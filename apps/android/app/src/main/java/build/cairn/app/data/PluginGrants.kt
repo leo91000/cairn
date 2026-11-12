@@ -12,6 +12,62 @@ import kotlinx.serialization.Serializable
 fun pluginResourcePathLabel(ancestors: List<String>, resourceName: String): String =
     (ancestors.asReversed() + resourceName).joinToString(" › ")
 
+/** A manifest identifier made readable: `grant_ui-read` becomes `Grant ui read`. */
+fun humanizePluginName(name: String): String =
+    name.replace('_', ' ').replace('-', ' ').trim().replaceFirstChar { it.uppercaseChar() }
+
+/** The French tag shown next to a contribution instead of its raw kind. */
+fun pluginContributionKindLabel(kind: String): String =
+    when (kind) {
+        "tool" -> "Outil"
+        "command" -> "Commande"
+        "hook" -> "Événement"
+        "condition" -> "Condition"
+        "projectSource" -> "Source de projets"
+        "skillSource" -> "Source de skills"
+        "runCredentials" -> "Identifiants"
+        "instructions" -> "Instructions"
+        else -> humanizePluginName(kind)
+    }
+
+/** A contribution's readable label: its manifest description, else its humanised name. */
+fun pluginContributionLabel(kind: String, name: String, description: String = ""): String =
+    when (kind) {
+        "runCredentials" -> "Identifiants de run"
+        "instructions" -> "Instructions"
+        else -> description.trim().ifEmpty { humanizePluginName(name) }
+    }
+
+fun pluginResourceTypeLabel(type: PluginResourceType): String =
+    type.description.trim().ifEmpty { humanizePluginName(type.name) }
+
+/** A resource type name read against the manifest, humanised when the manifest lost it. */
+fun pluginResourceTypeLabel(name: String, types: List<PluginResourceType>): String =
+    types.find { it.name == name }?.let(::pluginResourceTypeLabel) ?: humanizePluginName(name)
+
+/** A resource type with its parents, as in `Servers › Channels`. */
+fun pluginResourceTypeHierarchyLabel(
+    type: PluginResourceType,
+    types: List<PluginResourceType>,
+): String {
+    val chain = mutableListOf(type)
+    var parent = type.parentType
+    while (parent != null && chain.none { it.name == parent }) {
+        val parentType = types.find { it.name == parent } ?: break
+        chain.add(0, parentType)
+        parent = parentType.parentType
+    }
+    return chain.joinToString(" › ", transform = ::pluginResourceTypeLabel)
+}
+
+/** The last-resort label of a resource root whose path is not resolved. */
+fun pluginResourceFallbackLabel(root: PluginResourceRef, types: List<PluginResourceType>): String =
+    "${pluginResourceTypeLabel(root.resourceType, types)} · ${root.id}"
+
+/** Cache key of a resolved resource root path, shared by the editor and the review. */
+fun pluginResourcePathKey(instance: String, root: PluginResourceRef): String =
+    "$instance:${root.resourceType}:${root.id}"
+
 @Serializable
 data class PluginGrantDraft(
     val grants: List<PluginInstanceGrant> = emptyList(),
@@ -346,9 +402,13 @@ fun mergePluginGrantDrafts(
 
 data class GrantContribution(
     val grant: PluginContributionGrant,
-    val description: String,
+    val label: String,
     val resourceTypes: List<PluginResourceType>,
-)
+    val hint: String? = null,
+) {
+    val kindLabel: String
+        get() = pluginContributionKindLabel(grant.kind)
+}
 
 fun staleResourceRestrictions(
     resources: List<PluginResourceRef>,
@@ -377,8 +437,9 @@ fun PluginManifest.grantContributions(): List<GrantContribution> = buildList {
     fun add(
         kind: String,
         name: String = "",
-        description: String,
+        label: String,
         fieldTypes: List<String> = emptyList(),
+        hint: String? = null,
     ) {
         val selectableTypes = resources.filter { selectable ->
             fieldTypes.any { fieldType ->
@@ -394,41 +455,92 @@ fun PluginManifest.grantContributions(): List<GrantContribution> = buildList {
         add(
             GrantContribution(
                 PluginContributionGrant(kind, name, emptyList()),
-                description,
+                label,
                 selectableTypes,
+                hint,
             )
         )
     }
     tools.forEach {
-        add("tool", it.name, it.description, it.resourceFields.map { field -> field.resourceType })
+        add(
+            "tool",
+            it.name,
+            pluginContributionLabel("tool", it.name, it.description),
+            it.resourceFields.map { field -> field.resourceType },
+        )
     }
     commands.forEach {
         add(
             "command",
             it.name,
-            it.description,
+            pluginContributionLabel("command", it.name, it.description),
             it.arguments.mapNotNull { argument -> argument.resourceType },
         )
     }
     hooks.forEach {
-        add("hook", it.name, it.description, it.resourceFields.map { field -> field.resourceType })
+        add(
+            "hook",
+            it.name,
+            pluginContributionLabel("hook", it.name, it.description),
+            it.resourceFields.map { field -> field.resourceType },
+        )
     }
     if (runCredentials != null)
         add(
             "runCredentials",
-            description = "Identifiants de run : accès direct avec ce compte de service",
+            label = pluginContributionLabel("runCredentials", ""),
+            hint = "Accès direct avec ce compte de service",
         )
     if (instructions.hasNonRustWhitespace())
-        add("instructions", description = "Instructions ajoutées au prompt")
-    conditions.forEach { add("condition", it.name, it.description) }
-    projectSources.forEach { add("projectSource", it.name, it.title) }
-    skillSources.forEach { add("skillSource", it.name, it.title) }
+        add(
+            "instructions",
+            label = pluginContributionLabel("instructions", ""),
+            hint = "Ajoutées au prompt",
+        )
+    conditions.forEach {
+        add("condition", it.name, pluginContributionLabel("condition", it.name, it.description))
+    }
+    // Sources also carry a title, a better label than their humanised name.
+    projectSources.forEach {
+        add(
+            "projectSource",
+            it.name,
+            pluginContributionLabel(
+                "projectSource",
+                it.name,
+                it.description.ifBlank { it.title },
+            ),
+        )
+    }
+    skillSources.forEach {
+        add(
+            "skillSource",
+            it.name,
+            pluginContributionLabel("skillSource", it.name, it.description.ifBlank { it.title }),
+        )
+    }
 }
 
+private fun grantAccessSummary(access: PluginGrantAccess?): String =
+    when (access) {
+        is PluginGrantAccess.A -> "Accès complet"
+        is PluginGrantAccess.B ->
+            access.contributions.size.let { if (it == 1) "1 contribution" else "$it contributions" }
+        null -> "Aucun accès"
+    }
+
+private const val GRANT_EFFECT =
+    "Les contrôles d’accès du plugin s’appliquent immédiatement, y compris aux conversations en cours. Les identifiants déjà chargés restent utilisables jusqu’à la fin de chaque run."
+
+/**
+ * The sensitive review of plugin grant changes: one structured line per changed instance, then the
+ * run credential suppliers. [resourcePaths] holds resolved root paths by [pluginResourcePathKey].
+ */
 fun pluginGrantReview(
     before: PluginGrantDraft,
     after: PluginGrantDraft,
     catalog: PluginCatalog?,
+    resourcePaths: Map<String, String> = emptyMap(),
 ): List<ReviewLine> = buildList {
     if (before.key() == after.key()) return@buildList
     (before.grants + after.grants)
@@ -436,13 +548,50 @@ fun pluginGrantReview(
         .distinct()
         .forEach { id ->
             if (before.description(id) != after.description(id)) {
-                val name = catalog?.connectionLabel(id) ?: id
+                val title = catalog?.connectionLabel(id) ?: id
+                val previous = before.grants.find { it.instanceId == id }?.access
+                val next = after.grants.find { it.instanceId == id }?.access
+                val change = "${grantAccessSummary(previous)} → ${grantAccessSummary(next)}"
+                val manifest = catalog?.manifestOf(id)
+                val contributions = manifest?.grantContributions().orEmpty()
+                val types = manifest?.resources.orEmpty()
+
+                val granted =
+                    when (next) {
+                        is PluginGrantAccess.A ->
+                            listOf("Toutes les contributions actuelles et futures")
+                        is PluginGrantAccess.B ->
+                            next.contributions.map { item ->
+                                val label =
+                                    contributions
+                                        .find {
+                                            it.grant.kind == item.kind && it.grant.name == item.name
+                                        }
+                                        ?.label ?: pluginContributionLabel(item.kind, item.name)
+                                val roots =
+                                    item.resources.map { root ->
+                                        resourcePaths[pluginResourcePathKey(id, root)]
+                                            ?: pluginResourceFallbackLabel(root, types)
+                                    }
+                                val restriction =
+                                    when (roots.size) {
+                                        0 -> "toutes les ressources"
+                                        1 -> "${roots.single()} et ses descendants"
+                                        else -> "${roots.joinToString(", ")} et leurs descendants"
+                                    }
+                                "$label (${pluginContributionKindLabel(item.kind)}) : $restriction"
+                            }
+                        null -> emptyList()
+                    }
+
                 add(
                     ReviewLine(
-                        if (after.grants.none { it.instanceId == id }) ReviewKind.Reduction
-                        else ReviewKind.Access,
-                        "$name : ${before.description(id)} → ${after.description(id)}. Les contrôles d’accès du plugin s’appliquent immédiatement, y compris aux runs en cours. Les identifiants déjà chargés restent utilisables jusqu’à la fin de chaque run.",
-                        requiresReview = after.grants.none { it.instanceId == id },
+                        if (next == null) ReviewKind.Reduction else ReviewKind.Access,
+                        "$title : $change",
+                        requiresReview = next == null,
+                        title = title,
+                        change = change,
+                        details = granted + GRANT_EFFECT,
                     )
                 )
             }
@@ -462,13 +611,27 @@ fun pluginGrantReview(
             if (removedSuppliers.isNotEmpty())
                 " Les runs déjà en cours conservent les identifiants chargés jusqu’à leur fin."
             else ""
+        val title = "Identifiants de run"
+        val change =
+            "${previousNames.joinToString().ifBlank { "Aucun" }} → ${names.joinToString().ifBlank { "Aucun" }}"
         add(
             ReviewLine(
                 ReviewKind.Access,
-                "Fournisseurs d’identifiants de run : ${previousNames.joinToString().ifBlank { "Aucun" }} → ${names.joinToString().ifBlank { "Aucun" }}. Les identifiants rendent vaines les restrictions de ressource des outils.$activeRunNotice",
+                "$title : $change",
+                title = title,
+                change = change,
+                details =
+                    listOf(
+                        "Les identifiants rendent vaines les restrictions de ressource des outils.$activeRunNotice"
+                    ),
             )
         )
     }
+}
+
+private fun PluginCatalog.manifestOf(instanceId: String): PluginManifest? {
+    val connection = connections.firstOrNull { it.id == instanceId } ?: return null
+    return packages.firstOrNull { it.id == connection.pluginId }?.manifest
 }
 
 private fun PluginCatalog.connectionLabel(instanceId: String): String {
@@ -479,5 +642,5 @@ private fun PluginCatalog.connectionLabel(instanceId: String): String {
             ?.manifest
             ?.name
             ?.takeIf { it.isNotBlank() } ?: connection.pluginId.ifBlank { "Plugin" }
-    return "$packageName “${connection.name}”"
+    return "$packageName · ${connection.name}"
 }

@@ -4,6 +4,7 @@ package build.cairn.app.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -432,7 +433,14 @@ private fun AgentPage(
                         edited,
                         resources,
                         preview,
-                    ) + pluginGrantReview(savedGrants, grants, catalog)
+                    ) +
+                        pluginGrantReview(
+                            savedGrants,
+                            grants,
+                            catalog,
+                            if (savedGrants.key() == grants.key()) emptyMap()
+                            else resolveGrantReviewPaths(vm.api, catalog, grants),
+                        )
                 if (lines.any { it.kind == ReviewKind.Power || it.kind == ReviewKind.Access }) {
                     if (!creating) {
                         people.load(vm, agentId)
@@ -1285,6 +1293,55 @@ private fun SaveBar(
     }
 }
 
+/** A plugin grant change: its instance, `before → after`, and details folded by default. */
+@Composable
+private fun StructuredReviewLine(line: ReviewLine, index: Int) {
+    var expanded by rememberSaveable(index, line.text) { mutableStateOf(false) }
+    Text(
+        line.title.orEmpty(),
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurface,
+    )
+    line.change?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+    if (line.details.isNotEmpty()) {
+        Box(
+            Modifier.heightIn(min = 40.dp)
+                .clickable(role = Role.Button) { expanded = !expanded }
+                .semantics {
+                    contentDescription =
+                        (if (expanded) "Masquer les détails de " else "Détails de ") +
+                            line.title.orEmpty()
+                },
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                if (expanded) "Masquer les détails" else "Détails",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        if (expanded)
+            line.details.forEach { detail ->
+                Row {
+                    Text("•  ", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        detail,
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+    }
+}
+
 @Composable
 private fun ReviewDialog(
     review: PendingReview,
@@ -1299,80 +1356,105 @@ private fun ReviewDialog(
         modifier = Modifier.testTag("agent-review"),
         title = { Text("Vérifier avant d’enregistrer") },
         text = {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
+            val audience = review.lines.filter { it.kind == ReviewKind.Audience }
+            val changes = review.lines.filter { it.kind != ReviewKind.Audience }
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
                     "Toute personne pouvant utiliser cet agent peut exercer ses permissions à travers lui. Vérifiez ces modifications pour toutes ces personnes.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                review.lines.forEach { line ->
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        when (line.kind) {
-                            ReviewKind.Power -> PowerChip(line.kind.label)
-                            ReviewKind.Access ->
-                                ToneChip(PluginBadge(line.kind.label, PluginTone.OK))
-                            ReviewKind.Reduction ->
-                                ToneChip(PluginBadge(line.kind.label, PluginTone.WARNING))
-                            ReviewKind.Audience ->
-                                ToneChip(PluginBadge(line.kind.label, PluginTone.ATTENTION))
-                        }
+                // Who the new rights reach stays visible above the scrolling changes.
+                audience.forEach { line ->
+                    Column(
+                        Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surface)
+                            .border(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant,
+                                RoundedCornerShape(12.dp),
+                            )
+                            .padding(12.dp)
+                            .testTag("agent-review-audience"),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        ToneChip(PluginBadge(line.kind.label, PluginTone.ATTENTION))
                         Text(line.text, style = MaterialTheme.typography.bodyMedium)
                     }
                 }
-                review.delegations.forEach { delegation ->
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        ToneChip(PluginBadge("Effet externe", PluginTone.ATTENTION))
-                        if (delegation.blocked != null) {
-                            Text(
-                                "Impossible de réapprouver « ${delegation.name} » : ${delegation.blocked}",
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            Text(
-                                "Ce bot sera suspendu jusqu’à sa reconfirmation sur l’instance.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                            )
-                        } else {
-                            val checked = delegation.id in reapprove
-                            Row(
-                                Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
-                                    value = checked,
-                                    role = Role.Checkbox,
-                                    enabled = !saving,
-                                ) {
-                                    toggle(delegation.id, it)
-                                },
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Checkbox(checked, null)
-                                Spacer(Modifier.width(8.dp))
+                Column(
+                    Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    changes.forEachIndexed { index, line ->
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            when (line.kind) {
+                                ReviewKind.Power -> PowerChip(line.kind.label)
+                                ReviewKind.Access ->
+                                    ToneChip(PluginBadge(line.kind.label, PluginTone.OK))
+                                ReviewKind.Reduction ->
+                                    ToneChip(PluginBadge(line.kind.label, PluginTone.WARNING))
+                                ReviewKind.Audience ->
+                                    ToneChip(PluginBadge(line.kind.label, PluginTone.ATTENTION))
+                            }
+                            if (line.title == null)
+                                Text(line.text, style = MaterialTheme.typography.bodyMedium)
+                            else StructuredReviewLine(line, index)
+                        }
+                    }
+                    review.delegations.forEach { delegation ->
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            ToneChip(PluginBadge("Effet externe", PluginTone.ATTENTION))
+                            if (delegation.blocked != null) {
                                 Text(
-                                    "Réapprouver les nouveaux accès pour « ${delegation.name} »",
+                                    "Impossible de réapprouver « ${delegation.name} » : ${delegation.blocked}",
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
-                            }
-                            if (delegation.alreadySuspended)
-                                Text(
-                                    "Déjà suspendu par une modification précédente. Ne le réapprouvez qu’après avoir vérifié ses accès actuels.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            if (!checked)
                                 Text(
                                     "Ce bot sera suspendu jusqu’à sa reconfirmation sur l’instance.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.error,
                                 )
+                            } else {
+                                val checked = delegation.id in reapprove
+                                Row(
+                                    Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
+                                        value = checked,
+                                        role = Role.Checkbox,
+                                        enabled = !saving,
+                                    ) {
+                                        toggle(delegation.id, it)
+                                    },
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Checkbox(checked, null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        "Réapprouver les nouveaux accès pour « ${delegation.name} »",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                }
+                                if (delegation.alreadySuspended)
+                                    Text(
+                                        "Déjà suspendu par une modification précédente. Ne le réapprouvez qu’après avoir vérifié ses accès actuels.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                if (!checked)
+                                    Text(
+                                        "Ce bot sera suspendu jusqu’à sa reconfirmation sur l’instance.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                            }
                         }
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = confirm, enabled = !saving) { Text("Enregistrer") }
+            Button(onClick = confirm, enabled = !saving) { Text("Enregistrer") }
         },
         dismissButton = {
             TextButton(onClick = dismiss, enabled = !saving) { Text("Revenir") }

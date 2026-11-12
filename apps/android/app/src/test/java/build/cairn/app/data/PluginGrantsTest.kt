@@ -598,14 +598,21 @@ class PluginGrantsTest {
                 runCredentialInstances = listOf(support),
             )
 
-        val text = pluginGrantReview(before, after, catalog = null).joinToString(" ") { it.text }
-        val kinds = pluginGrantReview(before, after, catalog = null).map { it.kind }
+        val lines = pluginGrantReview(before, after, catalog = null)
+        val (grant, credentials) = lines
 
-        assertTrue(text.contains("channel support et descendants"))
-        assertTrue(text.contains("Aucun → $support"))
-        assertTrue(text.contains("Fournisseurs d’identifiants de run"))
-        assertTrue(text.contains("rendent vaines les restrictions de ressource"))
-        assertEquals(listOf(ReviewKind.Access, ReviewKind.Access), kinds)
+        assertEquals(listOf(ReviewKind.Access, ReviewKind.Access), lines.map { it.kind })
+        assertEquals(support, grant.title)
+        assertEquals("Aucun accès → 1 contribution", grant.change)
+        assertEquals("$support : Aucun accès → 1 contribution", grant.text)
+        // Without a catalog or a resolved path, the root falls back to its type and id.
+        assertEquals("Read (Outil) : Channel · support et ses descendants", grant.details.first())
+        assertTrue(grant.details.last().contains("identifiants déjà chargés restent utilisables"))
+        assertEquals("Identifiants de run", credentials.title)
+        assertEquals("Aucun → $support", credentials.change)
+        assertTrue(
+            credentials.details.single().contains("rendent vaines les restrictions de ressource")
+        )
     }
 
     @Test
@@ -681,10 +688,10 @@ class PluginGrantsTest {
         val lines = pluginGrantReview(PluginGrantDraft(), after, catalog)
 
         assertEquals(3, lines.size)
-        assertTrue(lines[0].text.contains("Tickets “Main”"))
-        assertTrue(lines[1].text.contains("Deployments “Main”"))
-        assertTrue(lines[2].text.contains("Tickets “Main”"))
-        assertTrue(lines[2].text.contains("Deployments “Main”"))
+        assertEquals("Tickets · Main", lines[0].title)
+        assertEquals("Aucun accès → Accès complet", lines[0].change)
+        assertEquals("Deployments · Main", lines[1].title)
+        assertEquals("Aucun → Tickets · Main, Deployments · Main", lines[2].change)
     }
 
     @Test
@@ -697,7 +704,14 @@ class PluginGrantsTest {
         assertEquals(1, lines.size)
         assertEquals(ReviewKind.Reduction, lines.single().kind)
         assertTrue(lines.single().requiresReview)
-        assertTrue(lines.single().text.contains("identifiants déjà chargés restent utilisables"))
+        assertEquals("Accès complet → Aucun accès", lines.single().change)
+        assertTrue(
+            lines
+                .single()
+                .details
+                .single()
+                .contains("identifiants déjà chargés restent utilisables")
+        )
         assertTrue(needsReview(lines, preview = null))
     }
 
@@ -713,7 +727,13 @@ class PluginGrantsTest {
 
         val line = pluginGrantReview(before, after, catalog = null).single()
 
-        assertTrue(line.text.contains("Les runs déjà en cours conservent les identifiants chargés"))
+        assertEquals("Identifiants de run", line.title)
+        assertEquals("$support → Aucun", line.change)
+        assertTrue(
+            line.details
+                .single()
+                .contains("Les runs déjà en cours conservent les identifiants chargés")
+        )
     }
 
     @Test
@@ -797,5 +817,164 @@ class PluginGrantsTest {
             staleResourceRestrictions(resources, currentTypes),
         )
         assertEquals(resources, staleResourceRestrictions(resources, emptyList()))
+    }
+
+    @Test
+    fun contributionAndResourceLabelsComeFromTheManifestWithAReadableFallback() {
+        val manifest =
+            PluginManifest(
+                id = "grant-ui",
+                name = "Grant UI",
+                version = "1",
+                apiVersion = 2,
+                capabilities = emptyList(),
+                resources =
+                    listOf(
+                        PluginResourceType("Servers", "server"),
+                        PluginResourceType(" ", "channel", "server"),
+                    ),
+                tools =
+                    listOf(
+                        PluginTool("  Read messages ", kotlinx.serialization.json.JsonNull, "read"),
+                        PluginTool("", kotlinx.serialization.json.JsonNull, "grant_ui-read"),
+                    ),
+                commands = listOf(PluginCommand(name = "post")),
+                runCredentials = build.cairn.contracts.PluginRunCredentials(),
+                instructions = "Guide",
+            )
+
+        val labels = manifest.grantContributions().map { it.label to it.kindLabel }
+
+        assertEquals(
+            listOf(
+                "Read messages" to "Outil",
+                "Grant ui read" to "Outil",
+                "Post" to "Commande",
+                "Identifiants de run" to "Identifiants",
+                "Instructions" to "Instructions",
+            ),
+            labels,
+        )
+        assertEquals("Événement", pluginContributionKindLabel("hook"))
+        assertEquals("Source de projets", pluginContributionKindLabel("projectSource"))
+        assertEquals("Source de skills", pluginContributionKindLabel("skillSource"))
+        assertEquals("Condition", pluginContributionKindLabel("condition"))
+
+        val (server, channel) = manifest.resources
+        assertEquals("Servers", pluginResourceTypeLabel(server))
+        assertEquals("Channel", pluginResourceTypeLabel(channel))
+        assertEquals(
+            "Servers › Channel",
+            pluginResourceTypeHierarchyLabel(channel, manifest.resources),
+        )
+        assertEquals(
+            "Thread · t1",
+            pluginResourceFallbackLabel(PluginResourceRef("t1", "thread"), manifest.resources),
+        )
+    }
+
+    @Test
+    fun grantReviewListsEachContributionWithResolvedRootsAndReadableKinds() {
+        val catalog =
+            PluginCatalog(
+                capabilities = emptyList(),
+                connections =
+                    listOf(
+                        PluginConnection(
+                            id = support,
+                            name = "Support",
+                            pluginId = "grant-ui",
+                            settings = buildJsonObject {},
+                            status = PluginStatus(),
+                            usage = PluginUsage(),
+                        )
+                    ),
+                packages =
+                    listOf(
+                        PluginEntry(
+                            active = null,
+                            builtin = false,
+                            id = "grant-ui",
+                            manifest =
+                                PluginManifest(
+                                    apiVersion = 2,
+                                    capabilities = emptyList(),
+                                    id = "grant-ui",
+                                    name = "Grant UI",
+                                    version = "1",
+                                    resources = listOf(PluginResourceType("Channels", "channel")),
+                                    tools =
+                                        listOf(
+                                            PluginTool(
+                                                "Read messages",
+                                                kotlinx.serialization.json.JsonNull,
+                                                "read",
+                                                listOf(PluginResourceField("/channel", "channel")),
+                                            )
+                                        ),
+                                    hooks =
+                                        listOf(
+                                            PluginHook(
+                                                "Receive messages",
+                                                "message",
+                                                kotlinx.serialization.json.JsonNull,
+                                            )
+                                        ),
+                                ),
+                            setup = null,
+                            status = "active",
+                            versions = emptyList(),
+                        )
+                    ),
+            )
+        val support1 = PluginResourceRef("support", "channel")
+        val general = PluginResourceRef("general", "channel")
+        val after =
+            PluginGrantDraft(
+                grants =
+                    listOf(
+                        PluginInstanceGrant(
+                            PluginGrantAccess.B(
+                                listOf(
+                                    PluginContributionGrant(
+                                        "tool",
+                                        "read",
+                                        listOf(support1, general),
+                                    ),
+                                    PluginContributionGrant("hook", "message", emptyList()),
+                                    PluginContributionGrant("command", "gone_away", emptyList()),
+                                )
+                            ),
+                            support,
+                        )
+                    )
+            )
+
+        val line =
+            pluginGrantReview(
+                    PluginGrantDraft(
+                        grants = listOf(PluginInstanceGrant(PluginGrantAccess.A(), support))
+                    ),
+                    after,
+                    catalog,
+                    mapOf(pluginResourcePathKey(support, support1) to "Team › #support"),
+                )
+                .single()
+
+        assertEquals(ReviewKind.Access, line.kind)
+        assertFalse(line.requiresReview)
+        assertEquals("Grant UI · Support", line.title)
+        assertEquals("Accès complet → 3 contributions", line.change)
+        assertEquals("Grant UI · Support : Accès complet → 3 contributions", line.text)
+        assertEquals(
+            listOf(
+                "Read messages (Outil) : Team › #support, Channels · general et leurs descendants",
+                "Receive messages (Événement) : toutes les ressources",
+                "Gone away (Commande) : toutes les ressources",
+            ),
+            line.details.dropLast(1),
+        )
+        assertTrue(line.details.last().startsWith("Les contrôles d’accès du plugin"))
+        assertTrue(needsReview(listOf(line), preview = null))
     }
 }

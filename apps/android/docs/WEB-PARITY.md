@@ -716,11 +716,32 @@ redesign or Beacon account capability is added.
 Both agent pages edit per-instance full access (including future contributions) or
 selected tools, commands, hooks, instructions, conditions, project/skill sources
 and run credentials. Searchable resource pickers use the resource listing and
-resolution APIs, show server › channel › thread ancestry and pagination, and
-retain selected roots across searches/types. Roots cover descendants; other types
-remain unrestricted. Web embeds the picker; Android uses a native scrollable
-Material dialog. Both explain immediate effects, full-only shared setup reuse,
-project-bounded waits, and credentials voiding tool resource restrictions.
+resolution APIs, show readable type hierarchies (« Servers › Channels ») and
+resolved root paths (« Team › #support ») with pagination, and retain selected
+roots across searches/types (« N/100 ressources racines sélectionnées »). Roots
+cover descendants; other types remain unrestricted. Web embeds the picker; Android
+uses a native scrollable Material dialog. Both explain immediate effects,
+full-only shared setup reuse, project-bounded waits, and credentials voiding tool
+resource restrictions.
+
+No technical identifier is shown. A contribution reads as its manifest description
+(trimmed), else its humanised name (`_`/`-` as spaces, first letter uppercased);
+run credentials and instructions read « Identifiants de run » / « Instructions ».
+A French kind tag replaces the raw kind (Outil, Commande, Événement, Condition,
+Source de projets, Source de skills, Identifiants, Instructions). Resource types
+read as their description, else their humanised name; an unresolved root falls
+back to « type · id ». Stale warnings and the review use the same labels.
+Platform note: Android labels project/skill sources by description, then title,
+then humanised name.
+
+The review lists one structured line per changed instance: « Package · Instance »,
+a short « avant → après » (« Aucun accès », « Accès complet », « N contributions »)
+and folded « Détails » with one bullet per granted contribution (« label (tag) :
+toutes les ressources » or its resolved roots) plus the immediate-effect sentence.
+Run credential supplier changes read « Identifiants de run » with « avant → après »
+and the existing warning. The beneficiaries block (« Ces nouveaux droits
+s’appliquent à : … ») stays at the top, above the scrolling changes, and the save
+button is a filled primary button.
 
 The credential supplier is explicit, at most one instance per package. Selecting
 the credentials contribution selects its supplier; moving it removes the previous
@@ -749,8 +770,7 @@ unconfirmed choices stay disabled until the owner retries successfully.
 Public MCP already reads/replaces these grants and lists/resolves resources;
 `cairn_installation` retains read/reduce-only authority. Grant editing keeps its
 existing authorization. Both sensitive reviews warn that anyone able to use the
-agent can exercise its permissions through it. They do not list individual
-accounts: member-to-agent access is the separate, unmerged #534 change. The no-code
+agent can exercise its permissions through it, and name those people (#534). The no-code
 hook rules editor is absent from this change; selecting a hook grant only controls
 which events may be delivered. No account management capability is added. Coverage:
 `plugin-grants.test.ts`, the agent-access and isolated agent-grants browser

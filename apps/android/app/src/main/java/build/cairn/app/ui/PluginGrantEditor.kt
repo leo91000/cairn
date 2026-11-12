@@ -29,6 +29,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 internal const val MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION = 100
 
@@ -162,6 +163,48 @@ internal suspend fun resolvePluginResourcePage(
         .awaitAll()
 }
 
+private const val REVIEW_RESOURCE_PATH_TIMEOUT_MS = 5_000L
+
+/**
+ * Resolves the resource roots [draft] restricts its contributions to, for the review. A root that
+ * cannot be resolved in time is left out: the review then shows its type and id.
+ */
+internal suspend fun resolveGrantReviewPaths(
+    api: CairnApi,
+    catalog: PluginCatalog?,
+    draft: PluginGrantDraft,
+): Map<String, String> = coroutineScope {
+    draft.grants
+        .flatMap { grant ->
+            val plugin =
+                catalog?.connections?.find { it.id == grant.instanceId }?.pluginId
+                    ?: return@flatMap emptyList()
+            (grant.access as? PluginGrantAccess.B)
+                ?.contributions
+                .orEmpty()
+                .flatMap { it.resources }
+                .distinct()
+                .map { root -> Triple(plugin, grant.instanceId, root) }
+        }
+        .map { (plugin, instance, root) ->
+            async {
+                val path =
+                    try {
+                        withTimeoutOrNull(REVIEW_RESOURCE_PATH_TIMEOUT_MS) {
+                            resolvePluginResourcePath(api, plugin, instance, root)
+                        }
+                    } catch (error: Exception) {
+                        if (error is CancellationException) throw error
+                        null
+                    }
+                path?.let { pluginResourcePathKey(instance, root) to it }
+            }
+        }
+        .awaitAll()
+        .filterNotNull()
+        .toMap()
+}
+
 internal fun canSelectPluginResourceRoot(selectedCount: Int, alreadySelected: Boolean): Boolean =
     alreadySelected || selectedCount < MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION
 
@@ -242,6 +285,7 @@ fun PluginGrantEditor(
                                         },
                                     enabled = enabled,
                                 )
+                                Spacer(Modifier.width(12.dp))
                                 Text(connection.name, Modifier.weight(1f))
                             }
                             if (entry.id == "onepassword")
@@ -369,19 +413,30 @@ fun PluginGrantEditor(
                                                 modifier =
                                                     Modifier.semantics {
                                                         contentDescription =
-                                                            "${item.kind} ${item.name}"
+                                                            "${contribution.label} (${contribution.kindLabel})"
                                                     },
                                                 enabled = enabled,
                                             )
-                                            Column(Modifier.weight(1f)) {
+                                            Column(
+                                                Modifier.weight(1f),
+                                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                            ) {
                                                 Text(
-                                                    "${item.kind} ${item.name}",
+                                                    contribution.label,
                                                     style = MaterialTheme.typography.labelLarge,
                                                 )
-                                                Text(
-                                                    contribution.description,
-                                                    style = MaterialTheme.typography.bodySmall,
+                                                ToneChip(
+                                                    PluginBadge(
+                                                        contribution.kindLabel,
+                                                        PluginTone.MUTED,
+                                                    )
                                                 )
+                                                contribution.hint?.let {
+                                                    Text(
+                                                        it,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                    )
+                                                }
                                             }
                                         }
                                         val staleResources =
@@ -411,7 +466,10 @@ fun PluginGrantEditor(
                                                     staleResources.forEach { resource ->
                                                         Column(Modifier.fillMaxWidth()) {
                                                             Text(
-                                                                "${resource.resourceType} · ${resource.id}",
+                                                                pluginResourceFallbackLabel(
+                                                                    resource,
+                                                                    manifest.resources,
+                                                                ),
                                                                 Modifier.fillMaxWidth(),
                                                                 style =
                                                                     MaterialTheme.typography
@@ -429,7 +487,7 @@ fun PluginGrantEditor(
                                                                     Modifier.align(Alignment.End)
                                                                         .semantics {
                                                                             contentDescription =
-                                                                                "Retirer la restriction obsolète ${item.kind} ${item.name} ${resource.resourceType} ${resource.id}"
+                                                                                "Retirer la restriction obsolète ${contribution.label} ${pluginResourceFallbackLabel(resource, manifest.resources)}"
                                                                         },
                                                             ) {
                                                                 Text("Retirer")
@@ -449,6 +507,7 @@ fun PluginGrantEditor(
                                                 entry.id,
                                                 connection.id,
                                                 contribution.resourceTypes,
+                                                manifest.resources,
                                                 held.resources,
                                                 enabled,
                                             ) {
@@ -484,18 +543,23 @@ fun PluginGrantEditor(
                                                 style = MaterialTheme.typography.bodySmall,
                                             )
                                             staleContributions.forEach { stale ->
+                                                val staleLabel =
+                                                    "${pluginContributionLabel(stale.kind, stale.name)} (${pluginContributionKindLabel(stale.kind)})"
                                                 Row(
                                                     verticalAlignment = Alignment.CenterVertically
                                                 ) {
                                                     Column(Modifier.weight(1f)) {
-                                                        Text("${stale.kind} ${stale.name}")
+                                                        Text(staleLabel)
                                                         Text(
                                                             "Restrictions enregistrées : " +
                                                                 if (stale.resources.isEmpty())
                                                                     "sans restriction"
                                                                 else
                                                                     stale.resources.joinToString {
-                                                                        "${it.resourceType} ${it.id}"
+                                                                        pluginResourceFallbackLabel(
+                                                                            it,
+                                                                            manifest.resources,
+                                                                        )
                                                                     },
                                                             style =
                                                                 MaterialTheme.typography.bodySmall,
@@ -515,7 +579,7 @@ fun PluginGrantEditor(
                                                         modifier =
                                                             Modifier.semantics {
                                                                 contentDescription =
-                                                                    "Retirer l’accès obsolète ${stale.kind} ${stale.name}"
+                                                                    "Retirer l’accès obsolète $staleLabel"
                                                             },
                                                     ) {
                                                         Text("Retirer")
@@ -655,6 +719,7 @@ private fun ResourceGrantPicker(
     plugin: String,
     instance: String,
     types: List<PluginResourceType>,
+    manifestTypes: List<PluginResourceType>,
     selected: List<PluginResourceRef>,
     enabled: Boolean,
     change: (List<PluginResourceRef>) -> Unit,
@@ -680,7 +745,7 @@ private fun ResourceGrantPicker(
                                 resolvePluginResourcePath(api, plugin, instance, root)
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e
-                                "${root.resourceType} · ${root.id}"
+                                pluginResourceFallbackLabel(root, manifestTypes)
                             }
                         "${root.resourceType}:${root.id}" to path
                     }
@@ -693,18 +758,18 @@ private fun ResourceGrantPicker(
         if (selected.isEmpty())
             "Toutes les ressources. Choisissez une ressource pour restreindre cette contribution."
         else
-            "Racines et descendants sélectionnés uniquement. Chaque type restreint doit correspondre ; les autres types restent libres.",
+            "Ressources racines sélectionnées et leurs descendants uniquement. Chaque type restreint doit correspondre ; les autres types restent libres.",
         style = MaterialTheme.typography.bodySmall,
     )
     Text(
-        "${selected.size}/$MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION radicaux sélectionnés pour cette contribution. Maximum 100 ; retirez-en un pour en choisir un autre.",
+        "${selected.size}/$MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION ressources racines sélectionnées pour cette contribution. Maximum 100 ; retirez-en une pour en choisir une autre.",
         Modifier.testTag("plugin-resource-root-count"),
         style = MaterialTheme.typography.bodySmall,
     )
     selected.forEach { item ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "${selectedPaths["${item.resourceType}:${item.id}"] ?: "${item.resourceType} · ${item.id}"} et descendants",
+                "${selectedPaths["${item.resourceType}:${item.id}"] ?: pluginResourceFallbackLabel(item, manifestTypes)} et descendants",
                 Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -756,23 +821,18 @@ private fun ResourceGrantPicker(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 types.forEach { resourceType ->
-                    val names = mutableListOf(resourceType.name)
-                    var parent = resourceType.parentType
-                    while (parent != null && parent !in names) {
-                        names.add(0, parent)
-                        parent = types.find { it.name == parent }?.parentType
-                    }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         RadioButton(
                             type == resourceType.name,
                             { type = resourceType.name },
                             modifier =
                                 Modifier.semantics {
-                                    contentDescription = "Type de ressource ${resourceType.name}"
+                                    contentDescription =
+                                        "Type de ressource ${pluginResourceTypeLabel(resourceType)}"
                                 },
                             enabled = enabled,
                         )
-                        Text(names.joinToString(" › "))
+                        Text(pluginResourceTypeHierarchyLabel(resourceType, manifestTypes))
                     }
                 }
                 OutlinedTextField(
@@ -791,7 +851,9 @@ private fun ResourceGrantPicker(
                 }
                 items.forEach { (item, path) ->
                     val ref = PluginResourceRef(item.id, item.resourceType)
-                    val label = path ?: "${item.resourceType} · ${item.name}"
+                    val label =
+                        path
+                            ?: "${pluginResourceTypeLabel(item.resourceType, manifestTypes)} · ${item.name}"
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(
                             ref in selected,

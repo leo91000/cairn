@@ -1140,11 +1140,9 @@ abstract class AgentPageCases {
             compose.waitUntil(15000) {
                 compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
             }
-            compose
-                .onNodeWithText(
-                    "1Password “Production” : Aucun accès → Accès complet, y compris les contributions futures. Les contrôles d’accès du plugin s’appliquent immédiatement, y compris aux runs en cours. Les identifiants déjà chargés restent utilisables jusqu’à la fin de chaque run."
-                )
-                .assertExists()
+            compose.onNodeWithText("1Password · Production").assertExists()
+            compose.onNodeWithText("Aucun accès → Accès complet").assertExists()
+            compose.onNodeWithTag("agent-review-audience").assertExists()
             // Declining the reapproval is possible: the bot then stops until it is reapproved.
             compose
                 .onNodeWithText("Réapprouver les nouveaux accès pour « #support »")
@@ -1416,8 +1414,8 @@ abstract class AgentPageCases {
                 .performScrollTo()
                 .performClick()
 
-            compose.onNodeWithContentDescription("tool read").assertIsOn()
-            compose.onNodeWithContentDescription("runCredentials ").assertIsOn()
+            compose.onNodeWithContentDescription("Read messages (Outil)").assertIsOn()
+            compose.onNodeWithContentDescription("Identifiants de run (Identifiants)").assertIsOn()
             compose.onNodeWithText("Team › #support et descendants").assertExists()
             compose
                 .onAllNodesWithText("Fournisseur actuel : Support", substring = true)
@@ -1437,14 +1435,18 @@ abstract class AgentPageCases {
                 .onNodeWithContentDescription("Accès à Support : selected")
                 .performScrollTo()
                 .performClick()
-            compose.onNodeWithContentDescription("tool read").performScrollTo().performClick()
-            compose.onNodeWithContentDescription("Accès à Support : selected").performScrollTo()
+            compose
+                .onNodeWithContentDescription("Read messages (Outil)")
+                .performScrollTo()
+                .performClick()
+            // Show the checked tool with its readable label and kind, above the next contribution.
+            compose.onNodeWithContentDescription("Post messages (Commande)").performScrollTo()
             capture("agent-plugin-grants-editor")
             compose.onNodeWithText("Choisir les ressources").performScrollTo().performClick()
             compose.mainClock.autoAdvance = false
             waitForText("Team")
             compose
-                .onNodeWithContentDescription("Type de ressource channel")
+                .onNodeWithContentDescription("Type de ressource Channels")
                 .performScrollTo()
                 .performClick()
             waitForText("Team › #support")
@@ -1462,14 +1464,14 @@ abstract class AgentPageCases {
             waitForText("Team › #general")
             compose.onNodeWithText("Team › #support et descendants").assertExists()
             compose
-                .onNodeWithContentDescription("Type de ressource server")
+                .onNodeWithContentDescription("Type de ressource Servers")
                 .performScrollTo()
                 .performClick()
             resourceSearch.performTextClearance()
             waitForText("Team")
             compose.onNodeWithText("Team › #support et descendants").assertExists()
             compose
-                .onNodeWithContentDescription("Type de ressource channel")
+                .onNodeWithContentDescription("Type de ressource Channels")
                 .performScrollTo()
                 .performClick()
             resourceSearch.performTextInput("support")
@@ -1480,7 +1482,10 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Team › #support et descendants").assertExists()
             compose.onNodeWithText("Team › #support et descendants").performScrollTo()
             compose.onNodeWithText("Choisir les ressources").performScrollTo()
-            compose.onNodeWithContentDescription("hook message").performScrollTo().performClick()
+            compose
+                .onNodeWithContentDescription("Receive messages (Événement)")
+                .performScrollTo()
+                .performClick()
             compose
                 .onNodeWithText(
                     "Toutes les ressources. Choisissez une ressource pour restreindre cette contribution."
@@ -1507,22 +1512,34 @@ abstract class AgentPageCases {
             compose.waitUntil(15000) {
                 compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
             }
+            // Beneficiaries open at the top; each instance change folds its details.
+            compose.onNodeWithTag("agent-review-audience").assertIsDisplayed()
             compose
-                .onNodeWithText("channel support et descendants", substring = true)
-                .assertExists()
+                .onNodeWithText("Ces nouveaux droits s’appliquent à :", substring = true)
+                .assertIsDisplayed()
+            compose.onNodeWithText("Grant UI · Support").assertExists()
+            compose.onNodeWithText("Aucun accès → 2 contributions").assertExists()
+            compose.onNodeWithText("Read messages (Outil) :", substring = true).assertDoesNotExist()
             compose
                 .onNodeWithText(
                     "Toute personne pouvant utiliser cet agent peut exercer ses permissions à travers lui.",
                     substring = true,
                 )
                 .assertExists()
+            compose.onNodeWithText("Aucun → Grant UI · Automation").assertExists()
+            capture("agent-plugin-grants-audience-review")
+            compose.onNodeWithContentDescription("Détails de Grant UI · Support").performClick()
             compose
                 .onNodeWithText(
-                    "Fournisseurs d’identifiants de run : Aucun → Grant UI “Automation”",
+                    "Read messages (Outil) : Team › #support et ses descendants",
                     substring = true,
                 )
+                .performScrollTo()
                 .assertExists()
-            capture("agent-plugin-grants-audience-review")
+            compose
+                .onNodeWithText("Receive messages (Événement) : toutes les ressources")
+                .assertExists()
+            capture("agent-plugin-grants-review-details")
             confirmReview()
             compose.waitUntil(15000) { fixture.grantSaves.size == 1 }
 
@@ -1941,19 +1958,19 @@ abstract class AgentPageCases {
             open(AgentSection.Plugins)
             waitForDescription("Accès à Support : selected")
             compose
-                .onNodeWithContentDescription("Retirer l’accès obsolète tool read")
+                .onNodeWithContentDescription("Retirer l’accès obsolète Read (Outil)")
                 .performScrollTo()
                 .assertExists()
             compose
                 .onNodeWithText("contributions que ce plugin ne fournit plus", substring = true)
                 .assertExists()
             compose
-                .onNodeWithContentDescription("Retirer l’accès obsolète tool read")
+                .onNodeWithContentDescription("Retirer l’accès obsolète Read (Outil)")
                 .performClick()
             compose
-                .onNodeWithContentDescription("Retirer l’accès obsolète tool read")
+                .onNodeWithContentDescription("Retirer l’accès obsolète Read (Outil)")
                 .assertDoesNotExist()
-            compose.onNodeWithText("command post").assertExists()
+            compose.onNodeWithText("Post messages").assertExists()
 
             back()
             compose.onNodeWithText("Enregistrer").performClick()
@@ -2029,14 +2046,14 @@ abstract class AgentPageCases {
             capture("agent-plugin-grants-stale-resource")
             compose
                 .onNodeWithContentDescription(
-                    "Retirer la restriction obsolète tool read channel support"
+                    "Retirer la restriction obsolète Read messages Channels · support"
                 )
                 .performScrollTo()
                 .performClick()
             compose.waitUntil(5000) {
                 compose
                     .onAllNodesWithContentDescription(
-                        "Retirer la restriction obsolète tool read channel support"
+                        "Retirer la restriction obsolète Read messages Channels · support"
                     )
                     .fetchSemanticsNodes()
                     .isEmpty()
@@ -2186,7 +2203,10 @@ abstract class AgentPageCases {
             }
             compose.onNodeWithText("Team › #support et descendants").assertDoesNotExist()
 
-            compose.onNodeWithContentDescription("hook message").performScrollTo().performClick()
+            compose
+                .onNodeWithContentDescription("Receive messages (Événement)")
+                .performScrollTo()
+                .performClick()
             compose.onNodeWithText("Enregistrer").performClick()
             confirmReview()
             compose.waitUntil(15000) { fixture.grantSaves.size == 1 }
@@ -2484,10 +2504,8 @@ abstract class AgentPageCases {
             back()
             compose.onNodeWithText("Créer l’agent").performClick()
             waitForText("Vérifier avant d’enregistrer")
-            waitForText(
-                "1Password “Production” : Aucun accès → Accès complet, y compris les contributions futures",
-                substring = true,
-            )
+            waitForText("1Password · Production")
+            waitForText("Aucun accès → Accès complet")
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             compose.waitUntil(15000) { fixture.grantSaves.isNotEmpty() }

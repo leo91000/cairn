@@ -622,10 +622,18 @@ enum class ReviewKind(val label: String) {
     Audience("Bénéficiaires"),
 }
 
+/**
+ * One change in the review. Plugin grant lines are structured: a [title], a short `before → after`
+ * [change] and collapsible [details]; [text] still reads the whole line for accessibility. Other
+ * lines only have [text].
+ */
 data class ReviewLine(
     val kind: ReviewKind,
     val text: String,
     val requiresReview: Boolean = false,
+    val title: String? = null,
+    val change: String? = null,
+    val details: List<String> = emptyList(),
 )
 
 data class AgentReviewAudience(

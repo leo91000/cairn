@@ -1281,6 +1281,41 @@ class AgentEditingTest {
     }
 
     @Test
+    fun structuredGrantLinesKeepTheReviewRules() {
+        val grant =
+            ReviewLine(
+                ReviewKind.Access,
+                "Grant UI · Support : Aucun accès → 1 contribution",
+                title = "Grant UI · Support",
+                change = "Aucun accès → 1 contribution",
+                details = listOf("Read messages (Outil) : toutes les ressources"),
+            )
+        val revocation =
+            ReviewLine(
+                ReviewKind.Reduction,
+                "Grant UI · Support : Accès complet → Aucun accès",
+                requiresReview = true,
+                title = "Grant UI · Support",
+                change = "Accès complet → Aucun accès",
+            )
+        val plain = ReviewLine(ReviewKind.Reduction, "Retrait : projet « SheetOM ».")
+
+        assertTrue(needsReview(listOf(grant), null))
+        assertTrue(needsReview(listOf(revocation), null))
+        assertFalse(needsReview(listOf(plain), null))
+        assertNull(plain.title)
+        assertNull(plain.change)
+        assertTrue(plain.details.isEmpty())
+        assertEquals(
+            ReviewLine(
+                ReviewKind.Audience,
+                "Ces nouveaux droits s’appliquent à : owner@example.com. Règles de hook pouvant utiliser cet agent : aucune configurée.",
+            ),
+            audienceReviewLine(AgentReviewAudience(listOf("owner@example.com"))),
+        )
+    }
+
+    @Test
     fun reviewDoesNotOpenForAnEarlierSuspensionAlone() {
         val reduction = ReviewLine(ReviewKind.Reduction, "Retrait : projet « SheetOM ».")
         assertFalse(needsReview(listOf(reduction), null))
