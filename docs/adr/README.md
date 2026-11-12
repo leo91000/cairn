@@ -91,6 +91,7 @@ for current behavior.
 | 0080 | [Les tours de plan sont bornés par Cairn, pas par le modèle](0080-plan-turns.md) |
 | 0081 | [Side questions use Claude Code's native side mechanism; Codex stays unavailable](0081-native-side-questions.md) |
 | 0082 | [Explicit backend moves reuse VM disks](0082-move-vm-disks-between-execution-backends.md) |
+| 0083 | [Les programmations sont des règles de hook déclenchées par l’Horloge](0083-programmations-as-clock-hook-rules.md) |
 
 ## Renumbered collisions
 
