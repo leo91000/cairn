@@ -145,11 +145,13 @@ les données.
 1. Arrêter les timers de mise à jour, le manager, le runner et toutes les nodes.
    Supprimer les conteneurs de l’installation avec `docker compose down`, avant
    d’effacer leur configuration Compose.
-2. Vider entièrement le bucket S3 externe de cette installation, versions et
-   marqueurs de suppression compris. Supprimer toute la racine de l’installation
+2. Pour une ancienne installation qui utilisait S3, vider son bucket externe,
+   versions et marqueurs de suppression compris, et arrêter et supprimer son
+   éventuel conteneur Garage conservé. Supprimer toute la racine de l’installation
    (`/var/lib/cairn-installation` par défaut), dont `installation.json`, la
    configuration Compose et de mise à jour, `data`, `home`, `workspaces`,
-   `runner-state` et `garage`. Cela efface aussi le bucket Garage intégré, les
+   `runner-state` et, s’il existe encore, `garage`. Cela efface les anciens objets
+   Garage, les
    anciennes images sélectionnées, l’identité et les secrets. Effacer également
    la configuration et tout l’état local de chaque node (disques, journaux et caches).
 3. Réinstaller dans des racines vides avec les images et binaires de la même
@@ -163,7 +165,7 @@ L’effacement de Beacon est une opération distincte ; cette procédure ne l’
 
 The installation timer polls `/install/release` every five minutes. It downloads
 the approved image, acquires a deployment lease, then replaces manager and runner
-while preserving their data and Garage. An installation can appear **Offline**
+while preserving their data and any legacy Garage service. An installation can appear **Offline**
 during replacement. The manager has a 300-second stop grace period so it can
 save checkpoints; the runner has a separate 60-second stop grace period, followed
 by startup/readiness checks. These delays are separate from the polling interval.
@@ -197,8 +199,10 @@ copies have been removed. No data restore point is provided by the release syste
 
 If a rollout fails, stop further releases and inspect the updater state before
 intervening. Record the current and previous immutable image pairs. Use a forward fix or an explicitly validated compatible recovery image; automatic update retries retain
-the candidate image instead of starting an older binary against current data. Preserve the active installation directory, Garage, private
-identity and Beacon database while investigating.
+the candidate image instead of starting an older binary against current data. Preserve the active installation directory, private
+identity and Beacon database while investigating. Keep any legacy Garage data
+and bucket until rollback is no longer needed; see
+[local conversation disks](INSTALLATION.md#local-conversation-disks).
 
 ## Configuration reference
 
