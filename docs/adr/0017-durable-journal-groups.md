@@ -1,3 +1,5 @@
+> Statut : Mise à jour par [ADR-0084](0084-local-conversation-disks-without-s3.md) : la consolidation locale remplace la publication et ses reçus ; le regroupement des synchronisations du journal reste applicable.
+
 # Partager les synchronisations du journal entre écritures en attente
 
 Date : 2026-10-01.
