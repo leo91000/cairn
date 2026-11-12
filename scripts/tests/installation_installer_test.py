@@ -181,11 +181,25 @@ if 'exec' in args:
                     path = installation / name
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(contents)
+                garage = {
+                    'image': 'legacy-storage-image', 'restart': 'unless-stopped',
+                    'env_file': ['garage.env'],
+                    'volumes': ['./garage.toml:/etc/garage.toml:ro', './garage:/var/lib/garage'],
+                    'healthcheck': {'test': ['CMD', '/garage', 'bucket', 'info', 'cairn-disks']},
+                }
+                compose['services']['garage'] = garage
+                dependency = {'condition': 'service_healthy'}
+                compose['services']['manager']['depends_on']['garage'] = dependency
+                (installation / 'compose.json').write_text(json.dumps(compose))
                 result = subprocess.run(command, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual((installation / 'data/installation-relay/identity.json').read_bytes(), identity)
                 for name, contents in legacy.items():
                     self.assertEqual((installation / name).read_bytes(), contents)
+                retained = json.loads((installation / 'compose.json').read_text())
+                self.assertEqual(retained['services']['garage'], garage)
+                self.assertEqual(retained['services']['manager']['depends_on']['garage'], dependency)
+                self.assertEqual(retained['services']['manager']['image'], compose['services']['manager']['image'])
                 self.assertNotIn('a' * 64, result.stdout + result.stderr)
             finally:
                 server.shutdown()

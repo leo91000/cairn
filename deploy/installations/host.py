@@ -240,7 +240,28 @@ def install(origin, code):
         if name in ('data', 'home', 'workspaces') and os.getuid() == 0:
             os.chown(directory, 1000, 1000)
 
-    atomic(ROOT / 'compose.json', json.dumps(compose(image, origin), indent=2))
+    deployment = compose(image, origin)
+    compose_file = ROOT / 'compose.json'
+    if compose_file.exists():
+        try:
+            previous = json.loads(compose_file.read_text())['services']
+            if not isinstance(previous, dict):
+                raise ValueError('Invalid services')
+            # The saved image may predate local disks. Keep its storage service
+            # recoverable until the operator removes it after ruling out rollback.
+            if 'garage' in previous:
+                garage = previous['garage']
+                if not isinstance(garage, dict):
+                    raise ValueError('Invalid legacy service')
+                deployment['services']['garage'] = garage
+                dependencies = previous.get('manager', {}).get('depends_on', {})
+                if isinstance(dependencies, dict) and 'garage' in dependencies:
+                    deployment['services']['manager']['depends_on']['garage'] = dependencies['garage']
+                elif isinstance(dependencies, list) and 'garage' in dependencies:
+                    deployment['services']['manager']['depends_on']['garage'] = {'condition': 'service_started'}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            raise RuntimeError('The existing Compose configuration cannot be read safely. Restore or repair it before rerunning the installer; it is retained.') from None
+    atomic(compose_file, json.dumps(deployment, indent=2))
     claim_file = ROOT / 'claim.env'
     identity = ROOT / 'data/installation-relay/identity.json'
     # Always replace a claim left by an interrupted install with the current code.

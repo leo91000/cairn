@@ -81,7 +81,9 @@ describe this loss: push commits and
 save files to keep before updating. The update does not erase old
 `data/storage-s3.json`, `garage.env`, `garage.toml`, Garage data, external buckets
 or environment values. Rerunning the installer leaves those files untouched.
-The update supervisor retains any existing Garage service. Once rollback is no
+The update supervisor and installer reruns retain any existing Garage service
+and its saved configuration; this also lets a stopped legacy service start again.
+Once rollback is no
 longer needed, the operator can stop and remove that service and its data,
 credentials and bucket. Do not remove unrelated Docker services or volumes.
 
