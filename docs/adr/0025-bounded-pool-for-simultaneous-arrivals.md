@@ -1,4 +1,4 @@
-> Statut : Remplacée pour la création de VM par snapshot par le boot normal ; le pool borné de VM prêtes et sa taille configurable restent applicables. [ADR-0084](0084-local-conversation-disks-without-s3.md) retire la condition de publication : une conversation retenue peut être évincée, son disque restant sur la node.
+> Statut : Remplacée pour la création de VM par snapshot par le boot normal ; le pool borné de VM prêtes et sa taille configurable restent applicables. [ADR-0084](0084-local-conversation-disks-without-s3.md) retire la condition de publication : une VM retenue peut être arrêtée sans publication préalable ; son disque reste sur la node.
 
 # Pool borné pour les arrivées simultanées
 

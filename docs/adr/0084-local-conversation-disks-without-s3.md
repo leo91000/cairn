@@ -6,7 +6,8 @@ Cette décision remplace l’[ADR-0076](0076-direct-node-storage-transfers.md) e
 l’[ADR-0009](0009-s3-backed-disks-required-on-every-node.md) (sauf le journal local
 comme format unique du disque), ainsi que la conservation de l’environnement lors
 d’un déplacement ([ADR-0002](0002-conversation-movement-by-pause-and-resume.md)), la
-publication des disques ([ADR-0008](0008-current-disk-publication-without-archives.md),
+publication des disques
+([ADR-0008](0008-current-disk-publication-without-archives.md),
 [ADR-0010](0010-shared-block-incarnations.md),
 [ADR-0021](0021-final-publication-without-blocking-the-next-turn.md),
 [ADR-0023](0023-periodic-journal-capture-without-guest-freeze.md),
@@ -93,11 +94,12 @@ lecture seule qui le présente.
 La destination et les autorisations sont vérifiées avant l’expiration, qui est
 irréversible. Le changement interrompt ensuite le tour en cours et clôt les
 questions ouvertes. La première admission du nouvel environnement est imposée sur la
-destination et attend sa capacité tant que celle-ci reste autorisée et non révoquée,
-puis revient au placement automatique ; la conversation n’est pas fixée à cette
-node. Sauf lorsque l’agent change lui-même la node de sa propre conversation,
-celle-ci attend ensuite son prochain message ; les messages en file et les attentes
-planifiées démarrent sur la destination, et une mission active y reprend
+destination et attend la capacité de cette node tant qu’elle reste autorisée et non
+révoquée ; si elle cesse de l’être, le placement automatique choisit la node. La
+conversation n’est pas fixée à cette node. Sauf lorsque l’agent change lui-même la
+node de sa propre conversation, celle-ci attend ensuite son prochain message ; les
+messages en file démarrent sur la destination, les attentes planifiées, y compris
+celles d’une mission, y reprennent à leur échéance, et une mission active y reprend
 automatiquement.
 
 Un agent peut aussi changer sa propre conversation de node, avec l’outil
@@ -107,11 +109,11 @@ expire, puis la conversation reprend automatiquement sur la destination dans un
 environnement vide, avec l’avertissement d’expiration décrit plus haut.
 
 Une node n’exécute qu’un backend : faire passer une machine de VM à natif, ou
-l’inverse, enrôle une seconde node avec son propre stockage
-([exploitation des nodes natives](../NATIVE-NODES.md)). La migration d’une
-conversation entre VM et exécution native est donc un changement de node : même
-confirmation, même expiration, environnement vide sur le backend de destination. Ses
-vérifications d’autorisation et d’autorité native restent celles des
+l’inverse, enrôle une seconde node avec son propre stockage ([exploitation des nodes
+natives](../NATIVE-NODES.md)). La migration d’une conversation entre VM et exécution
+native est donc un changement de node : même confirmation, même expiration,
+environnement vide sur le backend de destination. Ses vérifications d’autorisation
+et d’autorité native restent celles des
 [ADR-0054](0054-explicit-conversation-backend-migration.md) et
 [ADR-0082](0082-move-vm-disks-between-execution-backends.md). Le montage natif d’un
 disque créé en VM et la conversion physique d’un disque créé en natif n’ont plus de
@@ -145,9 +147,10 @@ stockage », tout environnement dont le disque dépend d’une publication S3 ou
 trouve sur une node déjà révoquée. Aucun bloc n’est rapatrié. Le travail en cours de
 ces conversations est interrompu ; leur prochain message, ou la reprise d’une
 mission active, démarre un environnement vide. Un environnement qui n’a jamais été
-publié et dont la node est active est déjà entièrement local et reste utilisable. La
-migration annule aussi les déplacements, relocalisations, reprises et migrations de
-backend en attente, sans les rejouer ni en conserver la destination.
+publié et dont la node n’est pas révoquée est déjà entièrement local et reste
+utilisable. La migration annule aussi les changements de node, relocalisations,
+reprises et migrations de backend en attente, sans les rejouer ni en conserver la
+destination.
 
 Cairn n’efface plus aucun objet distant, y compris les suppressions encore en
 attente : après la mise à jour, supprimer une conversation ne retire plus ses
@@ -156,8 +159,8 @@ fichiers de travail à la mise à jour, sans autre préavis que la note de versi
 demande de pousser les commits et de sauvegarder les fichiers à conserver. Le retour
 à une version antérieure exige une sauvegarde de la base de données faite par
 l’exploitant avant la mise à jour, que le superviseur ne fait pas, et le bucket
-correspondant ; les fichiers ne reviennent que jusqu’à leur dernière génération
-publiée. La mise à jour n’efface ni `storage-s3.json`, ni les valeurs
+correspondant ; les fichiers ne reviennent que dans l’état de leur dernière
+génération publiée. La mise à jour n’efface ni `storage-s3.json`, ni les valeurs
 `STORAGE_S3_*` de l’environnement, ni la configuration et les données de Garage. Les
 nouvelles installations n’embarquent plus Garage ; le superviseur déjà installé ne
 retire pas ce service, que l’exploitant arrête et retire, avec le bucket et ses
@@ -169,13 +172,15 @@ Le manager n’a plus besoin de S3 ni de ses identifiants. Les réglages S3 du w
 d’Android, du MCP public et de `cairn_installation` disparaissent, ainsi que les
 variables `STORAGE_S3_*`, l’objectif de synchronisation et le budget de cache de
 publication de l’installation et, pour les nodes, l’intervalle de synchronisation,
-le délai de retard de synchronisation et le budget de cache propre. Restent la
-réserve disque et le cache mémoire de chaque node, les délais de déconnexion,
-d’arrêt et d’attente de capacité de l’installation, et la limite de stockage par
-tâche. Sont retirés la lecture à la demande depuis S3, le codec et le chiffrement
-des blocs distants, les manifestes publiés, le pipeline de publication, les
-transferts directs, les blocs partagés et leur collecte, l’éviction du cache propre,
-la restauration sur une autre node, ainsi que leurs tests et leur documentation.
+le délai de retard de synchronisation et le budget de cache propre. L’attente de
+capacité préalable à un changement de node (`waitSeconds`, son maximum et son
+annulation) disparaît également. Restent la réserve disque et le cache mémoire de
+chaque node, les délais de déconnexion et d’arrêt de l’installation, et la limite de
+stockage par tâche. Sont retirés la lecture à la demande depuis S3, le codec et le
+chiffrement des blocs distants, les manifestes publiés, le pipeline de publication,
+les transferts directs, les blocs partagés et leur collecte, l’éviction du cache
+propre, la restauration sur une autre node, ainsi que leurs tests et leur
+documentation.
 
 La durabilité d’un environnement se limite désormais au disque de sa node. Une
 sauvegarde de la machine reste à la charge de son exploitant. Aucun environnement

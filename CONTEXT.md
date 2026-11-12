@@ -5,7 +5,7 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 ## Language
 
 **Placement automatique** :
-Le choix d’une node autorisée et disponible pour un nouvel environnement de travail, qu’elle exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation. Il ne change jamais la node d’un environnement existant : seul un changement de node confirmé fait repartir ailleurs une conversation dont l’environnement existe encore.
+Le choix d’une node autorisée et disponible pour un nouvel environnement de travail, qu’elle exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf migration explicite de son mode d’exécution. Il ne change jamais la node d’un environnement existant : seul un changement de node confirmé fait repartir ailleurs une conversation dont l’environnement existe encore.
 
 **Priorité de nodes d’un agent** :
 L’ordre de préférence propre à un agent pour placer ses nouveaux environnements de travail. Une node prioritaire indisponible laisse la place à la suivante, puis aux autres nodes autorisées. Une préférence ne donne aucun droit d’accès.
@@ -87,7 +87,7 @@ _Avoid_ : agent (qui désigne l’agent chargé du travail, et non la machine)
 Travail d’un agent effectué par le système de la node, avec ses pilotes et les ressources partagées avec son propriétaire. Il exige des agents sélectionnés et des personnes explicitement autorisées, avec une frontière d’isolation plus faible qu’une VM.
 
 **Migration du mode d’exécution d’une conversation** :
-Changement de node explicite d’une conversation entre VM Firecracker et Linux natif, qui ne s’exécutent jamais sur la même node. Comme tout changement de node, il fait expirer son environnement de travail et conserve le fil, son historique, ses pièces jointes et ses artefacts. Si l’environnement a déjà expiré, elle choisit seulement le backend et la node du prochain environnement, sans avertissement. L’autorisation explicite du propriétaire permet de poursuivre la conversation avec des droits natifs ; une délégation reste bornée par ses droits actuels.
+Choix explicite du mode d’exécution d’une conversation entre VM Firecracker et Linux natif, qui ne s’exécutent jamais sur la même node. Si son environnement de travail existe encore, c’est un changement de node : cet environnement expire, et la conversation conserve son fil, son historique, ses pièces jointes et ses artefacts. S’il a déjà expiré, la migration choisit seulement le backend et la node du prochain environnement, sans avertissement. L’autorisation explicite du propriétaire permet de poursuivre la conversation avec des droits natifs ; une délégation reste bornée par ses droits actuels.
 _Avoid_ : bascule d’environnement, conversion d’environnement
 
 **Capacité d’une node** :
