@@ -1,3 +1,5 @@
+> Statut : [ADR-0083](0083-local-conversation-disks-without-s3.md) remplace la réutilisation des disques entre backends : changer de backend est un changement de node qui fait expirer l’environnement de travail ; l’exécution native de confiance et ses vérifications d’autorité restent applicables.
+
 > Update 2026-11-07: [ADR-0082](0082-move-vm-disks-between-execution-backends.md) permits explicit cross-backend node moves. VM-created disks are mounted directly by authorized native controllers; only native-created disks need physical conversion before VM execution. Automatic placement and priorities remain as defined in ADR-0073.
 
 # Trusted native execution alongside Firecracker

@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0069](0069-nodes-introduced-by-beacon.md) pour l’adresse directe obligatoire des nodes : Beacon peut les mettre en relation avec leur manager, en conservant le chiffrement de bout en bout. Les installations autonomes restent applicables.
+> Statut : Remplacée par [ADR-0069](0069-nodes-introduced-by-beacon.md) pour l’adresse directe obligatoire des nodes : Beacon peut les mettre en relation avec leur manager, en conservant le chiffrement de bout en bout. Les installations autonomes restent applicables. [ADR-0083](0083-local-conversation-disks-without-s3.md) retire le stockage S3 local intégré et le S3 externe.
 
 # Installations autonomes, accessibles uniquement par le service officiel
 

@@ -1,3 +1,5 @@
+> Statut : Mise à jour par [ADR-0083](0083-local-conversation-disks-without-s3.md) : la consolidation locale du journal remplace la publication pour libérer les segments propres à une conversation ; le préfixe scellé partagé reste immuable.
+
 # Prepared native project bases use sealed journal segments
 
 Ordinary journal-open payload checks are superseded by

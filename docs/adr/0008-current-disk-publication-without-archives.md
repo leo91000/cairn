@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0041](0041-immediate-conversation-deletion.md) pour le délai de récupération des nouvelles suppressions ; la publication courante sans archives reste applicable.
+> Statut : Remplacée par [ADR-0041](0041-immediate-conversation-deletion.md) pour le délai de récupération des nouvelles suppressions et par [ADR-0083](0083-local-conversation-disks-without-s3.md) pour la publication des disques, retirée ; l’absence d’archives reste applicable.
 
 # Publication du disque courant sans archives
 

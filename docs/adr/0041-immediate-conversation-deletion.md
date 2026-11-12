@@ -1,3 +1,5 @@
+> Statut : Mise à jour par [ADR-0083](0083-local-conversation-disks-without-s3.md) : la suppression efface les disques locaux et les enregistrements de la conversation ; Cairn n’efface plus les anciens objets publiés, que l’exploitant supprime avec leur bucket. La suppression immédiate et irréversible reste applicable.
+
 # Immediate permanent conversation deletion
 
 New conversation deletions have no recovery window, as requested by the owner. This supersedes the 30-day trash policy for new deletions in ADR-0008 and the historical conversation lifecycle proposal. Web and Android require confirmation before sending the deletion request; Android no longer offers Undo.

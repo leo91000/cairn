@@ -1,4 +1,4 @@
-> Statut : Le support des vues paired est abandonné ; le trim durable du disque ext4 plat et le contrôle des VM restent applicables.
+> Statut : Le support des vues paired est abandonné ; le trim durable du disque ext4 plat et le contrôle des VM restent applicables. [ADR-0083](0083-local-conversation-disks-without-s3.md) libère les octets effacés par la consolidation locale du journal, sans publication ni collecte d’objets partagés.
 
 # Durable discard for guest images
 

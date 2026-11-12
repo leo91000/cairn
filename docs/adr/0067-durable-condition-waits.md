@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0060](0060-grouped-wait-conditions.md) pour la limite de profondeur des dépendances et [ADR-0053](0053-github-as-a-bundled-plugin.md) pour les identifiants GitHub et leur observation, désormais assurés par une instance de plugin accordée et son gestionnaire de conditions ; les conditions durables restent applicables.
+> Statut : Remplacée par [ADR-0060](0060-grouped-wait-conditions.md) pour la limite de profondeur des dépendances et [ADR-0053](0053-github-as-a-bundled-plugin.md) pour les identifiants GitHub et leur observation, désormais assurés par une instance de plugin accordée et son gestionnaire de conditions ; les conditions durables restent applicables. Mise à jour par [ADR-0083](0083-local-conversation-disks-without-s3.md) : après un changement de node, une attente conditionnelle est conservée et reprend sur la destination dès que sa condition est remplie ou à son échéance, dans un environnement vide et une nouvelle session.
 
 # Durable conditions for conversation continuation
 

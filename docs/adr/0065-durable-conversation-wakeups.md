@@ -1,3 +1,5 @@
+> Statut : Mise à jour par [ADR-0083](0083-local-conversation-disks-without-s3.md) : après un changement de node, une attente planifiée est conservée et reprend sur la destination à son échéance, dans un environnement vide et une nouvelle session.
+
 # Durable conversation wakeups
 
 Date: 2026-10-12.

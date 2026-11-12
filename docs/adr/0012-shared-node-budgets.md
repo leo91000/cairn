@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0070](0070-automatic-native-disk-growth.md) pour l’admission disque des nodes natives compatibles : leur capacité inutilisée accordée est protégée ; CPU et RAM restent partagés.
+> Statut : Remplacée par [ADR-0070](0070-automatic-native-disk-growth.md) pour l’admission disque des nodes natives compatibles : leur capacité inutilisée accordée est protégée ; CPU et RAM restent partagés. [ADR-0083](0083-local-conversation-disks-without-s3.md) retire les volumes S3, l’éviction des caches propres et le délai d’attente de `move_to_node` : le budget disque porte sur des environnements entièrement locaux, et un changement de node ne réserve ni ne conserve plus le disque.
 
 # Slots et budgets partagés par node
 
