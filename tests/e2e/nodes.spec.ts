@@ -523,7 +523,14 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   // Opened from the chip, the panel keeps it until it closes; focus then falls back to ⋯ once it is gone.
   await chip.click()
   await expect(panel).toBeVisible()
-  workspace.service.store.updateRun(detail.run.id, { storage: { waitingFor: null } } as any)
+  workspace.service.store.updateRun(detail.run.id, {
+    storage: {
+      mode: 'on-demand',
+      localBytes: 191392768,
+      dirtyBytes: 183890000,
+      waitingFor: null,
+    },
+  } as any)
   await heartbeat()
   await expect(chip).toHaveAccessibleName('Execution node: 175.4 MiB awaiting consolidation', { timeout: 15000 })
   await page.keyboard.press('Escape')
