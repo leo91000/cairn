@@ -1,6 +1,8 @@
 # Transferts directs de stockage confiés aux nodes
 
-Date : 28 octobre 2026. Statut : accepté par le propriétaire après le cadrage `grill-with-docs`.
+> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : les disques ne sont plus transférés vers un stockage distant.
+
+Date : 28 octobre 2026. Statut initial : accepté par le propriétaire après le cadrage `grill-with-docs`.
 
 Le manager concentre actuellement les contenus des disques, leur codec et leurs transferts vers le stockage distant. Nous choisissons des uploads et lectures directs entre les nodes d'exécution et le stockage, avec une coordination des autorisations, références et publications conservée par le manager. Le protocole est commun aux fournisseurs ; chaque driver déclare et fait qualifier ses capacités. Cette évolution complète les ADR-0009, ADR-0010 et ADR-0036 et ne transforme pas la synchronisation en réplication continue du journal.
 

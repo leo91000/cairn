@@ -1,6 +1,6 @@
 > Update 2026-11-07: [ADR-0082](0082-move-vm-disks-between-execution-backends.md) permits explicit cross-backend node moves. VM-created disks are mounted directly by authorized native controllers; only native-created disks need physical conversion before VM execution. Automatic placement and priorities remain as defined in ADR-0073.
 
-> Statut : Le support du layout paired est abandonné ; les migrations explicites entre le disque ext4 plat des VM et le mode natif restent applicables.
+> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : migrer une conversation entre VM et natif fait expirer son environnement de travail, sans conversion ni réutilisation du disque. `get_chat_backend_migration` et `migrate_chat_backend` restent ses points d’entrée, avec confirmation.
 
 # Existing conversations can explicitly migrate between Linux backends
 

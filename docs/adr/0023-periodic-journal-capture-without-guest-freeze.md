@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : il n’existe plus de sauvegarde périodique vers S3.
+
 # Sauvegardes périodiques sans gel du guest
 
 Date : 2026-10-02. Statut : livré et vérifié en production dans

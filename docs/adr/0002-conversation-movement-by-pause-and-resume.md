@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : changer de node fait expirer l’environnement de travail, qui n’est plus conservé par le déplacement.
+
 # Déplacer une conversation par pause et reprise
 
 Les nodes de Leo peuvent être disponibles de manière intermittente. Le déplacement

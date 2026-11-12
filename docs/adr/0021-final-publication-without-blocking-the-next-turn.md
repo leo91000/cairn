@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : il n’existe plus de publication finale vers S3.
+
 # Final publication without blocking the next turn
 
 ## Context

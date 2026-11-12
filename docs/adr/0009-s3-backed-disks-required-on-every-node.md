@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport FUSE et [ADR-0019](0019-booted-vms-with-ready-codex.md) pour le retrait du préchauffage anonyme et [ADR-0070](0070-automatic-native-disk-growth.md) pour la restriction d’agrandissement des disques plats natifs compatibles ; le stockage S3 obligatoire reste applicable.
+> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : les disques de travail restent locaux à leur node, sans S3.
 
 # Disques S3 obligatoires sur toutes les nodes
 

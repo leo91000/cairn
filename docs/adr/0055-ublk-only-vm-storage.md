@@ -1,4 +1,4 @@
-> Statut : Le transport ublk reste l’unique transport. Les anciens sélecteurs Cargo/environnement, l’adaptateur FUSE, les snapshots mémoire et le layout paired sont supprimés ; le pool prêt et la publication des disques restent applicables.
+> Statut : Le transport ublk reste l’unique transport. Les anciens sélecteurs Cargo/environnement, l’adaptateur FUSE, les snapshots mémoire et le layout paired sont supprimés  ; le pool prêt reste applicable. [ADR-0084](0084-local-conversation-disks-without-s3.md) retire la publication des disques.
 
 # ublk as the sole VM block transport
 

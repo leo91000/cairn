@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) pour le budget de synchronisation et le cache de blocs distants.
+
 # Verified block cache and active synchronization budget
 
 > The backup-lag pause is superseded by [ADR-0076](0076-direct-node-storage-transfers.md): overdue uploads are visible without suspending safe local work. Integrity, free-space and needed remote-read protection remain active.
