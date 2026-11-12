@@ -21,6 +21,7 @@ pub(crate) use storage::SCHEMA;
 use crate::{
     auth::{InstallationIdentity, InstallationRole},
     config::{id, now},
+    conversation_writers::{Eligibility, Eligible},
     error::{Error, Result, required},
     native::policy::Origin,
     service::Service,
@@ -107,6 +108,7 @@ pub(crate) struct Viewer {
 }
 
 /// The account a write acts for, with its membership and native provenance.
+#[derive(Clone)]
 struct Writer {
     creator: Creator,
     access_id: Option<String>,
@@ -115,13 +117,110 @@ struct Writer {
     origin: Origin,
 }
 
-/// Rules are written for a person only in a conversation that meets every provenance
-/// condition of ADR-0075. Cairn does not yet record who writes each entry of a
-/// conversation, so no conversation qualifies and agents only read rules.
-fn installation_writer(_db: &Db<'_>, _bearer: &str) -> Result<Writer> {
-    Err(Error::forbidden(
-        "An agent writes rules only for the person of a conversation that this person alone has written, from its start. This conversation does not qualify.",
-    ))
+impl Writer {
+    /// An agent writes for the person of its eligible conversation, never as the owner
+    /// and never with native authority.
+    fn agent(eligible: Eligible) -> Self {
+        Self {
+            creator: Creator {
+                account: eligible.account,
+                owner: eligible.owner,
+            },
+            access_id: eligible.access_id,
+            source: HookRuleSource::InstallationAgent,
+            conversation: Some(eligible.conversation),
+            origin: Origin::Unknown,
+        }
+    }
+
+    fn viewer(&self) -> Viewer {
+        Viewer {
+            account: Some(self.creator.account.clone()),
+            owner: self.creator.owner,
+        }
+    }
+}
+
+/// Resolves an installation agent to the person of its eligible conversation.
+fn installation_writer(db: &Db<'_>, bearer: &str, eligibility: &Eligibility) -> Result<Writer> {
+    Ok(Writer::agent(eligibility.check(db, bearer)?))
+}
+
+/// Who a write acts for: resolved before the transaction for people, and inside it for
+/// an agent, whose conversation must still meet every provenance condition of ADR-0075.
+enum Author {
+    Ready(Writer),
+    Agent(String, Eligibility),
+}
+
+impl Author {
+    async fn resolve(s: &Service, actor: &Actor) -> Result<Self> {
+        match actor {
+            Actor::Installation(bearer, _) => {
+                Ok(Self::Agent(bearer.clone(), Eligibility::observe(s).await?))
+            }
+            _ => Ok(Self::Ready(writer(s, actor).await?.0)),
+        }
+    }
+
+    fn agent(&self) -> bool {
+        matches!(self, Self::Agent(..))
+    }
+
+    fn writer(&self, db: &Db<'_>) -> Result<Writer> {
+        match self {
+            Self::Ready(writer) => Ok(writer.clone()),
+            Self::Agent(bearer, eligibility) => installation_writer(db, bearer, eligibility),
+        }
+    }
+
+    /// While a rule of the person is paused in an emergency or out of budget, an agent
+    /// only disables that person's rules.
+    fn unblocked(&self, db: &Db<'_>, writer: &Writer) -> Result<()> {
+        if self.agent() && blocked(db, &writer.creator.account)? {
+            return Err(Error::forbidden(
+                "A rule of this person is paused in an emergency or out of budget: an agent may only disable their rules.",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn blocked(db: &Db<'_>, account: &str) -> Result<bool> {
+    Ok(db.hook_rules()?.iter().any(|row| {
+        row.creator_account_id == account
+            && (row.emergency_paused_at.is_some() || row.budget_exhausted_at.is_some())
+    }))
+}
+
+/// Warns the person when an agent wrote, for them, a rule open to anyone that starts an
+/// agent with broad rights.
+fn warn_open(
+    db: &Db<'_>,
+    author: &Author,
+    writer: &Writer,
+    rule: &str,
+    definition: &HookRuleDefinition,
+) -> Result<()> {
+    if !author.agent() {
+        return Ok(());
+    }
+    let Some(warning) = validation::warnings(db, definition)?
+        .into_iter()
+        .find(|warning| warning.kind == "openToAnyone")
+    else {
+        return Ok(());
+    };
+    crate::notifications::enqueue_alert_to(
+        db,
+        &json!({
+            "id": id(),
+            "chatId": writer.conversation,
+            "title": format!("An agent saved the rule {}", definition.name),
+            "body": format!("{} Rule {rule}.", warning.message),
+        }),
+        Some(vec![writer.creator.account.clone()]),
+    )
 }
 
 /// Confirms memberships, then resolves who a write acts for. Callers hold `authors`.
@@ -149,8 +248,8 @@ async fn writer(s: &Service, actor: &Actor) -> Result<(Writer, Option<TaskAuthor
             (account, true, HookRuleSource::PublicMcp, origin)
         }
         Actor::Installation(..) => {
-            return Err(Error::forbidden(
-                "An agent writes rules only through the installation tools of an eligible conversation.",
+            return Err(Error::internal(
+                "An agent's writer is resolved within the write transaction.",
             ));
         }
     };
@@ -176,19 +275,6 @@ async fn writer(s: &Service, actor: &Actor) -> Result<(Writer, Option<TaskAuthor
         },
         policy,
     ))
-}
-
-/// Rule creation, whether direct or through a template, uses the same provenance gate.
-async fn creation_writer(s: &Service, actor: &Actor) -> Result<Writer> {
-    match actor {
-        Actor::Installation(bearer, _) => {
-            let bearer = bearer.clone();
-            s.store
-                .read(move |db| installation_writer(db, &bearer))
-                .await
-        }
-        _ => writer(s, actor).await.map(|(writer, _)| writer),
-    }
 }
 
 /// The instances a definition names, with their active manifests, read before the
@@ -572,17 +658,12 @@ pub(crate) async fn create(
     refresh_native(s, &input.definition).await?;
     let _authors = s.missions.authors.lock().await;
     actor.recheck().await?;
-    let writer = creation_writer(s, &actor).await?;
-    let viewer = Viewer {
-        account: Some(writer.creator.account.clone()),
-        owner: writer.creator.owner,
-    };
+    let author = Author::resolve(s, &actor).await?;
     s.store
         .transaction(move |db| {
             actor.authorize(db)?;
-            if let Actor::Installation(bearer, _) = &actor {
-                installation_writer(db, bearer)?;
-            }
+            let writer = author.writer(db)?;
+            let viewer = writer.viewer();
             if let Some(existing) = db.hook_rule(&rule)? {
                 if existing.creator_account_id != writer.creator.account {
                     return Err(Error::conflict(
@@ -591,13 +672,15 @@ pub(crate) async fn create(
                 }
                 return view(db, &rule, &viewer);
             }
+            author.unblocked(db, &writer)?;
             fresh_identity(db, &rule)?;
             let mut row = new_row(rule.clone(), &writer, !input.enabled);
-            save_version(db, &mut row, input.definition, &writer, &instances)?;
+            save_version(db, &mut row, input.definition.clone(), &writer, &instances)?;
             db.audit(
                 "hook_rule.created",
                 &json!({ "ruleId": row.id, "creator": row.creator_account_id }),
             )?;
+            warn_open(db, &author, &writer, &rule, &input.definition)?;
             view(db, &rule, &viewer)
         })
         .await
@@ -614,15 +697,13 @@ pub(crate) async fn replace(
     refresh_native(s, &input.definition).await?;
     let _authors = s.missions.authors.lock().await;
     actor.recheck().await?;
-    let (writer, _) = writer(s, &actor).await?;
-    let viewer = Viewer {
-        account: Some(writer.creator.account.clone()),
-        owner: writer.creator.owner,
-    };
+    let author = Author::resolve(s, &actor).await?;
     let rule = input.rule_id.to_string();
     s.store
         .transaction(move |db| {
             actor.authorize(db)?;
+            let writer = author.writer(db)?;
+            let viewer = writer.viewer();
             let mut row = required(db.hook_rule(&rule)?, "Rule not found")?;
             if row.creator_account_id != writer.creator.account {
                 return Err(Error::forbidden(
@@ -639,34 +720,74 @@ pub(crate) async fn replace(
                     "This rule changed. Reload it before saving.",
                 ));
             }
-            save_version(db, &mut row, input.definition, &writer, &instances)?;
+            author.unblocked(db, &writer)?;
+            save_version(db, &mut row, input.definition.clone(), &writer, &instances)?;
             db.audit(
                 "hook_rule.replaced",
                 &json!({ "ruleId": row.id, "version": row.version }),
             )?;
+            warn_open(db, &author, &writer, &rule, &input.definition)?;
             view(db, &rule, &viewer)
         })
         .await
 }
 
+/// What an agent may do to a rule's state, for the person of its eligible conversation.
+#[derive(Clone, Copy, PartialEq)]
+enum AgentChange {
+    /// Never: emergency pauses and budgets are lifted by people only.
+    Refused,
+    /// Only while no rule of the person is paused in an emergency or out of budget.
+    Unblocked,
+    /// Always: disabling only reduces what the person's rules do.
+    Allowed,
+}
+
 /// State changes need no fresh membership: they only reduce what the rule does, or
 /// lift a block its own holder may lift.
-async fn change_state<F>(s: &Service, rule: HookRuleId, actor: Actor, change: F) -> Result<HookRule>
+async fn change_state<F>(
+    s: &Service,
+    rule: HookRuleId,
+    actor: Actor,
+    agent: AgentChange,
+    change: F,
+) -> Result<HookRule>
 where
     F: FnOnce(&Db<'_>, &mut RuleRow, &Viewer) -> Result<&'static str> + Send + 'static,
 {
     actor.require_scope("manage")?;
     actor.recheck().await?;
-    if matches!(actor, Actor::Installation(..)) {
-        return Err(Error::forbidden(
-            "An agent changes rules only for the person of an eligible conversation.",
-        ));
-    }
+    let eligibility = match &actor {
+        Actor::Installation(..) if agent == AgentChange::Refused => {
+            return Err(Error::forbidden(
+                "An agent never pauses a rule in an emergency nor resumes its budget.",
+            ));
+        }
+        Actor::Installation(bearer, _) => Some(Author::Agent(
+            bearer.clone(),
+            Eligibility::observe(s).await?,
+        )),
+        _ => None,
+    };
     let viewer = actor.viewer();
     let rule = rule.to_string();
     s.store
         .transaction(move |db| {
             actor.authorize(db)?;
+            // An agent acts for its person only: never with the owner's authority.
+            let viewer = match &eligibility {
+                Some(author) => {
+                    let writer = author.writer(db)?;
+                    if agent == AgentChange::Unblocked {
+                        author.unblocked(db, &writer)?;
+                    }
+                    Viewer {
+                        account: Some(writer.creator.account),
+                        owner: false,
+                    }
+                }
+                None => viewer,
+            };
             let mut row = required(db.hook_rule(&rule)?, "Rule not found")?;
             let action = change(db, &mut row, &viewer)?;
             if row.disabled_at.is_some() {
@@ -693,7 +814,12 @@ pub(crate) async fn set_enabled(
     input: SetHookRuleEnabledInput,
     actor: Actor,
 ) -> Result<HookRule> {
-    change_state(s, input.rule_id, actor, move |_, row, viewer| {
+    let agent = if input.enabled {
+        AgentChange::Unblocked
+    } else {
+        AgentChange::Allowed
+    };
+    change_state(s, input.rule_id, actor, agent, move |_, row, viewer| {
         if !mine(row, viewer) {
             return Err(Error::forbidden(
                 "Only its creator can enable or disable this rule. The owner can pause it in an emergency.",
@@ -720,20 +846,26 @@ pub(crate) async fn set_emergency_pause(
     input: SetHookRuleEmergencyPauseInput,
     actor: Actor,
 ) -> Result<HookRule> {
-    change_state(s, input.rule_id, actor, move |_, row, viewer| {
-        if !viewer.owner {
-            return Err(Error::forbidden(
-                "Only the installation owner can pause a rule in an emergency.",
-            ));
-        }
-        if input.paused {
-            row.emergency_paused_at.get_or_insert_with(now);
-            Ok("hook_rule.emergency_paused")
-        } else {
-            row.emergency_paused_at = None;
-            Ok("hook_rule.emergency_resumed")
-        }
-    })
+    change_state(
+        s,
+        input.rule_id,
+        actor,
+        AgentChange::Refused,
+        move |_, row, viewer| {
+            if !viewer.owner {
+                return Err(Error::forbidden(
+                    "Only the installation owner can pause a rule in an emergency.",
+                ));
+            }
+            if input.paused {
+                row.emergency_paused_at.get_or_insert_with(now);
+                Ok("hook_rule.emergency_paused")
+            } else {
+                row.emergency_paused_at = None;
+                Ok("hook_rule.emergency_resumed")
+            }
+        },
+    )
     .await
 }
 
@@ -742,19 +874,25 @@ pub(crate) async fn lift_budget(
     input: HookRuleInput,
     actor: Actor,
 ) -> Result<HookRule> {
-    change_state(s, input.rule_id, actor, move |db, row, viewer| {
-        if !mine(row, viewer) && !viewer.owner {
-            return Err(Error::forbidden(
-                "Only its creator or the installation owner can resume this rule's budget.",
-            ));
-        }
-        if row.budget_exhausted_at.is_some() {
-            engine::reset_budget(db, &row.id)?;
-            row.budget_exhausted_at = None;
-        }
-        row.budget_reason = None;
-        Ok("hook_rule.budget_resumed")
-    })
+    change_state(
+        s,
+        input.rule_id,
+        actor,
+        AgentChange::Refused,
+        move |db, row, viewer| {
+            if !mine(row, viewer) && !viewer.owner {
+                return Err(Error::forbidden(
+                    "Only its creator or the installation owner can resume this rule's budget.",
+                ));
+            }
+            if row.budget_exhausted_at.is_some() {
+                engine::reset_budget(db, &row.id)?;
+                row.budget_exhausted_at = None;
+            }
+            row.budget_reason = None;
+            Ok("hook_rule.budget_resumed")
+        },
+    )
     .await
 }
 
@@ -776,15 +914,13 @@ pub(crate) async fn duplicate(
     refresh_native(s, &definition).await?;
     let _authors = s.missions.authors.lock().await;
     actor.recheck().await?;
-    let (mut writer, _) = writer(s, &actor).await?;
-    writer.source = HookRuleSource::Duplicate;
-    let viewer = Viewer {
-        account: Some(writer.creator.account.clone()),
-        owner: writer.creator.owner,
-    };
+    let author = Author::resolve(s, &actor).await?;
     s.store
         .transaction(move |db| {
             actor.authorize(db)?;
+            let mut writer = author.writer(db)?;
+            writer.source = HookRuleSource::Duplicate;
+            let viewer = writer.viewer();
             if let Some(existing) = db.hook_rule(&copy)? {
                 if existing.creator_account_id != writer.creator.account {
                     return Err(Error::conflict(
@@ -793,8 +929,17 @@ pub(crate) async fn duplicate(
                 }
                 return view(db, &copy, &viewer);
             }
+            author.unblocked(db, &writer)?;
             fresh_identity(db, &copy)?;
-            let (_, version) = current(db, &source)?;
+            let (source_row, version) = current(db, &source)?;
+            if author.agent()
+                && (source_row.emergency_paused_at.is_some()
+                    || source_row.budget_exhausted_at.is_some())
+            {
+                return Err(Error::forbidden(
+                    "An agent never duplicates a rule paused in an emergency or out of budget.",
+                ));
+            }
             for agent in agents_used(&version.definition) {
                 if !writer.creator.uses_agent(db, &agent)? {
                     return Err(Error::forbidden(
@@ -804,11 +949,18 @@ pub(crate) async fn duplicate(
             }
             // A duplicate starts disabled and belongs to whoever duplicates it.
             let mut row = new_row(copy.clone(), &writer, true);
-            save_version(db, &mut row, version.definition, &writer, &instances)?;
+            save_version(
+                db,
+                &mut row,
+                version.definition.clone(),
+                &writer,
+                &instances,
+            )?;
             db.audit(
                 "hook_rule.duplicated",
                 &json!({ "ruleId": row.id, "sourceId": source }),
             )?;
+            warn_open(db, &author, &writer, &copy, &version.definition)?;
             view(db, &copy, &viewer)
         })
         .await
@@ -817,16 +969,30 @@ pub(crate) async fn duplicate(
 pub(crate) async fn delete(s: &Service, input: HookRuleInput, actor: Actor) -> Result<()> {
     actor.require_scope("manage")?;
     actor.recheck().await?;
-    if matches!(actor, Actor::Installation(..)) {
-        return Err(Error::forbidden(
-            "An agent deletes rules only for the person of an eligible conversation.",
-        ));
-    }
+    let author = match &actor {
+        Actor::Installation(bearer, _) => Some(Author::Agent(
+            bearer.clone(),
+            Eligibility::observe(s).await?,
+        )),
+        _ => None,
+    };
     let viewer = actor.viewer();
     let rule = input.rule_id.to_string();
     s.store
         .transaction(move |db| {
             actor.authorize(db)?;
+            // An agent deletes only its person's rules, and none while one is blocked.
+            let viewer = match &author {
+                Some(author) => {
+                    let writer = author.writer(db)?;
+                    author.unblocked(db, &writer)?;
+                    Viewer {
+                        account: Some(writer.creator.account),
+                        owner: false,
+                    }
+                }
+                None => viewer,
+            };
             let row = required(db.hook_rule(&rule)?, "Rule not found")?;
             if !mine(&row, &viewer) && !viewer.owner {
                 return Err(Error::forbidden(
@@ -1138,17 +1304,15 @@ pub(crate) async fn install_template(
     if retry_requested {
         let _authors = s.missions.authors.lock().await;
         actor.recheck().await?;
-        let writer = creation_writer(s, &actor).await?;
-        let viewer = Viewer {
-            account: Some(writer.creator.account),
-            owner: writer.creator.owner,
-        };
+        let author = Author::resolve(s, &actor).await?;
         let retry_actor = actor.clone();
         let retry_key = creation_key.clone();
         let existing = s
             .store
             .read(move |db| {
                 retry_actor.authorize(db)?;
+                let writer = author.writer(db)?;
+                let viewer = writer.viewer();
                 template_creation(db, &retry_key, &viewer)
             })
             .await?;
@@ -1187,29 +1351,28 @@ pub(crate) async fn install_template(
 
     let _authors = s.missions.authors.lock().await;
     actor.recheck().await?;
-    let mut writer = creation_writer(s, &actor).await?;
-    writer.source = HookRuleSource::Template;
-    let viewer = Viewer {
-        account: Some(writer.creator.account.clone()),
-        owner: writer.creator.owner,
-    };
+    let author = Author::resolve(s, &actor).await?;
     s.store
         .transaction(move |db| {
             actor.authorize(db)?;
-            if let Actor::Installation(bearer, _) = &actor {
-                installation_writer(db, bearer)?;
+            let mut writer = author.writer(db)?;
+            if !author.agent() {
+                writer.source = HookRuleSource::Template;
             }
+            let viewer = writer.viewer();
             if let Some(existing) = template_creation(db, &creation_key, &viewer)? {
                 return Ok(existing);
             }
+            author.unblocked(db, &writer)?;
             templates::authorize_agents(db, &writer.creator, &template, &values)?;
             for (index, (id, definition)) in ids.iter().zip(definitions).enumerate() {
                 fresh_identity(db, id)?;
                 let mut row = new_row(id.clone(), &writer, !input.enabled);
-                save_version(db, &mut row, definition, &writer, &known).map_err(|mut error| {
+                save_version(db, &mut row, definition.clone(), &writer, &known).map_err(|mut error| {
                     error.message = format!("Rule {}: {}", index + 1, error.message);
                     error
                 })?;
+                warn_open(db, &author, &writer, id, &definition)?;
             }
             if retry_requested {
                 db.set_as(
@@ -1264,7 +1427,8 @@ pub(crate) fn reconcile(db: &Db<'_>, policy: &TaskAuthorPolicy) -> Result<()> {
 }
 
 /// The hooks and tools that rules of current memberships use on an execution agent,
-/// with the resources the agent holds now: a reduction keeps covering them.
+/// with the resources the agent holds now: a reduction keeps covering them. The rules of
+/// `except_account`, the person of an agent's eligible conversation, are left out.
 pub(crate) fn grant_uses(
     db: &Db<'_>,
     agent: &str,

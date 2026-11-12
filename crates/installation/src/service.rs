@@ -154,6 +154,7 @@ impl Service {
         self.save_profile_live(
             command,
             editor,
+            crate::conversation_writers::EntryWriter::Unknown,
             crate::authorization::Authorization::once(authorize),
         )
         .await
@@ -163,6 +164,7 @@ impl Service {
         self: &Arc<Self>,
         command: crate::agents::SaveProfile,
         editor: AgentEditor,
+        writer: crate::conversation_writers::EntryWriter,
         authorize: crate::authorization::Authorization,
     ) -> Result<cairn_contracts::Agent> {
         authorize.recheck().await?;
@@ -271,7 +273,9 @@ impl Service {
             }
             crate::coding_agent_configuration::validate_profile(db, &agent)?;
             crate::agent_grants::validate(db, &agent, &accepts_agents)?;
+            let before = current.as_ref().map(|profile| profile.settings.instructions.clone()).unwrap_or_default();
             let agent = crate::agent_grants::save_profile(db, agent, owner_review, &review.native_node_reviews)?;
+            crate::conversation_writers::record_instructions(db, &agent.id.to_string(), &before, &agent.settings.instructions, &writer)?;
             for connection in &review.reapprove_delegations {
                 crate::plugins::connections::reapprove(db, connection, &agent, &origin)?;
             }

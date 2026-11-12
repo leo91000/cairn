@@ -543,6 +543,7 @@ impl AgentOperation {
         } else {
             None
         };
+        let writer = crate::conversation_writers::EntryWriter::of_context(&context);
         let (editor, bearer) = match context {
             ResumeContext::Human(_) => (crate::service::AgentEditor::Owner, None),
             ResumeContext::Public(scopes, _) => {
@@ -574,6 +575,7 @@ impl AgentOperation {
                 s.save_profile_live(
                     crate::agents::SaveProfile::Create(decode(input)?),
                     editor,
+                    writer,
                     authorization,
                 )
                 .await?,
@@ -582,6 +584,7 @@ impl AgentOperation {
                 s.save_profile_live(
                     crate::agents::SaveProfile::Replace(decode(input)?),
                     editor,
+                    writer,
                     authorization,
                 )
                 .await?,

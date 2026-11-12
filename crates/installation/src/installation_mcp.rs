@@ -57,6 +57,41 @@ pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     Ok(run)
 }
 
+/// Reading another conversation or run through these tools is an agent entry in the
+/// caller's own conversation (ADR-0075): its content now reaches this conversation.
+async fn record_reading(s: &Service, run: &Value, name: &str, args: &Value) -> Result<()> {
+    let target = match name {
+        "list_chats" => None,
+        "get_chat" | "read_chat_content" => Some(("chat", text(args, "chatId").to_owned())),
+        "get_run" | "read_run_history" | "read_run_timeline" | "read_run_content"
+        | "list_run_artifacts" | "read_run_artifact" => {
+            Some(("run", text(args, "runId").to_owned()))
+        }
+        _ => return Ok(()),
+    };
+    let run_id = text(run, "id").to_owned();
+    s.store
+        .transaction(move |db| {
+            let Some(own) = db.conversation_for_run(&run_id)? else {
+                return Ok(());
+            };
+            let other = match &target {
+                Some(("chat", chat)) => *chat != own.id,
+                Some((_, run)) => *run != run_id,
+                None => true,
+            };
+            if other {
+                crate::conversation_writers::record_entry(
+                    db,
+                    &own.id,
+                    &crate::conversation_writers::EntryWriter::Agent,
+                )?;
+            }
+            Ok(())
+        })
+        .await
+}
+
 /// Reducing the calling agent's permissions invalidates its active grant.
 pub(crate) fn agent_allowed(caller: &Value, target: &Value) -> bool {
     if caller["id"] != target["id"] {
@@ -206,6 +241,7 @@ pub(crate) async fn operation(
             "Only read-scoped installation operations are available during a plan turn.",
         ));
     }
+    record_reading(s, &run, name, &args).await?;
     if let Some(op) = crate::capabilities::artifact_operation(name) {
         return op
             .invoke(

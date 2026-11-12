@@ -44,6 +44,15 @@ pub fn enqueue(db: &Db<'_>, question: &Question) -> Result<()> {
 }
 
 pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
+    enqueue_alert_to(db, alert, None)
+}
+
+/// An alert only the given accounts receive.
+pub(crate) fn enqueue_alert_to(
+    db: &Db<'_>,
+    alert: &Value,
+    members: Option<Vec<String>>,
+) -> Result<()> {
     enqueue_event(
         db,
         &NotificationEvent {
@@ -55,7 +64,7 @@ pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
                 body: text(alert, "body").chars().take(300).collect(),
                 rule_id: None,
             },
-            members: None,
+            members,
             question_recipients: None,
         },
     )
