@@ -1,6 +1,6 @@
 > Statut : [ADR-0084](0084-local-conversation-disks-without-s3.md) remplace la réutilisation des disques entre backends : changer de backend est un changement de node qui fait expirer l’environnement de travail.
 
-> Update 2026-11-07: [ADR-0082](0082-move-vm-disks-between-execution-backends.md) permits explicit cross-backend node moves. VM-created disks are mounted directly by authorized native controllers; only native-created disks need physical conversion before VM execution. Automatic placement and priorities remain as defined in ADR-0073.
+> Update 2026-11-07: [ADR-0082](0082-move-vm-disks-between-execution-backends.md) permits explicit cross-backend node moves. VM-created disks are mounted directly by authorized native controllers; only native-created disks need physical conversion before VM execution. Automatic placement and priorities remain as defined in ADR-0073. Superseded by [ADR-0084](0084-local-conversation-disks-without-s3.md): changing backend expires the working environment.
 
 # Trusted native execution alongside Firecracker
 

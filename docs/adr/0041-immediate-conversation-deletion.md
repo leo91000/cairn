@@ -1,4 +1,4 @@
-> Statut : [ADR-0084](0084-local-conversation-disks-without-s3.md) retire les objets publiés : la suppression efface les disques locaux et les enregistrements de la conversation.
+> Statut : Mise à jour par [ADR-0084](0084-local-conversation-disks-without-s3.md) : la suppression efface les disques locaux et les enregistrements de la conversation ; Cairn n’efface plus les anciens objets publiés, que l’exploitant supprime avec leur bucket.
 
 # Immediate permanent conversation deletion
 

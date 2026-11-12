@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0054](0054-explicit-conversation-backend-migration.md) pour l’interdiction de conversion native/VM, conversion elle-même retirée par [ADR-0084](0084-local-conversation-disks-without-s3.md) avec la source S3 et l’éviction en inactivité ; le journal ublk natif, désormais entièrement local, reste applicable.
+> Statut : Remplacée par [ADR-0054](0054-explicit-conversation-backend-migration.md) pour l’interdiction de conversion native/VM. [ADR-0084](0084-local-conversation-disks-without-s3.md) retire cette conversion, la source S3 et l’éviction en inactivité ; le journal ublk natif, désormais entièrement local, reste applicable.
 
 # Native workspaces use the VM journal through host ublk
 

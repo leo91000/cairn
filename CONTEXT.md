@@ -8,7 +8,7 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 Le choix d’une node autorisée et disponible pour un nouvel environnement de travail, qu’elle exécute des VM ou des processus natifs. Il ne fait jamais changer de node une conversation existante : seul un changement de node confirmé la fait repartir ailleurs.
 
 **Priorité de nodes d’un agent** :
-L’ordre de préférence propre à un agent pour placer ses nouvelles conversations. Un node prioritaire indisponible laisse la place au suivant, puis aux autres nodes autorisés. Une préférence ne donne aucun droit d’accès.
+L’ordre de préférence propre à un agent pour placer ses nouveaux environnements de travail. Une node prioritaire indisponible laisse la place à la suivante, puis aux autres nodes autorisées. Une préférence ne donne aucun droit d’accès.
 
 **Beacon** :
 Le service hébergé par Cairn qui fournit l’interface web et mobile, les comptes Cairn et l’accès à toutes les installations d’un compte. Il ne conserve pas le travail des agents.
