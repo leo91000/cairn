@@ -2,9 +2,9 @@
 
 Date : 12 novembre 2026. Statut : accepté par Léo.
 
-Cette décision remplace l’[ADR-0009](0009-s3-backed-disks-required-on-every-node.md),
-sauf le journal local comme format unique du disque, et
-l’[ADR-0076](0076-direct-node-storage-transfers.md), ainsi que la conservation de
+Cette décision remplace l’[ADR-0076](0076-direct-node-storage-transfers.md) et
+l’[ADR-0009](0009-s3-backed-disks-required-on-every-node.md) (sauf le journal local
+comme format unique du disque), ainsi que la conservation de
 l’environnement lors d’un déplacement
 ([ADR-0002](0002-conversation-movement-by-pause-and-resume.md)), la publication des
 disques ([ADR-0008](0008-current-disk-publication-without-archives.md),
@@ -35,6 +35,8 @@ L’environnement de travail d’une conversation est purement local à sa node
 d’exécution. Il n’en existe aucune copie distante : la perte ou la révocation d’une
 node entraîne la perte des fichiers de travail des conversations qui s’y trouvent.
 Leur historique, leurs pièces jointes et leurs artefacts restent conservés.
+Révoquer une node fait donc expirer les environnements qu’elle contient ; une
+conversation dont la node est simplement perdue expire lors de sa révocation.
 
 Le disque garde son format : le journal local durable
 ([ADR-0007](0007-demand-paged-disks-with-durable-local-journal.md),
@@ -55,13 +57,17 @@ environnement vide sur la destination, comme après une expiration pour inactivi
 conserve son historique, ses pièces jointes et ses artefacts. La session suivante
 reçoit l’historique visible, et l’agent est prévenu de la perte des fichiers et de
 la date de l’expiration. L’historique de la conversation et cet avertissement
-indiquent la cause : inactivité, changement de node ou migration du stockage.
+indiquent la cause : inactivité, changement de node, révocation de la node ou
+migration du stockage.
 
-Quelle que soit la cause, l’expiration retire immédiatement l’ancien environnement
-de la conversation. La suppression de son disque se poursuit en arrière-plan sur sa
-node et ne bloque ni les messages ni un changement de node : la node le supprime
-quand elle est joignable, et il est oublié si elle est révoquée. Une node supprime
-l’ancien disque d’une conversation avant d’admettre son nouvel environnement.
+Quelle que soit la cause, inactivité comprise, l’expiration retire immédiatement
+l’ancien environnement de la conversation : l’état bloquant de nettoyage disparaît.
+La suppression de son disque se poursuit en arrière-plan sur sa node et ne bloque ni
+les messages ni un changement de node : la node le supprime quand elle est
+joignable, et il est oublié si elle est révoquée. Une node supprime l’ancien disque
+d’une conversation avant d’admettre son nouvel environnement. La suppression d’une
+conversation garde le comportement de
+l’[ADR-0041](0041-immediate-conversation-deletion.md).
 
 Avant ce changement, le web et Android affichent, et le MCP public et
 `cairn_installation` renvoient, un avertissement du type : « Les fichiers de travail de cette conversation seront
@@ -91,9 +97,11 @@ Le placement automatique ([ADR-0073](0073-automatic-agent-placement.md)) choisit
 toujours la node d’un nouvel environnement, mais ne change jamais la node d’un
 environnement existant. La relocalisation faute de capacité et la reprise
 automatique sur une autre node après une indisponibilité sont supprimées. Une conversation dont la node
-est saturée, en maintenance ou hors ligne attend cette node. Une conversation dont la
-node est révoquée, ou dont l’agent n’y a plus accès, reste arrêtée jusqu’à un
-changement de node confirmé.
+est saturée, en maintenance ou hors ligne attend cette node. Une conversation dont
+l’agent n’a plus accès à la node de son environnement reste arrêtée jusqu’au retour
+de cet accès ou à un changement de node confirmé. Après une révocation, le prochain
+tour démarre un environnement vide par le placement automatique ; libérer les choix
+de node (`releasePlacements`) garde son rôle pour les préférences et fixations.
 
 Une node n’exécute qu’un backend : faire passer une machine de VM à natif, ou
 l’inverse, enrôle une seconde node avec son propre stockage
@@ -117,20 +125,22 @@ Cairn n’efface plus aucun objet distant, y compris les suppressions encore en
 attente : après la mise à jour, supprimer une conversation ne retire plus ses
 anciens blocs du bucket. La note de version demande de pousser les commits et de
 sauvegarder les fichiers à conserver avant la mise à jour. Les fichiers expirés ne
-reviennent qu’avec un retour complet à la base sauvegardée avant la mise à jour et
-au bucket correspondant, et seulement jusqu’à leur dernière génération publiée.
-L’exploitant conserve donc le bucket et ses identifiants tant qu’un retour arrière
-reste envisagé, puis les supprime avec, le cas échéant, le Garage intégré.
+reviennent qu’avec un retour complet à la base de données sauvegardée avant la mise
+à jour et au bucket correspondant, et seulement jusqu’à leur dernière génération
+publiée. La mise à jour retire le service Garage intégré sans effacer ses données.
+L’exploitant conserve donc le bucket, ses identifiants et ces données tant qu’un
+retour arrière reste envisagé, puis les supprime.
 
 ## Conséquences
 
 Le manager n’a plus besoin de S3 ni de ses identifiants, et l’installateur n’embarque
 plus Garage. Les réglages S3 du web, d’Android, du MCP public et de
-`cairn_installation` disparaissent, ainsi que les variables `STORAGE_S3_*`, et,
-pour les nodes, l’intervalle de synchronisation, le délai de retard de
-synchronisation et le budget de cache propre. La réserve disque d’une node, ses
-délais de déconnexion, d’arrêt et d’attente de capacité, et la limite de stockage
-par tâche restent. Sont retirés la lecture à la
+`cairn_installation` disparaissent, ainsi que les variables `STORAGE_S3_*`, le
+budget de cache de publication de l’installation et, pour les nodes, l’intervalle de
+synchronisation, le délai de retard de synchronisation et le budget de cache propre.
+Restent la réserve disque et le cache mémoire de chaque node, les délais de
+déconnexion, d’arrêt et d’attente de capacité de l’installation, et la limite de
+stockage par tâche. Sont retirés la lecture à la
 demande depuis S3, le codec et le chiffrement des blocs distants, les manifestes
 publiés, le pipeline de publication, les transferts directs, les blocs partagés et
 leur collecte, l’éviction du cache propre, la restauration sur une autre node, ainsi

@@ -1,6 +1,4 @@
-> Statut : Mise à jour par [ADR-0084](0084-local-conversation-disks-without-s3.md) : les octets effacés sont libérés par la consolidation locale du journal, sans publication ni collecte d’objets partagés.
-
-> Statut : Le support des vues paired est abandonné ; le trim durable du disque ext4 plat et le contrôle des VM restent applicables.
+> Statut : Le support des vues paired est abandonné ; le trim durable du disque ext4 plat et le contrôle des VM restent applicables. [ADR-0084](0084-local-conversation-disks-without-s3.md) libère les octets effacés par la consolidation locale du journal, sans publication ni collecte d’objets partagés.
 
 # Durable discard for guest images
 

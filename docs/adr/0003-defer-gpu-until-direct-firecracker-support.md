@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0050](0050-trusted-native-execution.md) pour l’accès GPU via une node native de confiance ; le GPU direct dans Firecracker reste différé.
+> Statut : Remplacée par [ADR-0050](0050-trusted-native-execution.md) pour l’accès GPU via une node native de confiance ; le GPU direct dans Firecracker reste différé. [ADR-0084](0084-local-conversation-disks-without-s3.md) retire le déplacement complet des environnements et la reprise depuis sauvegarde.
 
 # Conserver Firecracker et différer le GPU
 

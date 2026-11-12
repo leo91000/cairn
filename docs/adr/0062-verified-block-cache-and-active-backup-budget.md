@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) pour le budget de synchronisation et le cache de blocs distants.
+> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) pour le budget de synchronisation et la lecture de blocs distants ; le cache mémoire partagé de blocs vérifiés et le cache des enregistrements du journal restent applicables.
 
 # Verified block cache and active synchronization budget
 

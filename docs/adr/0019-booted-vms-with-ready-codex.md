@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le maintien du transport vhost-user ; la préparation et la conservation des VM restent applicables.
+> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le maintien du transport vhost-user ; la préparation et la conservation des VM restent applicables. [ADR-0084](0084-local-conversation-disks-without-s3.md) retire le grant S3, les reçus de publication et les lectures distantes des disques.
 
 # VM pré-démarrées avec Codex prêt
 
