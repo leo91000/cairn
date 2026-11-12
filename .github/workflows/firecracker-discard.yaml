@@ -37,7 +37,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/firecracker-discard/
-          key: firecracker-discard-${{ runner.os }}-1.97.0-${{ hashFiles('deploy/microvm/firecracker-*.patch') }}
-          restore-keys: firecracker-discard-${{ runner.os }}-1.97.0-
+          key: firecracker-discard-${{ runner.os }}-ubuntu24-1.97.0-${{ hashFiles('deploy/microvm/firecracker-*.patch') }}
+          restore-keys: firecracker-discard-${{ runner.os }}-ubuntu24-1.97.0-
       - name: Verify discard ordering, completions, feature negotiation
         run: scripts/test-firecracker-discard.sh

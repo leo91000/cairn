@@ -347,10 +347,13 @@ not proved by the generic supervisor. All of this runs on disposable CI hosts.
 
 ## GitHub responsibilities
 
-GitHub-hosted jobs run on `ubuntu-24.04`, not `ubuntu-latest`. The bounded native
-dependency setup and its tests rely on GNU coreutils `timeout`; the `ubuntu-26.04`
-image replaces it, which changes their exit statuses. Move the pin only together
-with that setup and its tests.
+GitHub-hosted jobs run on `ubuntu-24.04`, not `ubuntu-latest`, except the Android
+device shards when `CAIRN_ANDROID_DEVICE_RUNNER` selects a larger runner. The bounded
+native dependency setup and its tests rely on GNU coreutils `timeout`; the
+`ubuntu-26.04` image replaces it, which changes their exit statuses. The network
+package closure is pinned to Noble as well (see
+[CI failure observation](../CI-FAILURE-OBSERVATION.md)). Move the pin only together
+with that setup, its tests and the network closure.
 
 `PR validation` runs on every PR and push to main: the `quality` suite always,
 contracts and Android unit/lint checks when their inputs change. Its aggregate
