@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Agent } from '../../../../packages/contracts/contracts'
 import type { CreateAgentInput } from '../../../../packages/contracts/generated/typescript/CreateAgentInput'
+import type { PluginResourceRef } from '../../../../packages/contracts/generated/typescript/PluginResourceRef'
 import type { ReplaceAgentInput } from '../../../../packages/contracts/generated/typescript/ReplaceAgentInput'
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
 import type {
@@ -96,9 +97,14 @@ import {
 } from '../icons'
 import {
   grantDescription,
+  grantDetails,
   grantKey,
+  grantSummary,
   mergeGrantDrafts,
+  resourceTypeLabel,
 } from '../plugin-grants'
+import { pluginRequest } from '../plugin-operations'
+import { cachedPluginResourcePath, resolvePluginResourcePath } from '../plugin-resource-paths'
 import { useResourceSave } from '../resourceSave'
 import { buttonBase, buttonSizes, buttonVariants } from '../ui'
 
@@ -552,48 +558,81 @@ async function loadGrants(expectedAgent = agent.value): Promise<boolean> {
   }
 }
 
+const grantEffect = 'Plugin permission checks apply immediately, including in running conversations. Credentials already loaded into those runs remain available until they finish.'
+
+function instanceLabel(id: string) {
+  const connection = catalog.value.connections.find(item => item.id === id)
+  const plugin = catalog.value.packages.find(entry => entry.id === connection?.pluginId)
+  return `${plugin?.manifest?.name ?? 'Plugin'} · ${connection?.name ?? 'Removed instance'}`
+}
+
+function instanceManifest(id: string) {
+  const connection = catalog.value.connections.find(item => item.id === id)
+  return catalog.value.packages.find(entry => entry.id === connection?.pluginId)?.manifest ?? undefined
+}
+
+function resourceName(instance: string, root: PluginResourceRef) {
+  const manifest = instanceManifest(instance)
+  return (manifest && cachedPluginResourcePath(manifest.id, instance, root))
+    || `${resourceTypeLabel(manifest?.resources ?? [], root.resourceType)} · ${root.id}`
+}
+
+function changedGrantInstances() {
+  return [...new Set([...savedGrants.value.grants, ...grants.value.grants].map(item => item.instanceId))]
+    .filter(instance => grantDescription(savedGrants.value, instance) !== grantDescription(grants.value, instance))
+}
+
+/** Names the resource roots the review lists; after a few seconds it falls back to their type and id. */
+async function resolveGrantResourceNames() {
+  const roots = changedGrantInstances().flatMap((instance) => {
+    const manifest = instanceManifest(instance)
+    const held = [savedGrants.value, grants.value].flatMap(draft => draft.grants.filter(item => item.instanceId === instance))
+    return manifest
+      ? held.flatMap(grant => grant.access.type === 'selected' ? grant.access.contributions.flatMap(item => item.resources) : []).map(root => ({ manifest, instance, root }))
+      : []
+  })
+  if (!roots.length)
+    return
+
+  const resolutions = Promise.all(roots.map(({ manifest, instance, root }) => resolvePluginResourcePath(pluginRequest, manifest.id, instance, root).catch(() => null)))
+  await Promise.race([resolutions, new Promise(resolve => setTimeout(resolve, 5000))])
+}
+
 function grantReviewLines(): ReviewLine[] {
   if (!grantsChanged.value)
     return []
-  const ids = new Set([...savedGrants.value.grants, ...grants.value.grants].map(item => item.instanceId))
-  return [
-    ...[...ids].filter(instance => grantDescription(savedGrants.value, instance) !== grantDescription(grants.value, instance)).map((instance) => {
-      const previous = savedGrants.value.grants.find(item => item.instanceId === instance)
-      const current = grants.value.grants.find(item => item.instanceId === instance)
-      const previousDescription = grantDescription(savedGrants.value, instance)
-      const description = grantDescription(grants.value, instance)
+  const lines: ReviewLine[] = changedGrantInstances().map((instance) => {
+    const previous = savedGrants.value.grants.find(item => item.instanceId === instance)
+    const current = grants.value.grants.find(item => item.instanceId === instance)
+    const title = instanceLabel(instance)
+    const change = `${grantSummary(savedGrants.value, instance)} → ${grantSummary(grants.value, instance)}`
+    const granted = grantDetails(grants.value, instance, instanceManifest(instance), root => resourceName(instance, root))
+    const removed = previous && !current
+    return {
+      kind: removed ? 'reduction' as const : 'secret' as const,
+      ...(removed ? { requiresReview: true } : {}),
+      section: 'plugins' as const,
+      title,
+      change,
+      details: [...(granted.length ? granted : ['No contribution of this instance remains granted.']), grantEffect],
+      text: `${title}: ${change}`,
+    }
+  })
 
-      if (!previous && current) {
-        return {
-          kind: 'secret' as const,
-          section: 'plugins' as const,
-          text: `Added: ${connectionName(instance)} — plugin permission checks apply immediately, including in running conversations. Credentials already loaded into those runs remain available until they finish. Access: ${description}.`,
-        }
-      }
+  const suppliers = (draft: GrantDraft) => draft.runCredentialInstances.map(instanceLabel).join(', ') || 'None'
+  if (JSON.stringify(savedGrants.value.runCredentialInstances) !== JSON.stringify(grants.value.runCredentialInstances)) {
+    const change = `${suppliers(savedGrants.value)} → ${suppliers(grants.value)}`
+    lines.push({
+      kind: 'secret',
+      section: 'plugins',
+      title: 'Run credentials',
+      change,
+      details: [`Credentials give direct access as the service account and void tool resource restrictions.${savedGrants.value.runCredentialInstances.some(instance => !grants.value.runCredentialInstances.includes(instance)) ? ' Active runs keep credentials already loaded until they finish.' : ''}`],
+      text: `Run credentials: ${change}`,
+    })
+  }
 
-      if (previous && !current) {
-        return {
-          kind: 'reduction' as const,
-          requiresReview: true,
-          section: 'plugins' as const,
-          text: `Removed: ${connectionName(instance)} access. Plugin permission checks update immediately, including for running conversations. Credentials already loaded into active runs remain available until those runs finish.`,
-        }
-      }
-
-      return {
-        kind: 'secret' as const,
-        section: 'plugins' as const,
-        text: `${connectionName(instance)}: ${previousDescription} → ${description}. Plugin permission checks update immediately, including for running conversations. Credentials already loaded into active runs remain available until those runs finish.`,
-      }
-    }),
-    ...(JSON.stringify(savedGrants.value.runCredentialInstances) !== JSON.stringify(grants.value.runCredentialInstances)
-      ? [{
-          kind: 'secret' as const,
-          section: 'plugins' as const,
-          text: `Run credential suppliers: ${savedGrants.value.runCredentialInstances.map(connectionName).join(', ') || 'None'} → ${grants.value.runCredentialInstances.map(connectionName).join(', ') || 'None'}. Credentials void tool resource restrictions.${savedGrants.value.runCredentialInstances.some(instance => !grants.value.runCredentialInstances.includes(instance)) ? ' Active runs keep credentials already loaded until they finish.' : ''}`,
-        }]
-      : []),
-  ]
+  return lines
 }
 
 async function load() {
@@ -677,6 +716,14 @@ async function requestSave() {
     if (section.value !== first)
       await router.push({ query: { section: first } })
     return
+  }
+
+  busy.value = true
+  try {
+    await resolveGrantResourceNames()
+  }
+  finally {
+    busy.value = false
   }
 
   let lines = [...reviewLines(saved.value, draft.value, context.value), ...grantReviewLines()]

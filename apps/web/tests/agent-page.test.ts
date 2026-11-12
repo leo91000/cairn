@@ -128,6 +128,7 @@ it('reviews a grant-only addition with the people it reaches', async () => {
   await page.requestSave()
   expect(page.review.value.lines.map((line: any) => line.kind)).toEqual(['secret', 'audience'])
   expect(page.review.value.lines[1].text).toContain('Installation owner, ada@example.test')
+  expect(page.review.value.lines[0]).toMatchObject({ title: 'Plugin · Removed instance', change: 'No access → Full access' })
   expect(profileRequests).toHaveLength(0)
   expect(grantRequests).toHaveLength(0)
 })

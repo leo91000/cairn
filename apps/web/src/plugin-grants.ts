@@ -276,7 +276,7 @@ export function contributions(manifest: PluginManifest): Contribution[] {
     return {
       kind,
       name: item.name,
-      description: item.description || item.title || item.name,
+      description: item.description?.trim() || item.title?.trim() || humanizeName(item.name),
       resources: [],
       resourceTypes: selectableResourceTypes(manifest.resources ?? [], fieldTypes).map(type => type.name),
     }
@@ -289,7 +289,7 @@ export function contributions(manifest: PluginManifest): Contribution[] {
       ? [{
           kind: 'runCredentials' as const,
           name: '',
-          description: 'Run credentials — direct access as this service account',
+          description: 'Run credentials',
           resources: [],
           resourceTypes: [],
         }]
@@ -298,7 +298,7 @@ export function contributions(manifest: PluginManifest): Contribution[] {
       ? [{
           kind: 'instructions' as const,
           name: '',
-          description: 'Instructions added to the agent prompt',
+          description: 'Instructions',
           resources: [],
           resourceTypes: [],
         }]
@@ -307,6 +307,81 @@ export function contributions(manifest: PluginManifest): Contribution[] {
     ...named('projectSource', manifest.projectSources),
     ...named('skillSource', manifest.skillSources),
   ]
+}
+
+/** A manifest name for people when the plugin gives no description: `grant_ui_read` → “Grant ui read”. */
+export function humanizeName(name: string): string {
+  const words = name.replace(/[_-]+/g, ' ').trim()
+  return words ? words[0]!.toUpperCase() + words.slice(1) : ''
+}
+
+const kindLabels: Record<PluginContributionGrant['kind'], string> = {
+  tool: 'Tool',
+  command: 'Command',
+  hook: 'Event',
+  condition: 'Condition',
+  projectSource: 'Project source',
+  skillSource: 'Skill source',
+  runCredentials: 'Credentials',
+  instructions: 'Instructions',
+}
+
+export function contributionKindLabel(kind: PluginContributionGrant['kind']): string {
+  return kindLabels[kind] ?? humanizeName(kind)
+}
+
+/** The readable name of a granted contribution, including one the plugin no longer provides. */
+export function contributionLabel(manifest: PluginManifest | undefined, item: Pick<PluginContributionGrant, 'kind' | 'name'>): string {
+  const provided = manifest && contributions(manifest).find(candidate => candidate.kind === item.kind && candidate.name === item.name)
+  return provided?.description || humanizeName(item.name) || contributionKindLabel(item.kind)
+}
+
+export function resourceTypeLabel(types: PluginResourceType[], name: string): string {
+  return types.find(type => type.name === name)?.description.trim() || humanizeName(name)
+}
+
+/** The parents of a resource type then the type itself: “Servers › Channels”. */
+export function resourceTypePathLabel(types: PluginResourceType[], name: string): string {
+  const names = [name]
+  let parent = types.find(type => type.name === name)?.parentType
+  while (parent && !names.includes(parent)) {
+    names.unshift(parent)
+    parent = types.find(type => type.name === parent)?.parentType
+  }
+
+  return names.map(item => resourceTypeLabel(types, item)).join(' › ')
+}
+
+/** One instance's access in a few words, for the before → after line of the review. */
+export function grantSummary(draft: GrantDraft, instance: string): string {
+  const grant = draft.grants.find(item => item.instanceId === instance)
+  if (!grant)
+    return 'No access'
+  if (grant.access.type === 'full')
+    return 'Full access'
+  const count = grant.access.contributions.length
+  return `${count} ${count === 1 ? 'contribution' : 'contributions'}`
+}
+
+/** One line per granted contribution with its resource restriction, for the review details. */
+export function grantDetails(
+  draft: GrantDraft,
+  instance: string,
+  manifest: PluginManifest | undefined,
+  resourceName: (root: PluginResourceRef) => string,
+): string[] {
+  const grant = draft.grants.find(item => item.instanceId === instance)
+  if (!grant)
+    return []
+  if (grant.access.type === 'full')
+    return ['Every current and future contribution of this instance.']
+
+  return grant.access.contributions.map((item) => {
+    const restriction = item.resources.length
+      ? `${item.resources.map(resourceName).join(', ')}, including their contents`
+      : 'all resources'
+    return `${contributionLabel(manifest, item)} (${contributionKindLabel(item.kind)}): ${restriction}`
+  })
 }
 
 export function grantKey(draft: GrantDraft): string {

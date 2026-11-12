@@ -30,6 +30,12 @@ function cacheResolvedResourcePath(key: string, path: string) {
   }
 }
 
+/** A path this page already resolved, for labels that cannot wait for the plugin. */
+export function cachedPluginResourcePath(pluginId: string, instanceId: string, root: PluginResourceRef): string | undefined {
+  const cached = resolvedResourcePaths.get(`${pluginId}:${instanceId}:${root.resourceType}:${root.id}`)
+  return cached && cached.expiresAt > Date.now() ? cached.path : undefined
+}
+
 export function resolvePluginResourcePath(
   request: Parameters<typeof resolvePluginResource>[0],
   pluginId: string,

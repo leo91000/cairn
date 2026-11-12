@@ -3,14 +3,19 @@ import type { PluginManifest } from '../../../../packages/contracts/generated/ty
 import type { GrantDraft } from '../plugin-grants'
 import { computed, ref } from 'vue'
 import {
+  contributionKindLabel,
+  contributionLabel,
   contributions,
   removeGrant,
   removeGrantContribution,
   replaceGrantAccess,
+  resourceTypeLabel,
   selectableResourceTypes,
   staleResourceRestrictions,
 } from '../plugin-grants'
+import AccessChip from './AccessChip.vue'
 import PluginResourcePicker from './PluginResourcePicker.vue'
+import UiSegments from './UiSegments.vue'
 
 const props = defineProps<{
   manifest: PluginManifest
@@ -21,7 +26,20 @@ const props = defineProps<{
 const draft = defineModel<GrantDraft>({ required: true })
 const grant = computed(() => draft.value.grants.find(item => item.instanceId === props.instanceId))
 const selectedMode = ref(grant.value?.access.type === 'selected')
-const mode = computed(() => grant.value?.access.type ?? (selectedMode.value ? 'selected' : 'none'))
+const mode = computed({
+  get: () => grant.value?.access.type ?? (selectedMode.value ? 'selected' : 'none'),
+  set: value => setMode(value),
+})
+const modes = [
+  { value: 'none' as const, label: 'No access' },
+  { value: 'full' as const, label: 'Full access' },
+  { value: 'selected' as const, label: 'Choose contributions' },
+]
+const label = (item: { kind: typeof available.value[number]['kind'], name: string }) => contributionLabel(props.manifest, item)
+// Credentials and instructions are named by their kind already.
+const tagged = (item: { kind: typeof available.value[number]['kind'] }) => !['runCredentials', 'instructions'].includes(item.kind)
+const accessibleName = (item: typeof available.value[number]) => tagged(item) ? `${item.description} (${contributionKindLabel(item.kind)})` : item.description
+const resourceLabel = (resource: { resourceType: string, id: string }) => `${resourceTypeLabel(props.manifest.resources ?? [], resource.resourceType)} · ${resource.id}`
 const available = computed(() => contributions(props.manifest))
 const stale = computed(() => {
   const access = grant.value?.access
@@ -84,7 +102,12 @@ function supplier(on: boolean) {
 
 <template>
   <div class="grid w-full gap-3">
-    <label>Access to {{ instanceName }}<select :aria-label="`Access to ${instanceName}`" :value="mode" @change="setMode(($event.target as HTMLSelectElement).value)"><option value="none">No access</option><option value="full">Full access</option><option value="selected">Choose contributions</option></select></label>
+    <UiSegments
+      v-model="mode"
+      :label="`Access to ${instanceName}`"
+      :options="modes"
+      stretch
+    />
     <p v-if="mode === 'full'" class="text-xs text-muted">
       All current and future contributions. Run credentials require the explicit supplier choice below. Shared setup steps are available only with full access.
     </p>
@@ -97,11 +120,11 @@ function supplier(on: boolean) {
           Some saved grants refer to contributions this plugin no longer provides. Remove each stale grant before saving.
         </p>
         <div v-for="item in stale" :key="`${item.kind}:${item.name}`" class="flex items-start justify-between gap-3">
-          <span class="text-sm"><strong>{{ item.kind }} {{ item.name }}</strong><small class="block text-xs text-muted">Saved restrictions: {{ item.resources.length ? item.resources.map(resource => `${resource.resourceType} ${resource.id}`).join(', ') : 'unrestricted' }}</small></span>
+          <span class="text-sm"><strong>{{ label(item) }}</strong> <span class="text-xs text-muted">({{ contributionKindLabel(item.kind) }})</span><small class="block text-xs text-muted">Saved restrictions: {{ item.resources.length ? item.resources.map(resourceLabel).join(', ') : 'all resources' }}</small></span>
           <button
             type="button"
             class="shrink-0 rounded-md border border-line px-3 py-1 text-sm"
-            :aria-label="`Remove stale grant ${item.kind} ${item.name}`"
+            :aria-label="`Remove stale grant ${label(item)} (${contributionKindLabel(item.kind)})`"
             @click="removeStale(item)"
           >
             Remove grant
@@ -114,21 +137,21 @@ function supplier(on: boolean) {
             type="checkbox"
             class="mt-1 size-4!"
             :checked="!!held(item)"
-            :aria-label="`${item.kind} ${item.name || instanceName}`"
+            :aria-label="accessibleName(item)"
             @change="update(item, ($event.target as HTMLInputElement).checked)"
           >
-          <span><strong>{{ item.kind }} {{ item.name }}</strong><small class="block text-xs text-muted">{{ item.description }}</small></span>
+          <span class="flex min-w-0 flex-wrap items-center gap-2"><strong class="font-semibold [overflow-wrap:anywhere]">{{ item.description }}</strong><AccessChip v-if="tagged(item)" tone="none">{{ contributionKindLabel(item.kind) }}</AccessChip></span>
         </label>
         <div v-if="staleResources(item).length" role="alert" class="grid gap-2 rounded-lg border border-warning p-3">
           <p class="text-sm text-warning">
             Saved resource roots include types this contribution no longer accepts. Requests fail closed until corrected. Removing the last root makes this contribution unrestricted; uncheck the contribution to revoke it instead.
           </p>
           <div v-for="resource in staleResources(item)" :key="`${resource.resourceType}:${resource.id}`" class="flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:justify-between">
-            <span class="min-w-0 break-words text-sm">{{ resource.resourceType }} {{ resource.id }}</span>
+            <span class="min-w-0 break-words text-sm">{{ resourceLabel(resource) }}</span>
             <button
               type="button"
               class="max-w-full whitespace-normal rounded-md border border-line px-3 py-1 text-left text-sm sm:shrink-0"
-              :aria-label="`Remove stale resource restriction ${item.kind} ${item.name} ${resource.resourceType} ${resource.id}`"
+              :aria-label="`Remove stale resource restriction ${item.description} ${resourceLabel(resource)}`"
               @click="removeStaleResource(item, resource)"
             >
               Remove restriction

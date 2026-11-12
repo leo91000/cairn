@@ -1,17 +1,28 @@
 import type { PluginManifest } from '../../../packages/contracts/generated/typescript/PluginManifest'
 import type { GrantDraft } from '../src/plugin-grants'
-import { expect, it, vi } from 'vitest'
+import {
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import {
   canSelectPluginResourceRoot,
   chooseCredentialSupplier,
+  contributionKindLabel,
+  contributionLabel,
   contributions,
   grantDescription,
+  grantDetails,
   grantKey,
+  grantSummary,
   MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION,
   mergeGrantDrafts,
   removeGrant,
   removeGrantContribution,
   replaceGrantAccess,
+  resourceTypeLabel,
+  resourceTypePathLabel,
   selectableResourceTypes,
   staleResourceRestrictions,
 } from '../src/plugin-grants'
@@ -606,4 +617,47 @@ it('identifies saved resource roots no longer supported by a contribution', () =
     { resourceType: 'team', id: 'engineering' },
   ])
   expect(staleResourceRestrictions(resources, [])).toEqual(resources)
+})
+
+describe('readable grant labels', () => {
+  const manifest = {
+    id: 'chat',
+    name: 'Chat',
+    tools: [{ name: 'read_messages', description: 'Read messages', inputSchema: {} }, { name: 'list_threads', description: '  ', inputSchema: {} }],
+    resources: [{ name: 'server', description: 'Servers' }, { name: 'channel', description: 'Channels', parentType: 'server' }, { name: 'thread_reply', description: '' }],
+  } as any
+
+  it('names contributions and resource types from the manifest, then from a humanized name', () => {
+    expect(contributionLabel(manifest, { kind: 'tool', name: 'read_messages' })).toBe('Read messages')
+    expect(contributionLabel(manifest, { kind: 'tool', name: 'list_threads' })).toBe('List threads')
+    expect(contributionLabel(manifest, { kind: 'hook', name: 'gone-hook' })).toBe('Gone hook')
+    expect(contributionLabel(manifest, { kind: 'runCredentials', name: '' })).toBe('Credentials')
+    expect(contributionKindLabel('hook')).toBe('Event')
+    expect(resourceTypePathLabel(manifest.resources, 'channel')).toBe('Servers › Channels')
+    expect(resourceTypeLabel(manifest.resources, 'thread_reply')).toBe('Thread reply')
+  })
+
+  it('summarizes access and details each contribution with its resources', () => {
+    const draft = {
+      grants: [
+        { instanceId: 'a', access: { type: 'full' } },
+        {
+          instanceId: 'b',
+          access: {
+            type: 'selected',
+            contributions: [
+              { kind: 'tool', name: 'read_messages', resources: [{ resourceType: 'channel', id: 'c1' }] },
+              { kind: 'tool', name: 'list_threads', resources: [] },
+            ],
+          },
+        },
+      ],
+      runCredentialInstances: [],
+    } as any
+    expect([grantSummary(draft, 'none'), grantSummary(draft, 'a'), grantSummary(draft, 'b')]).toEqual(['No access', 'Full access', '2 contributions'])
+    expect(grantDetails(draft, 'b', manifest, root => `#${root.id}`)).toEqual([
+      'Read messages (Tool): #c1, including their contents',
+      'List threads (Tool): all resources',
+    ])
+  })
 })

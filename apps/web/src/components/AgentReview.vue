@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { ChipTone, DelegationEffect, ReviewLine } from '../agent-access'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import AccessChip from './AccessChip.vue'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
@@ -23,6 +23,9 @@ const kinds: Record<ReviewLine['kind'], [ChipTone, string]> = {
   reduction: ['unavailable', 'Reduction'],
   audience: ['none', 'Recipients'],
 }
+// Who receives the new rights stays in view above the changes.
+const audience = computed(() => props.lines.filter(line => line.kind === 'audience'))
+const changes = computed(() => props.lines.filter(line => line.kind !== 'audience'))
 </script>
 
 <template>
@@ -31,12 +34,37 @@ const kinds: Record<ReviewLine['kind'], [ChipTone, string]> = {
       <p class="text-sm leading-relaxed text-muted">
         Anyone who can use this agent can exercise its permissions through it. Check these changes for everyone who can use it.
       </p>
+      <section
+        v-for="line in audience"
+        :key="line.text"
+        class="grid gap-1.5 rounded-lg border border-line bg-inset px-3.5 py-3 text-sm leading-relaxed"
+        aria-label="Who receives these rights"
+      >
+        <AccessChip :tone="kinds.audience[0]" class="justify-self-start">
+          {{ kinds.audience[1] }}
+        </AccessChip>
+        <span class="min-w-0 [overflow-wrap:anywhere]">{{ line.text }}</span>
+      </section>
       <ul class="grid gap-3">
-        <li v-for="line in lines" :key="line.text" class="flex min-w-0 items-start gap-2.5 text-sm leading-relaxed">
+        <li v-for="line in changes" :key="line.text" class="flex min-w-0 items-start gap-2.5 text-sm leading-relaxed">
           <AccessChip :tone="kinds[line.kind][0]" class="mt-0.5">
             {{ kinds[line.kind][1] }}
           </AccessChip>
-          <span class="min-w-0 flex-1 [overflow-wrap:anywhere]">{{ line.text }}</span>
+          <div v-if="line.title" class="grid min-w-0 flex-1 gap-0.5">
+            <strong class="font-semibold [overflow-wrap:anywhere]">{{ line.title }}</strong>
+            <span class="[overflow-wrap:anywhere]">{{ line.change }}</span>
+            <details v-if="line.details?.length" class="text-xs text-muted">
+              <summary class="w-fit cursor-pointer py-1 font-medium text-ink">
+                Details
+              </summary>
+              <ul class="grid list-disc gap-1 pl-4">
+                <li v-for="detail in line.details" :key="detail" class="[overflow-wrap:anywhere]">
+                  {{ detail }}
+                </li>
+              </ul>
+            </details>
+          </div>
+          <span v-else class="min-w-0 flex-1 [overflow-wrap:anywhere]">{{ line.text }}</span>
         </li>
       </ul>
       <fieldset v-if="delegations.length" class="grid gap-2.5 border-t border-line pt-4">

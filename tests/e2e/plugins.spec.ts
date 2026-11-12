@@ -317,7 +317,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
     if (path.endsWith(`/agents/${helper.id}/plugin-grants`))
       grantWrites.push(request.postDataJSON())
   })
-  await page.getByRole('combobox', { name: 'Access to Reference', exact: true }).selectOption('full')
+  await page.getByRole('group', { name: 'Access to Reference', exact: true }).getByRole('button', { name: 'Full access', exact: true }).click()
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   await expect(earlier).not.toBeChecked()
   await review.getByRole('button', { name: 'Save', exact: true }).click()
@@ -326,8 +326,8 @@ test('Discord bots are set up through the package’s own form and keep the toke
   expect(grantWrites).toHaveLength(1)
   expect(await botEffect()).toMatchObject({ suspended: true, alreadySuspended: true })
 
-  await page.getByRole('combobox', { name: 'Access to Reference', exact: true }).selectOption('selected')
-  await page.getByRole('checkbox', { name: 'instructions Reference', exact: true }).check()
+  await page.getByRole('group', { name: 'Access to Reference', exact: true }).getByRole('button', { name: 'Choose contributions', exact: true }).click()
+  await page.getByRole('checkbox', { name: 'Instructions', exact: true }).check()
   const reviewRevision = (await workspace.api(`/api/agents/${helper.id}`)).revision
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   await expect(earlier).not.toBeChecked()

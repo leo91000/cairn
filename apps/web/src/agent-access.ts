@@ -545,6 +545,10 @@ export interface ReviewLine {
   requiresReview?: boolean
   text: string
   section: SectionId
+  /** A structured change: what changed, its before → after summary and details shown on demand. */
+  title?: string
+  change?: string
+  details?: string[]
 }
 
 export interface ReviewAudience {
