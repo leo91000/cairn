@@ -33,8 +33,8 @@ export function environment(env = process.env) {
 
 export function packages(args) {
   const selected = args.filter(arg => arg !== '--accept-licenses')
-  if (selected.some(arg => !/^(?:platform-tools|emulator|platforms;android-\d+|build-tools;\d+\.\d+\.\d+|system-images;android-\d+;(?:default|google_apis);x86_64|ndk;\d+\.\d+\.\d+|cmake;\d+\.\d+\.\d+)$/.test(arg)))
-    throw new Error('Use stable SDK package IDs, for example "platforms;android-36" "build-tools;36.0.0".')
+  if (selected.some(arg => !/^(?:platform-tools|emulator|platforms;android-\d+(?:\.\d+)?|build-tools;\d+\.\d+\.\d+|system-images;android-\d+;(?:default|google_apis);x86_64|ndk;\d+\.\d+\.\d+|cmake;\d+\.\d+\.\d+)$/.test(arg)))
+    throw new Error('Use stable SDK package IDs, for example "platforms;android-37.0" "build-tools;36.0.0".')
   return [...new Set(['platform-tools', ...selected])]
 }
 
