@@ -60,6 +60,14 @@ pub async fn grant(service: &Service, scopes: &[&str]) -> String {
     value
 }
 
+pub async fn native_authority_unavailable(service: &Service) {
+    service
+        .store
+        .set("test-relay:native-authority-unavailable", json!(true), None)
+        .await
+        .unwrap();
+}
+
 pub async fn router(service: Arc<Service>) -> Result<Router> {
     claimed(&service).await?;
     installation_router(service).await
@@ -219,6 +227,41 @@ async fn fixture_task_authors(
     }))
 }
 
+async fn fixture_native_authority(
+    State(service): State<Arc<Service>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some("Bearer fixture-only")
+    {
+        return Err(Error::unauthorized("Incorrect fixture installation token."));
+    }
+
+    if service
+        .store
+        .kv("test-relay:native-authority-unavailable")
+        .await?
+        .is_some()
+    {
+        return Err(Error::unavailable(
+            "Fixture native authority is unavailable.",
+        ));
+    }
+
+    Ok(Json(json!({
+        "00000000-0000-4000-8000-000000000010": {
+            "email": "owner@example.test",
+            "accessId": "owner:fixture",
+        },
+        "00000000-0000-4000-8000-000000000011": {
+            "email": "member@example.test",
+            "accessId": "member:fixture",
+        },
+    })))
+}
+
 async fn fixture_plugin_authorization(
     State(service): State<Arc<Service>>,
     headers: HeaderMap,
@@ -279,6 +322,10 @@ pub async fn claimed(service: &Service) -> Result<()> {
         .route(
             "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
             get(fixture_task_authors).with_state(Arc::new(service.clone())),
+        )
+        .route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/native-authority",
+            get(fixture_native_authority).with_state(Arc::new(service.clone())),
         )
         .route(
             "/api/relay/00000000-0000-4000-8000-000000000055/plugin-mcp-authorization",

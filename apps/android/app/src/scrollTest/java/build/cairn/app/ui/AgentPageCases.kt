@@ -13,7 +13,26 @@ import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import build.cairn.contracts.AgentPluginGrants
+import build.cairn.contracts.ListPluginResourcesOutput
+import build.cairn.contracts.PluginArgument
+import build.cairn.contracts.PluginCommand
+import build.cairn.contracts.PluginContributionGrant
+import build.cairn.contracts.PluginGrantAccess
+import build.cairn.contracts.PluginHook
+import build.cairn.contracts.PluginInstanceGrant
+import build.cairn.contracts.PluginManifest
+import build.cairn.contracts.PluginResource
+import build.cairn.contracts.PluginResourceField
+import build.cairn.contracts.PluginResourceRef
+import build.cairn.contracts.PluginResourceType
+import build.cairn.contracts.PluginRunCredentials
+import build.cairn.contracts.PluginTool
+import build.cairn.contracts.ResolvePluginResourceOutput
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
@@ -140,11 +159,68 @@ abstract class AgentPageCases {
                         setup = null,
                         versions = emptyList(),
                     ),
+                    PluginEntry(
+                        id = "grant-ui",
+                        builtin = true,
+                        manifest =
+                            PluginManifest(
+                                id = "grant-ui",
+                                name = "Grant UI",
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = listOf("hooks"),
+                                agentAccess = PluginAgentAccess("Read, post and receive messages."),
+                                resources =
+                                    listOf(
+                                        PluginResourceType("Servers", "server"),
+                                        PluginResourceType("Channels", "channel", "server"),
+                                        PluginResourceType("Threads", "thread", "channel"),
+                                    ),
+                                tools =
+                                    listOf(
+                                        PluginTool(
+                                            "Read messages",
+                                            JsonNull,
+                                            "read",
+                                            listOf(PluginResourceField("/channel", "channel")),
+                                        )
+                                    ),
+                                commands =
+                                    listOf(
+                                        PluginCommand(
+                                            name = "post",
+                                            description = "Post messages",
+                                            arguments =
+                                                listOf(
+                                                    PluginArgument(
+                                                        name = "channel",
+                                                        positional = true,
+                                                        resourceType = "channel",
+                                                    )
+                                                ),
+                                        )
+                                    ),
+                                hooks =
+                                    listOf(
+                                        PluginHook(
+                                            "Receive messages",
+                                            "message",
+                                            JsonNull,
+                                            listOf(PluginResourceField("/channel", "channel")),
+                                        )
+                                    ),
+                                runCredentials = PluginRunCredentials(),
+                            ),
+                        status = "active",
+                        active = null,
+                        setup = null,
+                        versions = emptyList(),
+                    ),
                 ),
             connections =
                 listOf(
                     PluginConnection(
-                        id = "prod",
+                        id = "11111111-1111-4111-8111-111111111111",
                         pluginId = "onepassword",
                         name = "Production",
                         settings = kotlinx.serialization.json.JsonObject(emptyMap()),
@@ -153,7 +229,7 @@ abstract class AgentPageCases {
                         enabled = true,
                     ),
                     PluginConnection(
-                        id = "staging",
+                        id = "22222222-2222-4222-8222-222222222222",
                         pluginId = "onepassword",
                         name = "Staging",
                         enabled = false,
@@ -162,7 +238,7 @@ abstract class AgentPageCases {
                         usage = PluginUsage(),
                     ),
                     PluginConnection(
-                        id = "bot",
+                        id = "33333333-3333-4333-8333-333333333333",
                         pluginId = "discord",
                         name = "#support",
                         agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
@@ -172,7 +248,7 @@ abstract class AgentPageCases {
                         enabled = true,
                     ),
                     PluginConnection(
-                        id = "gh-work",
+                        id = "44444444-4444-4444-8444-444444444444",
                         pluginId = "github",
                         name = "octo-work",
                         settings = kotlinx.serialization.json.JsonObject(emptyMap()),
@@ -181,11 +257,29 @@ abstract class AgentPageCases {
                         enabled = true,
                     ),
                     PluginConnection(
-                        id = "gh-home",
+                        id = "55555555-5555-4555-8555-555555555555",
                         pluginId = "github",
                         name = "octo-home",
                         settings = kotlinx.serialization.json.JsonObject(emptyMap()),
                         status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
+                    ),
+                    PluginConnection(
+                        id = "66666666-6666-4666-8666-666666666666",
+                        pluginId = "grant-ui",
+                        name = "Support",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(state = "ready"),
+                        usage = PluginUsage(),
+                        enabled = true,
+                    ),
+                    PluginConnection(
+                        id = "77777777-7777-4777-8777-777777777777",
+                        pluginId = "grant-ui",
+                        name = "Automation",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(state = "ready"),
                         usage = PluginUsage(),
                         enabled = true,
                     ),
@@ -225,10 +319,26 @@ abstract class AgentPageCases {
         /** Holds access changes until released, as a slow installation would. */
         val heldAccess: AtomicReference<java.util.concurrent.CountDownLatch?> =
             AtomicReference(null),
+        val grantSaves: CopyOnWriteArrayList<JsonObject> = CopyOnWriteArrayList(),
+        /** The next read of an agent's plugin grants fails. */
+        val failGrantReads: AtomicBoolean = AtomicBoolean(false),
+        val pluginCatalog: AtomicReference<PluginCatalog>,
+        val grantState: ConcurrentHashMap<String, build.cairn.contracts.AgentPluginGrants>,
+        val grantReadBarrier: AtomicReference<GrantReadBarrier?> = AtomicReference(null),
+        val refreshWorkspace: AtomicReference<(() -> Unit)?> = AtomicReference(null),
+        val failGrantWrites: AtomicBoolean = AtomicBoolean(false),
     )
+
+    private class GrantReadBarrier {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+    }
 
     private fun fixture(): Fixture {
         val saved = CopyOnWriteArrayList<Pair<String, JsonObject>>()
+        val grantSaves = CopyOnWriteArrayList<JsonObject>()
+        val grantState = ConcurrentHashMap<String, build.cairn.contracts.AgentPluginGrants>()
+        val pluginCatalog = AtomicReference(catalog)
         val agents = AtomicReference(listOf(main, release))
         val conflict = AtomicBoolean(false)
         val loseCreation = AtomicBoolean(false)
@@ -237,6 +347,9 @@ abstract class AgentPageCases {
         val failRefresh = AtomicBoolean(false)
         val failNodes = AtomicBoolean(false)
         val failPlugins = AtomicBoolean(false)
+        val failGrantReads = AtomicBoolean(false)
+        val failGrantWrites = AtomicBoolean(false)
+        val grantReadBarrier = AtomicReference<GrantReadBarrier?>(null)
         val mcps = AtomicReference("[]")
         val allowed = AtomicReference<List<String>>(emptyList())
         val accessChanges = CopyOnWriteArrayList<String>()
@@ -282,6 +395,108 @@ abstract class AgentPageCases {
                             response.setBody(
                                 """{"members":[{"id":"member-ada","email":"ada@example.test","accessId":"access-member-ada"},{"id":"member-bo","email":"bo@example.test","accessId":"access-member-bo"}],"invitations":[{"id":"invite-cy","email":"cy@example.test"}]}"""
                             )
+                    if (path.endsWith("/plugin-grants")) {
+                        if (request.method == "GET" && failGrantReads.getAndSet(false))
+                            return response
+                                .setResponseCode(503)
+                                .setBody(
+                                    nodeWireFixture(
+                                        request.path,
+                                        """{"error":"Plugin grant state unavailable"}""",
+                                    )
+                                )
+                        if (request.method == "GET") {
+                            grantReadBarrier.get()?.let { barrier ->
+                                barrier.started.countDown()
+                                if (!barrier.release.await(15, TimeUnit.SECONDS))
+                                    return response
+                                        .setResponseCode(503)
+                                        .setBody(
+                                            nodeWireFixture(
+                                                request.path,
+                                                """{"error":"Timed out waiting to release test grant read"}""",
+                                            )
+                                        )
+                            }
+                        }
+                        val agent =
+                            agents.get().first {
+                                it.id ==
+                                    path.removePrefix("/agents/").removeSuffix("/plugin-grants")
+                            }
+                        val before =
+                            grantState[agent.id]
+                                ?: build.cairn.contracts.AgentPluginGrants(
+                                    agent.id,
+                                    agent.plugins.map {
+                                        build.cairn.contracts.PluginInstanceGrant(
+                                            build.cairn.contracts.PluginGrantAccess.A(),
+                                            it,
+                                        )
+                                    },
+                                    agent.revision,
+                                    emptyList(),
+                                )
+                        if (request.method == "PUT") {
+                            val input =
+                                wireJson.decodeFromString<
+                                    build.cairn.contracts.ReplaceAgentPluginGrantsInput
+                                >(
+                                    text
+                                )
+                            grantSaves += wireJson.parseToJsonElement(text).jsonObject
+                            if (failGrantWrites.getAndSet(false))
+                                return response
+                                    .setResponseCode(503)
+                                    .setBody(
+                                        nodeWireFixture(
+                                            request.path,
+                                            """{"error":"Grant update failed"}""",
+                                        )
+                                    )
+                            if (input.revision != agent.revision)
+                                return response
+                                    .setResponseCode(409)
+                                    .setBody(
+                                        nodeWireFixture(
+                                            request.path,
+                                            """{"error":"Agent changed"}""",
+                                        )
+                                    )
+                            val next =
+                                before.copy(
+                                    grants = input.grants,
+                                    runCredentialInstances = input.runCredentialInstances,
+                                    revision = "grants-${grantSaves.size}",
+                                )
+                            grantState[agent.id] = next
+                            agents.set(
+                                agents.get().map {
+                                    if (it.id == agent.id)
+                                        it.copy(
+                                            revision = next.revision,
+                                            plugins =
+                                                next.grants
+                                                    .filter {
+                                                        it.access is
+                                                            build.cairn.contracts.PluginGrantAccess.A
+                                                    }
+                                                    .map { it.instanceId },
+                                        )
+                                    else it
+                                }
+                            )
+                            return response.setBody(
+                                nodeWireFixture(request.path, wireJson.encodeToString(next))
+                            )
+                        }
+                        return response.setBody(
+                            nodeWireFixture(
+                                request.path,
+                                wireJson.encodeToString(before.copy(revision = agent.revision)),
+                            )
+                        )
+                    }
                     if (request.method == "POST" && path == "/agents") {
                         val body = wireJson.parseToJsonElement(text).jsonObject
                         saved += path to body
@@ -398,12 +613,82 @@ abstract class AgentPageCases {
                             .setBody(
                                 nodeWireFixture(request.path, """{"error":"Nodes indisponibles"}""")
                             )
+                    if (
+                        request.method == "GET" &&
+                            path ==
+                                "/plugins/grant-ui/connections/66666666-6666-4666-8666-666666666666/resources"
+                    ) {
+                        val resourceType = request.requestUrl?.queryParameter("resourceType")
+                        val page = request.requestUrl?.queryParameter("page")?.toIntOrNull() ?: 1
+                        val query = request.requestUrl?.queryParameter("query").orEmpty()
+                        val all =
+                            when (resourceType) {
+                                "server" ->
+                                    listOf(PluginResource("guild", "Team", resourceType = "server"))
+                                "channel" ->
+                                    listOf(
+                                        PluginResource(
+                                            "support",
+                                            "#support",
+                                            PluginResourceRef("guild", "server"),
+                                            "channel",
+                                        ),
+                                        PluginResource(
+                                            "general",
+                                            "#general",
+                                            PluginResourceRef("guild", "server"),
+                                            "channel",
+                                        ),
+                                    )
+                                else -> emptyList()
+                            }
+                        val resources =
+                            if (resourceType == "channel" && query.isBlank())
+                                all.filterIndexed { index, _ -> index == page - 1 }
+                            else all.filter { it.name.contains(query, ignoreCase = true) }
+                        val output =
+                            ListPluginResourcesOutput(
+                                resources,
+                                if (resourceType == "channel" && query.isBlank() && page == 1) 2
+                                else null,
+                            )
+                        return response.setBody(
+                            nodeWireFixture(request.path, wireJson.encodeToString(output))
+                        )
+                    }
+                    if (
+                        request.method == "GET" &&
+                            path ==
+                                "/plugins/grant-ui/connections/66666666-6666-4666-8666-666666666666/resources/ancestors"
+                    ) {
+                        val resourceType = request.requestUrl?.queryParameter("resourceType")
+                        val id = request.requestUrl?.queryParameter("id").orEmpty()
+                        val resource =
+                            when (resourceType) {
+                                "server" -> PluginResource(id, "Team", resourceType = "server")
+                                else ->
+                                    PluginResource(
+                                        id,
+                                        if (id == "support") "#support" else "#general",
+                                        PluginResourceRef("guild", "server"),
+                                        "channel",
+                                    )
+                            }
+                        val ancestors =
+                            if (resourceType == "server") emptyList()
+                            else listOf(PluginResource("guild", "Team", resourceType = "server"))
+                        val output = ResolvePluginResourceOutput(ancestors, resource)
+                        return response.setBody(
+                            nodeWireFixture(request.path, wireJson.encodeToString(output))
+                        )
+                    }
                     val body =
                         when {
                             path.endsWith("/preview") ->
                                 if (path.startsWith("/agents/d3153f9f-724b-59c3-9614-ab78f231c4d3"))
-                                    """{"runs":{"queued":0,"running":0},"delegations":[{"id":"bot","pluginId":"discord","name":"#support","enabled":true,"suspended":true,"blocked":null,"alreadySuspended":${alreadySuspended.get()}}]}"""
-                                else """{"runs":{"queued":0,"running":0},"delegations":[]}"""
+                                    """{"runs":{"queued":0,"running":0},"delegations":[{"id":"33333333-3333-4333-8333-333333333333","pluginId":"discord","name":"#support","enabled":true,"suspended":true,"blocked":null,"alreadySuspended":${alreadySuspended.get()}}],"accounts":[{"email":"owner@example.test"},{"email":"member@example.test"}]}"""
+                                else
+                                    """{"runs":{"queued":0,"running":0},"delegations":[],"accounts":[{"email":"owner@example.test"},{"email":"member@example.test"}]}"""
                             path == "/agents" ->
                                 wireJson.encodeToString(
                                     build.cairn.contracts.ListAgentsOutput(agents.get())
@@ -414,7 +699,7 @@ abstract class AgentPageCases {
                             path == "/skills" ->
                                 """[{"name":"review","scope":"global"},{"name":"lint","scope":"2450c72e-6174-56da-b0fc-b06868e8e8e5"}]"""
                             path == "/nodes" -> nodes
-                            path == "/plugins" -> wireJson.encodeToString(catalog)
+                            path == "/plugins" -> wireJson.encodeToString(pluginCatalog.get())
                             path == "/api/installations" -> beaconInstallationsFixture()
                             path == "/api/account/session" -> beaconAccountFixture("fixture")
                             path.endsWith("/models") -> """{"models":[]}"""
@@ -460,6 +745,13 @@ abstract class AgentPageCases {
             failMembers,
             accountsMissing,
             heldAccess,
+            grantSaves,
+            failGrantReads,
+            pluginCatalog,
+            grantState,
+            grantReadBarrier,
+            AtomicReference(null),
+            failGrantWrites,
         )
     }
 
@@ -487,6 +779,7 @@ abstract class AgentPageCases {
                     },
                     beaconOrigin = "",
                 )
+            fixture.refreshWorkspace.set { vm.perform { refresh() } }
             val models = ViewModelStore().apply { put("fixture", vm) }
             var mounted by mutableStateOf(true)
             compose.setContent {
@@ -523,9 +816,10 @@ abstract class AgentPageCases {
                 }
                 body(fixture)
             } finally {
-                compose.runOnIdle { mounted = false }
-                compose.waitForIdle()
-                compose.runOnIdle { models.clear() }
+                compose.runOnUiThread {
+                    mounted = false
+                    models.clear()
+                }
             }
         }
     }
@@ -549,6 +843,7 @@ abstract class AgentPageCases {
 
     private fun waitForText(text: String, substring: Boolean = false) {
         compose.waitUntil(15000) {
+            if (!compose.mainClock.autoAdvance) compose.mainClock.advanceTimeByFrame()
             compose
                 .onAllNodesWithText(text, substring = substring)
                 .fetchSemanticsNodes()
@@ -673,30 +968,34 @@ abstract class AgentPageCases {
             compose.onNodeWithTag("agent-section-Github").assertDoesNotExist()
             // Fixed rows do not open: Android used to offer restrictions the server rejects.
             compose.onNodeWithTag("agent-section-Projects").assertHasNoClickAction()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithText("Aucun accès").fetchSemanticsNodes().isNotEmpty()
+            }
             compose.onNodeWithText("Aucun accès").assertExists()
             capture("agent-main")
 
             open(AgentSection.Plugins)
             waitForDescription("Accès à Production")
-            compose.onNodeWithText("1Password · comptes de service").assertExists()
+            compose.onAllNodesWithText("1Password · comptes de service").assertCountEquals(2)
             compose.onNodeWithContentDescription("Accès à Production").assertIsOff().performClick()
             back()
             compose.onNodeWithText("● 1 modification non enregistrée").assertExists()
             compose.onNodeWithText("Enregistrer").performClick()
             confirmReview()
-            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            val (path, body) = fixture.saved.single()
-            assertEquals("/agents/$MAIN_AGENT_ID", path)
-            val access = body["settings"]!!.jsonObject["access"]!!.jsonObject
-            // Live grants are sent next to the access policy, never inside it.
+            compose.waitUntil(15000) { fixture.grantSaves.isNotEmpty() }
+            val body = fixture.grantSaves.single()
+            assertEquals(MAIN_AGENT_ID, body["agentId"]!!.jsonPrimitive.content)
             assertEquals(
-                JsonArray(listOf(JsonPrimitive("prod"))),
-                body["settings"]!!.jsonObject["plugins"],
+                "11111111-1111-4111-8111-111111111111",
+                body["grants"]!!
+                    .jsonArray
+                    .single()
+                    .jsonObject["instanceId"]!!
+                    .jsonPrimitive
+                    .content,
             )
-            assertFalse("plugins" in access)
-            assertEquals(JsonNull, access["projects"])
             assertEquals("m1", body["revision"]!!.jsonPrimitive.content)
-            assertTrue(body["review"]!!.jsonObject["reapproveDelegations"]!!.jsonArray.isEmpty())
+            assertTrue(fixture.saved.isEmpty())
         }
     }
 
@@ -761,7 +1060,7 @@ abstract class AgentPageCases {
             )
             assertFalse("exclusiveNodes" in access)
             assertEquals(
-                JsonArray(listOf(JsonPrimitive("bot"))),
+                JsonArray(listOf(JsonPrimitive("33333333-3333-4333-8333-333333333333"))),
                 body["review"]!!.jsonObject["reapproveDelegations"],
             )
             assertEquals("r1", body["revision"]!!.jsonPrimitive.content)
@@ -822,8 +1121,8 @@ abstract class AgentPageCases {
 
             open(AgentSection.Plugins)
             waitForDescription("Accès à Production")
-            compose.onNodeWithText("1Password · comptes de service").assertExists()
-            compose.onNodeWithText("Aucun accès par défaut, Main compris").assertExists()
+            compose.onAllNodesWithText("1Password · comptes de service").assertCountEquals(2)
+            compose.onAllNodesWithText("Aucun accès par défaut, Main compris").assertCountEquals(2)
             compose.onNodeWithText("Compte désactivé").assertExists()
             compose
                 .onNodeWithText("Répond en tant que cet agent sur « #support »", substring = true)
@@ -841,11 +1140,9 @@ abstract class AgentPageCases {
             compose.waitUntil(15000) {
                 compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
             }
-            compose
-                .onNodeWithText(
-                    "Ajout : 1Password « Production », effectif immédiatement, y compris dans les conversations en cours."
-                )
-                .assertExists()
+            compose.onNodeWithText("1Password · Production").assertExists()
+            compose.onNodeWithText("Aucun accès → Accès complet").assertExists()
+            compose.onNodeWithTag("agent-review-audience").assertExists()
             // Declining the reapproval is possible: the bot then stops until it is reapproved.
             compose
                 .onNodeWithText("Réapprouver les nouveaux accès pour « #support »")
@@ -854,13 +1151,17 @@ abstract class AgentPageCases {
                 .onNodeWithText("Ce bot sera suspendu jusqu’à sa reconfirmation sur l’instance.")
                 .assertExists()
             confirmReview()
-            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            val body = fixture.saved.single().second
+            compose.waitUntil(15000) { fixture.grantSaves.isNotEmpty() }
             assertEquals(
-                JsonArray(listOf(JsonPrimitive("prod"))),
-                body["settings"]!!.jsonObject["plugins"],
+                "11111111-1111-4111-8111-111111111111",
+                fixture.grantSaves
+                    .single()["grants"]!!
+                    .jsonArray
+                    .single()
+                    .jsonObject["instanceId"]!!
+                    .jsonPrimitive
+                    .content,
             )
-            assertTrue(body["review"]!!.jsonObject["reapproveDelegations"]!!.jsonArray.isEmpty())
         }
     }
 
@@ -904,27 +1205,56 @@ abstract class AgentPageCases {
                 )
                 .assertExists()
             confirmReview()
-            compose.waitUntil(15000) { fixture.saved.size == 2 }
-            assertTrue(
-                fixture.saved
-                    .last()
-                    .second["review"]!!
-                    .jsonObject["reapproveDelegations"]!!
-                    .jsonArray
-                    .isEmpty()
+            compose.waitUntil(15000) { fixture.grantSaves.size == 1 }
+            assertEquals(1, fixture.saved.size)
+        }
+    }
+
+    @Test
+    fun aGrantOnlyEditAppliesAnExplicitReapprovalOfAnEarlierSuspension() {
+        journey(release.id) { fixture ->
+            fixture.alreadySuspended.set(true)
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Production")
+            compose.onNodeWithContentDescription("Accès à Production").performClick()
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
+            }
+            val reapproval =
+                compose.onNodeWithText("Réapprouver les nouveaux accès pour « #support »")
+            reapproval.assertIsOff().performScrollTo().performClick().assertIsOn()
+            confirmReview()
+            compose.waitUntil(15000) {
+                fixture.grantSaves.size == 1 &&
+                    compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
+            }
+            val profile = fixture.saved.single().second
+            assertEquals("r1", profile["revision"]!!.jsonPrimitive.content)
+            assertTrue(profile["settings"]!!.jsonObject["plugins"]!!.jsonArray.isEmpty())
+            assertEquals(
+                listOf("33333333-3333-4333-8333-333333333333"),
+                profile["review"]!!.jsonObject["reapproveDelegations"]!!.jsonArray.map {
+                    it.jsonPrimitive.content
+                },
+            )
+            // The grant write applies at the revision returned by that accepted reapproval.
+            assertEquals("saved-1", fixture.grantSaves.single()["revision"]!!.jsonPrimitive.content)
+            assertEquals(
+                listOf("11111111-1111-4111-8111-111111111111"),
+                fixture.agents.get().single { it.id == release.id }.plugins,
             )
         }
     }
 
     @Test
-    fun aGithubAccountIsAPluginGrantAndTwoAccountsShowTheServerRefusal() {
-        journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
+    fun twoGithubInstancesCanBeGrantedWithoutImplicitCredentials() {
+        journey(release.id) { fixture ->
+            // Keep this grant-only test separate from a deliberately selected reapproval.
+            fixture.alreadySuspended.set(true)
             open(AgentSection.Plugins)
             waitForDescription("Accès à octo-work")
-            compose
-                .onNodeWithText("Granted agents' runs push", substring = true)
-                .performScrollTo()
-                .assertExists()
             compose
                 .onNodeWithContentDescription("Accès à octo-work")
                 .performScrollTo()
@@ -933,38 +1263,338 @@ abstract class AgentPageCases {
                 .onNodeWithContentDescription("Accès à octo-home")
                 .performScrollTo()
                 .performClick()
-            capture("agent-github-accounts")
             back()
             compose.onNodeWithText("Enregistrer").performClick()
             confirmReview()
-            // The server refuses two accounts whose runs would both receive credentials.
-            waitForText(oneInstance, substring = true)
-            assertEquals(
-                listOf("gh-work", "gh-home"),
-                fixture.saved.single().second["settings"]!!.jsonObject["plugins"]!!.jsonArray.map {
-                    it.jsonPrimitive.content
-                },
-            )
+            compose.waitUntil(15000) { fixture.grantSaves.size == 1 }
+            val body = fixture.grantSaves.single()
+            assertEquals(2, body["grants"]!!.jsonArray.size)
+            assertTrue(body["runCredentialInstances"]!!.jsonArray.isEmpty())
+            assertTrue(fixture.saved.isEmpty())
+        }
+    }
 
-            // One account saves.
+    @Test
+    fun profileEditIsSavedWhenGrantRevocationFails() {
+        val support = "66666666-6666-4666-8666-666666666666"
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.agents.set(
+                    fixture.agents.get().map {
+                        if (it.id == release.id) it.copy(plugins = listOf(support)) else it
+                    }
+                )
+                fixture.failGrantWrites.set(true)
+            },
+        ) { fixture ->
             open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : full")
             compose
-                .onNodeWithContentDescription("Accès à octo-home")
+                .onNodeWithContentDescription("Accès à Support : none")
                 .performScrollTo()
                 .performClick()
+            compose.onNodeWithContentDescription("Accès à Support : none").assertIsSelected()
             back()
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Release without Support")
             compose.onNodeWithText("Enregistrer").performClick()
             confirmReview()
             compose.waitUntil(15000) {
-                fixture.saved.size == 2 &&
-                    compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
+                fixture.saved.isNotEmpty() && fixture.grantSaves.isNotEmpty()
             }
-            val body = fixture.saved.last().second
+            waitForText("Grant update failed")
+
+            val settings = fixture.saved.single().second["settings"]!!.jsonObject
             assertEquals(
-                JsonArray(listOf(JsonPrimitive("gh-work"))),
-                body["settings"]!!.jsonObject["plugins"],
+                listOf(support),
+                settings["plugins"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
-            assertFalse("github" in body["settings"]!!.jsonObject["access"]!!.jsonObject)
+            val savedProfile = fixture.agents.get().single { it.id == release.id }
+            assertEquals("Release without Support", savedProfile.name)
+            assertEquals(listOf(support), savedProfile.plugins)
+            assertTrue(fixture.grantSaves.single()["grants"]!!.jsonArray.isEmpty())
+            assertTrue(fixture.grantSaves.single()["runCredentialInstances"]!!.jsonArray.isEmpty())
+        }
+    }
+
+    @Test
+    fun profileEditDoesNotGrantFullPluginAccessWhenGrantSaveFails() {
+        val support = "66666666-6666-4666-8666-666666666666"
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.grantState[release.id] =
+                    AgentPluginGrants(
+                        release.id,
+                        listOf(
+                            PluginInstanceGrant(
+                                PluginGrantAccess.B(
+                                    listOf(PluginContributionGrant("tool", "read", emptyList()))
+                                ),
+                                support,
+                            )
+                        ),
+                        release.revision,
+                        emptyList(),
+                    )
+                fixture.failGrantWrites.set(true)
+            },
+        ) { fixture ->
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : selected")
+            compose
+                .onNodeWithContentDescription("Accès à Support : full")
+                .performScrollTo()
+                .performClick()
+            back()
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Release with pending Support")
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            waitForText("Grant update failed")
+
+            val settings = fixture.saved.single().second["settings"]!!.jsonObject
+            assertTrue(settings["plugins"]!!.jsonArray.isEmpty())
+            val savedProfile = fixture.agents.get().single { it.id == release.id }
+            assertEquals("Release with pending Support", savedProfile.name)
+            assertTrue(savedProfile.plugins.isEmpty())
+            assertEquals(
+                "full",
+                fixture.grantSaves
+                    .single()["grants"]!!
+                    .jsonArray
+                    .single()
+                    .jsonObject["access"]!!
+                    .jsonObject["type"]!!
+                    .jsonPrimitive
+                    .content,
+            )
+            assertTrue(
+                fixture.grantState[release.id]!!.grants.single().access is PluginGrantAccess.B
+            )
+        }
+    }
+
+    @Test
+    fun retappingSelectedModePreservesContributionsResourcesAndCredentialSupplier() {
+        val support = "66666666-6666-4666-8666-666666666666"
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.grantState[release.id] =
+                    AgentPluginGrants(
+                        release.id,
+                        listOf(
+                            PluginInstanceGrant(
+                                PluginGrantAccess.B(
+                                    listOf(
+                                        PluginContributionGrant(
+                                            "tool",
+                                            "read",
+                                            listOf(PluginResourceRef("support", "channel")),
+                                        ),
+                                        PluginContributionGrant("runCredentials", "", emptyList()),
+                                    )
+                                ),
+                                support,
+                            )
+                        ),
+                        release.revision,
+                        listOf(support),
+                    )
+            },
+        ) { fixture ->
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : selected")
+            waitForText("Team › #support et descendants")
+            compose
+                .onNodeWithContentDescription("Accès à Support : selected")
+                .assertIsSelected()
+                .performScrollTo()
+                .performClick()
+
+            compose.onNodeWithContentDescription("Read messages (Outil)").assertIsOn()
+            compose.onNodeWithContentDescription("Identifiants de run (Identifiants)").assertIsOn()
+            compose.onNodeWithText("Team › #support et descendants").assertExists()
+            compose
+                .onAllNodesWithText("Fournisseur actuel : Support", substring = true)
+                .assertCountEquals(2)
+            compose.onNodeWithTag("agent-save-bar").assertDoesNotExist()
+            assertTrue(fixture.grantSaves.isEmpty())
+        }
+    }
+
+    protected fun runContributionGrantSelectionJourney() {
+        journey(release.id) { fixture ->
+            fixture.alreadySuspended.set(true)
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support")
+
+            compose
+                .onNodeWithContentDescription("Accès à Support : selected")
+                .performScrollTo()
+                .performClick()
+            compose
+                .onNodeWithContentDescription("Read messages (Outil)")
+                .performScrollTo()
+                .performClick()
+            // Show the checked tool with its readable label and kind, above the next contribution.
+            compose.onNodeWithContentDescription("Post messages (Commande)").performScrollTo()
+            capture("agent-plugin-grants-editor")
+            compose.onNodeWithText("Choisir les ressources").performScrollTo().performClick()
+            compose.mainClock.autoAdvance = false
+            waitForText("Team")
+            compose
+                .onNodeWithContentDescription("Type de ressource Channels")
+                .performScrollTo()
+                .performClick()
+            waitForText("Team › #support")
+            compose.mainClock.advanceTimeBy(500)
+            compose.onNodeWithContentDescription("Team › #support").performScrollTo()
+            capture("agent-plugin-grants-resource-picker")
+            compose
+                .onNodeWithContentDescription("Rechercher des ressources")
+                .performTextInput("support")
+            waitForText("Team › #support")
+            compose.onNodeWithContentDescription("Team › #support").performClick()
+            val resourceSearch = compose.onNodeWithContentDescription("Rechercher des ressources")
+            resourceSearch.performTextClearance()
+            resourceSearch.performTextInput("general")
+            waitForText("Team › #general")
+            compose.onNodeWithText("Team › #support et descendants").assertExists()
+            compose
+                .onNodeWithContentDescription("Type de ressource Servers")
+                .performScrollTo()
+                .performClick()
+            resourceSearch.performTextClearance()
+            waitForText("Team")
+            compose.onNodeWithText("Team › #support et descendants").assertExists()
+            compose
+                .onNodeWithContentDescription("Type de ressource Channels")
+                .performScrollTo()
+                .performClick()
+            resourceSearch.performTextInput("support")
+            waitForText("Team › #support")
+            compose.onNodeWithContentDescription("Team › #support").assertIsOn()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.mainClock.autoAdvance = true
+            compose.onNodeWithText("Team › #support et descendants").assertExists()
+            compose.onNodeWithText("Team › #support et descendants").performScrollTo()
+            compose.onNodeWithText("Choisir les ressources").performScrollTo()
+            compose
+                .onNodeWithContentDescription("Receive messages (Événement)")
+                .performScrollTo()
+                .performClick()
+            compose
+                .onNodeWithText(
+                    "Toutes les ressources. Choisissez une ressource pour restreindre cette contribution."
+                )
+                .assertExists()
+            // The checked tool and hook each have a picker; reveal the hook's whole block.
+            compose.onAllNodesWithText("Choisir les ressources").assertCountEquals(2)
+            compose.onAllNodesWithText("Choisir les ressources").onLast().performScrollTo()
+            capture("agent-plugin-grants-hook")
+
+            compose
+                .onNodeWithContentDescription("Accès à Automation : full")
+                .performScrollTo()
+                .performClick()
+            compose
+                .onNodeWithContentDescription("Fournir les identifiants depuis Automation")
+                .performScrollTo()
+                .performClick()
+            compose
+                .onAllNodesWithText("Fournisseur actuel : Automation", substring = true)
+                .assertCountEquals(2)
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
+            }
+            // Beneficiaries open at the top; each instance change folds its details.
+            compose.onNodeWithTag("agent-review-audience").assertIsDisplayed()
+            compose
+                .onNodeWithText("Ces nouveaux droits s’appliquent à :", substring = true)
+                .assertIsDisplayed()
+            compose.onNodeWithText("Grant UI · Support").assertExists()
+            compose.onNodeWithText("Aucun accès → 2 contributions").assertExists()
+            compose.onNodeWithText("Read messages (Outil) :", substring = true).assertDoesNotExist()
+            compose
+                .onNodeWithText(
+                    "Toute personne pouvant utiliser cet agent peut exercer ses permissions à travers lui.",
+                    substring = true,
+                )
+                .assertExists()
+            compose.onNodeWithText("Aucun → Grant UI · Automation").assertExists()
+            capture("agent-plugin-grants-audience-review")
+            compose.onNodeWithContentDescription("Détails de Grant UI · Support").performClick()
+            compose
+                .onNodeWithText(
+                    "Read messages (Outil) : Team › #support et ses descendants",
+                    substring = true,
+                )
+                .performScrollTo()
+                .assertExists()
+            compose
+                .onNodeWithText("Receive messages (Événement) : toutes les ressources")
+                .assertExists()
+            capture("agent-plugin-grants-review-details")
+            confirmReview()
+            compose.waitUntil(15000) { fixture.grantSaves.size == 1 }
+
+            back()
+            open(AgentSection.Plugins)
+            waitForText("Team › #support et descendants")
+
+            val body = fixture.grantSaves.single()
+            val grants = body["grants"]!!.jsonArray
+            val supportGrant =
+                grants
+                    .single {
+                        it.jsonObject["instanceId"]!!.jsonPrimitive.content.endsWith("666666666666")
+                    }
+                    .jsonObject
+            val automationGrant =
+                grants
+                    .single {
+                        it.jsonObject["instanceId"]!!.jsonPrimitive.content.endsWith("777777777777")
+                    }
+                    .jsonObject
+            val selected = supportGrant["access"]!!.jsonObject["contributions"]!!.jsonArray
+            val tool =
+                selected
+                    .single { it.jsonObject["kind"]!!.jsonPrimitive.content == "tool" }
+                    .jsonObject
+            assertEquals("read", tool["name"]!!.jsonPrimitive.content)
+            assertEquals(
+                "channel",
+                tool["resources"]!!
+                    .jsonArray
+                    .single()
+                    .jsonObject["resourceType"]!!
+                    .jsonPrimitive
+                    .content,
+            )
+            assertEquals(
+                "support",
+                tool["resources"]!!.jsonArray.single().jsonObject["id"]!!.jsonPrimitive.content,
+            )
+            assertTrue(
+                selected.any {
+                    it.jsonObject["kind"]!!.jsonPrimitive.content == "hook" &&
+                        it.jsonObject["name"]!!.jsonPrimitive.content == "message"
+                }
+            )
+            assertEquals(
+                "full",
+                automationGrant["access"]!!.jsonObject["type"]!!.jsonPrimitive.content,
+            )
+            assertEquals(
+                listOf("77777777-7777-4777-8777-777777777777"),
+                body["runCredentialInstances"]!!.jsonArray.map { it.jsonPrimitive.content },
+            )
+            assertTrue(fixture.saved.isEmpty())
         }
     }
 
@@ -1139,6 +1769,329 @@ abstract class AgentPageCases {
     }
 
     @Test
+    fun aFailedGrantReadAfterConflictCannotSaveTheStaleDraft() {
+        journey(release.id) { fixture ->
+            // Exercise a grant-write conflict, without selecting a separate profile reapproval.
+            fixture.alreadySuspended.set(true)
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : full")
+            compose
+                .onNodeWithContentDescription("Accès à Support : full")
+                .performScrollTo()
+                .performClick()
+
+            // Another owner removed grants and advanced the shared revision.
+            fixture.agents.set(
+                fixture.agents.get().map {
+                    if (it.id == release.id)
+                        it.copy(
+                            description = "Changed elsewhere",
+                            plugins = emptyList(),
+                            revision = "r2",
+                        )
+                    else it
+                }
+            )
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            waitForText("Cet agent a été modifié ailleurs", substring = true)
+            assertEquals(1, fixture.grantSaves.size)
+
+            fixture.failGrantReads.set(true)
+            compose.onNodeWithText("Recharger").performClick()
+            waitForText("Plugin grant state unavailable", substring = true)
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            assertEquals(
+                "A retry must not overwrite the newer grant state.",
+                1,
+                fixture.grantSaves.size,
+            )
+        }
+    }
+
+    @Test
+    fun conflictReloadUsesFreshPackageMappingAndKeepsDraftRetryableWhenCatalogFails() {
+        val support = "66666666-6666-4666-8666-666666666666"
+        val automation = "77777777-7777-4777-8777-777777777777"
+        val review = "88888888-8888-4888-8888-888888888888"
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.grantState[release.id] =
+                    build.cairn.contracts.AgentPluginGrants(
+                        release.id,
+                        listOf(
+                            build.cairn.contracts.PluginInstanceGrant(
+                                build.cairn.contracts.PluginGrantAccess.A(),
+                                support,
+                            )
+                        ),
+                        release.revision,
+                        listOf(support),
+                    )
+            },
+        ) { fixture ->
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : full")
+            compose
+                .onNodeWithContentDescription("Accès à Automation : full")
+                .performScrollTo()
+                .performClick()
+            compose
+                .onNodeWithContentDescription("Fournir les identifiants depuis Automation")
+                .performScrollTo()
+                .performClick()
+
+            val reviewConnection =
+                PluginConnection(
+                    id = review,
+                    pluginId = "grant-ui",
+                    name = "Review",
+                    settings = JsonObject(emptyMap()),
+                    status = PluginStatus(state = "ready"),
+                    usage = PluginUsage(),
+                    enabled = true,
+                )
+            fixture.pluginCatalog.set(
+                fixture.pluginCatalog
+                    .get()
+                    .copy(connections = fixture.pluginCatalog.get().connections + reviewConnection)
+            )
+            fixture.grantState[release.id] =
+                build.cairn.contracts.AgentPluginGrants(
+                    release.id,
+                    listOf(
+                        build.cairn.contracts.PluginInstanceGrant(
+                            build.cairn.contracts.PluginGrantAccess.A(),
+                            support,
+                        ),
+                        build.cairn.contracts.PluginInstanceGrant(
+                            build.cairn.contracts.PluginGrantAccess.A(),
+                            review,
+                        ),
+                    ),
+                    "r2",
+                    listOf(review),
+                )
+            fixture.agents.set(
+                fixture.agents.get().map {
+                    if (it.id == release.id)
+                        it.copy(plugins = listOf(support, review), revision = "r2")
+                    else it
+                }
+            )
+            fixture.conflict.set(true)
+
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            waitForText("Cet agent a été modifié ailleurs", substring = true)
+
+            fixture.failPlugins.set(true)
+            compose.onNodeWithText("Recharger").performClick()
+            waitForText("Plugins indisponibles", substring = true)
+            compose.onNodeWithText("Recharger").assertIsEnabled()
+            compose
+                .onNodeWithContentDescription("Fournir les identifiants depuis Automation")
+                .assertDoesNotExist()
+            compose.onNodeWithContentDescription("Accès à Support : full").assertDoesNotExist()
+
+            fixture.failPlugins.set(false)
+            compose.onNodeWithText("Recharger").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithText("Recharger").fetchSemanticsNodes().isEmpty()
+            }
+            waitForDescription("Accès à Review : full")
+            compose
+                .onNodeWithContentDescription("Fournir les identifiants depuis Automation")
+                .assertIsOn()
+            compose
+                .onNodeWithContentDescription("Fournir les identifiants depuis Review")
+                .assertIsOff()
+
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.grantSaves.isNotEmpty() }
+            assertEquals(
+                listOf(automation),
+                fixture.grantSaves.last()["runCredentialInstances"]!!.jsonArray.map {
+                    it.jsonPrimitive.content
+                },
+            )
+        }
+    }
+
+    @Test
+    fun removedContributionCanBeRevokedWithoutDroppingOtherPluginGrants() {
+        val support = "66666666-6666-4666-8666-666666666666"
+        val staleTool = PluginContributionGrant("tool", "read", emptyList())
+        val command = PluginContributionGrant("command", "post", emptyList())
+        val credentials = PluginContributionGrant("runCredentials", "", emptyList())
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.pluginCatalog.set(
+                    catalog.copy(
+                        packages =
+                            catalog.packages.map { entry ->
+                                if (entry.id == "grant-ui")
+                                    entry.copy(
+                                        manifest = entry.manifest!!.copy(tools = emptyList())
+                                    )
+                                else entry
+                            }
+                    )
+                )
+                fixture.grantState[release.id] =
+                    build.cairn.contracts.AgentPluginGrants(
+                        release.id,
+                        listOf(
+                            build.cairn.contracts.PluginInstanceGrant(
+                                PluginGrantAccess.B(listOf(staleTool, command, credentials)),
+                                support,
+                            )
+                        ),
+                        release.revision,
+                        listOf(support),
+                    )
+            },
+        ) { fixture ->
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : selected")
+            compose
+                .onNodeWithContentDescription("Retirer l’accès obsolète Read (Outil)")
+                .performScrollTo()
+                .assertExists()
+            compose
+                .onNodeWithText("contributions que ce plugin ne fournit plus", substring = true)
+                .assertExists()
+            compose
+                .onNodeWithContentDescription("Retirer l’accès obsolète Read (Outil)")
+                .performClick()
+            compose
+                .onNodeWithContentDescription("Retirer l’accès obsolète Read (Outil)")
+                .assertDoesNotExist()
+            compose.onNodeWithText("Post messages").assertExists()
+
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.grantSaves.size == 1 }
+            val saved = fixture.grantSaves.single()
+            val grant = saved["grants"]!!.jsonArray.single().jsonObject
+            val contributions = grant["access"]!!.jsonObject["contributions"]!!.jsonArray
+            assertEquals(
+                listOf("command", "runCredentials"),
+                contributions.map { it.jsonObject["kind"]!!.jsonPrimitive.content },
+            )
+            assertEquals(
+                listOf(support),
+                saved["runCredentialInstances"]!!.jsonArray.map { it.jsonPrimitive.content },
+            )
+        }
+    }
+
+    @Test
+    fun removedResourceTypeIsShownAsStaleUntilItsRestrictionIsRemoved() {
+        val support = "66666666-6666-4666-8666-666666666666"
+        val read =
+            PluginContributionGrant(
+                "tool",
+                "read",
+                listOf(PluginResourceRef("support", "channel")),
+            )
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.pluginCatalog.set(
+                    catalog.copy(
+                        packages =
+                            catalog.packages.map { entry ->
+                                if (entry.id == "grant-ui")
+                                    entry.copy(
+                                        manifest =
+                                            entry.manifest!!.copy(
+                                                tools =
+                                                    entry.manifest.tools.map {
+                                                        it.copy(resourceFields = emptyList())
+                                                    }
+                                            )
+                                    )
+                                else entry
+                            }
+                    )
+                )
+                fixture.grantState[release.id] =
+                    build.cairn.contracts.AgentPluginGrants(
+                        release.id,
+                        listOf(
+                            build.cairn.contracts.PluginInstanceGrant(
+                                PluginGrantAccess.B(listOf(read)),
+                                support,
+                            )
+                        ),
+                        release.revision,
+                        emptyList(),
+                    )
+            },
+        ) {
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : selected")
+            compose
+                .onNodeWithText(
+                    "Certaines restrictions enregistrées ne correspondent plus",
+                    substring = true,
+                )
+                .assertExists()
+            compose.onNodeWithText("Sans restriction de ressource.").assertDoesNotExist()
+            capture("agent-plugin-grants-stale-resource")
+            compose
+                .onNodeWithContentDescription(
+                    "Retirer la restriction obsolète Read messages Channels · support"
+                )
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithContentDescription(
+                        "Retirer la restriction obsolète Read messages Channels · support"
+                    )
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }
+            waitForText("Sans restriction de ressource.")
+        }
+    }
+
+    @Test
+    fun aGrantReadFailureShowsPluginAccessAsUnavailableInOverview() {
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.failGrantReads.set(true)
+            },
+        ) {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithContentDescription("Secrets & plugins, Indisponible, à corriger")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithContentDescription("Secrets & plugins, Indisponible, à corriger")
+                .assertExists()
+            compose.onNodeWithText("Aucun accès").assertDoesNotExist()
+        }
+    }
+
+    @Test
+    fun resourcePickerCapsRootsAtTheBackendLimitButAllowsRemoval() {
+        assertEquals(100, MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION)
+        assertTrue(canSelectPluginResourceRoot(99, alreadySelected = false))
+        assertFalse(canSelectPluginResourceRoot(100, alreadySelected = false))
+        assertTrue(canSelectPluginResourceRoot(100, alreadySelected = true))
+    }
+
+    @Test
     fun aFailedReReadOnReloadMakesPluginsUnknown() {
         journey("d3153f9f-724b-59c3-9614-ab78f231c4d3") { fixture ->
             open(AgentSection.Identity)
@@ -1161,6 +2114,129 @@ abstract class AgentPageCases {
     }
 
     @Test
+    fun pluginGrantEditorIsDisabledWhileConflictReloadReadsGrants() {
+        journey(release.id) { fixture ->
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : none")
+            back()
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Release bot draft")
+            fixture.conflict.set(true)
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            waitForText("Cet agent a été modifié ailleurs", substring = true)
+
+            back()
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : none")
+            val barrier = GrantReadBarrier()
+            fixture.grantReadBarrier.set(barrier)
+            compose.onNodeWithText("Recharger").performClick()
+            compose.waitUntil(10000) { barrier.started.count == 0L }
+            compose.onNodeWithContentDescription("Accès à Support : none").assertIsNotEnabled()
+            barrier.release.countDown()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithText("Recharger").fetchSemanticsNodes().isEmpty()
+            }
+            fixture.grantReadBarrier.set(null)
+            compose.onNodeWithContentDescription("Accès à Support : none").assertIsEnabled()
+        }
+    }
+
+    @Test
+    fun workspaceRevisionRefreshReloadsPluginGrantsBeforeEditing() {
+        val support = "66666666-6666-4666-8666-666666666666"
+        val general = PluginResourceRef("general", "channel")
+        val previousGrant =
+            PluginContributionGrant(
+                "tool",
+                "read",
+                listOf(PluginResourceRef("support", "channel")),
+            )
+        val refreshedRevision = "remote-agent-revision"
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.grantState[release.id] =
+                    build.cairn.contracts.AgentPluginGrants(
+                        release.id,
+                        listOf(
+                            build.cairn.contracts.PluginInstanceGrant(
+                                PluginGrantAccess.B(listOf(previousGrant)),
+                                support,
+                            )
+                        ),
+                        release.revision,
+                        emptyList(),
+                    )
+            },
+        ) { fixture ->
+            open(AgentSection.Plugins)
+            waitForText("Team › #support et descendants")
+
+            fixture.agents.set(
+                fixture.agents.get().map {
+                    if (it.id == release.id) it.copy(revision = refreshedRevision) else it
+                }
+            )
+            fixture.grantState[release.id] =
+                build.cairn.contracts.AgentPluginGrants(
+                    release.id,
+                    listOf(
+                        build.cairn.contracts.PluginInstanceGrant(
+                            PluginGrantAccess.B(
+                                listOf(previousGrant.copy(resources = listOf(general)))
+                            ),
+                            support,
+                        )
+                    ),
+                    refreshedRevision,
+                    emptyList(),
+                )
+            fixture.refreshWorkspace.get()!!.invoke()
+
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText("Team › #general et descendants")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Team › #support et descendants").assertDoesNotExist()
+
+            compose
+                .onNodeWithContentDescription("Receive messages (Événement)")
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.grantSaves.size == 1 }
+
+            val saved = fixture.grantSaves.single()
+            val grants = saved["grants"]!!.jsonArray
+            val selected = grants.single {
+                it.jsonObject["instanceId"]!!.jsonPrimitive.content == support
+            }
+            val contributions =
+                selected.jsonObject["access"]!!.jsonObject["contributions"]!!.jsonArray
+            assertTrue(
+                contributions.any {
+                    it.jsonObject["kind"]!!.jsonPrimitive.content == "tool" &&
+                        it.jsonObject["name"]!!.jsonPrimitive.content == "read" &&
+                        it.jsonObject["resources"]!!.jsonArray.any {
+                            it.jsonObject["id"]!!.jsonPrimitive.content == "general"
+                        }
+                }
+            )
+            assertTrue(
+                contributions.any {
+                    it.jsonObject["kind"]!!.jsonPrimitive.content == "hook" &&
+                        it.jsonObject["name"]!!.jsonPrimitive.content == "message"
+                }
+            )
+        }
+    }
+
+    @Test
     fun pluginGrantsStayAsTheyAreWhenTheCatalogFailsToLoad() {
         journey(
             "d3153f9f-724b-59c3-9614-ab78f231c4d3",
@@ -1169,7 +2245,7 @@ abstract class AgentPageCases {
                 fixture.agents.set(
                     fixture.agents.get().map {
                         if (it.id == "d3153f9f-724b-59c3-9614-ab78f231c4d3")
-                            it.copy(plugins = listOf("prod"))
+                            it.copy(plugins = listOf("11111111-1111-4111-8111-111111111111"))
                         else it
                     }
                 )
@@ -1180,7 +2256,7 @@ abstract class AgentPageCases {
             open(AgentSection.Plugins)
             waitForText("Impossible de charger les plugins", substring = true)
             compose.onNodeWithText("1 instance accordée :").assertExists()
-            compose.onNodeWithText("prod").assertExists()
+            compose.onNodeWithText("11111111-1111-4111-8111-111111111111").assertExists()
             compose.onNodeWithText("Retirer").assertDoesNotExist()
             compose.onNodeWithText("Instance supprimée").assertDoesNotExist()
 
@@ -1288,7 +2364,7 @@ abstract class AgentPageCases {
                 fixture.agents.set(
                     fixture.agents.get().map {
                         if (it.id == "d3153f9f-724b-59c3-9614-ab78f231c4d3")
-                            it.copy(plugins = listOf("bot"))
+                            it.copy(plugins = listOf("33333333-3333-4333-8333-333333333333"))
                         else it
                     }
                 )
@@ -1310,11 +2386,8 @@ abstract class AgentPageCases {
             compose.onNodeWithText("⚠ 1 point à vérifier").assertDoesNotExist()
             compose.onNodeWithText("Enregistrer").performClick()
             confirmReview()
-            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            assertEquals(
-                JsonArray(emptyList()),
-                fixture.saved.single().second["settings"]!!.jsonObject["plugins"],
-            )
+            compose.waitUntil(15000) { fixture.grantSaves.isNotEmpty() }
+            assertTrue(fixture.grantSaves.single()["grants"]!!.jsonArray.isEmpty())
         }
     }
 
@@ -1413,6 +2486,34 @@ abstract class AgentPageCases {
                     .jsonPrimitive
                     .int,
             )
+        }
+    }
+
+    @Test
+    fun creatingAnAgentReviewsItsPluginGrant() {
+        journey("") { fixture ->
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Production")
+            compose
+                .onNodeWithContentDescription("Accès à Production")
+                .performScrollTo()
+                .performClick()
+            back()
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Agent de révision")
+            back()
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText("Vérifier avant d’enregistrer")
+            waitForText("1Password · Production")
+            waitForText("Aucun accès → Accès complet")
+            confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            compose.waitUntil(15000) { fixture.grantSaves.isNotEmpty() }
+            val profileSettings = fixture.saved.single().second["settings"]!!.jsonObject
+            val savedGrants = fixture.grantSaves.single()
+            assertTrue(profileSettings["plugins"]!!.jsonArray.isEmpty())
+            assertTrue(savedGrants["runCredentialInstances"]!!.jsonArray.isEmpty())
+            assertEquals(1, savedGrants["grants"]!!.jsonArray.size)
         }
     }
 

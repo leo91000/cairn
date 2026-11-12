@@ -4,6 +4,7 @@ package build.cairn.app.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -33,12 +34,16 @@ import build.cairn.app.data.*
 import build.cairn.contracts.AgentInput
 import build.cairn.contracts.CreateAgentInput
 import build.cairn.contracts.ListAgentsInput
+import build.cairn.contracts.PluginGrantAccess
 import build.cairn.contracts.ReplaceAgentInput
+import build.cairn.contracts.ReplaceAgentPluginGrantsInput
 import build.cairn.contracts.createAgent
 import build.cairn.contracts.deleteAgent
+import build.cairn.contracts.getAgentPluginGrants
 import build.cairn.contracts.listAgents
 import build.cairn.contracts.previewAgent
 import build.cairn.contracts.replaceAgent
+import build.cairn.contracts.replaceAgentPluginGrants
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
@@ -115,6 +120,18 @@ private fun AgentPage(
 ) {
     var baseline by rememberSaveable(saver = agentSaver()) { mutableStateOf(loaded) }
     var draft by rememberSaveable(saver = draftSaver()) { mutableStateOf(AgentDraft(loaded)) }
+    var savedGrantsJson by rememberSaveable {
+        mutableStateOf(wireJson.encodeToString(PluginGrantDraft.serializer(), PluginGrantDraft()))
+    }
+    var grantsJson by rememberSaveable { mutableStateOf(savedGrantsJson) }
+    val savedGrants = wireJson.decodeFromString(PluginGrantDraft.serializer(), savedGrantsJson)
+    val grants = wireJson.decodeFromString(PluginGrantDraft.serializer(), grantsJson)
+    var grantsLoaded by rememberSaveable { mutableStateOf(creating) }
+    var grantsError by remember { mutableStateOf<String?>(null) }
+    var grantsAttempt by remember { mutableIntStateOf(0) }
+    fun editGrants(value: PluginGrantDraft) {
+        grantsJson = wireJson.encodeToString(PluginGrantDraft.serializer(), value)
+    }
     var section by rememberSaveable { mutableStateOf<String?>(null) }
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
     var nodesLoaded by remember { mutableStateOf(false) }
@@ -170,14 +187,47 @@ private fun AgentPage(
         }
     }
 
-    val changes = agentChanges(baseline, draft)
+    LaunchedEffect(agentId, grantsAttempt) {
+        if (creating || grantsLoaded) return@LaunchedEffect
+        try {
+            val currentGrants = vm.api.getAgentPluginGrants(AgentInput(agentId))
+            if (currentGrants.revision != baseline.revision)
+                throw ApiException(
+                    409,
+                    "L’agent a changé. Rechargez-le avant de modifier ses droits.",
+                )
+            savedGrantsJson =
+                wireJson.encodeToString(PluginGrantDraft.serializer(), currentGrants.draft())
+            grantsJson = savedGrantsJson
+            grantsLoaded = true
+            grantsError = null
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            grantsError = e.message
+            if (e is ApiException && e.status == 409) {
+                conflict = true
+                saveError = "L’agent a changé. Rechargez-le avant de modifier ses droits."
+            }
+        }
+    }
+    val grantChanges = grants.key() != savedGrants.key()
+    val changes =
+        (agentChanges(baseline, draft) +
+                if (grantChanges) listOf(AgentSection.Plugins) else emptyList())
+            .distinct()
     val dirty = changes.isNotEmpty()
     // A newer saved version replaces an untouched page; a modified draft keeps its base so a
     // concurrent save is detected by the server.
     LaunchedEffect(loaded.revision, loaded) {
         if (!creating && !dirty && loaded != baseline) {
+            val agentRevisionChanged = loaded.revision != baseline.revision
             baseline = loaded
             draft = AgentDraft(loaded)
+            if (agentRevisionChanged) {
+                grantsLoaded = false
+                grantsError = null
+                grantsAttempt++
+            }
         }
     }
 
@@ -195,7 +245,11 @@ private fun AgentPage(
             skillsLoaded = state.agents.isNotEmpty(),
         )
     val errors = agentErrors(draft)
-    val issues = agentIssues(draft.agent, resources)
+    val displayDraft =
+        if (grantsLoaded)
+            draft.copy(agent = draft.agent.copy(plugins = grants.grants.map { it.instanceId }))
+        else draft
+    val issues = agentIssues(displayDraft.agent, resources)
     val current = AgentSection.entries.find { it.name == section }
 
     fun update(change: (Agent) -> Agent) {
@@ -222,9 +276,12 @@ private fun AgentPage(
         approved: List<String>,
         nativeNodes: List<String> = emptyList(),
     ) {
-        // A profile already saved (only its reload failed) is not sent again.
-        val profilePending = (creating && creation.id.isBlank()) || profileChanged(baseline, edited)
-        val saved: Agent =
+        // Explicit reapproval uses the revision-checked profile API, including grant-only edits.
+        val profilePending =
+            (creating && creation.id.isBlank()) ||
+                profileChanged(baseline, edited) ||
+                approved.isNotEmpty()
+        var saved: Agent =
             when {
                 !profilePending -> baseline
                 creating -> {
@@ -299,6 +356,30 @@ private fun AgentPage(
 
         baseline = saved
         draft = AgentDraft(saved)
+        if (grantChanges) {
+            val updated =
+                vm.api.replaceAgentPluginGrants(
+                    ReplaceAgentPluginGrantsInput(
+                        saved.id,
+                        grants.grants,
+                        saved.revision,
+                        grants.runCredentialInstances,
+                    )
+                )
+            savedGrantsJson =
+                wireJson.encodeToString(PluginGrantDraft.serializer(), updated.draft())
+            grantsJson = savedGrantsJson
+            saved =
+                saved.copy(
+                    revision = updated.revision,
+                    plugins =
+                        updated.grants
+                            .filter { it.access is PluginGrantAccess.A }
+                            .map { it.instanceId },
+                )
+            baseline = saved
+            draft = AgentDraft(saved)
+        }
         try {
             vm.refresh()
         } catch (e: Exception) {
@@ -326,8 +407,9 @@ private fun AgentPage(
         errorSection = if (conflict) null else sectionOfError(error.message.orEmpty())
     }
     fun save() {
-        if (saving || errors.isNotEmpty()) return
-        val edited = draft.resolved()
+        if (saving || conflict || errors.isNotEmpty()) return
+        val resolvedDraft = draft.resolved()
+        val edited = resolvedDraft
         saving = true
         saveError = null
         scope.launch {
@@ -351,7 +433,14 @@ private fun AgentPage(
                         edited,
                         resources,
                         preview,
-                    )
+                    ) +
+                        pluginGrantReview(
+                            savedGrants,
+                            grants,
+                            catalog,
+                            if (savedGrants.key() == grants.key()) emptyMap()
+                            else resolveGrantReviewPaths(vm.api, catalog, grants),
+                        )
                 if (lines.any { it.kind == ReviewKind.Power || it.kind == ReviewKind.Access }) {
                     if (!creating) {
                         people.load(vm, agentId)
@@ -367,20 +456,19 @@ private fun AgentPage(
                             people.rows,
                             everyMemberHasAccess = people.outdated,
                         )
-                    lines =
-                        agentReview(
-                            baseline,
-                            edited,
-                            resources,
-                            preview,
-                            audience,
-                        )
+                    // Plugin grant changes are access too, so the audience line follows them.
+                    lines = lines + audienceReviewLine(audience)
                 }
                 if (needsReview(lines, preview)) {
                     val suspended = preview?.suspendedDelegations().orEmpty()
                     reapprove = preview?.preselectedReapprovals().orEmpty()
                     review =
-                        PendingReview(edited, lines, suspended, edited.nativeReviewNodes(resources))
+                        PendingReview(
+                            edited,
+                            lines,
+                            suspended,
+                            edited.nativeReviewNodes(resources),
+                        )
                 } else commit(edited, emptyList())
             } catch (e: Exception) {
                 fail(e)
@@ -390,9 +478,12 @@ private fun AgentPage(
         }
     }
     fun reload() {
+        val keepGrantEdits = grantChanges
         saving = true
         scope.launch {
+            var attemptedFreshGrantRead = false
             try {
+                val base = baseline
                 val theirs =
                     vm.api.listAgents(build.cairn.contracts.ListAgentsInput()).agents.find {
                         it.id == agentId
@@ -403,16 +494,60 @@ private fun AgentPage(
                 val fresh = vm.state.value
                 val freshMcps =
                     fresh.mcps.map { it.id }.toSet().takeIf { refreshed && fresh.isOwner }
-                draft = draft.rebased(baseline, theirs, freshMcps)
+                // Supplier merging depends on the current instance-to-package mapping. Do not
+                // guess when a concurrently added instance is missing from the stale catalog.
+                val freshCatalog =
+                    if (keepGrantEdits) vm.api.get<PluginCatalog>("/plugins") else null
+                attemptedFreshGrantRead = true
+                val freshGrants = vm.api.getAgentPluginGrants(AgentInput(agentId))
+                if (freshGrants.revision != theirs.revision)
+                    throw ApiException(409, "L’agent a changé pendant le rechargement. Réessayez.")
+
+                // Do not rebase onto a profile revision until its matching grants are known too.
+                val rebasedDraft = draft.rebased(base, theirs, freshMcps)
+                val keepGrantEdits = grantChanges
+                val baseGrants = savedGrants
+                val localGrants = grants
+                val refreshedGrantsJson =
+                    wireJson.encodeToString(PluginGrantDraft.serializer(), freshGrants.draft())
+                val rebasedGrantsJson =
+                    if (keepGrantEdits) {
+                        val packageByInstance =
+                            freshCatalog!!.connections.associate { it.id to it.pluginId }
+                        wireJson.encodeToString(
+                            PluginGrantDraft.serializer(),
+                            mergePluginGrantDrafts(
+                                baseGrants,
+                                localGrants,
+                                freshGrants.draft(),
+                                packageByInstance,
+                            ),
+                        )
+                    } else {
+                        refreshedGrantsJson
+                    }
                 baseline = theirs
+                draft = rebasedDraft
+                savedGrantsJson = refreshedGrantsJson
+                grantsJson = rebasedGrantsJson
+                grantsLoaded = true
+                grantsError = null
+                if (freshCatalog != null) catalog = freshCatalog
                 // Machines and plugin instances may have changed elsewhere too; until read again
                 // they are unknown.
                 nodesAttempt++
-                catalogAttempt++
+                if (!keepGrantEdits) catalogAttempt++
                 saveError = null
                 conflict = false
             } catch (e: Exception) {
-                fail(e)
+                if (e is CancellationException) throw e
+                // A failed refresh leaves both the draft's base and the current grant state
+                // unknown. A catalog failure leaves the local grant draft intact and retryable.
+                conflict = true
+                if (attemptedFreshGrantRead || keepGrantEdits) grantsLoaded = false
+                grantsError = e.message
+                errorSection = null
+                saveError = e.message ?: "Impossible de confirmer les droits actuels. Réessayez."
             } finally {
                 saving = false
             }
@@ -443,7 +578,7 @@ private fun AgentPage(
                 when (current) {
                     null ->
                         AgentOverview(
-                            draft,
+                            displayDraft,
                             resources,
                             creating,
                             issues,
@@ -451,6 +586,8 @@ private fun AgentPage(
                             changes.toSet(),
                             state.modelCatalog("codex").models,
                             people,
+                            grantsLoaded,
+                            grantsError,
                         ) {
                             section = it.name
                         }
@@ -485,14 +622,38 @@ private fun AgentPage(
                                 ::access,
                             )
                     AgentSection.Plugins ->
-                        PluginsSection(
-                            draft.agent,
-                            catalog,
-                            catalogFailed,
-                            retry = { catalogAttempt++ },
-                            navigate = { navigate(it) },
-                            change = ::update,
-                        )
+                        if (catalog == null || !grantsLoaded) {
+                            Text(
+                                grantsError
+                                    ?: if (catalogFailed) "Impossible de charger les plugins."
+                                    else "Chargement des droits…"
+                            )
+                            val held =
+                                if (grantsLoaded) grants.grants.map { it.instanceId }
+                                else draft.agent.plugins
+                            if (held.isNotEmpty())
+                                Text(
+                                    if (held.size == 1) "1 instance accordée :"
+                                    else "${held.size} instances accordées :"
+                                )
+                            held.forEach { Text(it) }
+                            TextButton({
+                                catalogAttempt++
+                                grantsAttempt++
+                            }) {
+                                Text("Réessayer")
+                            }
+                        } else {
+                            PluginGrantEditor(
+                                vm.api,
+                                catalog!!,
+                                grants,
+                                ::editGrants,
+                                agentId,
+                                navigate,
+                                enabled = !saving,
+                            )
+                        }
                     AgentSection.Nodes ->
                         NodesSection(
                             draft.agent,
@@ -560,6 +721,7 @@ private fun AgentPage(
                     if (creating) discarding = true
                     else {
                         draft = AgentDraft(baseline)
+                        grantsJson = savedGrantsJson
                         saveError = null
                         conflict = false
                     }
@@ -854,6 +1016,8 @@ private fun AgentOverview(
     /** Codex's catalog, to name the agent's speed as its model runs it. */
     codexModels: List<CodingAgentModel>,
     people: AgentPeople,
+    grantsLoaded: Boolean,
+    grantsError: String?,
     open: (AgentSection) -> Unit,
 ) {
     val agent = draft.agent
@@ -943,11 +1107,20 @@ private fun AgentOverview(
         }
         OverviewRow(
             AgentSection.Plugins,
-            if (plugins.isBlank()) if (main) "· même pour Main" else "" else plugins,
-            error = AgentSection.Plugins in errors,
+            when {
+                grantsError != null -> "Indisponible"
+                !grantsLoaded -> "Chargement…"
+                plugins.isBlank() -> if (main) "· même pour Main" else ""
+                else -> plugins
+            },
+            error = AgentSection.Plugins in errors || grantsError != null,
             changed = AgentSection.Plugins in changed,
             chips = {
-                if (plugins.isBlank()) ToneChip(PluginBadge("Aucun accès", PluginTone.MUTED))
+                when {
+                    grantsError != null -> ToneChip(PluginBadge("Indisponible", PluginTone.WARNING))
+                    !grantsLoaded -> ToneChip(PluginBadge("Chargement…", PluginTone.MUTED))
+                    plugins.isBlank() -> ToneChip(PluginBadge("Aucun accès", PluginTone.MUTED))
+                }
             },
         ) {
             open(AgentSection.Plugins)
@@ -1107,12 +1280,65 @@ private fun SaveBar(
                     TextButton(onClick = discard, enabled = !saving) { Text("Annuler") }
                 Button(
                     onClick = save,
-                    enabled = !saving && errors.isEmpty() && (count > 0 || creating || retryable),
+                    enabled =
+                        !saving &&
+                            !conflict &&
+                            errors.isEmpty() &&
+                            (count > 0 || creating || retryable),
                 ) {
                     Text(if (creating) "Créer l’agent" else "Enregistrer")
                 }
             }
         }
+    }
+}
+
+/** A plugin grant change: its instance, `before → after`, and details folded by default. */
+@Composable
+private fun StructuredReviewLine(line: ReviewLine, index: Int) {
+    var expanded by rememberSaveable(index, line.text) { mutableStateOf(false) }
+    Text(
+        line.title.orEmpty(),
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurface,
+    )
+    line.change?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+    if (line.details.isNotEmpty()) {
+        Box(
+            Modifier.heightIn(min = 40.dp)
+                .clickable(role = Role.Button) { expanded = !expanded }
+                .semantics {
+                    contentDescription =
+                        (if (expanded) "Masquer les détails de " else "Détails de ") +
+                            line.title.orEmpty()
+                },
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                if (expanded) "Masquer les détails" else "Détails",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        if (expanded)
+            line.details.forEach { detail ->
+                Row {
+                    Text("•  ", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        detail,
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
     }
 }
 
@@ -1130,75 +1356,105 @@ private fun ReviewDialog(
         modifier = Modifier.testTag("agent-review"),
         title = { Text("Vérifier avant d’enregistrer") },
         text = {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                review.lines.forEach { line ->
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        when (line.kind) {
-                            ReviewKind.Power -> PowerChip(line.kind.label)
-                            ReviewKind.Access ->
-                                ToneChip(PluginBadge(line.kind.label, PluginTone.OK))
-                            ReviewKind.Reduction ->
-                                ToneChip(PluginBadge(line.kind.label, PluginTone.WARNING))
-                            ReviewKind.Audience ->
-                                ToneChip(PluginBadge(line.kind.label, PluginTone.ATTENTION))
-                        }
+            val audience = review.lines.filter { it.kind == ReviewKind.Audience }
+            val changes = review.lines.filter { it.kind != ReviewKind.Audience }
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Toute personne pouvant utiliser cet agent peut exercer ses permissions à travers lui. Vérifiez ces modifications pour toutes ces personnes.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // Who the new rights reach stays visible above the scrolling changes.
+                audience.forEach { line ->
+                    Column(
+                        Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surface)
+                            .border(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant,
+                                RoundedCornerShape(12.dp),
+                            )
+                            .padding(12.dp)
+                            .testTag("agent-review-audience"),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        ToneChip(PluginBadge(line.kind.label, PluginTone.ATTENTION))
                         Text(line.text, style = MaterialTheme.typography.bodyMedium)
                     }
                 }
-                review.delegations.forEach { delegation ->
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        ToneChip(PluginBadge("Effet externe", PluginTone.ATTENTION))
-                        if (delegation.blocked != null) {
-                            Text(
-                                "Impossible de réapprouver « ${delegation.name} » : ${delegation.blocked}",
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            Text(
-                                "Ce bot sera suspendu jusqu’à sa reconfirmation sur l’instance.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                            )
-                        } else {
-                            val checked = delegation.id in reapprove
-                            Row(
-                                Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
-                                    value = checked,
-                                    role = Role.Checkbox,
-                                    enabled = !saving,
-                                ) {
-                                    toggle(delegation.id, it)
-                                },
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Checkbox(checked, null)
-                                Spacer(Modifier.width(8.dp))
+                Column(
+                    Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    changes.forEachIndexed { index, line ->
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            when (line.kind) {
+                                ReviewKind.Power -> PowerChip(line.kind.label)
+                                ReviewKind.Access ->
+                                    ToneChip(PluginBadge(line.kind.label, PluginTone.OK))
+                                ReviewKind.Reduction ->
+                                    ToneChip(PluginBadge(line.kind.label, PluginTone.WARNING))
+                                ReviewKind.Audience ->
+                                    ToneChip(PluginBadge(line.kind.label, PluginTone.ATTENTION))
+                            }
+                            if (line.title == null)
+                                Text(line.text, style = MaterialTheme.typography.bodyMedium)
+                            else StructuredReviewLine(line, index)
+                        }
+                    }
+                    review.delegations.forEach { delegation ->
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            ToneChip(PluginBadge("Effet externe", PluginTone.ATTENTION))
+                            if (delegation.blocked != null) {
                                 Text(
-                                    "Réapprouver les nouveaux accès pour « ${delegation.name} »",
+                                    "Impossible de réapprouver « ${delegation.name} » : ${delegation.blocked}",
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
-                            }
-                            if (delegation.alreadySuspended)
-                                Text(
-                                    "Déjà suspendu par une modification précédente. Ne le réapprouvez qu’après avoir vérifié ses accès actuels.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            if (!checked)
                                 Text(
                                     "Ce bot sera suspendu jusqu’à sa reconfirmation sur l’instance.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.error,
                                 )
+                            } else {
+                                val checked = delegation.id in reapprove
+                                Row(
+                                    Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
+                                        value = checked,
+                                        role = Role.Checkbox,
+                                        enabled = !saving,
+                                    ) {
+                                        toggle(delegation.id, it)
+                                    },
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Checkbox(checked, null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        "Réapprouver les nouveaux accès pour « ${delegation.name} »",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                }
+                                if (delegation.alreadySuspended)
+                                    Text(
+                                        "Déjà suspendu par une modification précédente. Ne le réapprouvez qu’après avoir vérifié ses accès actuels.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                if (!checked)
+                                    Text(
+                                        "Ce bot sera suspendu jusqu’à sa reconfirmation sur l’instance.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                            }
                         }
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = confirm, enabled = !saving) { Text("Enregistrer") }
+            Button(onClick = confirm, enabled = !saving) { Text("Enregistrer") }
         },
         dismissButton = {
             TextButton(onClick = dismiss, enabled = !saving) { Text("Revenir") }
@@ -1607,174 +1863,6 @@ private fun SwitchRow(
                 else SwitchDefaults.colors(),
         )
     }
-}
-
-@Composable
-private fun PluginsSection(
-    agent: Agent,
-    catalog: PluginCatalog?,
-    failed: Boolean,
-    retry: () -> Unit,
-    navigate: (String) -> Unit,
-    change: ((Agent) -> Agent) -> Unit,
-) {
-    if (catalog == null) {
-        if (!failed) {
-            LinearProgressIndicator(Modifier.fillMaxWidth())
-            return
-        }
-        // Grants are kept as they are: nothing can be checked, granted or removed until it loads.
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "Impossible de charger les plugins. Leurs accès ne peuvent pas être modifiés pour l’instant.",
-                Modifier.weight(1f),
-                color = MaterialTheme.colorScheme.error,
-            )
-            TextButton(onClick = retry) { Text("Réessayer") }
-        }
-        if (agent.plugins.isNotEmpty()) {
-            Note(
-                if (agent.plugins.size == 1) "1 instance accordée :"
-                else "${agent.plugins.size} instances accordées :"
-            )
-            agent.plugins.forEach { Text(it, style = MaterialTheme.typography.bodyMedium) }
-        }
-        return
-    }
-    val granted = agent.plugins
-    val groups = catalog.agentGrantable()
-    // Held grants whose package no longer gives agents anything: kept, but shown to be removed.
-    val unavailable = catalog.unavailableGrants(granted)
-    if (groups.isEmpty())
-        Empty(
-            "Aucun plugin ne donne d’accès aux agents",
-            "Ajoutez un compte de service 1Password ou une instance de plugin pour l’accorder ici.",
-        )
-    groups.forEach { (entry, connections) ->
-        val onePassword = entry.id == "onepassword"
-        Panel {
-            Text(
-                if (onePassword) "${entry.name} · comptes de service" else entry.name,
-                Modifier.semantics { heading() },
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Note(
-                if (onePassword) "Aucun accès par défaut, Main compris"
-                else
-                    entry.manifest?.agentAccess?.description?.ifBlank { null }
-                        ?: "Outils, commandes et instructions apportés par chaque instance"
-            )
-            connections.forEach { connection ->
-                val on = connection.id in granted
-                val failed = connection.status.state in setOf("error", "failed")
-                Column {
-                    SwitchRow(
-                        connection.name,
-                        when {
-                            on && !connection.enabled ->
-                                "L’accès est conservé, mais l’agent ne peut rien utiliser tant que ${if (onePassword) "le compte" else "l’instance"} reste désactivé${if (onePassword) "" else "e"}."
-                            !connection.enabled ->
-                                "Non accordé · désactivé${if (onePassword) "" else "e"}"
-                            on -> "Accordé"
-                            else -> "Non accordé"
-                        },
-                        on,
-                        enabled = true,
-                        description = "Accès à ${connection.name}",
-                    ) { allowed ->
-                        change {
-                            it.copy(
-                                plugins =
-                                    if (allowed) (it.plugins + connection.id).distinct()
-                                    else it.plugins - connection.id
-                            )
-                        }
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        ToneChip(
-                            when {
-                                !connection.enabled ->
-                                    PluginBadge(
-                                        if (onePassword) "Compte désactivé" else "Désactivée",
-                                        PluginTone.WARNING,
-                                    )
-                                failed -> PluginBadge("Test échoué", PluginTone.ATTENTION)
-                                else -> PluginBadge("Actif", PluginTone.OK)
-                            }
-                        )
-                        Spacer(Modifier.weight(1f))
-                        TextButton(onClick = { navigate("plugins/${segment(entry.id)}") }) {
-                            Text(if (onePassword) "Configurer le compte ↗" else "Configurer ↗")
-                        }
-                    }
-                }
-            }
-            if (onePassword)
-                Note(
-                    "Avec un compte accordé, l’agent peut lister les coffres, les éléments et les noms de champs, puis lire une valeur avec cairn plugin onepassword read. Il ne peut créer des éléments et modifier des champs qu’avec les comptes dont l’écriture est autorisée ; il ne supprime jamais d’élément. Ce que le compte voit et écrit se règle dans 1Password : créez un autre compte de service pour d’autres droits. Retirer l’accès bloque immédiatement les lectures suivantes ; un secret déjà lu ne peut pas être rappelé."
-                )
-            else Note("Effectif immédiatement, y compris dans les conversations en cours.")
-        }
-    }
-    unavailable.forEach { connection ->
-        val plugin = catalog.packages.find { it.id == connection.pluginId }?.name
-        Column(Modifier.fillMaxWidth().testTag("agent-plugin-unavailable-${connection.id}")) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    connection.name + (plugin?.let { " · $it" } ?: ""),
-                    Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                ToneChip(PluginBadge("Indisponible", PluginTone.ATTENTION))
-                TextButton(
-                    onClick = { change { it.copy(plugins = it.plugins - connection.id) } },
-                    modifier =
-                        Modifier.semantics {
-                            contentDescription = "Retirer ${connection.name}"
-                        },
-                ) {
-                    Text("Retirer")
-                }
-            }
-            Note(
-                "Ce plugin ne donne plus d’accès aux agents (version non approuvée, invalide ou sans accès agent). L’accès est conservé, mais ne donne rien tant qu’il ne redevient pas disponible."
-            )
-        }
-    }
-    val missing = granted.filter { id -> catalog.connections.none { it.id == id } }
-    missing.forEach { id ->
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Instance supprimée", Modifier.weight(1f))
-            ToneChip(PluginBadge("Introuvable", PluginTone.ATTENTION))
-            TextButton(onClick = { change { it.copy(plugins = it.plugins - id) } }) {
-                Text("Retirer")
-            }
-        }
-    }
-    val delegations = catalog.connections.filter { agent.id.isNotBlank() && it.agentId == agent.id }
-    if (delegations.isNotEmpty())
-        Panel {
-            Text("Délégations", style = MaterialTheme.typography.titleMedium)
-            delegations.forEach { connection ->
-                val plugin = catalog.packages.find { it.id == connection.pluginId }?.name
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Répond en tant que cet agent sur « ${connection.name} »" +
-                            (plugin?.let { " ($it)" } ?: ""),
-                        Modifier.weight(1f),
-                    )
-                    ToneChip(PluginBadge("Réglé sur l’instance", PluginTone.MUTED))
-                }
-                TextButton(onClick = { navigate("plugins/${segment(connection.pluginId)}") }) {
-                    Text("Ouvrir ↗")
-                }
-            }
-            Note(
-                "Modifier les accès de cet agent suspend ces bots jusqu’à leur reconfirmation (vous pourrez les réapprouver en enregistrant)."
-            )
-        }
-    if (groups.isEmpty() && delegations.isEmpty() && unavailable.isEmpty())
-        TextButton(onClick = { navigate("plugins") }) { Text("Ouvrir les plugins ›") }
 }
 
 private fun nodeStatus(node: ExecutionNode): PluginBadge =

@@ -82,7 +82,8 @@ test('1Password service accounts are plugin instances with private tokens, grant
 
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Review before saving' })
-  await expect(review).toContainText('Added: 1Password “Production secrets” — effective immediately, including in running conversations.')
+  await expect(review).toContainText('1Password · Production secrets')
+  await expect(review).toContainText('No access → Full access')
   await review.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toHaveCount(0)
   saved = await accounts()
@@ -118,7 +119,7 @@ test('1Password service accounts are plugin instances with private tokens, grant
   // The saved token survived an edit that left it blank.
   expect(saved[0].secretKeys).toEqual(['token'])
 
-  // The agent keeps the grant, shown as unusable while the account is disabled; revoking needs no review.
+  // The agent keeps the grant while the account is disabled; fully revoking it needs review.
   await page.goto(workspacePath(`/agents/${MAIN_AGENT_ID}?section=plugins`))
   await expect(accounts1Password.getByText('Account disabled', { exact: true })).toBeVisible()
   await page.getByRole('link', { name: 'Overview', exact: true }).click()
@@ -126,7 +127,11 @@ test('1Password service accounts are plugin instances with private tokens, grant
   await openAgentSection(page, 'Secrets & plugins')
   await accounts1Password.getByRole('switch', { name: 'Access to 1Password Production secrets' }).uncheck()
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
-  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
+  const grantReviewDialog = page.getByRole('dialog', { name: 'Review before saving' })
+  await expect(grantReviewDialog).toContainText('1Password · Production secrets')
+  await expect(grantReviewDialog).toContainText('Full access → No access')
+  await grantReviewDialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(grantReviewDialog).toHaveCount(0)
   expect((await accounts())[0].agentIds).toEqual([])
   await page.goto(workspacePath('/plugins/onepassword'))
   await expect(account.getByText('No agent can use it yet.')).toBeVisible()

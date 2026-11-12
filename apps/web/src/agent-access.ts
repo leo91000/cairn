@@ -542,8 +542,13 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
 
 export interface ReviewLine {
   kind: 'power' | 'secret' | 'reduction' | 'audience'
+  requiresReview?: boolean
   text: string
   section: SectionId
+  /** A structured change: what changed, its before → after summary and details shown on demand. */
+  title?: string
+  change?: string
+  details?: string[]
 }
 
 export interface ReviewAudience {
@@ -641,17 +646,21 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     lines.push({ kind: 'reduction', section: 'projects', text: `Removed: ${removed.join(', ')}.${consequence}` })
   else if (affected)
     lines.push({ kind: 'reduction', section: 'projects', text: `Changed access.${consequence}` })
-  if (audience && lines.some(line => line.kind === 'power' || line.kind === 'secret')) {
-    const accounts = audience.accounts.join(', ')
-    const rules = audience.hookRules.length ? audience.hookRules.join(', ') : 'none configured'
-    lines.push({
-      kind: 'audience',
-      section: 'people',
-      text: `These new rights apply to: ${accounts}. Hook rules that can use this agent: ${rules}.`,
-    })
-  }
+  if (audience && lines.some(line => line.kind === 'power' || line.kind === 'secret'))
+    lines.push(audienceReviewLine(audience))
 
   return lines
+}
+
+/** Who the new rights reach, shown after every power or secret the review lists. */
+export function audienceReviewLine(audience: ReviewAudience): ReviewLine {
+  const accounts = audience.accounts.join(', ')
+  const rules = audience.hookRules.length ? audience.hookRules.join(', ') : 'none configured'
+  return {
+    kind: 'audience',
+    section: 'people',
+    text: `These new rights apply to: ${accounts}. Hook rules that can use this agent: ${rules}.`,
+  }
 }
 
 /** A plugin delegation answering as the agent, as `POST /agents/{id}/preview` reports it. */
@@ -661,7 +670,7 @@ export type Preview = import('../../../packages/contracts/generated/typescript/A
 export function needsReview(lines: ReviewLine[], preview: Preview | null) {
   const runs = preview ? preview.runs.queued + preview.runs.running : 0
   const delegations = preview?.delegations.some(item => item.suspended && !item.alreadySuspended) ?? false
-  return lines.some(line => line.kind !== 'reduction') || runs > 0 || delegations
+  return lines.some(line => line.kind !== 'reduction' || line.requiresReview) || runs > 0 || delegations
 }
 
 export interface Issue {

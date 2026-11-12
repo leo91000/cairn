@@ -176,15 +176,10 @@ impl Db<'_> {
         Ok(())
     }
 
-    /// Legacy owner editors explicitly add full access. Only the first choice can
-    /// initialize a supplier; a revoked choice cannot be replaced by this path.
+    /// Profile plugin ids are a compatibility projection of full grants, not a
+    /// choice to provide run credentials. Only an explicit supplier edit or the
+    /// one-time legacy migration may select a credential supplier.
     pub(crate) fn sync_full_plugin_grants(&self, agent: &str, instances: &[String]) -> Result<()> {
-        let directory = self
-            .0
-            .path()
-            .and_then(|path| std::path::Path::new(path).parent())
-            .unwrap_or(std::path::Path::new(""));
-        let mut packages = BTreeMap::new();
         for instance in instances {
             self.0.execute(
                 "DELETE FROM plugin_contribution_grants WHERE agent_id=? AND instance_id=?",
@@ -192,22 +187,13 @@ impl Db<'_> {
             )?;
             let connection =
                 required(self.plugin_instance(instance)?, "Plugin instance not found")?;
-            let package_has_credentials = *packages
-                .entry(connection.plugin_id.clone())
-                .or_insert_with(|| {
-                    super::registry::upgrade_package(self, directory, &connection.plugin_id)
-                        .ok()
-                        .map(|package| package.manifest.run_credentials.is_some())
-                });
-            if let Some(has_credentials) = package_has_credentials {
-                let choice = has_credentials.then_some(instance);
-                // Even a package without credentials gets an empty choice: adding
-                // credentials in a later version must not silently select an instance.
-                self.0.execute(
-                    "INSERT INTO plugin_credential_suppliers VALUES(?,?,?) ON CONFLICT(agent_id,plugin_id) DO UPDATE SET instance_id=NULL WHERE excluded.instance_id IS NULL",
-                    params![agent, connection.plugin_id, choice],
-                )?;
-            }
+            // Persist a tombstone even when the approved package has no credentials
+            // yet, so a future package update cannot select this instance implicitly.
+            // INSERT OR IGNORE also preserves a supplier chosen through the grants API.
+            self.0.execute(
+                "INSERT OR IGNORE INTO plugin_credential_suppliers VALUES(?,?,NULL)",
+                params![agent, connection.plugin_id],
+            )?;
         }
         self.clear_ungranted_suppliers(agent)
     }
@@ -266,7 +252,7 @@ fn declared(manifest: &cairn_plugin_api::Manifest, grant: &PluginContributionGra
         Kind::ProjectSource => manifest.project_source(&grant.name).is_some(),
         Kind::SkillSource => manifest.skill_source(&grant.name).is_some(),
         Kind::RunCredentials => grant.name.is_empty() && manifest.run_credentials.is_some(),
-        Kind::Instructions => grant.name.is_empty() && !manifest.instructions.is_empty(),
+        Kind::Instructions => grant.name.is_empty() && !manifest.instructions.trim().is_empty(),
     }
 }
 
@@ -691,6 +677,33 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn instruction_grants_require_nonblank_declared_content() {
+        let manifest: cairn_plugin_api::Manifest = serde_json::from_value(json!({
+            "id": "example",
+            "name": "Example",
+            "version": "1",
+            "apiVersion": 2,
+            "capabilities": [],
+            "instructions": " \n\t"
+        }))
+        .unwrap();
+        let grant = PluginContributionGrant {
+            kind: Kind::Instructions,
+            name: String::new(),
+            resources: Vec::new(),
+        };
+
+        assert!(!declared(&manifest, &grant));
+        assert!(declared(
+            &cairn_plugin_api::Manifest {
+                instructions: "Guide".into(),
+                ..manifest
+            },
+            &grant,
+        ));
+    }
+
     #[tokio::test]
     async fn legacy_full_access_is_per_instance_and_supplier_removal_never_falls_back() {
         let root = tempfile::tempdir().unwrap();
@@ -717,6 +730,13 @@ mod tests {
                 agent.settings.plugins = vec![first.into(), second.into()];
                 db.save_agent(&agent)?;
                 let id = agent.id.to_string();
+                assert_eq!(db.plugin_credential_supplier(&id, "github")?, None);
+                db.choose_setup_credential_supplier(&id, first)?;
+                assert_eq!(
+                    db.plugin_credential_supplier(&id, "github")?.as_deref(),
+                    Some(first)
+                );
+                db.save_agent(&agent)?;
                 assert_eq!(
                     db.plugin_credential_supplier(&id, "github")?.as_deref(),
                     Some(first)

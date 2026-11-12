@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { GrantDraft } from '../plugin-grants'
 import type { PluginConnection, PluginEntry } from '../plugins'
 import { computed, ref } from 'vue'
 import { grantablePackages, instanceState } from '../agent-access'
@@ -8,8 +9,10 @@ import {
   TriangleAlert,
   X,
 } from '../icons'
+import { chooseCredentialSupplier, removeGrant } from '../plugin-grants'
 import AccessChip from './AccessChip.vue'
 import Icon from './Icon.vue'
+import PluginGrantEditor from './PluginGrantEditor.vue'
 import UiButton from './UiButton.vue'
 import UiSwitch from './UiSwitch.vue'
 
@@ -21,9 +24,12 @@ const props = defineProps<{
   connections: PluginConnection[]
   // Delegations currently stopped until their new access is reapproved.
   suspended: string[]
+  disabled: boolean
 }>()
 // Granted plugin instance ids.
-const plugins = defineModel<string[]>('plugins', { required: true })
+const grants = defineModel<GrantDraft>('grants', { required: true })
+const plugins = computed(() => grants.value.grants.map(item => item.instanceId))
+const editorRevisions = ref<Record<string, number>>({})
 const query = ref('')
 const grantable = computed(() => grantablePackages(props.packages))
 const instances = computed(() => props.connections.filter(connection => grantable.value.some(entry => entry.id === connection.pluginId)))
@@ -47,14 +53,49 @@ function packageName(pluginId: string) {
   return props.packages.find(entry => entry.id === pluginId)?.manifest?.name ?? pluginId
 }
 
-function set(id: string, on: boolean) {
-  const granted = plugins.value.filter(value => value !== id)
-  plugins.value = on ? [...granted, id] : granted
+function remove(id: string) {
+  grants.value = removeGrant(grants.value, id)
+}
+
+function toggleAccess(id: string, on: boolean) {
+  editorRevisions.value = {
+    ...editorRevisions.value,
+    [id]: (editorRevisions.value[id] ?? 0) + 1,
+  }
+  grants.value = on
+    ? {
+        ...grants.value,
+        grants: [
+          ...grants.value.grants.filter(item => item.instanceId !== id),
+          { instanceId: id, access: { type: 'full' } },
+        ],
+      }
+    : removeGrant(grants.value, id)
+}
+
+function update(next: GrantDraft, pluginId: string, instanceId: string) {
+  if (next.runCredentialInstances.includes(instanceId) && !grants.value.runCredentialInstances.includes(instanceId)) {
+    next = chooseCredentialSupplier(next, props.connections.filter(connection => connection.pluginId === pluginId).map(connection => connection.id), instanceId)
+  }
+
+  grants.value = next
+}
+
+function supplierName(pluginId: string) {
+  return props.connections.find(connection => connection.pluginId === pluginId && grants.value.runCredentialInstances.includes(connection.id))?.name ?? ''
 }
 </script>
 
 <template>
-  <div class="grid min-w-0 gap-5">
+  <fieldset
+    :disabled="disabled"
+    :inert="disabled"
+    :aria-busy="disabled"
+    class="grid min-w-0 gap-5 border-0 p-0 m-0"
+  >
+    <legend class="sr-only">
+      Agent plugin permissions
+    </legend>
     <label v-if="searchable" class="search-field flex min-w-0 flex-row items-center gap-[7px] rounded-[7px] border border-line bg-raised px-2.5 py-0 text-subtle"><Icon :name="Search" :size="16" /><input
       v-model="query"
       type="search"
@@ -77,12 +118,8 @@ function set(id: string, on: boolean) {
         </p>
       </header>
       <ul v-if="rows.length" class="divide-y divide-line">
-        <li v-for="connection in rows" :key="connection.id" class="flex min-w-0 items-center gap-3 px-5 py-3 phone:flex-wrap phone:px-4">
-          <UiSwitch
-            :model-value="plugins.includes(connection.id)"
-            :label="`Access to ${packageName(connection.pluginId)} ${connection.name}`"
-            @update:model-value="set(connection.id, $event)"
-          />
+        <li v-for="connection in rows" :key="connection.id" class="flex min-w-0 flex-wrap items-center gap-3 px-5 py-3 phone:px-4">
+          <UiSwitch :model-value="plugins.includes(connection.id)" :label="`Access to ${packageName(connection.pluginId)} ${connection.name}`" @update:model-value="toggleAccess(connection.id, $event)" />
           <div class="min-w-0 flex-1">
             <p class="flex flex-wrap items-center gap-2 text-sm">
               <span class="min-w-0 truncate font-semibold">{{ connection.name }}</span>
@@ -103,6 +140,16 @@ function set(id: string, on: boolean) {
           <RouterLink :to="`/plugins/${connection.pluginId}`" class="inline-flex min-h-11 items-center gap-1 text-xs font-medium text-accent hover:underline phone:ml-auto">
             {{ entry.id === 'onepassword' ? 'Configure account' : 'Configure' }}<Icon :name="ArrowUpRight" :size="13" />
           </RouterLink>
+          <PluginGrantEditor
+            v-if="entry.manifest"
+            :key="`${connection.id}:${editorRevisions[connection.id] ?? 0}`"
+            :model-value="grants"
+            :manifest="entry.manifest"
+            :instance-id="connection.id"
+            :instance-name="connection.name"
+            :supplier-name="supplierName(entry.id)"
+            @update:model-value="update($event, entry.id, connection.id)"
+          />
         </li>
       </ul>
       <p v-else class="px-5 py-4 text-sm text-muted phone:px-4">
@@ -136,7 +183,7 @@ function set(id: string, on: boolean) {
         </p>
       </header>
       <ul class="divide-y divide-line">
-        <li v-for="connection in unusable" :key="connection.id" class="flex min-w-0 items-center gap-3 px-5 py-3 phone:flex-wrap phone:px-4">
+        <li v-for="connection in unusable" :key="connection.id" class="flex min-w-0 flex-wrap items-center gap-3 px-5 py-3 phone:px-4">
           <div class="min-w-0 flex-1">
             <p class="flex flex-wrap items-center gap-2 text-sm">
               <span class="min-w-0 truncate font-semibold">{{ packageName(connection.pluginId) }} · {{ connection.name }}</span>
@@ -154,7 +201,7 @@ function set(id: string, on: boolean) {
           <UiButton
             size="small"
             :aria-label="`Remove access to ${packageName(connection.pluginId)} ${connection.name}`"
-            @click="set(connection.id, false)"
+            @click="remove(connection.id)"
           >
             <Icon :name="X" :size="13" />Remove
           </UiButton>
@@ -170,7 +217,7 @@ function set(id: string, on: boolean) {
       <UiButton
         size="small"
         aria-label="Remove deleted plugin instances"
-        @click="plugins = plugins.filter(id => !missing.includes(id))"
+        @click="missing.forEach(remove)"
       >
         <Icon :name="X" :size="13" />Remove
       </UiButton>
@@ -207,5 +254,5 @@ function set(id: string, on: boolean) {
         </li>
       </ul>
     </section>
-  </div>
+  </fieldset>
 </template>

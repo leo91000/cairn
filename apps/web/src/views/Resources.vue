@@ -11,12 +11,14 @@ import {
   nextTick,
   onMounted,
   ref,
+  watch,
 } from 'vue'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { createProject } from '../../../../packages/contracts/generated/createProject'
 import { deleteAgent } from '../../../../packages/contracts/generated/deleteAgent'
 import { deleteProject } from '../../../../packages/contracts/generated/deleteProject'
+import { getAgentPluginGrants } from '../../../../packages/contracts/generated/getAgentPluginGrants'
 import { importProject } from '../../../../packages/contracts/generated/importProject'
 import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import { replaceProject } from '../../../../packages/contracts/generated/replaceProject'
@@ -62,6 +64,37 @@ const props = defineProps<{
 }>()
 const isAgent = computed(() => props.kind === 'agents')
 const items = computed(() => [...state[props.kind]].sort((a, b) => Number(b.id === MAIN_AGENT_ID) - Number(a.id === MAIN_AGENT_ID)))
+const pluginGrantSummaries = ref<Record<string, 'loading' | 'selected' | 'none' | 'unavailable'>>({})
+let pluginGrantSummaryGeneration = 0
+
+async function loadPluginGrantSummaries() {
+  const generation = ++pluginGrantSummaryGeneration
+  if (!isAgent.value || state.installationRole !== 'owner') {
+    pluginGrantSummaries.value = {}
+    return
+  }
+
+  const agents = state.agents
+  pluginGrantSummaries.value = Object.fromEntries(agents.map(agent => [agent.id, 'loading']))
+  const summaries = await Promise.all(agents.map(async (agent) => {
+    try {
+      const grants = await getAgentPluginGrants(api, { agentId: agent.id })
+      return [agent.id, grants.grants.some(grant => grant.access.type === 'selected') ? 'selected' : 'none'] as const
+    }
+    catch {
+      return [agent.id, 'unavailable'] as const
+    }
+  }))
+  if (generation === pluginGrantSummaryGeneration)
+    pluginGrantSummaries.value = Object.fromEntries(summaries)
+}
+
+watch(
+  [isAgent, () => state.installationRole, () => JSON.stringify(state.agents.map(agent => [agent.id, agent.revision]))],
+  () => void loadPluginGrantSummaries(),
+  { immediate: true },
+)
+
 const taskCounts = computed(() => {
   const counts = new Map<string, number>()
   for (const task of state.tasks) {
@@ -108,6 +141,20 @@ const picked = ref('')
 
 // Plugin names for the agents' access summary and project sources; members do not see plugins.
 const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
+
+function agentAccessText(agent: Agent) {
+  const summary = accessSummary(agent, catalog.value)
+  const grantSummary = pluginGrantSummaries.value[agent.id]
+  if (!grantSummary || grantSummary === 'none')
+    return summary
+  const detail = {
+    loading: 'Plugin access loading',
+    selected: 'Selected plugin access',
+    unavailable: 'Plugin access unavailable',
+  }[grantSummary]
+  return `${summary} · ${detail}`
+}
+
 const sources = computed(() => pluginSources(catalog.value, 'projectSources'))
 const importSource = computed(() => editing.value ? undefined : sources.value.find(source => source.key === projectMode.value))
 const modes = computed(() => [
@@ -330,7 +377,7 @@ async function remove() {
         </div>
         <div v-if="'reasoning' in item" class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted">
           <span class="max-w-full truncate" :title="item.model || 'Provider default'">{{ `${codingAgents[item.provider || 'codex'].label} · ${item.model || 'Provider default'}` }}</span>
-          <span class="inline-flex min-w-0 items-center gap-1.5"><Icon :name="ShieldCheck" :size="13" class="shrink-0" /><span class="min-w-0">{{ accessSummary(item, catalog) }}</span></span>
+          <span class="inline-flex min-w-0 items-center gap-1.5"><Icon :name="ShieldCheck" :size="13" class="shrink-0" /><span class="min-w-0">{{ agentAccessText(item as Agent) }}</span></span>
         </div>
         <div v-else-if="'path' in item" class="flex shrink-0 items-center gap-5 pr-6 text-xs text-muted phone:mt-2 phone:gap-4 phone:pr-0">
           <span class="inline-flex max-w-36 items-center gap-1.5" :title="item.baseBranch"><Icon :name="GitBranch" :size="13" /><span class="truncate">{{ item.baseBranch }}</span></span>

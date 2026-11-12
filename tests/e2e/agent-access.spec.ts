@@ -696,16 +696,27 @@ test('tool choices stay visible and editable when every MCP connection is grante
 test('a held plugin grant whose package cannot give agents access is shown, counted and removable', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Ticket triager' })
+  const queueId = '11111111-1111-4111-8111-111111111111'
+  const listedAgents = await workspace.api('/api/agents')
   // The agent holds a grant on an instance whose package now waits for review.
+  await page.route(`**/api/agents/${agent.id}/plugin-grants`, async (route) => {
+    const input = route.request().method() === 'PUT' ? route.request().postDataJSON() : { grants: [{ instanceId: queueId, access: { type: 'full' } }], runCredentialInstances: [] }
+    await route.fulfill({
+      json: {
+        agentId: agent.id,
+        revision: agent.revision,
+        grants: input.grants,
+        runCredentialInstances: input.runCredentialInstances,
+      },
+    })
+  })
   await page.route('**/api/agents', async (route) => {
     if (route.request().method() !== 'GET') {
       await route.continue()
       return
     }
 
-    const response = await route.fetch()
-    const { agents } = await response.json()
-    await route.fulfill({ response, json: { agents: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) } })
+    await route.fulfill({ json: { agents: listedAgents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: [queueId] } : item) } })
   })
   await page.route('**/api/plugins', route => route.fulfill({
     json: {
@@ -724,7 +735,7 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
       }],
       capabilities: [],
       connections: [{
-        id: 'queue',
+        id: queueId,
         pluginId: 'tickets',
         name: 'Support queue',
         enabled: true,
@@ -758,96 +769,34 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
   await unavailable.getByRole('button', { name: 'Remove access to Tickets Support queue' }).click()
   await expect(unavailable).toHaveCount(0)
 
-  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
-  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
-  const body = (await saving).postDataJSON().settings
-  expect(body.plugins).toEqual([])
-  expect(body.access).not.toHaveProperty('plugins')
-})
-
-test('a GitHub account is granted like any plugin instance, and the server refuses a second one', async ({ page, workspace }) => {
-  await useRelayForHttpMocks(page)
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Release pusher' })
-  const account = (id: string, name: string) => ({
-    id,
-    pluginId: 'github',
-    name,
-    enabled: true,
-    settings: { login: name.toLowerCase() },
-    agentIds: [],
-    userIds: [],
-    people: [],
-    accessMode: 'allowlist',
-    agentId: '',
-    projectId: null,
-    maxMessagesPerHour: 0,
-    status: { state: 'ready', message: `Signed in as ${name.toLowerCase()}` },
-    usage: { hour: 0 },
-    requests: [],
-    activity: [],
-  })
-  await page.route('**/api/plugins', route => route.fulfill({
-    json: {
-      packages: [{
-        id: 'github',
-        builtin: true,
-        status: 'active',
-        active: '1.0.0',
-        manifest: {
-          id: 'github',
-          name: 'GitHub',
-          version: '1.0.0',
-          apiVersion: 2,
-          description: 'Agents push as your account.',
-          capabilities: ['http'],
-          instances: { singular: 'Account', plural: 'Accounts' },
-          agentAccess: { description: 'Grant one account per agent.' },
-          runCredentials: { git: [] },
-        },
-        versions: [],
-      }],
-      capabilities: [],
-      connections: [account('work', 'Work'), account('personal', 'Personal')],
-    },
-  }))
-  await page.route(`**/api/agents/${agent.id}/preview`, route => route.fulfill({ json: { runs: { queued: 0, running: 0 }, delegations: [] } }))
-  const refusal = 'Grant one GitHub instance per agent: its runs use that instance\'s credentials.'
-  const saves: Record<string, any>[] = []
-  await page.route(`**/api/agents/${agent.id}`, async (route) => {
-    if (route.request().method() !== 'PUT')
-      return route.continue()
-    saves.push(route.request().postDataJSON())
-    await route.fulfill({ status: 400, json: { error: refusal } })
-  })
-  await page.goto(workspacePath(`/agents/${agent.id}`))
-  await authenticateWorkspace(page)
-  await openAgentSection(page, 'Secrets & plugins')
-  await page.getByRole('switch', { name: 'Access to GitHub Work' }).check()
-  await page.getByRole('switch', { name: 'Access to GitHub Personal' }).check()
-  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
-  const review = page.getByRole('dialog', { name: 'Review before saving' })
-  await expect(review).toContainText('Added: GitHub “Work”')
-  await review.getByRole('button', { name: 'Save', exact: true }).click()
-  await expect(review).toContainText(refusal)
-  expect(saves.at(-1)!.settings.plugins).toEqual(['work', 'personal'])
-  expect(saves.at(-1)!.settings.access).not.toHaveProperty('github')
-  await review.getByRole('button', { name: 'Back to editing', exact: true }).click()
-  // The refusal stays with the plugins section, where the owner removes one account.
-  await expect(page.getByRole('alert').filter({ hasText: refusal }).first()).toBeVisible()
+  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}/plugin-grants`))
+  await saveAgent(page, true)
+  expect((await saving).postDataJSON().grants).toEqual([])
 })
 
 test('when plugins cannot be loaded, plugin access is read-only and no grant looks deleted', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Catalog reader' })
+  const heldInstance = '22222222-2222-4222-8222-222222222222'
+  const listedAgents = await workspace.api('/api/agents')
+  await page.route(`**/api/agents/${agent.id}/plugin-grants`, async (route) => {
+    const input = route.request().method() === 'PUT' ? route.request().postDataJSON() : { grants: [{ instanceId: heldInstance, access: { type: 'full' } }], runCredentialInstances: [] }
+    await route.fulfill({
+      json: {
+        agentId: agent.id,
+        revision: agent.revision,
+        grants: input.grants,
+        runCredentialInstances: input.runCredentialInstances,
+      },
+    })
+  })
   await page.route('**/api/agents', async (route) => {
     if (route.request().method() !== 'GET') {
       await route.continue()
       return
     }
 
-    const response = await route.fetch()
-    const { agents } = await response.json()
-    await route.fulfill({ response, json: { agents: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) } })
+    await route.fulfill({ json: { agents: listedAgents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: [heldInstance] } : item) } })
   })
   let catalogFails = true
   await page.route('**/api/plugins', route => catalogFails
@@ -863,7 +812,7 @@ test('when plugins cannot be loaded, plugin access is read-only and no grant loo
   await expect(failure).toContainText('Plugin host unavailable')
   await expect(page.getByRole('button', { name: 'Remove deleted plugin instances' })).toHaveCount(0)
   // The held grant stays listed, read-only.
-  await expect(failure.getByRole('list', { name: 'Held plugin access' })).toHaveText('Granted instance queue…')
+  await expect(failure.getByRole('list', { name: 'Held plugin access' })).toHaveText(`Granted instance ${heldInstance.slice(0, 8)}…`)
   await expect(failure.getByRole('button', { name: /Remove/ })).toHaveCount(0)
   // Once loaded, the grant is checked again: here its instance is really gone.
   catalogFails = false

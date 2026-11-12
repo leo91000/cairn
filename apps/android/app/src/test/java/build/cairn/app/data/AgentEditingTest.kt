@@ -38,6 +38,7 @@ class AgentEditingTest {
             storage = NodeStoragePolicy(),
             staleDisks = StaleDisks(count = 0, diskMiB = 0),
         )
+
     private val mac =
         ExecutionNode(
             id = "17ce976c-733b-5e32-9840-7888af8907c0",
@@ -750,6 +751,10 @@ class AgentEditingTest {
         )
         // With them: package names, and exclusivity only where it applies (mac cannot run it).
         assertEquals("2 projets · 2 nodes · 1Password", agentAccessSummary(granted, catalog, nodes))
+        assertEquals(
+            "2 projets · 2 nodes · 1Password · Accès plugin sélectionné",
+            agentAccessSummary(granted, catalog, nodes, selectedPluginAccess = true),
+        )
     }
 
     @Test
@@ -1273,6 +1278,41 @@ class AgentEditingTest {
         }
         grantNodeAgents(emptyList(), setOf("824f3da3-b37b-5713-9c61-06e3f54a7ff8")) { sent += it }
         assertTrue(sent.isEmpty())
+    }
+
+    @Test
+    fun structuredGrantLinesKeepTheReviewRules() {
+        val grant =
+            ReviewLine(
+                ReviewKind.Access,
+                "Grant UI · Support : Aucun accès → 1 contribution",
+                title = "Grant UI · Support",
+                change = "Aucun accès → 1 contribution",
+                details = listOf("Read messages (Outil) : toutes les ressources"),
+            )
+        val revocation =
+            ReviewLine(
+                ReviewKind.Reduction,
+                "Grant UI · Support : Accès complet → Aucun accès",
+                requiresReview = true,
+                title = "Grant UI · Support",
+                change = "Accès complet → Aucun accès",
+            )
+        val plain = ReviewLine(ReviewKind.Reduction, "Retrait : projet « SheetOM ».")
+
+        assertTrue(needsReview(listOf(grant), null))
+        assertTrue(needsReview(listOf(revocation), null))
+        assertFalse(needsReview(listOf(plain), null))
+        assertNull(plain.title)
+        assertNull(plain.change)
+        assertTrue(plain.details.isEmpty())
+        assertEquals(
+            ReviewLine(
+                ReviewKind.Audience,
+                "Ces nouveaux droits s’appliquent à : owner@example.com. Règles de hook pouvant utiliser cet agent : aucune configurée.",
+            ),
+            audienceReviewLine(AgentReviewAudience(listOf("owner@example.com"))),
+        )
     }
 
     @Test
