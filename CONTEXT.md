@@ -273,9 +273,9 @@ _Avoid_ : transport natif
 Un événement qu’un plugin déclare pouvoir émettre, avec ce qu’il transporte : par
 exemple un message écrit dans un salon Discord, avec son auteur et son fil. Cairn émet
 aussi les siens : pour les conversations rattachées à une clé (réponse prête,
-question, progression, fin) et l’Horloge. Un hook ne fait rien seul ; ce sont les règles de hook qui y
-réagissent. Le hook d’un plugin s’accorde à un agent ; ceux d’une conversation suivent
-l’accès à son agent, et l’Horloge n’exige aucun droit.
+question, progression, fin) et l’Horloge. Un hook ne fait rien seul ; ce sont les
+règles de hook qui y réagissent. Le hook d’un plugin s’accorde à un agent ; ceux d’une
+conversation suivent l’accès à son agent, et l’Horloge n’exige aucun droit.
 _Avoid_ : webhook (le mécanisme HTTP), trigger
 
 **Règle de hook** :
