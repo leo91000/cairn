@@ -45,6 +45,7 @@ pub struct Worker {
     run_preparation_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     wake: Notify,
     conversation_cleanup: Notify,
+    retirement: Notify,
     initialized: OnceCell<()>,
     maintenance: AtomicI64,
     tasks: TaskTracker,
@@ -101,6 +102,7 @@ impl Worker {
         self.tasks
             .spawn(crate::nodes::exclusive::maintain(s.clone()));
         self.tasks.spawn(clean_conversations(s.clone()));
+        self.tasks.spawn(retire_environments(s.clone()));
         self.tasks.spawn(schedule_tasks(s.clone()));
         self.tasks.spawn(self.clone().run_forever(s));
         Ok(())
@@ -128,6 +130,11 @@ impl Worker {
 
     pub fn notify_conversation_cleanup(&self) {
         self.conversation_cleanup.notify_one();
+    }
+
+    /// Wakes the retirement of expired environments, after an expiration or a stopped run.
+    pub fn notify_retirement(&self) {
+        self.retirement.notify_one();
     }
 
     /// Coalesce wakeups without losing work queued during an active scheduling pass.
@@ -202,6 +209,11 @@ async fn schedule_tasks(s: Arc<Service>) {
 /// Recovers executions and unfinished cleanup from the previous worker process.
 fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
     db.restore_chat_summaries(None)?;
+    // Earlier versions removed an expired environment before the next message
+    // and moved environments between nodes. Neither survives an update.
+    crate::environment_expiration::finish_legacy_cleaning(db)?;
+    crate::nodes::moves::abandon_legacy_moves(db)?;
+    crate::backend_migration::abandon_legacy_conversions(db)?;
     for run in db.active_run_states()? {
         let id = &run.id;
         if run.status != RunStatus::Running {
@@ -262,6 +274,32 @@ async fn clean_conversations(s: Arc<Service>) {
                 if let Err(error) = result {
                     let detail = json!({ "message": error.message });
                     audit(&s.store, "conversation.cleanup_failed", detail).await;
+                }
+            }
+        }
+    }
+}
+
+/// Detaches stopped expired environments and retires their old disks and files.
+async fn retire_environments(s: Arc<Service>) {
+    let mut timer = tokio::time::interval(Duration::from_secs(5));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = s.shutdown.cancelled() => break,
+            _ = timer.tick() => {}
+            () = s.worker.retirement.notified() => {}
+        }
+        let work = async {
+            s.detach_stopped_environments().await?;
+            s.retire_environments().await
+        };
+        tokio::select! {
+            () = s.shutdown.cancelled() => break,
+            result = work => {
+                if let Err(error) = result {
+                    let detail = json!({ "message": error.message });
+                    audit(&s.store, "environment.retirement_failed", detail).await;
                 }
             }
         }

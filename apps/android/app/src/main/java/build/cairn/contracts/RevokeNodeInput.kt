@@ -6,6 +6,7 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class RevokeNodeInput(
+    val discardWorkingFiles: Boolean = false,
     val nodeId: String,
     val releasePlacements: Boolean = false,
 ) {

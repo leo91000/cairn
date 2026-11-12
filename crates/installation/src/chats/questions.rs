@@ -92,6 +92,11 @@ pub(super) fn release(db: &Db<'_>, run_id: &str, id: Option<&str>) -> Result<()>
     release_matching(db, run_id, id, false)
 }
 
+/// Closes every open question of the run, including Cairn's own.
+pub(crate) fn close_open(db: &Db<'_>, run_id: &str) -> Result<()> {
+    release_matching(db, run_id, None, true)
+}
+
 fn release_matching(
     db: &Db<'_>,
     run_id: &str,

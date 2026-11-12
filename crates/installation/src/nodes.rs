@@ -95,10 +95,6 @@ pub(crate) fn is_project_import_request(method: &str, path: &str) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum NodeState {
-    Pausing,
-    Saving,
-    Restoring,
-    Resuming,
     Updating,
     WaitingForNode,
 }
@@ -1057,6 +1053,8 @@ struct Revocation {
     /// Return conversations fixed to or preferring this node to automatic placement,
     /// as when the machine re-enrolls under another execution backend.
     release_placements: bool,
+    /// The working environments on the node expire with it.
+    discard_working_files: bool,
 }
 
 pub(crate) async fn revoke_live(
@@ -1071,8 +1069,33 @@ pub(crate) async fn revoke_live(
     } else {
         decode(body)?
     };
+    crate::environment_expiration::require_discard(
+        request.discard_working_files,
+        crate::environment_expiration::NODE_WARNING,
+    )?;
     let node = node.to_owned();
-    s.store
+    // Executions on the node stop first; their environments are detached afterwards.
+    let hosted = {
+        let node = node.clone();
+        s.store
+            .read(move |db| crate::environment_expiration::runs_on_node(db, &node))
+            .await?
+    };
+    let mut quiet = std::collections::HashMap::new();
+    for run in &hosted {
+        let preparation = s.worker.run_preparation_lock(run).await;
+        if let Ok(guard) = preparation.try_lock_owned() {
+            quiet.insert(run.clone(), guard);
+        }
+    }
+    let active = s.worker.active.lock().await;
+    let idle = quiet
+        .keys()
+        .filter(|run| !active.contains_key(*run))
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let revoked = s
+        .store
         .transaction(move |db| {
             authorize.authorize(db)?;
             let mut record = db
@@ -1117,17 +1140,28 @@ pub(crate) async fn revoke_live(
             if request.release_placements {
                 released = release_placements(db, &node)?;
             }
+            let expired = crate::environment_expiration::expire_node_in(db, &node, &idle)?;
 
             db.audit(
                 "node.revoked",
-                &json!({ "nodeId": node, "releasedPlacements": released }),
+                &json!({ "nodeId": node, "releasedPlacements": released, "expiredEnvironments": expired }),
             )?;
             Ok(serde_json::to_value(cairn_contracts::NodeRevocation {
                 node: serde_json::from_value(public(record)?)?,
                 released_placements: released as u32,
             })?)
         })
-        .await
+        .await?;
+    for run in &hosted {
+        if let Some(cancel) = active.get(run) {
+            cancel.cancel();
+        }
+    }
+    drop(active);
+    drop(quiet);
+    s.worker.notify_retirement();
+    s.worker.notify();
+    Ok(revoked)
 }
 
 /// Clears pins and preferences naming `node`. A pinned conversation otherwise waits

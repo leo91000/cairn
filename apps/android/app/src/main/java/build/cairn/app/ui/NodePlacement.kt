@@ -33,6 +33,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
     val exclusive = run.suspendedByExclusive.takeIf { run.active }
     var expanded by remember(run.id) { mutableStateOf(false) }
     var moving by remember(run.id) { mutableStateOf(false) }
+    var confirmMove by remember(run.id) { mutableStateOf(false) }
     var loaded by remember(run.id) { mutableStateOf(false) }
     var savedMode by remember(run.id) { mutableStateOf("automatic") }
     var savedNode by remember(run.id) { mutableStateOf("") }
@@ -338,9 +339,6 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     val others = placement.nodes.filter { it.id != run.nodeId }
-    val nativeToVm =
-        run.executionBackend == "native" &&
-            others.find { it.id == destination }?.capabilities?.backend == "firecracker"
     if (moving)
         DetailSheet("Déplacer vers une autre node", { moving = false }) {
             Choice(
@@ -354,32 +352,41 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                 if (!busy) destination = it
             }
             TextButton(
-                enabled =
-                    !busy &&
-                        destination.isNotEmpty() &&
-                        (run.status in listOf("running", "succeeded") ||
-                            nativeToVm && run.status in listOf("failed", "cancelled")) &&
-                        (run.sessionId != null || run.backup?.id != null || nativeToVm) &&
-                        run.nodeState == null,
-                onClick = {
-                    request(
-                        {
-                            api.moveConversationToNode(
-                                MoveToNodeInput(runId = run.id, nodeId = destination)
-                            )
-                        },
-                        "Déplacement demandé.",
-                    )
-                },
+                enabled = !busy && destination.isNotEmpty(),
+                onClick = { confirmMove = true },
             ) {
                 Text("Déplacer maintenant")
             }
             Text(
-                "Les disques créés en VM gardent leurs fichiers et leur session entre VM et natif sans copie. Un disque créé en natif nécessite une conversion unique vers une VM : le chat attend le prochain message, une mission reprend automatiquement dans une nouvelle session avec son historique. Les commandes s’arrêtent ; les outils système dépendent de la destination.",
+                "Le changement de node fait expirer l’environnement de travail. La première admission attend la capacité sur la destination tant qu’elle reste autorisée.",
                 style = MaterialTheme.typography.bodySmall,
             )
             saved?.let { Text(it) }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        }
+    if (confirmMove)
+        Confirm(
+            title = "Changer de node ?",
+            description =
+                "Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Le tour en cours s’arrête et les questions ouvertes sont closes. Les messages en file, les attentes planifiées et les missions actives reprennent sur la destination ; sinon, la conversation attend le prochain message.",
+            busy = busy,
+            error = error,
+            dismiss = { confirmMove = false },
+        ) {
+            request(
+                {
+                    api.moveConversationToNode(
+                        MoveToNodeInput(
+                            runId = run.id,
+                            nodeId = destination,
+                            discardWorkingFiles = true,
+                        )
+                    )
+                    confirmMove = false
+                    moving = false
+                },
+                "Changement de node demandé.",
+            )
         }
 }
 

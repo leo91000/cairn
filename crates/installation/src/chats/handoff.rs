@@ -1,5 +1,6 @@
 //! Prompt text sent to a native agent session for a chat turn.
 use crate::{error::Result, store::Db, validation::text};
+use cairn_contracts::EnvironmentExpirationCause;
 #[cfg(test)]
 use cairn_contracts::EventKind;
 use rusqlite::OptionalExtension;
@@ -179,8 +180,14 @@ fn request_text(plan: &Value) -> String {
     let current = text(&plan["execution"], "text");
     let context = text(&plan["execution"], "context");
     let expiration = plan["environmentExpiredAt"].as_i64();
+    // Expirations recorded before causes existed were all due to inactivity.
+    let reason = plan["environmentExpirationCause"]
+        .as_str()
+        .and_then(EnvironmentExpirationCause::parse)
+        .unwrap_or(EnvironmentExpirationCause::Inactivity)
+        .reason();
     let notice = expiration.map_or(String::new(), |at| format!(
-        "Cairn removed this conversation's previous working environment after inactivity at Unix time {at} ms. Its files, unpushed changes, tools stored in the environment and native agent session were deleted. The conversation history, uploaded attachments and published artifacts were retained. Work since that expiration belongs to the new environment. Do not assume files or tool results from before that date still exist. Inspect the current workspace and external services before continuing. Actions already performed outside the environment (commits, messages, deployments and shared host changes) were not undone: verify them before repeating any action. Request missing inputs when necessary.\n\n"
+        "Cairn removed this conversation's previous working environment {reason} at Unix time {at} ms. Its files, unpushed changes, tools stored in the environment and native agent session were deleted. The conversation history, uploaded attachments and published artifacts were retained. Work since that expiration belongs to the new environment. Do not assume files or tool results from before that date still exist. Inspect the current workspace and external services before continuing. Actions already performed outside the environment (commits, messages, deployments and shared host changes) were not undone: verify them before repeating any action. Request missing inputs when necessary.\n\n"
     ));
     if context.is_empty() {
         return format!("{notice}{current}");
@@ -242,6 +249,28 @@ mod tests {
             assert!(prompt.contains("published artifacts were retained"));
             assert!(!prompt.contains("workspace and completed changes are preserved"));
             assert!(prompt.ends_with("Continue"));
+        }
+    }
+
+    #[test]
+    fn expired_environment_notice_states_its_cause() {
+        for (cause, reason) in [
+            ("inactivity", "after inactivity"),
+            ("node-change", "when the conversation changed node"),
+            ("node-revocation", "when its node was revoked"),
+            ("storage-migration", "during the storage migration"),
+        ] {
+            let plan = json!({
+                "environmentExpiredAt": 123,
+                "environmentExpirationCause": cause,
+                "execution": { "text": "Continue" },
+            });
+            let prompt = execution_text(&plan);
+            assert!(
+                prompt.contains(&format!("environment {reason} at Unix time 123 ms")),
+                "{prompt}"
+            );
+            assert!(!prompt.contains("after inactivity") || cause == "inactivity");
         }
     }
 

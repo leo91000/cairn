@@ -72,7 +72,12 @@ async function migrate() {
   try {
     await api(`/nodes/placement/${props.runId}/backend-migration`, {
       method: 'POST',
-      body: JSON.stringify({ nodeId: destination.value, backend: state.value.toBackend, confirm: true }),
+      body: JSON.stringify({
+        nodeId: destination.value,
+        backend: state.value.toBackend,
+        confirm: true,
+        ...(!state.value.environmentExpired && { discardWorkingFiles: true }),
+      }),
     })
     state.value.pending = true
     confirm.value = false
@@ -102,7 +107,7 @@ async function migrate() {
         The next message will create an empty environment. Conversation history and published files are retained.
       </template>
       <template v-else>
-        Execution is paused while the environment moves. You can leave this screen.
+        The previous environment expired. Waiting for the next environment to start on the destination. You can leave this screen.
       </template>
     </p>
     <template v-else>
@@ -113,7 +118,7 @@ async function migrate() {
         You can explicitly change this conversation to {{ label }}. Its current environment is kept until you confirm.
       </p>
       <p v-else>
-        The agent now uses {{ label }}. Migrate this conversation to keep its history and files.
+        The agent now uses {{ label }}. Change this conversation to continue with its history in a fresh environment.
       </p>
       <p v-if="state?.reason" class="text-warning">
         {{ state.reason }}
@@ -144,29 +149,14 @@ async function migrate() {
     <Modal v-if="confirm" title="Migrate this conversation?" @close="confirm = false">
       <div class="p-6 grid gap-4">
         <p v-if="state?.environmentExpired">
-          The previous working files were deleted after inactivity. Confirm {{ label }} for a new empty environment, keeping the same conversation, history, uploads and published artifacts.
+          The previous environment expired. Confirm {{ label }} for a new empty environment, keeping the conversation history, attachments and artifacts.
         </p>
         <p v-else>
-          Execution will stop and its files will move to {{ label }}. This keeps the same conversation and history.
+          This conversation's working files will be lost. Its history, attachments and artifacts are kept.
         </p>
-        <p v-if="state?.environmentExpired">
-          The next message starts a fresh engine session with the preserved conversation context.
-        </p>
-        <p v-else-if="state?.conversion">
-          A native-created disk needs a one-time conversion. Chats wait for the next message; missions resume automatically in a fresh engine session with their history.
-        </p>
-        <p v-else-if="!state?.environmentExpired">
-          The same disk and engine session are reused without copying files.
-        </p>
-        <p>Running commands stop. System tools and dependencies may need reinstalling on the destination.</p>
+        <p>The next environment starts on the selected node with a fresh engine session and the conversation history. It waits for capacity there while that node stays authorized.</p>
         <p v-if="!state?.environmentExpired">
-          The original environment is retained if migration fails.
-        </p>
-        <p v-if="state?.environmentExpired">
-          Your chosen node is pinned for the new environment. You can change this in the conversation's node preferences.
-        </p>
-        <p v-else>
-          The conversation's previous node preference will be cleared.
+          The current turn stops and open questions close. Queued messages, scheduled waits and active missions continue there; otherwise the conversation waits for your next message.
         </p>
         <div class="mt-4 flex justify-end gap-2">
           <UiButton :disabled="busy" @click="confirm = false">

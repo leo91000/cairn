@@ -290,6 +290,10 @@ fn conversation_view_with_run(
         lifecycle_error: chat.lifecycle_error,
         environment_state: chat.environment_state,
         environment_expired_at: chat.environment_expired_at,
+        environment_expiration_cause: serde_json::from_value(run_field(
+            "environmentExpirationCause",
+        ))
+        .unwrap_or_default(),
         environment_error: chat.environment_error,
         requested_by: chat.requested_by,
         wakeup: chat.wakeup,
@@ -699,7 +703,6 @@ fn require_sendable(
     messages: &[Message],
     id: &str,
 ) -> Result<()> {
-    crate::conversation_lifecycle::require_environment_state_ready(chat.environment_state)?;
     let undelivered = messages
         .iter()
         .filter(|message| message.status != MessageStatus::Delivered)
@@ -1219,7 +1222,6 @@ fn continue_run(
         None => return Err(Error::conflict("Run checkpoint not found")),
     };
     let provider = Provider::of_run(snapshot)?;
-    crate::conversation_lifecycle::require_environment_state_ready(chat.environment_state)?;
     let expired = chat.environment_state == Some(EnvironmentState::Expired);
     let restart_requested =
         expired || chat.session_restart_requested || checkpoint.fresh_session == Some(true);
@@ -1350,7 +1352,12 @@ fn launch_turn(
     {
         return Ok(());
     }
-    crate::conversation_lifecycle::require_environment_state_ready(chat.environment_state)?;
+    // The interrupted environment is detached once its execution has stopped.
+    if let Some(run) = &run
+        && crate::environment_expiration::pending(db, text(run, "id"))?
+    {
+        return Ok(());
+    }
     crate::coding_agent_configuration::freeze_message(db, &mut snapshot, run.as_ref(), &message)?;
     Provider::of_run(&snapshot)?
         .adapter()
@@ -1726,6 +1733,7 @@ impl Service {
     pub async fn chat_tick(&self, active: &HashSet<String>) -> Result<()> {
         self.expire_attachment_uploads().await?;
         let side_open = self.side_question_chats().await?;
+        let expiring = crate::environment_expiration::pending_runs(self).await?;
         for chat in self.store.conversations().await? {
             // Before anything holds the conversation (trash, cleaning, a pending agent
             // switch): a stopped turn's side questions fail now.
@@ -1743,7 +1751,10 @@ impl Service {
                 }
             }
             if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
-                || chat.environment_state == Some(EnvironmentState::Cleaning)
+                || chat
+                    .run_id
+                    .as_ref()
+                    .is_some_and(|run| expiring.contains(run))
             {
                 continue;
             }

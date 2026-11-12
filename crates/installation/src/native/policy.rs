@@ -274,22 +274,6 @@ pub fn allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
     allows_agent(db, run, node, &agent, Admission::Execution)
 }
 
-/// Only the fenced migration read path can substitute the saved backend for the
-/// current profile. All principal, node-owner and parent revocations still apply.
-pub(crate) fn allows_migration_source(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
-    if run["backendMigration"]["sourceReadReady"] != true {
-        return Ok(false);
-    }
-    let mut agent = db
-        .agent_snapshot(crate::nodes::run_agent(run))?
-        .unwrap_or_default();
-    agent["access"]["backend"] = "native".into();
-    agent["access"]["nodes"] = json!([node["id"]]);
-    let mut source = run.clone();
-    apply(&mut source, &run["backendMigration"]["grant"]);
-    allows_agent(db, &source, node, &agent, Admission::MigrationSource)
-}
-
 pub(crate) fn merge_plugin_grants(grant: &mut Value, previous: &Value) {
     if !previous["nativePluginGrants"].is_null() && !previous["nativePluginGrants"].is_array() {
         grant["nativeProvenanceUnknown"] = true.into();
@@ -362,7 +346,6 @@ fn authority_allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
 enum Admission {
     Execution,
     Authority,
-    MigrationSource,
 }
 
 fn allows_agent(
@@ -378,10 +361,7 @@ fn allows_agent(
         || node["nativeEnabled"] != true
         || node["revoked"] == true
         || !matches!(admission, Admission::Authority) && !crate::nodes::native_mode::applied(node)
-        // A fenced migration reads existing storage; it never launches a workload.
-        // Switching backend revokes the agent's administrator execution review.
-        || !matches!(admission, Admission::MigrationSource)
-            && !crate::nodes::native_mode::reviewed(node, agent)
+        || !crate::nodes::native_mode::reviewed(node, agent)
         || !crate::service::allowed(&policy(agent)["nodes"], text(node, "id"))
     {
         return Ok(false);
@@ -509,11 +489,6 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         .agent_snapshot(text(chat, "agentId"))?
         .unwrap_or_default();
     let run = db.run(text(chat, "runId"))?.unwrap_or_default();
-    if run["backendMigration"].is_object() {
-        return Err(Error::conflict(
-            "Wait for the backend migration to finish before directing this conversation.",
-        ));
-    }
     if !supports(&agent, text(&policy(&run["snapshot"]["agent"]), "backend"))
         && policy(&agent)["backend"] != "auto"
         && run["id"].is_string()

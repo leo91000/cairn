@@ -126,8 +126,6 @@ pub(crate) struct Accepted {
     task: Option<(String, i64)>,
     native: Vec<(&'static str, Value)>,
     stop: CancellationToken,
-    installation: bool,
-    self_migration: Mutex<Option<String>>,
 }
 
 fn revoked() -> Error {
@@ -149,55 +147,13 @@ impl Accepted {
     }
 
     pub(crate) async fn capture(s: &Service, bearer: &str) -> Result<Arc<Self>> {
-        Self::capture_scoped(s, bearer, None).await
-    }
-
-    pub(crate) async fn capture_workspace_move(
-        s: &Service,
-        bearer: &str,
-        run: &str,
-    ) -> Result<Arc<Self>> {
-        let current = crate::project_workspaces::authorize(s, bearer).await?;
-        if current["id"] != run {
-            return Err(revoked());
-        }
-        Self::capture_scoped(s, bearer, Some(run.to_owned())).await
-    }
-
-    pub(crate) fn bind_self_move(&self, run: &str, operation: &str) -> Result<()> {
-        if self.run_id != run || operation.is_empty() {
-            return Err(revoked());
-        }
-        let mut bound = self.self_migration.lock().unwrap();
-        if bound.as_ref().is_some_and(|previous| previous != operation) {
-            return Err(revoked());
-        }
-        *bound = Some(operation.to_owned());
-        Ok(())
-    }
-
-    async fn capture_scoped(
-        s: &Service,
-        bearer: &str,
-        workspace_run: Option<String>,
-    ) -> Result<Arc<Self>> {
         let bearer = bearer.to_owned();
         let job = s
             .store
             .read(move |db| {
                 // Capture only from a currently valid request, before its bearer expires.
-                let run = if workspace_run.is_some() {
-                    crate::project_workspaces::authorize_in(db, &bearer)?
-                } else {
-                    crate::installation_mcp::authorize_in(db, &bearer)?
-                };
+                let run = crate::installation_mcp::authorize_in(db, &bearer)?;
                 let run_id = text(&run, "id").to_owned();
-                if workspace_run
-                    .as_ref()
-                    .is_some_and(|expected| expected != &run_id)
-                {
-                    return Err(revoked());
-                }
                 let chat = db.conversation_for_run(&run_id)?;
                 let requester = chat
                     .as_ref()
@@ -251,8 +207,6 @@ impl Accepted {
                     task,
                     native,
                     stop: CancellationToken::new(),
-                    installation: workspace_run.is_none(),
-                    self_migration: Mutex::new(None),
                 }))
             })
             .await?;
@@ -274,19 +228,8 @@ impl Accepted {
 
     fn check(&self, db: &Db<'_>) -> Result<()> {
         let run = required(db.run(&self.run_id)?, "Initiating run removed")?;
-        let self_move = self
-            .self_migration
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|expected| {
-                run["backendMigration"]["id"] == *expected
-                    && run["backendMigration"]["selfMove"] == true
-                    && crate::backend_migration::pending(&run)
-            });
         if !run["cancelRequestedAt"].is_null()
-            || run["status"] == RunStatus::Cancelled && !self_move
-            || !self.installation && run["status"] != RunStatus::Running && !self_move
+            || run["status"] == RunStatus::Cancelled
             || !crate::installation_mcp::agent_allowed(&self.agent, &run["snapshot"]["agent"])
             || self
                 .native
@@ -300,7 +243,7 @@ impl Accepted {
             db.agent_snapshot(&self.profile.id)?,
             "Initiating agent removed",
         )?;
-        if self.installation && crate::service::policy(&self.agent)["installation"] != true
+        if crate::service::policy(&self.agent)["installation"] != true
             || !crate::installation_mcp::agent_allowed(&current, &self.agent)
         {
             return Err(revoked());

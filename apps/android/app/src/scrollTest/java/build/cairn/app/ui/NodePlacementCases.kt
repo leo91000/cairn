@@ -1284,12 +1284,20 @@ abstract class NodePlacementCases {
         val publishedDisk = mutableStateOf(false)
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
+            val moved = CopyOnWriteArrayList<JsonObject>()
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
                         val body =
                             when {
+                                path.endsWith("/move") -> {
+                                    moved +=
+                                        wireJson
+                                            .parseToJsonElement(request.body.readUtf8())
+                                            .jsonObject
+                                    """{"status":"moved"}"""
+                                }
                                 path ==
                                     "/api/installations/fixture/api/nodes/placement/00000000-0000-4000-8000-000000000095" &&
                                     request.method == "PUT" -> {
@@ -1439,11 +1447,24 @@ abstract class NodePlacementCases {
             assertEquals(JsonNull, saved[1]["selection"]?.jsonObject?.get("preferredNodeId"))
             compose.onNodeWithText("Dernière synchronisation", substring = true).assertExists()
             compose.onNodeWithText("Préférence enregistrée", substring = true).assertExists()
-            // A sessionless run needs a retained published disk before it can move.
+            // Changing node discards files; it does not require a published recovery point.
             compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
-            compose.onNodeWithText("Déplacer maintenant").performScrollTo().assertIsNotEnabled()
-            compose.runOnIdle { publishedDisk.value = true }
-            compose.onNodeWithText("Déplacer maintenant").assertIsEnabled()
+            compose.onNodeWithText("Déplacer maintenant").performScrollTo().assertIsEnabled()
+            compose.onNodeWithText("Déplacer maintenant").performClick()
+            compose
+                .onNodeWithText(
+                    "Les fichiers de travail de cette conversation seront perdus.",
+                    substring = true,
+                )
+                .assertExists()
+            assertTrue(moved.isEmpty())
+            capture("node-change-confirm")
+            compose.onNodeWithText("Annuler").performClick()
+            assertTrue(moved.isEmpty())
+            compose.onNodeWithText("Déplacer maintenant").performClick()
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) { moved.isNotEmpty() }
+            assertEquals(true, moved[0]["discardWorkingFiles"]?.jsonPrimitive?.boolean)
         }
     }
 
@@ -1549,18 +1570,16 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Migrer cette conversation…").performScrollTo().performClick()
             compose
                 .onNodeWithText(
-                    if (expired) "Le prochain message ouvre une nouvelle session"
-                    else "sans copie des fichiers",
+                    if (expired) "L’environnement précédent a expiré"
+                    else "Les fichiers de travail de cette conversation seront perdus.",
                     substring = true,
                 )
                 .assertExists()
             if (expired) {
-                compose
-                    .onNodeWithText("un nouvel environnement vide", substring = true)
-                    .assertExists()
+                compose.onNodeWithText("un environnement vide", substring = true).assertExists()
                 compose
                     .onNodeWithText(
-                        "Le fil, l’historique, les pièces jointes et les livrables sont conservés",
+                        "L’historique, les pièces jointes et les artefacts sont conservés",
                         substring = true,
                     )
                     .assertExists()
@@ -1569,7 +1588,7 @@ abstract class NodePlacementCases {
                     .assertDoesNotExist()
             }
             assertTrue(submitted.isEmpty())
-            capture("backend-migration-confirm")
+            capture(if (expired) "expired-backend-confirm" else "backend-migration-confirm")
             // The migration renders before connect() finishes refreshing the workspace, and
             // vm.perform ignores actions until then.
             compose.waitUntil(10000) { !vm.state.value.busy }
@@ -1581,6 +1600,8 @@ abstract class NodePlacementCases {
                 submitted[0]["nodeId"]?.jsonPrimitive?.content,
             )
             assertEquals(true, submitted[0]["confirm"]?.jsonPrimitive?.boolean)
+            if (expired) assertFalse("discardWorkingFiles" in submitted[0])
+            else assertEquals(true, submitted[0]["discardWorkingFiles"]?.jsonPrimitive?.boolean)
             completed.set(true)
             elapse(2000)
             compose.waitUntil(10000) {
@@ -1870,6 +1891,13 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            compose
+                .onNodeWithText(
+                    "Les fichiers de travail de cette conversation seront perdus.",
+                    substring = true,
+                )
+                .assertExists()
+            capture("node-revoke-confirm")
             compose.onNodeWithText("Confirmer").assertIsEnabled().performClick()
             compose.waitUntil(10000) {
                 compose
@@ -1889,6 +1917,14 @@ abstract class NodePlacementCases {
                     it.first ==
                         "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/revoke"
                 }
+            )
+            assertEquals(
+                true,
+                writes
+                    .first { it.first.endsWith("/revoke") }
+                    .second["discardWorkingFiles"]
+                    ?.jsonPrimitive
+                    ?.boolean,
             )
             compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
             compose.onNodeWithText("Nom de la machine").performTextInput("Nouvelle node")

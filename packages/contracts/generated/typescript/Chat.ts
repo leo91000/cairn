@@ -13,6 +13,7 @@ import type { ConversationEnvironmentState } from './ConversationEnvironmentStat
 import type { ConversationLifecycle } from './ConversationLifecycle'
 import type { ConversationRequester } from './ConversationRequester'
 import type { ConversationStatus } from './ConversationStatus'
+import type { EnvironmentExpirationCause } from './EnvironmentExpirationCause'
 import type { ExclusiveReservation } from './ExclusiveReservation'
 import type { SideQuestionUnavailable } from './SideQuestionUnavailable'
 
@@ -47,6 +48,7 @@ export interface Chat {
   lifecycleError?: string | null
   environmentState?: ConversationEnvironmentState | null
   environmentExpiredAt?: number | null
+  environmentExpirationCause?: EnvironmentExpirationCause | null
   environmentError?: string | null
   requestedBy?: ConversationRequester | null
   requester?: ChatRequester | null

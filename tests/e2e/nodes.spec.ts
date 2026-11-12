@@ -570,8 +570,11 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   const movePath = `**/nodes/placement/${detail.run.id}/move`
   await page.route(movePath, async (route) => {
     expect(route.request().postDataJSON()).not.toHaveProperty('requiredTags')
+    expect(route.request().postDataJSON().discardWorkingFiles).toBe(true)
     await route.fulfill({ json: { status: 'moving', nodeId: destinationNode.nodeId } })
   })
+  await expect(move).toContainText('This conversation\'s working files will be lost. Its history, attachments and artifacts are kept.')
+  await page.screenshot({ path: 'test-results/node-change-confirm.png' })
   await move.getByRole('button', { name: 'Move now' }).click()
   await expect(move).toHaveCount(0)
   await page.unroute(movePath)
@@ -793,6 +796,8 @@ test('native enrollment requires explicit people and native agent grants', async
   await showSection(node, 'Settings')
   await node.getByRole('button', { name: 'Revoke', exact: true }).click()
   const revoke = page.getByRole('dialog', { name: 'Revoke node', exact: true })
+  await expect(revoke).toContainText('This conversation\'s working files will be lost. Its history, attachments and artifacts are kept.')
+  await page.screenshot({ path: 'test-results/node-revoke-confirm.png' })
   await expect(revoke).toContainText('mounts=$(findmnt -rno TARGET)')
   await expect(revoke).toContainText('the command lists it and stops before deleting anything')
   await page.keyboard.press('Escape')
@@ -949,21 +954,26 @@ for (const { automatic, expired } of [{ automatic: false, expired: false }, { au
     await page.getByRole('menuitem', { name: 'Execution node', exact: true }).click()
     await page.getByRole('button', { name: 'Migrate this conversation…', exact: true }).click()
     const confirm = page.getByRole('dialog', { name: 'Migrate this conversation?', exact: true })
-    await expect(confirm).toContainText(expired ? 'fresh engine session' : 'same disk and engine session')
+    await expect(confirm).toContainText('fresh engine session')
     if (expired) {
       await expect(confirm).toContainText('new empty environment')
-      await expect(confirm).toContainText('uploads and published artifacts')
+      await expect(confirm).toContainText('attachments and artifacts')
       await expect(confirm).not.toContainText('original environment is retained')
     }
     else {
-      await expect(confirm).toContainText('original environment is retained')
+      await expect(confirm).toContainText('This conversation\'s working files will be lost. Its history, attachments and artifacts are kept.')
     }
 
     expect(requestBody).toBeUndefined()
-    await page.screenshot({ path: 'test-results/backend-migration-confirm.png' })
+    await page.screenshot({ path: `test-results/backend-migration-confirm-${expired ? 'expired' : automatic ? 'automatic' : 'fixed'}.png` })
     await confirm.getByRole('button', { name: expired ? 'Confirm backend change' : 'Stop and migrate', exact: true }).click()
     await expect(page.getByRole('status').filter({ hasText: 'Migrating to native execution' })).toBeVisible()
-    expect(requestBody).toEqual({ nodeId: 'native-fixture', backend: 'native', confirm: true })
+    expect(requestBody).toEqual({
+      nodeId: 'native-fixture',
+      backend: 'native',
+      confirm: true,
+      ...(!expired && { discardWorkingFiles: true }),
+    })
     phase = 'complete'
     await expect(page.getByRole('status').filter({ hasText: 'Execution backend changed' })).toBeVisible()
     if (automatic) {

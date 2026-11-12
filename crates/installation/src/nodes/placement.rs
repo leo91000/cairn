@@ -340,6 +340,8 @@ struct Snapshot {
     nodes: Vec<Value>,
     attempts: Vec<Attempt>,
     volumes: Vec<Value>,
+    /// Nodes that must first delete the disk of this run's expired environment.
+    retiring: Vec<String>,
 }
 
 impl Snapshot {
@@ -376,6 +378,7 @@ impl Snapshot {
             nodes,
             attempts: db.attempts()?,
             volumes: db.list("node-volumes")?,
+            retiring: crate::environment_expiration::retiring_nodes(db, text(run, "id"))?,
         })
     }
 
@@ -392,7 +395,9 @@ impl Snapshot {
         let mut best: Option<Candidate> = None;
         let mut full = Vec::new();
         for node in &self.nodes {
-            if !request.eligible(node, configured) {
+            if !request.eligible(node, configured)
+                || self.retiring.iter().any(|id| node["id"] == id.as_str())
+            {
                 continue;
             }
             let Some(resources) = request.resources_for(node) else {
@@ -441,6 +446,38 @@ fn shortage(full: &[String]) -> String {
     )
 }
 
+/// The destination of a node change binds only the first admission of the new
+/// environment, while it stays authorized and not revoked. Otherwise placement
+/// is automatic again.
+fn without_stale_target(db: &Db<'_>, run: &Value) -> Result<Option<Value>> {
+    let Some(target) = run["targetNodeId"].as_str() else {
+        return Ok(None);
+    };
+    let agent = db
+        .agent_snapshot(super::run_agent(run))?
+        .unwrap_or_default();
+    let node = db.node_boundary(target)?;
+    let authorized = node.as_ref().is_some_and(|node| {
+        node["revoked"] != true
+            && super::agent_allows(&agent, target)
+            && (!crate::native::policy::node_native(node)
+                || crate::native::policy::allows(db, run, node).unwrap_or(false))
+    });
+    if authorized {
+        return Ok(None);
+    }
+    db.update_run_placement(
+        text(run, "id"),
+        crate::nodes::run_placement::PlacementChanges {
+            target_node_id: Some(None),
+            ..Default::default()
+        },
+    )?;
+    let mut automatic = run.clone();
+    automatic["targetNodeId"] = Value::Null;
+    Ok(Some(automatic))
+}
+
 fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Result<Value> {
     // Moves deliberately supply a prospective environment. Automatic admission
     // reads the latest persisted run so stale callers cannot rebind its backend.
@@ -455,6 +492,8 @@ fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Resu
             .ok_or_else(|| Error::not_found("Conversation removed."))?;
         &persisted
     };
+    let automatic = without_stale_target(db, run)?;
+    let run = automatic.as_ref().unwrap_or(run);
     let snapshot = Snapshot::load(db, run, configured)?;
     let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
     if !request.moving
@@ -510,7 +549,6 @@ pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Attempt]
         let state = &record.state;
         if record.boundary["isolated"] != true
             || state.cancel_requested_at.is_some()
-            || record.boundary["backendMigration"].is_object()
             || attempts
                 .iter()
                 .any(|attempt| attempt.run_id == state.id && super::is_active_attempt(attempt))
@@ -564,15 +602,17 @@ pub async fn check(s: &Service, run: &Value) -> Result<()> {
     let configured = !s.config.runner_url.is_empty();
     s.store
         .transaction(move |db| {
-            let snapshot = Snapshot::load(db, &run, configured)?;
-            let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint);
+            let automatic = without_stale_target(db, &run)?;
+            let run = automatic.as_ref().unwrap_or(&run);
+            let snapshot = Snapshot::load(db, run, configured)?;
+            let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
             if !request.moving && run["moveReservation"].is_string() {
                 return Ok(Ok(()));
             }
             match snapshot.select(&request, configured) {
                 Ok(_) => Ok(Ok(())),
                 Err(error) if is_no_capacity(&error) => {
-                    request_reclamation(db, &run, configured)?;
+                    request_reclamation(db, run, configured)?;
                     Ok(Err(error))
                 }
                 Err(error) => Err(error),
@@ -715,6 +755,16 @@ fn admit(
     };
     db.save_attempt(&record)?;
     db.put("node-volumes", &volume)?;
+    if run["targetNodeId"].is_string() && !request.moving {
+        // The imposed destination applies only to this first admission.
+        db.update_run_placement(
+            request.run_id(),
+            crate::nodes::run_placement::PlacementChanges {
+                target_node_id: Some(None),
+                ..Default::default()
+            },
+        )?;
+    }
     if policy(&run["snapshot"]["agent"])["backend"] == "auto" {
         let mut snapshot = run["snapshot"].clone();
         let backend = if crate::native::policy::node_native(&best.node) {
@@ -918,6 +968,7 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         record = db.update_run_placement(
             run,
             super::run_placement::PlacementChanges {
+                target_node_id: Some(None),
                 pinned_node_id: Some(selection.pinned_node_id.map(|id| id.to_string())),
                 preferred_node_id: Some(selection.preferred_node_id.map(|id| id.to_string())),
                 ..Default::default()

@@ -29,6 +29,8 @@ data class Chat(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val environmentError: String? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val environmentExpirationCause: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val environmentExpiredAt: Long? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val environmentState: String? = null,
@@ -107,6 +109,12 @@ data class Chat(
     init {
         accountRequired?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
         require(createdAt in 0L..9007199254740991L)
+        environmentExpirationCause?.let {
+            require(
+                Regex("^(inactivity|node-change|node-revocation|storage-migration)\$")
+                    .containsMatchIn(it)
+            )
+        }
         environmentExpiredAt?.let { require(it in 0L..9007199254740991L) }
         environmentState?.let { require(Regex("^(cleaning|expired)\$").containsMatchIn(it)) }
         finishedAt?.let { require(it in 0L..9007199254740991L) }

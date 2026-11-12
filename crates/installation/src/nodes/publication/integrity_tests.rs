@@ -65,11 +65,39 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
             Ok(())
         }).await.unwrap();
 
+        if !permanently_deleted {
+            s.expire_environment(
+                &run,
+                crate::environment_expiration::Expiration::new(
+                    cairn_contracts::EnvironmentExpirationCause::Inactivity,
+                ),
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        }
         let retire = || async {
             if permanently_deleted {
-                crate::conversation_deletion::purge(&s, chat.clone()).await
-            } else {
-                crate::conversation_deletion::expire_environment(&s, chat.clone()).await
+                return crate::conversation_deletion::purge(&s, chat.clone()).await;
+            }
+            // Each attempt is due immediately; the retry delay is not under test.
+            s.store
+                .transaction(|db| {
+                    for mut retirement in db.list("environment-retirements")? {
+                        retirement["retryAfter"] = Value::Null;
+                        db.put("environment-retirements", &retirement)?;
+                    }
+                    Ok(())
+                })
+                .await?;
+            s.retire_environments().await?;
+            match s.store.list("environment-retirements").await?.first() {
+                Some(retirement) => Err(crate::error::Error::unavailable(
+                    retirement["error"]
+                        .as_str()
+                        .unwrap_or("Retirement pending."),
+                )),
+                None => Ok(()),
             }
         };
         // Even a successful disk DELETE does not prove that a detached ACK has

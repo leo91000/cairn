@@ -1076,7 +1076,8 @@ async fn expired_remote_conversation_continues_with_history_without_fencing_a_re
 }
 
 #[tokio::test]
-async fn interrupted_environment_cleanup_blocks_execution_and_retries_after_policy_is_disabled() {
+async fn interrupted_environment_retirement_accepts_messages_and_retries_after_policy_is_disabled()
+{
     let app = App::new().await;
     let mut chat = old_chat(&app, 8).await;
     let run = id();
@@ -1097,42 +1098,49 @@ async fn interrupted_environment_cleanup_blocks_execution_and_retries_after_poli
         .unwrap();
     app.service.cleanup_conversations().await.unwrap();
     let detail = app.get(&chat_path(&chat)).await.1;
-    assert_eq!(detail["environmentState"], "cleaning");
+    assert_eq!(detail["environmentState"], "expired");
+    assert_eq!(detail["environmentExpirationCause"], "inactivity");
+    assert!(detail["environmentError"].is_null());
+    app.service.retire_environments().await.unwrap();
+    let detail = app.get(&chat_path(&chat)).await.1;
     assert!(detail["environmentError"].is_string());
     assert_eq!(
         app.request(
             "POST",
             &format!("{}/messages", chat_path(&chat)),
-            json!({ "id": id(), "text": "Wait for erasure" })
+            json!({ "id": id(), "text": "Continue despite background cleanup" })
         )
         .await
         .0,
-        StatusCode::CONFLICT
+        StatusCode::OK
     );
     app.request("PUT", RETENTION, json!({ "inactivityDays": 0 }))
         .await;
+    // Repair the captured invalid worktree metadata, then retry the durable job.
     app.service
         .store
-        .update_run_boundary_fixture(&run, json!({ "workspaces": [] }))
+        .transaction(|db| {
+            for mut retirement in db.list("environment-retirements")? {
+                retirement["workspaces"] = json!([]);
+                retirement["retryAfter"] = Value::Null;
+                db.put("environment-retirements", &retirement)?;
+            }
+            Ok(())
+        })
         .await
         .unwrap();
-    let mut current = app
-        .service
-        .store
-        .conversation_boundary(text(&chat, "id"))
-        .await
-        .unwrap()
-        .unwrap();
-    current["environmentRetryAfter"] = 0.into();
-    app.service
-        .store
-        .save_conversation_boundary(current)
-        .await
-        .unwrap();
-    app.service.cleanup_conversations().await.unwrap();
+    app.service.retire_environments().await.unwrap();
     let detail = app.get(&chat_path(&chat)).await.1;
     assert_eq!(detail["environmentState"], "expired");
     assert!(detail["environmentError"].is_null());
+    assert!(
+        app.service
+            .store
+            .list("environment-retirements")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1193,6 +1201,8 @@ async fn seven_day_expiration_preserves_history_uploads_artifacts_and_public_acc
         "expired"
     );
     assert_eq!(app.get(&chat_path(&recent)).await.0, StatusCode::OK);
+    assert!(workspace.exists(), "physical cleanup is deferred");
+    app.service.retire_environments().await.unwrap();
     assert!(!workspace.exists());
     assert!(attachments.exists());
     assert!(artifact_path.exists());

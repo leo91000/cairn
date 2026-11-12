@@ -43,20 +43,6 @@ fn inactive_due(chat: &Conversation, cutoff: Option<i64>) -> bool {
             .is_some_and(|(cutoff, activity)| activity <= cutoff)
 }
 
-pub(crate) fn require_environment_state_ready(state: Option<EnvironmentState>) -> Result<()> {
-    if state == Some(EnvironmentState::Cleaning) {
-        return Err(Error::conflict(
-            "The expired environment is being removed. Retry after cleanup finishes.",
-        ));
-    }
-    Ok(())
-}
-
-/// A11's backend migration still receives the named conversation boundary.
-pub(crate) fn require_environment_ready(chat: &Value) -> Result<()> {
-    require_environment_state_ready(serde_json::from_value(chat["environmentState"].clone())?)
-}
-
 pub use cairn_contracts::ConversationLifecycle as Lifecycle;
 
 string_enum! {
@@ -462,30 +448,21 @@ fn mark_purging(db: &Db<'_>, id: &str) -> Result<Option<Conversation>> {
     Ok(Some(db.save_conversation(&current)?))
 }
 
-fn environment_cleanup_due(chat: &Conversation) -> bool {
-    chat.lifecycle == Lifecycle::Active
-        && chat.environment_state == Some(EnvironmentState::Cleaning)
-        && chat.environment_retry_after.unwrap_or(0) <= now()
-}
-
-fn mark_environment_expiring(db: &Db<'_>, id: &str) -> Result<Option<Conversation>> {
+/// Expires an inactive environment in this transaction. Its physical retirement
+/// continues in the background without blocking the next message.
+fn expire_inactive(db: &Db<'_>, id: &str) -> Result<bool> {
     let Some(mut chat) = db.conversation(id)? else {
-        return Ok(None);
+        return Ok(false);
     };
-    if environment_cleanup_due(&chat) {
-        return Ok(Some(chat));
-    }
     let cutoff = cutoff(&retention(db)?);
     if !inactive_due(&chat, cutoff) {
-        return Ok(None);
+        return Ok(false);
     }
     let run_id = chat.run_id.as_deref().unwrap_or("");
     let run = db.run(run_id)?;
     let run_busy = run.as_ref().is_some_and(|run| {
         run_is_active(Some(run))
             || run["recoveryPending"] == true
-            || run["backendMigration"].is_object()
-            || run["moveRequest"].is_object()
             || run["finishedAt"]
                 .as_i64()
                 .zip(cutoff)
@@ -493,25 +470,26 @@ fn mark_environment_expiring(db: &Db<'_>, id: &str) -> Result<Option<Conversatio
     });
     let pending = chat.wakeup.is_some()
         || db.conversation_messages(id)?.iter().any(message_is_pending)
-        || db.questions(id)?.iter().any(Question::is_open);
+        || db.questions(id)?.iter().any(Question::is_open)
+        || crate::environment_expiration::pending(db, run_id)?;
     if run_busy || pending || crate::chats::coding_agent::pending_for_run(db, run_id)? {
-        return Ok(None);
+        return Ok(false);
     }
-    chat.environment_state = Some(EnvironmentState::Cleaning);
-    chat.environment_expired_at = Some(now());
-    if let Some(run) = run {
-        db.change_run(
-            text(&run, "id"),
-            crate::runs::RunChanges {
-                resume_available: Some(false),
-                boundary: Some(json!({ "environmentState": "cleaning" })),
-                ..Default::default()
-            },
-        )?;
-        db.revoke_mcp_run(text(&run, "id"))?;
+    if run.is_none() {
+        chat.environment_state = Some(EnvironmentState::Expired);
+        chat.environment_expired_at = Some(now());
+        db.save_conversation(&chat)?;
+        return Ok(true);
     }
-    db.audit("chat.environment.expired", &json!({ "id": id }))?;
-    Ok(Some(db.save_conversation(&chat)?))
+    crate::environment_expiration::request_in(
+        db,
+        run_id,
+        &crate::environment_expiration::Expiration::new(
+            cairn_contracts::EnvironmentExpirationCause::Inactivity,
+        ),
+        false,
+    )?;
+    Ok(true)
 }
 
 impl Service {
@@ -529,9 +507,11 @@ impl Service {
             .read(|db| Ok((db.conversations()?, cutoff(&retention(db)?))))
             .await?;
         chats.sort_by_key(|chat| chat.retry_after.unwrap_or(0));
-        for chat in chats.iter().filter(|chat| {
-            purge_due(chat) || environment_cleanup_due(chat) || inactive_due(chat, cutoff)
-        }) {
+        let mut expired = false;
+        for chat in chats
+            .iter()
+            .filter(|chat| purge_due(chat) || inactive_due(chat, cutoff))
+        {
             // Preparation can create run files before execution is registered as active.
             let preparation = self
                 .worker
@@ -551,41 +531,40 @@ impl Service {
                 .store
                 .transaction(move |db| {
                     if let Some(chat) = mark_purging(db, &claim)? {
-                        return Ok(Some((chat, true)));
+                        return Ok((Some(chat), false));
                     }
-                    Ok(mark_environment_expiring(db, &claim)?.map(|chat| (chat, false)))
+                    Ok((None, expire_inactive(db, &claim)?))
                 })
                 .await?;
-            let Some((chat, deleting)) = claim else {
-                continue;
-            };
             drop(active);
-            let result = if deleting {
-                crate::conversation_deletion::purge(self, serde_json::to_value(chat)?).await
-            } else {
-                crate::conversation_deletion::expire_environment(self, serde_json::to_value(chat)?)
-                    .await
+            let chat = match claim {
+                (Some(chat), _) => chat,
+                (None, true) => {
+                    expired = true;
+                    break;
+                }
+                (None, false) => continue,
             };
-            if let Err(error) = result {
-                self.record_cleanup_failure(id, error, deleting).await?;
+            if let Err(error) =
+                crate::conversation_deletion::purge(self, serde_json::to_value(chat)?).await
+            {
+                self.record_cleanup_failure(id, error).await?;
             }
-            // One conversation per pass bounds cleanup load, including backlog.
+            // One deletion per pass bounds cleanup load, including backlog.
             break;
+        }
+        if expired {
+            self.worker.notify_retirement();
         }
         Ok(())
     }
 
-    async fn record_cleanup_failure(&self, id: String, error: Error, deleting: bool) -> Result<()> {
+    async fn record_cleanup_failure(&self, id: String, error: Error) -> Result<()> {
         self.store
             .transaction(move |db| {
                 if let Some(mut current) = db.conversation(&id)? {
-                    if deleting {
-                        current.lifecycle_error = Some(error.message);
-                        current.retry_after = Some(now() + PURGE_RETRY_MS);
-                    } else {
-                        current.environment_error = Some(error.message);
-                        current.environment_retry_after = Some(now() + PURGE_RETRY_MS);
-                    }
+                    current.lifecycle_error = Some(error.message);
+                    current.retry_after = Some(now() + PURGE_RETRY_MS);
                     db.save_conversation(&current)?;
                 }
                 Ok(())

@@ -43,7 +43,7 @@ async fn grant(
     let grant = serde_json::to_value(grant)?;
     let run_id = text(run, "id").to_owned();
     let requested = json!({
-        "nativeParentRunId": crate::backend_migration::lineage(run)["nativeParentRunId"],
+        "nativeParentRunId": run["nativeParentRunId"],
     });
     s.store
         .transaction(move |db| {
@@ -100,13 +100,7 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
 }
 
 pub(crate) async fn authorize_id(s: &Service, grant_id: &str) -> Result<Option<Value>> {
-    // Refresh the external native-policy observation before the transactional
-    // authorization. Every actual grant/run/node/agent check uses one DB view.
-    if let Some(grant) = s.store.get("node-disk-grants", grant_id).await?
-        && s.store.run(text(&grant, "runId")).await?["backendMigration"]["sourceReadReady"] == true
-    {
-        crate::native::policy::refresh(s).await?;
-    }
+    // Every actual grant/run/node/agent check uses one DB view.
     let grant_id = grant_id.to_owned();
     s.store
         .read(move |db| {
@@ -124,20 +118,8 @@ pub(crate) async fn authorize_id(s: &Service, grant_id: &str) -> Result<Option<V
 pub(crate) fn authorize_id_db(db: &crate::store::Db<'_>, grant_id: &str) -> Result<Option<Value>> {
     let grant = db.get("node-disk-grants", grant_id)?;
     let Some(grant) = grant else { return Ok(None) };
-    let mut run = crate::error::required(db.run(text(&grant, "runId"))?, "Conversation missing.")?;
-    let node = text(&grant, "nodeId");
-    if run["backendMigration"]["nodeId"] == node
-        && run["backendMigration"]["convertedBackup"].is_string()
-        && grant["backups"]
-            .as_array()
-            .is_some_and(|points| points.contains(&run["backendMigration"]["convertedBackup"]))
-    {
-        run = crate::backend_migration::candidate(&run);
-    }
-    if run["moveRequest"]["nodeId"] == node && run["moveRequest"]["backend"].is_string() {
-        run["snapshot"]["agent"]["access"]["backend"] = run["moveRequest"]["backend"].clone();
-    }
-    authorize_owner(db, &run, node)?;
+    let run = crate::error::required(db.run(text(&grant, "runId"))?, "Conversation missing.")?;
+    authorize_owner(db, &run, text(&grant, "nodeId"))?;
     Ok(Some(grant))
 }
 
@@ -150,21 +132,12 @@ pub(crate) fn authorize_owner(db: &crate::store::Db<'_>, run: &Value, node: &str
         "Agent not found.",
     )?;
     let record = crate::error::required(db.node_boundary(node)?, "Node not found.")?;
-    let source_allowed = crate::backend_migration::source_read(db, text(run, "id"), &record)?;
-    let native_allowed = source_allowed
-        || !crate::native::policy::node_native(&record)
+    let native_allowed = !crate::native::policy::node_native(&record)
         || crate::native::policy::allows(db, run, &record)?;
     let revoked = record["revoked"] == true;
-    let owner = super::owner_node(run) == node
-        || run["moveRequest"]["nodeId"] == node
-        || run["backendMigration"]["nodeId"] == node;
+    let owner = super::owner_node(run) == node;
     let cancelling = run["status"] == RunStatus::Running && !run["cancelRequestedAt"].is_null();
-    if !native_allowed
-        || revoked
-        || !owner
-        || cancelling
-        || (!source_allowed && !super::agent_allows(&agent, node))
-    {
+    if !native_allowed || revoked || !owner || cancelling || !super::agent_allows(&agent, node) {
         return Err(Error::forbidden("Disk ownership or authorization changed."));
     }
     Ok(())

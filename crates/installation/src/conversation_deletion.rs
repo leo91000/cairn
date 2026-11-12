@@ -52,6 +52,17 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
     if run.is_empty() {
         return Ok(());
     }
+    let isolated = s.store.run(run).await?["isolated"] == true;
+    disk_on(s, run, action, destination, isolated).await
+}
+
+async fn disk_on(
+    s: &Service,
+    run: &str,
+    action: &str,
+    destination: Option<&str>,
+    isolated: bool,
+) -> Result<()> {
     let base = match destination {
         Some(node) if node != crate::nodes::LOCAL_NODE_ID => format!(
             "{}/internal/execution/{node}",
@@ -61,7 +72,7 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
         None => crate::nodes::transport::url(s, run).await?,
     };
     if base.is_empty() {
-        if s.store.run(run).await?["isolated"] == true {
+        if isolated {
             return Err(Error::unavailable("The VM node is unavailable."));
         }
         return Ok(());
@@ -121,16 +132,9 @@ pub async fn discard_stale_disk(s: &Service, run: &str, node: &str, whole: bool)
     Ok(())
 }
 
-/// Irreversible conversation deletion must also release its published data when
-/// a permanently revoked machine can never acknowledge local disk erasure.
-async fn delete_disk_for_purge(s: &Service, run: &str, destination: Option<&str>) -> Result<()> {
-    if run.is_empty() {
-        return Ok(());
-    }
-    let checkpoint = crate::nodes::checkpoint(s, run).await?;
-    let node = destination
-        .or(checkpoint["nodeId"].as_str())
-        .unwrap_or(crate::nodes::LOCAL_NODE_ID);
+/// A permanently revoked machine can never acknowledge local disk erasure: its disk
+/// references are released instead.
+async fn forget_revoked_disk(s: &Service, run: &str, node: &str) -> Result<bool> {
     let revoked = node != crate::nodes::LOCAL_NODE_ID
         && s.store
             .node_boundary(node)
@@ -142,11 +146,48 @@ async fn delete_disk_for_purge(s: &Service, run: &str, destination: Option<&str>
             run,
             node,
             remote_erasure_confirmed = false,
-            "Released deleted conversation references on a permanently revoked node"
+            "Released retired disk references on a permanently revoked node"
         );
+    }
+    Ok(revoked)
+}
+
+/// Irreversible conversation deletion must also release its published data when
+/// a permanently revoked machine can never acknowledge local disk erasure.
+async fn delete_disk_for_purge(s: &Service, run: &str, destination: Option<&str>) -> Result<()> {
+    if run.is_empty() {
+        return Ok(());
+    }
+    let checkpoint = crate::nodes::checkpoint(s, run).await?;
+    let node = destination
+        .or(checkpoint["nodeId"].as_str())
+        .unwrap_or(crate::nodes::LOCAL_NODE_ID);
+    if forget_revoked_disk(s, run, node).await? {
         return Ok(());
     }
     disk(s, run, "delete", destination).await
+}
+
+/// Deletes the disk an expired environment left on `node`, once its execution is fenced.
+pub(crate) async fn delete_retired_disk(
+    s: &Service,
+    run: &str,
+    node: &str,
+    isolated: bool,
+) -> Result<()> {
+    if forget_revoked_disk(s, run, node).await? {
+        return Ok(());
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        disk_on(s, run, "delete", Some(node), isolated),
+    )
+    .await
+    .map_err(|_| {
+        Error::unavailable("The retired disk deletion will retry when its node responds.")
+    })??;
+    // A node without a VM controller confirms nothing; its references go with the disk.
+    forget_deleted_disk(s, run, node).await
 }
 
 async fn delete_disks(s: &Service, run: &str) -> Result<()> {
@@ -205,9 +246,19 @@ async fn detach_worktrees(s: &Service, chat: &Value) -> Result<()> {
     } else {
         s.store.run(run_id).await?
     };
-    let root = s.config.data_dir.join("runs").join(run_id);
     let workspaces = array(&run["workspaces"]);
     let projects = crate::service::run_projects(&run);
+    detach_retired_worktrees(s, run_id, &workspaces, &projects).await
+}
+
+/// Detaches the worktrees an environment used, from the identities captured with it.
+pub(crate) async fn detach_retired_worktrees(
+    s: &Service,
+    run_id: &str,
+    workspaces: &[Value],
+    projects: &[Value],
+) -> Result<()> {
+    let root = s.config.data_dir.join("runs").join(run_id);
     for workspace in workspaces.iter().filter(|w| w["kind"] == "worktree") {
         let target = Path::new(text(workspace, "path"));
         if !target.is_dir() {
@@ -227,12 +278,26 @@ async fn detach_worktrees(s: &Service, chat: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Removes the manager's working files of a run.
+pub(crate) async fn remove_run_files(s: &Service, run: &str) -> Result<()> {
+    if run.is_empty() {
+        return Ok(());
+    }
+    remove(&s.config.data_dir.join("runs").join(run)).await
+}
+
 async fn files(s: &Service, chat: &Value) -> Result<()> {
     let run = text(chat, "runId");
     detach_worktrees(s, chat).await?;
-    if !run.is_empty() {
-        remove(&s.config.data_dir.join("runs").join(run)).await?;
+    let run_id = run.to_owned();
+    for (workspaces, projects) in s
+        .store
+        .read(move |db| crate::environment_expiration::detached_worktrees(db, &run_id))
+        .await?
+    {
+        detach_retired_worktrees(s, run, &workspaces, &projects).await?;
     }
+    remove_run_files(s, run).await?;
     s.attachments
         .purge(
             &s.store,
@@ -273,6 +338,7 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
         ],
     )?;
     db.delete_checkpoint(run)?;
+    crate::environment_expiration::forget_in(db, run)?;
     for key in [format!("turn-speed:{run}"), format!("chat-error:{cid}")]
         .into_iter()
         .chain(crate::chat_titles::keys(cid))
@@ -307,70 +373,6 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
     crate::nodes::publication::purge(s, &run).await?;
     files(s, &chat).await?;
     s.store.transaction(move |db| forget(db, &cid, &run)).await
-}
-
-/// Retires only the disposable environment. Messages, uploads, artifacts and
-/// public artifact URLs belong to the conversation and remain available.
-pub async fn expire_environment(s: &Service, chat: Value) -> Result<()> {
-    let cid = text(&chat, "id").to_owned();
-    let run = text(&chat, "runId").to_owned();
-    if !run.is_empty() {
-        s.accounts.recover_run(s, &s.store.run(&run).await?).await?;
-        delete_disks(s, &run).await?;
-        crate::nodes::publication::expire_environment(s, &run).await?;
-        detach_worktrees(s, &chat).await?;
-        remove(&s.config.data_dir.join("runs").join(&run)).await?;
-    }
-    s.store.transaction(move |db| {
-        if !run.is_empty() {
-            let boundary = json!({
-                "environmentState": "expired",
-                "environmentExpiredAt": chat["environmentExpiredAt"],
-                // Disk deletion already fenced the old environment. Recovery
-                // must not contact its retired node before fresh placement.
-                "isolated": false,
-                "backup": null,
-                "storage": null,
-                "requiredRuntimeId": null,
-                "requiredRuntime": null,
-                "runtimeId": null,
-                "workspaces": [],
-                "restoredAt": null,
-                "contextUsage": null,
-            });
-            db.change_run(&run, crate::runs::RunChanges {
-                session_id: Some(None),
-                resume_available: Some(false),
-                workspace: Some(None),
-                workspace_cleaned_at: Some(None),
-                recovery_pending: Some(false),
-                placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                    node_id: Some(None),
-                    target_node_id: Some(None),
-                    preferred_node_id: Some(None),
-                    pinned_node_id: Some(None),
-                    node_state: Some(None),
-                    movement_error: Some(None),
-                    ..Default::default()
-                })),
-                boundary: Some(boundary),
-                ..Default::default()
-            })?;
-            crate::worker::checkpoint::RunCheckpoint {
-                completed: Some(true),
-                ..Default::default()
-            }.store_in(db, &run)?;
-            db.event(&run, &cairn_contracts::EventKind::Status,
-                "Environment removed after inactivity. Conversation history, uploads and published artifacts are retained. The next message starts a fresh environment.", None)?;
-        }
-        if let Some(mut current) = db.conversation(&cid)? {
-            current.environment_state = Some(cairn_contracts::ConversationEnvironmentState::Expired);
-            current.environment_error = None;
-            current.environment_retry_after = None;
-            db.save_conversation(&current)?;
-        }
-        Ok(())
-    }).await
 }
 
 #[cfg(test)]

@@ -43,6 +43,8 @@ impl PartialEq<ConversationLifecycle> for serde_json::Value {
 }
 
 /// Retirement of a working environment leaves its conversation and files retained.
+/// `cleaning` is only reported by installations that still remove the old environment
+/// before accepting the next message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum ConversationEnvironmentState {
@@ -63,6 +65,47 @@ impl ConversationEnvironmentState {
             "cleaning" => Some(Self::Cleaning),
             "expired" => Some(Self::Expired),
             _ => None,
+        }
+    }
+}
+
+/// Why a conversation's working environment expired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum EnvironmentExpirationCause {
+    Inactivity,
+    NodeChange,
+    NodeRevocation,
+    StorageMigration,
+}
+
+impl EnvironmentExpirationCause {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inactivity => "inactivity",
+            Self::NodeChange => "node-change",
+            Self::NodeRevocation => "node-revocation",
+            Self::StorageMigration => "storage-migration",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "inactivity" => Some(Self::Inactivity),
+            "node-change" => Some(Self::NodeChange),
+            "node-revocation" => Some(Self::NodeRevocation),
+            "storage-migration" => Some(Self::StorageMigration),
+            _ => None,
+        }
+    }
+
+    /// Completes "Environment removed …" in status events and agent warnings.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Inactivity => "after inactivity",
+            Self::NodeChange => "when the conversation changed node",
+            Self::NodeRevocation => "when its node was revoked",
+            Self::StorageMigration => "during the storage migration",
         }
     }
 }
@@ -375,6 +418,13 @@ pub struct Chat {
     #[ts(optional = nullable, type = "number | null")]
     #[schemars(range(min = 0_i64, max = 9007199254740991_i64))]
     pub environment_expired_at: Option<i64>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(inactivity|node-change|node-revocation|storage-migration)$")
+    )]
+    pub environment_expiration_cause: Option<EnvironmentExpirationCause>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub environment_error: Option<String>,

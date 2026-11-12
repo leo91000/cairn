@@ -127,10 +127,9 @@ pub struct MoveToNodeInput {
         }))
     )]
     pub required_tags: Option<Vec<String>>,
+    /// Confirms that the conversation's working files are lost by the node change.
     #[serde(default)]
-    #[schemars(range(min = 0, max = 3600))]
-    #[ts(type = "number")]
-    pub wait_seconds: u64,
+    pub discard_working_files: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -252,18 +251,16 @@ pub struct RenewExclusiveInput {
 
 impl MoveToNodeInput {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.wait_seconds > 3600
-            || self.required_tags.as_ref().is_some_and(|tags| {
-                tags.len() > 32
-                    || tags.iter().any(|tag| {
-                        tag.is_empty()
-                            || tag.len() > 40
-                            || !tag
-                                .bytes()
-                                .all(|c| c.is_ascii_alphanumeric() || b"_:./-".contains(&c))
-                    })
-            })
-        {
+        if self.required_tags.as_ref().is_some_and(|tags| {
+            tags.len() > 32
+                || tags.iter().any(|tag| {
+                    tag.is_empty()
+                        || tag.len() > 40
+                        || !tag
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b"_:./-".contains(&c))
+                })
+        }) {
             return Err("Invalid movement request.");
         }
         Ok(())

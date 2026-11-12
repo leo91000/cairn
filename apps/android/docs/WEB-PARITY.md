@@ -25,14 +25,12 @@ the Fil filter beside the title (`/`). Presentation only: no contract, MCP,
 
 ## Explicit VM/native moves (2026-11-07)
 
-Web and Android label node destinations with their backend and permit an explicit
-cross-backend move, including a first native-born conversion without an engine
-session after failure. VM-created disks retain their engine session without
-copying files. Native-born conversion explains chat next-message continuation
-and automatic mission continuation. Both apps track pending moves/conversions,
-show failures for retry and retain the expired-environment confirmation flow.
-Public MCP and the installation tool expose the same preview and confirmed
-compatibility entry point, with chatId or runId, plus ordinary move_to_node.
+Web and Android label destinations with their backend. Explicit cross-backend
+changes now expire the working environment after file-loss confirmation, as
+described in the confirmed node changes entry below. History, attachments and
+artifacts stay in the same conversation; no disk or engine session follows.
+Public MCP and the installation tool share that behavior with either chatId or
+runId for backend migration, plus ordinary move_to_node.
 
 ## Direct conversation read action in the Fil (2026-11-07)
 
@@ -691,14 +689,22 @@ visual flow or platform-specific capability is introduced. HTTP, public MCP and
 `cairn_installation` share the placement capability registry and current scopes;
 execution-scoped exclusivity still requires the owner's existing agent grant.
 
-Both apps await the existing HTTP movement result. Public MCP and
-`cairn_installation` start a caller-private movement operation, then poll
-`get_node_move_operation` in separate calls so a capacity wait can exceed the
-bounded code worker's 30 seconds. Both use the same admission, live grants and
-native provenance. `cancel_node_move_operation` cancels waiting admission;
-admitted movement retains its existing fencing/recovery. Abandoning an HTTP or
-workspace capacity wait clears its pending marker and unclaimed reservation.
-The polling models are generated in Rust/TS/Kotlin; app presentation is unchanged.
+Confirmed node changes expire the working environment on web, Android, public
+MCP, `cairn_installation` and the agent workspace. Each operation requires the
+new `discardWorkingFiles: true` confirmation while an environment exists; backend
+migration's existing `confirm: true` is separate. Web shows the English loss
+warning in its Move, migration and both revoke dialogs; Android shows « Les fichiers
+de travail de cette conversation seront perdus. L’historique, les pièces jointes et
+les artefacts sont conservés. » and adds a native `Confirm` after selecting a move
+destination. No write is sent on opening or cancelling a confirmation. Already
+expired environments select their next backend/node without that loss warning.
+Both expiration notices allow causes other than inactivity. Revocation expires
+every environment on the node; releasing placement choices remains separate.
+The first admission waits for capacity on the chosen node while authorized;
+queued messages, waits and active missions preserve their continuation. Files and
+engine sessions are never transferred across nodes. Platform difference: English
+web dialogs and French Material sheets/confirmations. Validation: node/backend
+migration HTTP/MCP tests, `nodes.spec.ts`, shared `NodePlacementCases` on JVM/device.
 
 Execution allowances use the generated ExecutionResources model in both apps,
 including native disk allowances of 0/116/120 MiB after reserves. Configured node

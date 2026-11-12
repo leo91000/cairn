@@ -258,14 +258,6 @@ pub(crate) async fn capture_for_update(s: &Service, run: &Value, node: &str) -> 
     .await
 }
 
-pub(crate) async fn capture_authorized(
-    s: &Service,
-    run: &Value,
-    authorize: crate::authorization::Authorization,
-) -> Result<Value> {
-    capture_with(s, run, CaptureProtocol::Direct, authorize).await
-}
-
 async fn capture_with(
     s: &Service,
     run: &Value,
@@ -791,41 +783,6 @@ impl Publication<'_> {
         result
     }
 
-    async fn transfer_converted(
-        &self,
-        disk: &Path,
-        manifest: &Value,
-        objects: &[shared_blocks::Object],
-    ) -> Result<u64> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        let mut file = tokio::fs::File::open(disk).await?;
-        let mut uploaded = 0;
-        for object in objects.iter().filter(|object| !object.ready) {
-            self.authorize.recheck().await?;
-            let read = diagnostic::start(Stage::ConvertedRead);
-            let block = snapshots::find_block(manifest, &object.hash)
-                .ok_or_else(|| Error::bad("Converted block missing."))?;
-            file.seek(std::io::SeekFrom::Start(block["offset"].as_u64().unwrap()))
-                .await?;
-            let mut bytes = vec![0; object.size as usize];
-            file.read_exact(&mut bytes).await?;
-            read.finish(bytes.len());
-            if !crate::storage::digest::matches(&object.hash, &bytes) {
-                return Err(Error::bad("Converted disk changed during publication."));
-            }
-            let scope = shared_blocks::key(&object.hash, &object.id);
-            self.storage
-                .upload_bytes_authorized(
-                    encrypt_block(self.s, scope.clone(), bytes).await?,
-                    &scope,
-                    &self.authorize,
-                )
-                .await?;
-            uploaded += object.size;
-        }
-        Ok(uploaded)
-    }
-
     async fn transfer_operations(
         &self,
         manifest: &Value,
@@ -1157,138 +1114,6 @@ async fn encrypt_block(s: &Service, scope: String, bytes: Vec<u8>) -> Result<Vec
         .block_codec
         .encode(s.vault.clone(), scope, bytes)
         .await
-}
-
-/// Publish a converted, offline environment without replacing the source pointer.
-/// The migration commits its checkpoint and this point together after restoration.
-#[cfg(test)]
-pub(crate) async fn converted_environment(
-    s: &Service,
-    run: &Value,
-    node: &Value,
-    disk: &Path,
-    manifest: Value,
-) -> Result<Value> {
-    converted_environment_authorized(
-        s,
-        run,
-        node,
-        disk,
-        manifest,
-        crate::authorization::Authorization::default(),
-    )
-    .await
-}
-
-pub(crate) async fn converted_environment_authorized(
-    s: &Service,
-    run: &Value,
-    node: &Value,
-    disk: &Path,
-    manifest: Value,
-    authorize: crate::authorization::Authorization,
-) -> Result<Value> {
-    let publication_attempt = id();
-    let span = tracing::info_span!(
-        target: "cairn_performance",
-        "disk_publication_attempt",
-        publication_attempt,
-        run_id = crate::performance::identity(text(run, "id")),
-        source = "converted_environment"
-    );
-    Box::pin(converted_environment_owned(
-        s,
-        run,
-        node,
-        disk,
-        manifest,
-        &publication_attempt,
-        authorize,
-    ))
-    .instrument(span)
-    .await
-}
-
-async fn converted_environment_owned(
-    s: &Service,
-    run: &Value,
-    node: &Value,
-    disk: &Path,
-    manifest: Value,
-    publication_attempt: &str,
-    authorize: crate::authorization::Authorization,
-) -> Result<Value> {
-    let run_id = text(run, "id");
-    let mut timing = Operation::new(
-        "disk_publication",
-        crate::performance::identity(run_id),
-        "queue",
-    );
-    let _operation = s.node_backup_operation.lock(run_id).await;
-    authorize.recheck().await?;
-    timing.next("prepare_upload");
-    let storage = Storage::configured(s)?;
-    let snapshot_id = id();
-    let snapshot = json!({ "manifest": manifest });
-    let publication = Publication {
-        authorize: authorize.clone(),
-        s,
-        run,
-        run_id,
-        publication_attempt,
-        attempt: "",
-        node: &node["id"],
-        storage: &storage,
-        base: "",
-        credential: "",
-        snapshot: &snapshot,
-        snapshot_id: &snapshot_id,
-        budget: budget_bytes(&settings(s).await?),
-        block_envelope: 2,
-    };
-    let directory = root(s, run_id);
-    crate::skills::private_dir(&directory.join("blocks")).await?;
-    let mut intent = publication
-        .write_intent(&directory, snapshot["manifest"].clone())
-        .await?;
-    timing.next("transfer_blocks");
-    let metrics = diagnostic::Metrics::new(publication_attempt, run_id, &snapshot_id, "manager");
-    let uploaded = publication
-        .observe_transfer(
-            &metrics,
-            &intent.objects,
-            Box::pin(publication.transfer_converted(disk, &intent.manifest, &intent.objects)),
-        )
-        .await?;
-    timing.next("publish_manifest");
-    publication.publish_manifest(&mut intent, uploaded).await?;
-    let (owner, migration, point) = (
-        run_id.to_owned(),
-        run["backendMigration"]["id"].clone(),
-        intent.value.clone(),
-    );
-    authorize.recheck().await?;
-    s.store
-        .transaction(move |db| {
-            authorize.check_local(db)?;
-            let current = db
-                .run(&owner)?
-                .ok_or_else(|| Error::not_found("Conversation removed."))?;
-            if current["backendMigration"]["id"] != migration {
-                return Err(Error::conflict(
-                    "Backend migration changed during publication.",
-                ));
-            }
-            shared_blocks::verified(db, text(&point, "id"))?;
-            db.put("node-backups", &point)?;
-            let mut migration = current["backendMigration"].clone();
-            migration["convertedBackup"] = point["id"].clone();
-            db.update_run_boundary(&owner, &json!({ "backendMigration": migration }))?;
-            Ok(())
-        })
-        .await?;
-    timing.finish();
-    Ok(intent.value)
 }
 
 /// Blocks of this run's earlier publications, by hash, with the point that holds them.
@@ -2143,6 +1968,25 @@ pub(crate) fn storage_for(s: &Service, backup: &Value) -> Result<Storage> {
         .ok_or_else(|| Error::bad("Invalid backup bucket."))?
         .into();
     Ok(storage)
+}
+
+/// The run's current verified recovery point, if its manifest is still readable.
+pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
+    let _operation = s.node_backup_operation.lock(run).await;
+    let current = s.store.run(run).await?;
+    let Some(head) = current["backup"]["id"].as_str() else {
+        return Ok(None);
+    };
+    let point =
+        s.store.get("node-backups", head).await?.filter(|point| {
+            point["runId"] == run && point["sessionId"].is_string() && in_s3(point)
+        });
+    // Publication already verified every immutable dependency. Demand reads
+    // verify blocks again, so only the current manifest needs validation.
+    match point {
+        Some(point) if manifest(s, &point).await.is_ok() => Ok(Some(point)),
+        _ => Ok(None),
+    }
 }
 
 /// Retire a conversation's recovery references and durably queue remote reclamation.

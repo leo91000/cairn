@@ -41,8 +41,7 @@ destination. Before changing anything it refuses:
   for it to finish and retry; a merge never cancels work.
 - A destination missing its own administrator review for a native node granted to
   the source. Reviews remain tied to their identity and are never transferred.
-- An active backend conversion, including its stopped source while destination
-  capacity is pending. A failed or interrupted conversion does not block a merge.
+- An active execution being interrupted for environment expiration.
 - A destination that does not already cover the source's access, node selection,
   plugin grants (including GitHub credentials) and exclusive node grants. Grant
   access explicitly first.

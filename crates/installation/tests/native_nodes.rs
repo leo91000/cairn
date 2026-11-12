@@ -4073,7 +4073,7 @@ async fn native_mode_confirmation_covers_incoming_moves_and_reservations() {
 }
 
 #[tokio::test]
-async fn native_mode_transition_keeps_automatic_recovery_and_capacity_moves_on_the_source() {
+async fn native_mode_transition_and_unavailability_keep_the_environment_on_its_source() {
     use cairn_installation::nodes::{moves, snapshots};
 
     let f = Fixture::new().await;
@@ -4122,7 +4122,12 @@ async fn native_mode_transition_keeps_automatic_recovery_and_capacity_moves_on_t
         )
         .await
         .unwrap();
-    assert!(moves::latest(&f.service, &run_id).await.unwrap().is_some());
+    assert!(
+        cairn_installation::nodes::publication::latest(&f.service, &run_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
     let mut node = f.node.clone();
     let generation = id();
     node["capabilities"]["nativeModeProtocol"] = 1.into();
@@ -4138,8 +4143,7 @@ async fn native_mode_transition_keeps_automatic_recovery_and_capacity_moves_on_t
             .put_node_fixture(node.clone())
             .await
             .unwrap();
-        assert!(!moves::advance(&f.service, &run).await.unwrap());
-        assert!(!moves::queue_capacity_move(&f.service, &run).await.unwrap());
+        assert!(!moves::node_ready(&f.service, &run).await.unwrap());
         assert!(f.service.store.run(&run_id).await.unwrap()["moveRequest"].is_null());
         assert!(f.service.store.attempts_fixture().await.unwrap().is_empty());
         assert_eq!(
@@ -4161,15 +4165,23 @@ async fn native_mode_transition_keeps_automatic_recovery_and_capacity_moves_on_t
         .put_node_fixture(node.clone())
         .await
         .unwrap();
-    assert!(moves::advance(&f.service, &run).await.unwrap());
-    assert!(!moves::queue_capacity_move(&f.service, &run).await.unwrap());
-    // Genuine unavailability after confirmation retains ordinary relocation.
+    assert!(moves::node_ready(&f.service, &run).await.unwrap());
+    // Genuine unavailability after confirmation waits for the node: no relocation.
     node["executionReady"] = false.into();
     f.service.store.put_node_fixture(node).await.unwrap();
-    assert!(moves::queue_capacity_move(&f.service, &run).await.unwrap());
+    assert!(!moves::node_ready(&f.service, &run).await.unwrap());
+    let waiting = f.service.store.run(&run_id).await.unwrap();
+    assert!(waiting["moveRequest"].is_null());
+    assert_eq!(waiting["nodeState"], "waiting-for-node");
+    assert!(f.service.store.attempts_fixture().await.unwrap().is_empty());
     assert_eq!(
-        f.service.store.run(&run_id).await.unwrap()["moveRequest"]["nodeId"],
-        destination
+        f.service
+            .store
+            .checkpoint_boundary(&run_id)
+            .await
+            .unwrap()
+            .unwrap()["nodeId"],
+        source
     );
 }
 

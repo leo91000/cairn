@@ -2614,6 +2614,14 @@
         "null"
       ]
     },
+    "environmentExpirationCause": {
+      "default": null,
+      "pattern": "^(inactivity|node-change|node-revocation|storage-migration)$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "environmentExpiredAt": {
       "default": null,
       "format": "int64",

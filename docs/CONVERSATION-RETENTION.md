@@ -26,44 +26,66 @@ worker finalization protect the environment. Pausing alone does not protect it.
 The worker checks every 15 seconds and processes at most one eligible conversation
 per pass. It rechecks policy, activity and pending work atomically before claiming
 expiration, under the existing process, storage, preparation and worker locks.
-Once claimed, expiration is irreversible. `environmentState` is `cleaning` until
-physical retirement succeeds, then `expired`. Unavailable nodes/storage leave
-cleanup pending with a visible `environmentError`; retries start after one minute,
-even if future expiration is disabled. New messages are refused during cleanup.
-Manual deletion remains available during cleanup.
+Once claimed, expiration is irreversible. The conversation immediately reports
+`environmentState: "expired"` and detaches its old environment in the writer
+transaction. Older `cleaning` environments are expired idempotently on startup.
+Physical retirement continues from a durable queue and retries failures after one
+minute, even if future automatic expiration is disabled. Messages and a new node
+choice remain available. Admission waits for the previous execution to be confirmed
+stopped, or for its lease to lapse if its node is unreachable. A node must delete
+the retired disk before admitting this run's next environment on that node; other
+nodes need not wait for that disk deletion. A revoked node's disk is forgotten.
+Explicit conversation deletion retains ADR-0041 behavior.
 
 After expiration, send a new message (and resume the queue if paused) to recreate
 the environment. The same conversation and run retain their history and artifacts;
 the old checkpoint, session and disk pointers are not reused. The fresh native
 session receives the bounded visible transcript, and uploaded attachments are
 copied back into its input directory. Every subsequent agent turn carries the
-expiration date and warns that older files and unpushed changes were removed.
+expiration date and cause (inactivity, node change, node revocation or storage
+migration), and warns that older files and unpushed changes were removed.
 The agent must inspect current files and verify external effects before repeating
 actions; environment expiration does not undo commits, messages or deployments.
-Web and Android show the expiration and pending cleanup in the conversation.
+Web and Android show the expiration in the conversation.
 
-If the agent's execution backend changed after expiration, use the existing
-explicit backend migration confirmation in its execution-node details. It checks
-current management, destination and provenance grants, then selects the new backend
-without reading or converting the deleted disk. The next message creates an empty
-environment on that backend. The selected destination is pinned for fresh admission;
-its node preference can still be changed before starting. History, uploads and
-published artifacts remain; other
-reduced resource permissions still prevent continuation under the existing policy.
-The same confirmed action is available through public MCP and `cairn_installation`;
-its preview reports `environmentExpired`. Cleanup must finish before it is allowed.
+An explicit node change uses the same expiration, including VM ↔ native changes.
+The destination and current grants are checked before files are discarded. Every
+surface requires `discardWorkingFiles: true` for an existing environment, separately
+from migration's `confirm: true`. The current turn stops and open questions close.
+The first admission waits on the destination while it remains authorized and not
+revoked; otherwise placement becomes automatic. It does not permanently pin the
+conversation. A new explicit choice replaces this destination without another
+warning while the environment is expired. Queued messages and scheduled or
+conditional waits retain their continuations. Active missions without a wait
+resume automatically; a chat otherwise waits for its next message. An agent moving
+its own conversation automatically continues there with the expiration warning.
+
+For an already expired environment, placement or `migrate_chat_backend` selects the
+next node/backend without a loss warning or `discardWorkingFiles`. The migration
+preview reports `environmentExpired`. Current management, destination and native
+provenance grants still apply. No old disk is read, transferred or converted.
 
 `GET /api/settings/conversations` returns `{ "inactivityDays": 7 }` by default;
 `PUT` accepts the same shape and records an audit entry. Existing owner-only HTTP
 authorization is unchanged. Public MCP and `cairn_installation` expose
 `get_conversation_retention` (`read`) and `set_conversation_retention` (`manage`),
 with revocable installation grants rechecked at the database boundary.
-`list_chats` / `get_chat` expose `environmentState`, `environmentExpiredAt` and
-`environmentError`; normal chat and artifact tools keep their authorization.
+`list_chats` / `get_chat` expose `environmentState`, `environmentExpiredAt`,
+`environmentExpirationCause` and `environmentError`; normal chat and artifact tools keep their authorization.
 
 Remote retirement queues exact old manifest keys rather than a run-wide prefix:
 a delayed cleanup must never erase a newly created environment's publications.
 Shared immutable blocks keep their existing ownership-aware collection.
+
+Expiration metadata uses the existing `records` store: `environment-expirations`
+holds the detached environment while its interrupted worker finishes stopping;
+`environment-retirements` holds captured attempt/process/node identities, worktrees,
+projects and retry progress. No SQLite schema/version change is needed. The run
+boundary records `environmentExpirationCause` alongside `environmentExpiredAt`.
+An interrupted worker's checkpoint is retained only for fencing until it stops;
+then it is replaced by a fresh checkpoint. The queue removes manager/provider files
+and retires exact old S3 references before admission, so a delayed cleanup cannot
+erase a new environment. Node disk deletion can finish afterwards on other nodes.
 
 ## Validation
 

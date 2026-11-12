@@ -136,7 +136,12 @@ impl Worker {
         if state.cancel_requested_at.is_some() {
             let pending_id = run_id.clone();
             if s.store
-                .read(move |db| crate::chats::coding_agent::pending_for_run(db, &pending_id))
+                .read(move |db| {
+                    Ok(
+                        crate::chats::coding_agent::pending_for_run(db, &pending_id)?
+                            || crate::environment_expiration::pending(db, &pending_id)?,
+                    )
+                })
                 .await?
             {
                 return Ok(());
@@ -223,11 +228,7 @@ impl Worker {
             if let Err(error) = crate::nodes::placement::check(s, &current).await
                 && error.is_unavailable()
             {
-                if crate::nodes::placement::is_no_capacity(&error)
-                    && crate::nodes::moves::queue_capacity_move(s, &current).await?
-                {
-                    return Ok(());
-                }
+                // A full, offline or maintained node keeps its environment: it waits.
                 return report_capacity_wait(s, &s.store.run_state(&run_id).await?, &error.message)
                     .await;
             }
@@ -271,6 +272,7 @@ impl Worker {
             .await;
             worker.active.lock().await.remove(&run_id);
             worker.notify();
+            worker.notify_retirement();
         });
         timing.finish();
         Ok(())
@@ -318,9 +320,10 @@ fn eligible_run(db: &Db<'_>, id: &str) -> Result<bool> {
     let Some(record) = db.run_record(id)? else {
         return Ok(false);
     };
-    if record.boundary["backendMigration"].is_object()
-        || record.state.status != RunStatus::Queued
+    // The next environment waits until the previous one is fenced and its local files retired.
+    if record.state.status != RunStatus::Queued
         || record.state.cancel_requested_at.is_some()
+        || crate::environment_expiration::admission_blocked(db, id)?
     {
         return Ok(false);
     }
@@ -536,7 +539,6 @@ fn controller_budget_exhausted(
     saved: &RunCheckpoint,
     state: &RunState,
     native_mode_interruption: bool,
-    move_requested: bool,
 ) -> bool {
     if !saved.managed() || saved.terminal_code() == Some(0) || provider_retry_paid(saved, state) {
         return false;
@@ -569,11 +571,10 @@ fn controller_budget_exhausted(
     {
         return false;
     }
-    let exception = (saved
+    let exception = saved
         .prepared()
         .is_some_and(|prepared| prepared["backend"] == "native")
-        && native_mode_interruption)
-        || move_requested;
+        && native_mode_interruption;
     if exception && saved.has_controller_recovery_reservation() {
         return false;
     }
@@ -599,49 +600,8 @@ fn recovery_cannot_replay(
             || saved.settled().is_some_and(|settled| {
                 matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
             })
-            || controller_budget_exhausted(
-                saved,
-                state,
-                run["nativeModeInterruption"].is_string(),
-                run["moveRequest"].is_object(),
-            )
+            || controller_budget_exhausted(saved, state, run["nativeModeInterruption"].is_string())
     })
-}
-
-/// An explicit transfer of a stopped environment is not permission to replay
-/// the previous turn. Preserve the request while recovery fences its source.
-pub(super) fn explicit_idle_move(
-    state: &RunState,
-    movement: Option<&crate::nodes::run_placement::MoveRequest>,
-    saved: &RunCheckpoint,
-) -> bool {
-    let Some(movement) = movement else {
-        return false;
-    };
-    if movement.idle != Some(true)
-        || movement.automatic
-        || state.status != RunStatus::Queued
-        || !state.recovery_pending
-        || state.cancel_requested_at.is_some()
-        || !saved.managed()
-    {
-        return false;
-    }
-    match movement.idle_status.unwrap_or(RunStatus::Succeeded) {
-        RunStatus::Failed | RunStatus::Cancelled => {
-            matches!(movement.backend.as_deref(), Some("native" | "firecracker"))
-        }
-        RunStatus::Succeeded => {
-            saved.completed()
-                && saved.terminal_code() == Some(0)
-                && saved.finalization_error().is_none()
-                && saved.output_error().is_none()
-                && !saved.settled().is_some_and(|settled| {
-                    matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
-                })
-        }
-        _ => false,
-    }
 }
 
 // Persist the controller's cumulative pause counter with the deadline it
@@ -871,14 +831,10 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     // requeued because its first fencing attempt failed. Placement and possible
     // disk relocation belong to admission after its wakeup.
     let cannot_replay = recovery_cannot_replay(checkpoint.as_ref(), recovery_deadline, &state, run);
-    let movement: Option<crate::nodes::run_placement::MoveRequest> =
-        serde_json::from_value(run["moveRequest"].clone())?;
-    let finished_idle_move = checkpoint
-        .as_ref()
-        .is_some_and(|saved| explicit_idle_move(&state, movement.as_ref(), saved));
     if !parked
-        && (!cannot_replay || finished_idle_move)
-        && !crate::nodes::moves::advance_for_attempt(s, run, expected_checkpoint.as_ref()).await?
+        && !cannot_replay
+        && !crate::nodes::moves::node_ready_for_attempt(s, run, expected_checkpoint.as_ref())
+            .await?
     {
         return Ok(false);
     }
@@ -930,11 +886,10 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         &current_state,
         &current_run,
     );
-    if cannot_replay_after_fence && !parked {
-        crate::nodes::moves::abort_terminal_recovery(s, run_id, expected_fenced.as_ref()).await?;
-    } else if cannot_replay
+    if cannot_replay
+        && !cannot_replay_after_fence
         && !parked
-        && !crate::nodes::moves::advance_for_attempt(s, run, expected_fenced.as_ref()).await?
+        && !crate::nodes::moves::node_ready_for_attempt(s, run, expected_fenced.as_ref()).await?
     {
         return Ok(false);
     }
@@ -1114,7 +1069,6 @@ pub(super) fn finish_recovery(
                 checkpoint,
                 current,
                 record.placement.native_mode_interruption.is_some(),
-                record.placement.move_request.is_some(),
             )
         {
             let expired = matches!(checkpoint.remaining_ms, None | Some(Some(i64::MIN..=0)));
@@ -1162,7 +1116,6 @@ pub(super) fn finish_recovery(
 /// Settles a recovering run whose cancellation was requested. One waiting for an automatic
 /// retry shows the stop in its conversation; a wait's own card already shows its cancellation.
 fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState) -> Result<()> {
-    crate::nodes::moves::release_terminal_destination_in(db, id)?;
     db.change_run(
         id,
         crate::runs::RunChanges {
@@ -1443,100 +1396,6 @@ mod tests {
         assert!(current.controller_observation.is_none());
         service.shutdown.cancel();
         server.abort();
-    }
-
-    #[tokio::test]
-    async fn terminal_recovery_releases_a_transferred_destination_reservation() {
-        let (_root, service, _chat, run, _workspace) = fixture().await;
-        let held = crate::config::id();
-        let saved =
-            RunCheckpoint::from_value(json!({"runnerId":"old-source-attempt","remainingMs":0}))
-                .unwrap();
-        saved.store(&service.store, &run).await.unwrap();
-        service
-            .store
-            .put_attempt_fixture(json!({
-                "id": held, "runId": run,
-                "nodeId": crate::nodes::LOCAL_NODE_ID, "released": false,
-            }))
-            .await
-            .unwrap();
-        service
-            .store
-            .change_run(
-                &run,
-                crate::runs::RunChanges {
-                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                        move_request: Some(None),
-                        move_reservation: Some(Some(held.clone())),
-                        node_state: Some(Some("resuming".into())),
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        crate::nodes::moves::abort_terminal_recovery(&service, &run, Some(&saved))
-            .await
-            .unwrap();
-        assert_eq!(
-            service.store.attempt_fixture(&held).await.unwrap().unwrap()["released"],
-            true
-        );
-        let current = service.store.run(&run).await.unwrap();
-        assert!(current["moveReservation"].is_null());
-        assert!(current["nodeState"].is_null());
-        for cancelled in [true, false] {
-            let held = crate::config::id();
-            service
-                .store
-                .put_attempt_fixture(json!({
-                    "id": held, "runId": run,
-                    "nodeId": crate::nodes::LOCAL_NODE_ID, "released": false,
-                }))
-                .await
-                .unwrap();
-            let cause = crate::run_retry::Cause::classify(
-                &json!({"code":"request_timeout","message":"expired"}),
-            )
-            .unwrap();
-            let retry = crate::run_retry::Retry::next(
-                None,
-                cause,
-                now() - crate::run_retry::MAX_RECOVERY_MS - 1,
-            )
-            .unwrap();
-            service
-                .store
-                .change_run(
-                    &run,
-                    crate::runs::RunChanges {
-                        status: Some(RunStatus::Queued),
-                        cancel_requested_at: Some(None),
-                        recovery_pending: Some(false),
-                        retry: Some(Some(retry)),
-                        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                            move_reservation: Some(Some(held.clone())),
-                            node_state: Some(Some("resuming".into())),
-                            ..Default::default()
-                        })),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            if cancelled {
-                service.worker.cancel(&service, &run).await.unwrap();
-            } else {
-                assert!(super::super::retry::expire(&service, &run).await.unwrap());
-            }
-            assert_eq!(
-                service.store.attempt_fixture(&held).await.unwrap().unwrap()["released"],
-                true
-            );
-            assert!(service.store.run(&run).await.unwrap()["moveReservation"].is_null());
-        }
     }
 
     /// Regression fixture: queued provider retry written by e1dac before fencing.
