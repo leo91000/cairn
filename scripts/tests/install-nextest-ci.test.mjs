@@ -192,6 +192,132 @@ describe('fixed nextest acquisition', () => {
     }
   })
 
+  it('authenticates only the pinned API request and never the signed asset request', async () => {
+    const value = fixture()
+    try {
+      const githubToken = 'fixture-private-token'
+      const records = []
+      let count = 0
+      await installNextest(value.bin, {
+        ...value,
+        githubToken,
+        report: record => records.push(record),
+        fetchAsset: async (requested, init) => {
+          if (count++ === 0) {
+            expect(requested).toBe(nextestArtifact.url)
+            expect(init.headers.Authorization).toBe(`Bearer ${githubToken}`)
+            return new Response(null, { status: 302, headers: { location: 'https://release-assets.githubusercontent.com/asset?signature=private' } })
+          }
+
+          expect(init.headers).toBeUndefined()
+          return value.fetchAsset(requested, init)
+        },
+      })
+      expect(count).toBe(2)
+      expect(JSON.stringify(records)).not.toContain(githubToken)
+    }
+    finally {
+      value.close()
+    }
+  })
+
+  it('refuses to send API authentication to an overridden acquisition target', async () => {
+    const value = fixture()
+    try {
+      await expect(installNextest(value.bin, {
+        ...value,
+        githubToken: 'fixture-private-token',
+        artifact: { ...value.artifact, url: 'https://other.example/asset' },
+      })).rejects.toThrow('CI_NEXTEST_AUTH_TARGET_REJECTED')
+      expect(value.requests).toHaveLength(0)
+      expect(value.calls).toHaveLength(0)
+    }
+    finally {
+      value.close()
+    }
+  })
+
+  it('redacts authenticated API failures without retrying or extracting', async () => {
+    const value = fixture()
+    try {
+      const githubToken = 'fixture-private-token'
+      const records = []
+      let count = 0
+      let authorization
+      await expect(installNextest(value.bin, {
+        ...value,
+        githubToken,
+        report: record => records.push(record),
+        fetchAsset: async (_requested, init) => {
+          count++
+          authorization = init.headers.Authorization
+          throw new Error(`private failure: ${githubToken}`)
+        },
+      })).rejects.toThrow('CI_NEXTEST_INSTALL_FAILED')
+      expect(count).toBe(1)
+      expect(authorization).toBe(`Bearer ${githubToken}`)
+      expect(value.calls).toHaveLength(0)
+      expect(records).toEqual([{ event: 'nextest-failure', stage: 'api', code: 'CI_NEXTEST_INSTALL_FAILED' }])
+    }
+    finally {
+      value.close()
+    }
+  })
+
+  it('removes the CLI token from the environment before acquisition or child processes', () => {
+    const value = fixture()
+    try {
+      const githubToken = 'fixture-private-token'
+      const receipt = path.join(value.directory, 'environment.json')
+      const script = fileURLToPath(new URL('../install-nextest-ci.mjs', import.meta.url))
+      const preload = `import { writeFileSync } from 'node:fs';
+        const token = process.env.GITHUB_TOKEN;
+        globalThis.fetch = async (_url, init) => {
+          writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({
+            environmentToken: Boolean(process.env.GITHUB_TOKEN),
+            authenticated: init.headers.Authorization === 'Bearer ' + token,
+          }));
+          throw new Error('fixture transport refusal');
+        };`
+      const result = spawnSync(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(preload)}`, script], {
+        encoding: 'utf8',
+        env: {
+          GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
+          RUNNER_OS: 'Linux',
+          RUNNER_ARCH: 'X64',
+          GITHUB_TOKEN: githubToken,
+          CARGO_HOME: value.directory,
+        },
+      })
+      expect(result.status).toBe(1)
+      expect(JSON.parse(readFileSync(receipt, 'utf8'))).toEqual({ environmentToken: false, authenticated: true })
+      expect(result.stdout).toBe('')
+      expect(result.stderr).not.toContain(githubToken)
+      expect(result.stderr).toContain('CI_NEXTEST_INSTALL_FAILED')
+      expect(existsSync(path.join(value.directory, 'bin'))).toBe(false)
+    }
+    finally {
+      value.close()
+    }
+  })
+
+  it('requires a step-scoped GitHub token in the hosted installation CLI', () => {
+    const script = fileURLToPath(new URL('../install-nextest-ci.mjs', import.meta.url))
+    const result = spawnSync(process.execPath, [script], {
+      encoding: 'utf8',
+      env: {
+        GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
+        RUNNER_OS: 'Linux',
+        RUNNER_ARCH: 'X64',
+      },
+    })
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr.trim()).toBe('CI_NEXTEST_REQUIRES_GITHUB_TOKEN')
+  })
+
   it('follows the official release-asset redirect within the same acquisition deadline', async () => {
     const value = fixture()
     try {

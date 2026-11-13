@@ -32,6 +32,7 @@ function discard(response) {
 
 export async function installNextest(binDirectory, {
   artifact = nextestArtifact,
+  githubToken = '',
   fetchAsset = fetch,
   createTimeoutSignal = AbortSignal.timeout,
   run = spawnSync,
@@ -69,8 +70,16 @@ export async function installNextest(binDirectory, {
 
   let response
   try {
+    // A credential can accompany only this exact immutable GitHub API request.
+    if (githubToken && artifact.url !== nextestArtifact.url)
+      fail('AUTH_TARGET_REJECTED')
+
+    const headers = { 'Accept': 'application/octet-stream', 'X-GitHub-Api-Version': '2022-11-28' }
+    if (githubToken)
+      headers.Authorization = `Bearer ${githubToken}`
+
     response = await fetchAsset(artifact.url, {
-      headers: { 'Accept': 'application/octet-stream', 'X-GitHub-Api-Version': '2022-11-28' },
+      headers,
       redirect: 'manual',
       signal,
     })
@@ -157,8 +166,14 @@ if (import.meta.main) {
       fail('REQUIRES_HOSTED_LINUX_X64')
     }
 
+    const githubToken = process.env.GITHUB_TOKEN
+    delete process.env.GITHUB_TOKEN
+    if (!githubToken)
+      fail('REQUIRES_GITHUB_TOKEN')
+
     const binDirectory = path.join(process.env.CARGO_HOME || path.join(process.env.HOME, '.cargo'), 'bin')
     console.log(JSON.stringify(await installNextest(binDirectory, {
+      githubToken,
       report: record => console.error(JSON.stringify(record)),
     })))
   }
