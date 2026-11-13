@@ -2327,6 +2327,13 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         }))
         .into_response();
     }
+    if path.starts_with("/disks/") && path.ends_with("/delete") && request.method() == "POST" {
+        let bytes = axum::body::to_bytes(request.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        return Json(json!({ "deleted":true,"retirementId":body["retirementId"] })).into_response();
+    }
     if path == "/node-budget" {
         return (StatusCode::CONFLICT, Json(json!({ "error": "Shared RAM budget is below current usage plus the controller reserve." }))).into_response();
     }
@@ -2346,6 +2353,16 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         return StatusCode::NOT_FOUND.into_response();
     }
     let attempt = path.split('/').nth(2).unwrap();
+    if (path.ends_with("/logs") || path.ends_with("/wait"))
+        && !state
+            .plans
+            .lock()
+            .await
+            .iter()
+            .any(|plan| plan["id"] == attempt)
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if path.ends_with("/logs") {
         let plans = state.plans.lock().await;
         let plan = plans.iter().find(|plan| plan["id"] == attempt).unwrap();
@@ -3561,6 +3578,190 @@ async fn a_post_expiration_protocol_failure_releases_its_reservation_and_retries
     let resumed = fixture.until_finished(&run).await;
     assert_eq!(resumed["status"], RunStatus::Succeeded, "{resumed}");
     assert_eq!(controller.plans.lock().await.len(), 2);
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_first_expired_admission_failure_preserves_its_replaceable_destination() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: AtomicBool::new(false),
+    });
+    let unavailable = Arc::new(AtomicBool::new(false));
+    let rejected = Arc::new(AtomicUsize::new(0));
+    let owner = Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let (fail, observed, target, store) = (
+        unavailable.clone(),
+        rejected.clone(),
+        owner.clone(),
+        fixture.service.store.clone(),
+    );
+    let app = Router::new()
+        .fallback(any(
+            move |state: State<Arc<Controller>>, request: Request| {
+                let (fail, observed, target, store) = (
+                    fail.clone(),
+                    observed.clone(),
+                    target.clone(),
+                    store.clone(),
+                );
+                async move {
+                    if request.uri().path() == "/health"
+                        && request.headers().contains_key("authorization")
+                        && fail.load(Ordering::SeqCst)
+                    {
+                        let run = target.lock().await.clone().unwrap();
+                        let reserved = store.attempts().await.unwrap().into_iter().any(|attempt| {
+                            attempt.run_id == run && !attempt.released && !attempt.disk_materialized
+                        });
+                        if reserved {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                    }
+                    serve_controller(state, request).await
+                }
+            },
+        ))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let s = fixture.service.clone();
+    let home = s.config.home.join(".codex");
+    tokio::fs::create_dir_all(&home).await.unwrap();
+    tokio::fs::write(home.join("auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket":"fixture-storage","endpoint":"https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    fixture.start().await;
+    let chat = fixture.start_chat(message("First healthy VM turn")).await;
+    let run = fixture.chat_run(&chat).await;
+    assert_eq!(
+        fixture.until_finished(&run).await["status"],
+        RunStatus::Succeeded
+    );
+    fixture.until_worker_quiescent().await;
+    fixture.stop(false).await;
+    // Start a real first admission after inactivity expiration, with an imposed
+    // destination that must remain replaceable throughout preparation.
+    let mut agent = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
+    agent["access"]["backend"] = "firecracker".into();
+    s.store.put_agent_fixture(agent.clone()).await.unwrap();
+    let (run_id, chat_id) = (run.clone(), chat.clone());
+    s.store
+        .transaction(move |db| {
+            let mut snapshot = db.run(&run_id)?.unwrap()["snapshot"].clone();
+            snapshot["agent"] = agent;
+            let old = now() - 8 * 86_400_000;
+            db.change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    snapshot: Some(serde_json::from_value(snapshot)?),
+                    finished_at: Some(Some(old)),
+                    ..Default::default()
+                },
+            )?;
+            let mut retained = db.conversation(&chat_id)?.unwrap();
+            retained.created_at = old;
+            retained.updated_at = old;
+            retained.last_activity_at = Some(old);
+            db.save_conversation(&retained)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    s.save_conversation_retention(json!({ "inactivityDays":7 }))
+        .await
+        .unwrap();
+    s.cleanup_conversations().await.unwrap();
+    s.detach_stopped_environments().await.unwrap();
+    s.retire_environments().await.unwrap();
+    let expired = s.store.run(&run).await.unwrap();
+    assert_eq!(expired["environmentState"], "expired");
+    cairn_installation::nodes::moves::request(&s, &expired, &json!({ "nodeId":LOCAL_NODE_ID }))
+        .await
+        .unwrap();
+    assert_eq!(
+        s.store.run(&run).await.unwrap()["targetNodeId"],
+        LOCAL_NODE_ID
+    );
+    *owner.lock().await = Some(run.clone());
+    unavailable.store(true, Ordering::SeqCst);
+    s.chat_send(&chat, message("Retry after protocol health recovers"))
+        .await
+        .unwrap();
+    fixture.start().await;
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || (rejected.load(Ordering::SeqCst) > 0).then_some(()),
+    )
+    .await;
+    fixture
+        .until(&run, |run| run["status"] == RunStatus::Queued)
+        .await;
+    fixture.until_worker_quiescent().await;
+    assert!(
+        s.store
+            .attempts()
+            .await
+            .unwrap()
+            .iter()
+            .all(|attempt| attempt.run_id != run || attempt.released),
+        "a failed health check retained unbound capacity"
+    );
+    let pending = s.store.run(&run).await.unwrap();
+    assert_eq!(pending["environmentState"], "expired");
+    assert_eq!(pending["targetNodeId"], LOCAL_NODE_ID);
+    assert!(pending["nodeId"].is_null());
+    // Reconfiguration is still the expired branch: no second discard confirmation.
+    s.store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                capacity_wait_until: Some(Some(now() + 60_000)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    cairn_installation::nodes::moves::request(&s, &pending, &json!({ "nodeId":LOCAL_NODE_ID }))
+        .await
+        .unwrap();
+    unavailable.store(false, Ordering::SeqCst);
+    s.store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                capacity_wait_until: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let resumed = fixture.until_finished(&run).await;
+    assert_eq!(resumed["status"], RunStatus::Succeeded, "{resumed}");
+    assert_eq!(controller.plans.lock().await.len(), 2);
+    assert!(resumed["environmentState"].is_null());
+    assert!(resumed["targetNodeId"].is_null());
+    assert!(resumed["pinnedNodeId"].is_null());
+    assert_eq!(resumed["nodeId"], LOCAL_NODE_ID);
     fixture.stop(false).await;
     server.abort();
 }

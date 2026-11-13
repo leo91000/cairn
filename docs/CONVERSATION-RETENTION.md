@@ -77,8 +77,11 @@ surface requires `discardWorkingFiles: true` for an existing environment, separa
 from migration's `confirm: true`. The current turn stops and open questions close.
 The first admission waits on the destination while it remains authorized and not
 revoked; otherwise placement becomes automatic. It does not permanently pin the
-conversation. A new explicit choice replaces this destination without another
-warning while the environment is expired. Queued messages and scheduled or
+conversation. Reserving capacity leaves the environment expired and keeps that
+first destination. The checkpoint publication that transfers durable execution
+ownership consumes them, under revision and attempt checks. A failed preparation
+releases its capacity without requiring another discard confirmation. A new
+explicit choice replaces the destination while the environment is expired. Queued messages and scheduled or
 conditional waits retain their continuations. Active missions without a wait
 resume automatically; a chat otherwise waits for its next message. An agent moving
 its own conversation automatically continues there with the expiration warning.
@@ -103,13 +106,19 @@ Shared immutable blocks keep their existing ownership-aware collection.
 Expiration metadata uses the existing `records` store: `environment-expirations`
 holds the detached environment while its interrupted worker finishes stopping;
 `environment-retirements` holds captured attempt/process/node identities, worktrees,
-projects and retry progress. No SQLite schema/version change is needed. The run
+projects, exact detached publications and retry/erasure progress. Schema 32
+separates detached publication acknowledgements from the active run slot; see
+[migration 0032](migrations/0032-detached-publication-acknowledgements.md). The run
 boundary records an `environmentAdmissionRevision` to reject stale preparations
-when the first destination/backend is replaced, and `environmentExpirationCause` alongside `environmentExpiredAt`.
+when the first destination/backend is replaced, `environmentRetirementId` to scope
+cleanup notices, and `environmentExpirationCause` alongside `environmentExpiredAt`.
 An interrupted worker's checkpoint is retained only for fencing until it stops;
-then it is replaced by a fresh checkpoint. The queue removes manager/provider files
-and retires exact old S3 references before admission, so a delayed cleanup cannot
-erase a new environment. Node disk deletion can finish afterwards on other nodes.
+then it is replaced by a fresh checkpoint. Logical detachment moves the old
+manager/provider namespace and captures its exact old references before admission.
+A durable phase makes interrupted replacement-directory creation replayable.
+Physical erasure and old S3 reclamation keep retrying independently afterward;
+identity-qualified cleanup cannot erase a new environment. A destination that
+still holds the old disk waits for its durable deletion acknowledgement.
 
 ## Validation
 

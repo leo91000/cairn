@@ -374,7 +374,11 @@ impl Snapshot {
                 .as_array()
                 .cloned()
                 .unwrap_or_default(),
-            checkpoint: super::db_checkpoint(db, text(run, "id"))?,
+            checkpoint: if run["environmentState"] == "expired" {
+                json!({})
+            } else {
+                super::db_checkpoint(db, text(run, "id"))?
+            },
             nodes,
             attempts: db.attempts()?,
             volumes: db.list("node-volumes")?,
@@ -774,28 +778,6 @@ fn admit(
     };
     db.save_attempt(&record)?;
     db.put("node-volumes", &volume)?;
-    if run["environmentState"] == "expired" && !request.moving {
-        // Publish ownership with admission, before a preparing worker can save
-        // its checkpoint: revocation must see this environment in that gap.
-        db.update_run_placement(
-            request.run_id(),
-            super::run_placement::PlacementChanges {
-                node_id: Some(Some(id.to_owned())),
-                ..Default::default()
-            },
-        )?;
-        db.update_run_boundary(request.run_id(), &json!({ "environmentState": null }))?;
-    }
-    if run["targetNodeId"].is_string() && !request.moving {
-        // The imposed destination applies only to this first admission.
-        db.update_run_placement(
-            request.run_id(),
-            crate::nodes::run_placement::PlacementChanges {
-                target_node_id: Some(None),
-                ..Default::default()
-            },
-        )?;
-    }
     if policy(&run["snapshot"]["agent"])["backend"] == "auto" {
         let mut snapshot = run["snapshot"].clone();
         let backend = if crate::native::policy::node_native(&best.node) {
@@ -828,6 +810,69 @@ fn admit(
         lease_expires_at: Some(lease_expires_at),
     };
     Ok(serde_json::to_value(placement)?)
+}
+
+/// Transfer a preparation reservation to the published execution checkpoint.
+/// Capacity ownership is visible to revocation earlier; it is not an environment
+/// admission and cannot consume the replaceable first destination by itself.
+pub fn publish_admission(db: &Db<'_>, run: &str, attempt: &str, revision: &Value) -> Result<()> {
+    let current = db
+        .run(run)?
+        .ok_or_else(|| Error::not_found("Run not found"))?;
+    crate::environment_expiration::require_admission_revision(&current, revision)?;
+    crate::conversation_lifecycle::require_active_run(db, run)?;
+    if !current["cancelRequestedAt"].is_null() {
+        return Err(Error::conflict("Execution stopped before admission."));
+    }
+    let held = db
+        .attempt(attempt)?
+        .ok_or_else(|| Error::conflict("Admission reservation disappeared."))?;
+    let checkpoint = super::db_checkpoint(db, run)?;
+    if held.run_id != run
+        || held.released
+        || held.role != AttemptRole::Execution
+        || !held.disk_materialized
+        || checkpoint["runnerId"] != attempt
+        || checkpoint["nodeId"] != held.node_id
+    {
+        return Err(Error::conflict(
+            "Admission ownership changed before publication.",
+        ));
+    }
+    let node = db
+        .node_boundary(&held.node_id)?
+        .ok_or_else(|| Error::unavailable("Execution node removed."))?;
+    let agent = db
+        .agent_snapshot(super::run_agent(&current))?
+        .unwrap_or_default();
+    let tags_match = current["requiredTags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .all(|tag| super::node_tags(&node).any(|present| present == tag));
+    if node["revoked"] == true
+        || !super::agent_allows(&agent, &held.node_id)
+        || !tags_match
+        || crate::native::policy::node_native(&node)
+            && !crate::native::policy::allows(db, &current, &node)?
+    {
+        return Err(Error::unavailable(format!(
+            "{NO_CAPACITY}: the selected node is no longer authorized."
+        )));
+    }
+    db.update_run_placement(
+        run,
+        super::run_placement::PlacementChanges {
+            node_id: Some(Some(held.node_id)),
+            target_node_id: Some(None),
+            resources: Some(Some(held.resources)),
+            ..Default::default()
+        },
+    )?;
+    if current["environmentState"] == "expired" {
+        db.update_run_boundary(run, &json!({ "environmentState":null }))?;
+    }
+    Ok(())
 }
 
 pub async fn release(s: &Service, attempt: &str) -> Result<()> {

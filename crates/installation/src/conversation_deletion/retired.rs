@@ -62,25 +62,39 @@ async fn quarantine(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Caller holds preparation, publication and publication-reader ownership.
-pub(crate) async fn detach(s: &Service, run: &str, retirement: &str) -> Result<()> {
+const DETACHED: &str = "namespaces-detached";
+
+/// A durable phase precedes replacement-directory creation, so a crash before
+/// its manager marker never makes the two namespaces ambiguous on replay.
+async fn detach_namespaces(s: &Service, run: &str, retirement: &str) -> Result<()> {
     crate::validation::uuid(run)?;
     crate::validation::uuid(retirement)?;
-    // The bundled VM controller shares this manager's data volume. Its older
-    // unqualified mutations must be fenced by upgrade before namespace reuse.
     super::ensure_local_retirement_protocol(s).await?;
     let retired = directory(s, retirement);
     crate::skills::private_dir(&retired).await?;
-    for kind in ["runs", "node-backups"] {
-        let source = s.config.data_dir.join(kind).join(run);
-        if kind == "runs" && source.join(MANAGER_NAMESPACE).exists() && retired.join(kind).exists()
-        {
-            continue;
+    let phase = retired.join(DETACHED);
+    let detached = match tokio::fs::read(&phase).await {
+        Ok(bytes) if bytes == retirement.as_bytes() => true,
+        Ok(_) => return Err(Error::conflict("Invalid detached namespace phase.")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !detached {
+        for kind in ["runs", "node-backups"] {
+            let source = s.config.data_dir.join(kind).join(run);
+            quarantine(&source, &retired.join(kind)).await?;
         }
-        quarantine(&source, &retired.join(kind)).await?;
+        crate::skills::atomic_write(&phase, retirement.as_bytes()).await?;
     }
-    mark_manager_namespace(s, run).await?;
+    // Re-sync even when an interrupted caller left the phase file visible.
+    tokio::fs::File::open(&retired).await?.sync_all().await?;
     Ok(())
+}
+
+/// Caller holds preparation, publication and publication-reader ownership.
+pub(crate) async fn detach(s: &Service, run: &str, retirement: &str) -> Result<()> {
+    detach_namespaces(s, run, retirement).await?;
+    mark_manager_namespace(s, run).await
 }
 
 async fn git_worktree(
@@ -236,6 +250,55 @@ mod tests {
             result.status.success(),
             "{}",
             String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn namespace_replay_survives_a_missing_replacement_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+        let (run, retirement) = (crate::config::id(), crate::config::id());
+        let manager = service.config.data_dir.join("runs").join(&run);
+        crate::skills::private_dir(&manager).await.unwrap();
+        tokio::fs::write(manager.join("old.txt"), b"old files")
+            .await
+            .unwrap();
+        detach_namespaces(&service, &run, &retirement)
+            .await
+            .unwrap();
+        // Reproduce interruption after private_dir, before atomic marker write.
+        crate::skills::private_dir(&manager).await.unwrap();
+        tokio::fs::write(manager.join(".partial.tmp"), b"partial marker")
+            .await
+            .unwrap();
+        assert!(!manager.join(MANAGER_NAMESPACE).exists());
+        detach(&service, &run, &retirement).await.unwrap();
+        assert!(manager.join(MANAGER_NAMESPACE).exists());
+        assert_eq!(
+            tokio::fs::read(directory(&service, &retirement).join("runs/old.txt"))
+                .await
+                .unwrap(),
+            b"old files"
+        );
+        tokio::fs::write(manager.join("new.txt"), b"new files")
+            .await
+            .unwrap();
+        detach(&service, &run, &retirement).await.unwrap();
+        erase(
+            &service,
+            &run,
+            &retirement,
+            &[],
+            &[],
+            &crate::nodes::publication::RetiredPublications::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::fs::read(manager.join("new.txt")).await.unwrap(),
+            b"new files"
         );
     }
 

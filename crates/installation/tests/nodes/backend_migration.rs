@@ -83,6 +83,48 @@ impl Change {
             .await
     }
 
+    async fn publish_admission(&self, attempt: &str) {
+        placement::materialize(&self.owner.service, attempt)
+            .await
+            .unwrap();
+        let (run, attempt) = (self.run.clone(), attempt.to_owned());
+        self.owner
+            .service
+            .store
+            .transaction(move |db| {
+                let current = db.run(&run)?.unwrap();
+                let held = db.attempt(&attempt)?.unwrap();
+                let mut checkpoint = db.checkpoint_boundary(&run)?.unwrap_or_else(|| json!({}));
+                checkpoint["runnerId"] = attempt.clone().into();
+                checkpoint["nodeId"] = held.node_id.into();
+                db.save_checkpoint_boundary(&run, &checkpoint)?;
+                db.change_run(
+                    &run,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(RunStatus::Running),
+                        cancel_requested_at: Some(None),
+                        ..Default::default()
+                    },
+                )?;
+                placement::publish_admission(
+                    db,
+                    &run,
+                    &attempt,
+                    &current["environmentAdmissionRevision"],
+                )?;
+                db.change_run(
+                    &run,
+                    cairn_installation::runs::RunChanges {
+                        status: RunStatus::of(&current),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
     async fn retirements(&self) -> Vec<Value> {
         self.owner
             .service
@@ -286,6 +328,11 @@ async fn confirmed_node_change_expires_the_environment_and_imposes_its_destinati
         .await
         .unwrap();
     assert_eq!(admitted["nodeId"], change.destination);
+    assert_eq!(
+        change.owner.run(&change.run).await["targetNodeId"],
+        change.destination
+    );
+    change.publish_admission(&attempt).await;
     assert!(change.owner.run(&change.run).await["targetNodeId"].is_null());
     placement::release(&change.owner.service, &attempt)
         .await
@@ -791,6 +838,11 @@ async fn a_retired_disk_blocks_only_readmission_to_its_own_node_until_deleted() 
         .await
         .unwrap();
     assert_eq!(admitted["nodeId"], change.destination);
+    assert_eq!(
+        change.owner.run(&change.run).await["environmentState"],
+        "expired"
+    );
+    change.publish_admission(&attempt).await;
     assert!(change.owner.run(&change.run).await["environmentState"].is_null());
     placement::release(&change.owner.service, &attempt)
         .await
@@ -1088,6 +1140,11 @@ async fn expiration_restores_a_live_missions_settled_wait_but_explicit_stop_canc
         placement::reserve(&change.owner.service, &current, &attempt)
             .await
             .unwrap();
+        assert_eq!(
+            change.owner.run(&change.run).await["environmentState"],
+            "expired"
+        );
+        change.publish_admission(&attempt).await;
         assert!(change.owner.run(&change.run).await["environmentState"].is_null());
         placement::release(&change.owner.service, &attempt)
             .await
@@ -1181,8 +1238,9 @@ async fn revocation_sees_a_fresh_admission_before_its_checkpoint_is_persisted() 
         .await
         .unwrap();
     let admitted = change.owner.run(&change.run).await;
-    assert_eq!(admitted["nodeId"], change.destination);
-    assert!(admitted["environmentState"].is_null());
+    assert!(admitted["nodeId"].is_null());
+    assert_eq!(admitted["environmentState"], "expired");
+    assert_eq!(admitted["targetNodeId"], change.destination);
     let checkpoint = change
         .owner
         .service

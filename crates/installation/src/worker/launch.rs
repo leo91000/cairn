@@ -258,29 +258,75 @@ impl Execution<'_> {
         let mut admission = self.run.clone();
         admission["environmentAdmissionRevision"] = self.admission_revision.clone();
         let placement = placement::reserve(self.s, &admission, &runner).await?;
+        self.reservation = Some((runner.clone(), placement.clone()));
         *self.run = self.s.store.run(&self.id).await?;
         if !execution::uses_vm(self.run, &self.s.config) {
             // Development's shared process has no controller or retained node disk.
             // Keep the selected backend, but never give recovery a node to contact.
             placement::release(self.s, &runner).await?;
+            self.reservation = None;
+            if fresh_environment {
+                let revision = self.admission_revision.clone();
+                let id = self.id.clone();
+                let generation = crate::config::id();
+                self.checkpoint
+                    .update_and_publish(
+                        |checkpoint| {
+                            checkpoint.prepared = None;
+                            checkpoint.node_id = None;
+                            checkpoint.runner_id = None;
+                            checkpoint.runtime_id = None;
+                            checkpoint.workspace_initialized = None;
+                            checkpoint.generation = Some(generation);
+                        },
+                        move |db| {
+                            let current = db
+                                .run(&id)?
+                                .ok_or_else(|| Error::not_found("Run not found"))?;
+                            crate::environment_expiration::require_admission_revision(
+                                &current, &revision,
+                            )
+                        },
+                    )
+                    .await?;
+            }
             return Ok(());
         }
         let saved_runner = runner.clone();
         let state = self.s.store.run_state(&self.id).await?;
         let node = placement["nodeId"].as_str().map(str::to_owned);
         let runtime = placement["runtimeId"].clone();
+        let id = self.id.clone();
+        let revision = self.admission_revision.clone();
+        let generation = crate::config::id();
         self.checkpoint
-            .update(|checkpoint| {
-                checkpoint.bind_paid_admission(&saved_runner, &state);
-                checkpoint.turn_pending = None;
-                checkpoint.recovery_deadline_ms = None;
-                checkpoint.terminal_code = None;
-                checkpoint.provider_failed = None;
-                checkpoint.node_id = Some(node);
-                checkpoint.runtime_id = Some(Some(runtime));
-            })
+            .update_and_publish(
+                |checkpoint| {
+                    if fresh_environment {
+                        checkpoint.prepared = None;
+                        checkpoint.workspace_initialized = None;
+                        checkpoint.generation = Some(generation);
+                    }
+                    checkpoint.bind_paid_admission(&saved_runner, &state);
+                    checkpoint.turn_pending = None;
+                    checkpoint.recovery_deadline_ms = None;
+                    checkpoint.terminal_code = None;
+                    checkpoint.provider_failed = None;
+                    checkpoint.node_id = Some(node);
+                    checkpoint.runtime_id = Some(Some(runtime));
+                },
+                move |db| {
+                    let current = db
+                        .run(&id)?
+                        .ok_or_else(|| Error::not_found("Run not found"))?;
+                    crate::environment_expiration::require_admission_revision(&current, &revision)?;
+                    if !current["cancelRequestedAt"].is_null() {
+                        return Err(Error::conflict("Execution stopped before preparation."));
+                    }
+                    Ok(())
+                },
+            )
             .await?;
-        self.reservation = Some((runner, placement));
         Ok(())
     }
 
@@ -455,6 +501,36 @@ impl Execution<'_> {
         crate::delegation::authorize_async(s, self.run).await?;
         credentials.authorize(s).await?;
         authorization.recheck().await?;
+        if !execution::uses_vm(self.run, &s.config) && self.run["environmentState"] == "expired" {
+            let id = self.id.clone();
+            let revision = self.admission_revision.clone();
+            self.checkpoint
+                .update_and_publish(
+                    |_| {},
+                    move |db| {
+                        let current = db
+                            .run(&id)?
+                            .ok_or_else(|| Error::not_found("Run not found"))?;
+                        crate::environment_expiration::require_admission_revision(
+                            &current, &revision,
+                        )?;
+                        if !current["cancelRequestedAt"].is_null() {
+                            return Err(Error::conflict("Execution stopped before admission."));
+                        }
+                        db.update_run_placement(
+                            &id,
+                            nodes::run_placement::PlacementChanges {
+                                node_id: Some(None),
+                                target_node_id: Some(None),
+                                ..Default::default()
+                            },
+                        )?;
+                        db.update_run_boundary(&id, &json!({ "environmentState":null }))
+                    },
+                )
+                .await?;
+            *self.run = s.store.run(&self.id).await?;
+        }
         timing.finish();
         Ok(Workspace {
             prepared,
@@ -521,10 +597,18 @@ impl Execution<'_> {
         };
         let saved_prepared = prepared.clone();
         let publication = authorization.clone();
+        let id = self.id.clone();
+        let revision = self.admission_revision.clone();
         self.checkpoint
             .update_and_publish(
                 |c| c.prepared = Some(Some(saved_prepared)),
-                move |db| publication.authorize_in(db),
+                move |db| {
+                    let current = db
+                        .run(&id)?
+                        .ok_or_else(|| Error::not_found("Run not found"))?;
+                    crate::environment_expiration::require_admission_revision(&current, &revision)?;
+                    publication.authorize_in(db)
+                },
             )
             .await?;
         authorization.recheck().await?;
@@ -994,6 +1078,9 @@ impl Execution<'_> {
         let runtime_id = placement["runtimeId"].clone();
         let state = s.store.run_state(&self.id).await?;
         let publication = workspace.authorization.clone();
+        let admitted_run = self.id.clone();
+        let admitted_attempt = runner.clone();
+        let admitted_revision = self.admission_revision.clone();
         self.checkpoint
             .update_and_publish(
                 |c| {
@@ -1005,7 +1092,15 @@ impl Execution<'_> {
                     c.node_id = Some(node_id);
                     c.runtime_id = Some(Some(runtime_id));
                 },
-                move |db| publication.authorize_in(db),
+                move |db| {
+                    publication.authorize_in(db)?;
+                    placement::publish_admission(
+                        db,
+                        &admitted_run,
+                        &admitted_attempt,
+                        &admitted_revision,
+                    )
+                },
             )
             .await?;
         // The persisted checkpoint now owns fencing/release on subsequent errors.

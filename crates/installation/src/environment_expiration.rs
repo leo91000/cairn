@@ -153,10 +153,18 @@ pub(crate) fn runs_on_node(db: &Db<'_>, node: &str) -> Result<Vec<String>> {
     let mut runs =
         db.0.prepare_cached(
             "SELECT runs.id FROM runs LEFT JOIN run_checkpoints ON run_checkpoints.run_id=runs.id
-             WHERE (runs.placement_node_id=?1 OR json_extract(run_checkpoints.state,'$.nodeId')=?1
+             WHERE (json_type(runs.boundary,'$.environmentState') IS NOT 'text'
+                 AND (runs.placement_node_id=?1 OR json_extract(run_checkpoints.state,'$.nodeId')=?1))
                 OR EXISTS(SELECT 1 FROM placements p JOIN attempts a ON a.id=p.id
-                    WHERE p.run_id=runs.id AND p.node_id=?1 AND p.role='execution' AND a.released=0))
-               AND json_type(runs.boundary,'$.environmentState') IS NOT 'text'",
+                    WHERE p.run_id=runs.id AND p.node_id=?1 AND p.role='execution' AND a.released=0
+                      AND (json_type(runs.boundary,'$.environmentState') IS NOT 'text'
+                        OR runs.placement_target_node_id IS NULL OR runs.placement_target_node_id=p.node_id)
+                      AND NOT EXISTS(SELECT 1 FROM records retired
+                          WHERE retired.kind='environment-retirements'
+                            AND json_extract(retired.data,'$.runId')=runs.id
+                            AND (json_extract(retired.data,'$.attempt')=a.id
+                              OR EXISTS(SELECT 1 FROM json_each(retired.data,'$.attempts') held
+                                  WHERE json_extract(held.value,'$.id')=a.id))))",
         )?
         .query_map([node], |row| row.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -418,7 +426,7 @@ fn detach_environment_in(
     let mut nodes = db
         .list("node-volumes")?
         .into_iter()
-        .filter(|volume| volume["runId"] == run_id)
+        .filter(|volume| volume["runId"] == run_id && volume["materialized"] == true)
         .map(|volume| text(&volume, "nodeId").to_owned())
         .collect::<Vec<_>>();
     for node in [

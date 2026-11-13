@@ -1202,8 +1202,35 @@ async fn seven_day_expiration_preserves_history_uploads_artifacts_and_public_acc
     );
     assert_eq!(app.get(&chat_path(&recent)).await.0, StatusCode::OK);
     assert!(workspace.exists(), "physical cleanup is deferred");
+    let retirement = app
+        .service
+        .store
+        .list("environment-retirements")
+        .await
+        .unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     app.service.retire_environments().await.unwrap();
-    assert!(!workspace.exists());
+    assert!(!workspace.join("unpublished.txt").exists());
+    assert!(workspace.join(".cairn-manager-environment").is_file());
+    assert!(
+        !app.service
+            .config
+            .data_dir
+            .join("retired-environments")
+            .join(retirement)
+            .exists()
+    );
+    assert!(
+        app.service
+            .store
+            .list("environment-retirements")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(app.get(&chat_path(&expired)).await.1["environmentError"].is_null());
     assert!(attachments.exists());
     assert!(artifact_path.exists());
     assert!(

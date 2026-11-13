@@ -42,6 +42,14 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+fn require_removed(result: std::io::Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 const MAX_PLAN: u64 = 8_000_000;
 const MAX_LOG: u64 = 64 * 1024 * 1024;
 const MAX_TERMINAL_METADATA: u64 = 128;
@@ -2515,10 +2523,15 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                         .path()
                         .extension()
                         .is_some_and(|extension| extension == "run")
-                        && tokio::fs::read_to_string(entry.path())
-                            .await
-                            .is_ok_and(|owner| owner == *run)
                     {
+                        let owner = match tokio::fs::read_to_string(entry.path()).await {
+                            Ok(owner) => owner,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(error) => return Err(error.into()),
+                        };
+                        if owner != *run {
+                            continue;
+                        }
                         let id = entry
                             .path()
                             .file_stem()
@@ -2527,31 +2540,43 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                             .into_owned();
                         uuid(&id)?;
                         for extension in ["log", "lease", "terminal"] {
-                            let _ = tokio::fs::remove_file(controller.file(&id, extension)).await;
+                            require_removed(
+                                tokio::fs::remove_file(controller.file(&id, extension)).await,
+                            )?;
                         }
-                        let _ = tokio::fs::remove_file(
-                            controller
-                                .state
-                                .join("roots")
-                                .join(&id)
-                                .with_extension("plan.json"),
-                        )
-                        .await;
-                        let _ = tokio::fs::remove_dir_all(controller.state.join("roots").join(&id))
-                            .await;
-                        let _ = tokio::fs::remove_file(
-                            controller
-                                .data
-                                .join("runner-plans")
-                                .join(format!("{id}.json")),
-                        )
-                        .await;
+                        require_removed(
+                            tokio::fs::remove_file(
+                                controller
+                                    .state
+                                    .join("roots")
+                                    .join(&id)
+                                    .with_extension("plan.json"),
+                            )
+                            .await,
+                        )?;
+                        require_removed(
+                            tokio::fs::remove_dir_all(controller.state.join("roots").join(&id))
+                                .await,
+                        )?;
+                        require_removed(
+                            tokio::fs::remove_file(
+                                controller
+                                    .data
+                                    .join("runner-plans")
+                                    .join(format!("{id}.json")),
+                            )
+                            .await,
+                        )?;
                     }
                 }
             }
-            let plans = controller.data.join("runner-plans");
-            if plans.is_dir() {
-                tokio::fs::File::open(plans).await?.sync_all().await?;
+            for directory in [
+                controller.state.join("roots"),
+                controller.data.join("runner-plans"),
+            ] {
+                if directory.is_dir() {
+                    tokio::fs::File::open(directory).await?.sync_all().await?;
+                }
             }
             if let Some(retirement) = &retirement {
                 retirement.commit(&root).await?;
@@ -5330,6 +5355,69 @@ pub(crate) mod tests {
         .unwrap_err();
         assert_eq!(error.status, 409);
         assert!(!controller.leased(&attempt).await);
+    }
+
+    #[tokio::test]
+    async fn native_retirement_retries_attempt_cleanup_before_persisting_its_receipt() {
+        for bad_log in [true, false] {
+            let (_fixture, controller) = fixture().await;
+            let (run, attempt, retirement) = (
+                crate::config::id(),
+                crate::config::id(),
+                crate::config::id(),
+            );
+            tokio::fs::write(controller.file(&attempt, "run"), run.as_bytes())
+                .await
+                .unwrap();
+            let roots = controller.state.join("roots");
+            private_dir(&roots).await.unwrap();
+            let directory = roots.join(&attempt);
+            if bad_log {
+                private_dir(&directory).await.unwrap();
+                tokio::fs::write(directory.join("provider-home"), b"old private home")
+                    .await
+                    .unwrap();
+                private_dir(&controller.file(&attempt, "log"))
+                    .await
+                    .unwrap();
+            } else {
+                tokio::fs::write(&directory, b"transient wrong file type")
+                    .await
+                    .unwrap();
+            }
+            let path = format!("/disks/{run}/delete");
+            let body = json!({ "retirementId":retirement });
+            assert!(
+                route(controller.clone(), request(&path, &body))
+                    .await
+                    .is_err()
+            );
+            let receipt = controller
+                .state
+                .join("disk-retirements")
+                .join(&run)
+                .join(&retirement);
+            assert!(
+                !receipt.exists(),
+                "failed cleanup was permanently acknowledged"
+            );
+            if bad_log {
+                tokio::fs::remove_dir(controller.file(&attempt, "log"))
+                    .await
+                    .unwrap();
+            } else {
+                tokio::fs::remove_file(&directory).await.unwrap();
+            }
+            assert_eq!(
+                route(controller, request(&path, &body))
+                    .await
+                    .unwrap()
+                    .status(),
+                200
+            );
+            assert!(receipt.exists());
+            assert!(!directory.exists());
+        }
     }
 
     #[tokio::test]

@@ -39,6 +39,10 @@ fn snapshot(db: &Connection) -> BTreeMap<String, (String, Vec<Vec<SqlValue>>)> {
                     let fields = columns.iter().map(|column| format!("\"{column}\"")).collect::<Vec<_>>().join(",");
                     (format!("retained node columns: {columns:?}"), format!("SELECT {fields} FROM nodes ORDER BY id"))
                 }
+                "direct_journal_acknowledgements" => (
+                    "retained acknowledgement columns".to_owned(),
+                    "SELECT publication,run_id,node_id,retired FROM direct_journal_acknowledgements ORDER BY publication".to_owned(),
+                ),
                 "records" => ("record rows".to_owned(), "SELECT * FROM records ORDER BY id".to_owned()),
                 _ => (sql, format!("SELECT * FROM \"{}\"", name.replace('"', "\"\""))),
             };
@@ -110,6 +114,15 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
         placement_migration_fixture::retained_run_columns(&db),
         run_columns_before
     );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM direct_journal_acknowledgements WHERE detached!=0",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
     for (name, old) in &before {
         if matches!(name.as_str(), "chat_messages" | "chat_questions") {
             // The later Plan migration adds only a false flag to existing rows.
@@ -159,7 +172,7 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        31
+        32
     );
     let s = Service::new(common::config(root.path())).await.unwrap();
     let proof = s.store.kv("d2-fixture-proof").await.unwrap().unwrap();
