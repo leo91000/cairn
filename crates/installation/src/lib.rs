@@ -72,6 +72,7 @@ pub mod runs;
 pub mod service;
 pub mod skills;
 pub mod storage;
+mod storage_migration;
 pub mod store;
 pub mod supervisor;
 pub(crate) mod task_storage;

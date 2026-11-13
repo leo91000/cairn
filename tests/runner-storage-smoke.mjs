@@ -1,64 +1,20 @@
-// Real controller/guest storage path. The loopback immutable origin deliberately
-// replaces S3 here; encrypted S3 publication is covered by node_s3_test.py.
+// Real controller/guest local journal durability, pressure and cold reopen path.
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
-import {
-  mkdir,
-  readFile,
-  rm,
-  writeFile,
-} from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
-import { blockDigest } from './block-digest.mjs'
 import { storageProbeCommand } from './storage-probe-command.mjs'
 
-export async function prepareStorageOrigin({
-  root,
-  docker,
-  name,
-  api,
-  maxDirtySeconds = 300,
-  // An installation manager's private origin, such as `http://manager:4310`.
-  // The caller resolves its host to the runner container on a Docker network.
-  managerOrigin,
-}) {
-  const origin = path.join(root, 'data/storage-fixture')
-  const master = new URL(managerOrigin || 'http://127.0.0.1:4313')
-  const address = managerOrigin ? '0.0.0.0' : '127.0.0.1'
-  await mkdir(origin)
-  // The server runs as root with the runner's private umask. Pre-create the
-  // read ledger as the test user so subsequent assertions can read/reset it.
-  await writeFile(path.join(origin, 'reads'), '')
-  await writeFile(path.join(origin, 'server.mjs'), `
-    import http from 'node:http'; import fs from 'node:fs';
-    const root='/data/storage-fixture';
-    http.createServer((req,res)=>{
-      if(req.headers.authorization!=='Bearer fixture-storage-grant'){res.writeHead(403).end();return;}
-      const pathname=new URL(req.url,'http://storage-fixture.test').pathname;
-      if(pathname==='/internal/node-restore/renew'){res.end('{}');return;}
-      if(fs.existsSync(root+'/offline')){res.writeHead(503).end();return;}
-      const hash=pathname.split('/').at(-1);
-      if(!/^(?:b3-)?[a-f0-9]{64}$/.test(hash)||!fs.existsSync(root+'/'+hash)){res.writeHead(404).end();return;}
-      const delay=Number(fs.existsSync(root+'/latency')?fs.readFileSync(root+'/latency','utf8'):0);
-      setTimeout(()=>{const bytes=fs.readFileSync(root+'/'+hash);
-        fs.appendFileSync(root+'/reads',hash+'\\n'); res.end(bytes);},delay);
-    }).listen(${master.port},'${address}');
-  `)
-  docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
-  // As the installation manager does at startup, in the DATA_DIR it shares with its runner.
-  if (managerOrigin)
-    await writeFile(path.join(root, 'data/manager-origin'), master.origin)
-  const policy = {
-    cacheMiB: 8,
-    reserveMiB: 64,
-    reservePercent: 1,
-    backupSeconds: 60,
-    maxDirtySeconds,
-  }
+export async function prepareLocalStorage({ api, root, managerOrigin }) {
+  const policy = { memoryCacheMiB: 8, reserveMiB: 64, reservePercent: 1 }
+  // PR2b retains the authorization packet; local base reads never use it remotely.
+  const master = new URL(managerOrigin || 'http://127.0.0.1:4313/')
   const storage = { master: master.href, grant: 'fixture-storage-grant', policy }
+  if (root && managerOrigin)
+    await writeFile(path.join(root, 'data/manager-origin'), master.origin)
   let generation = 0
 
   async function applyPolicy(policy) {
@@ -66,12 +22,16 @@ export async function prepareStorageOrigin({
   }
 
   await applyPolicy(policy)
-  return {
-    origin,
-    policy,
-    storage,
-    applyPolicy,
-  }
+  return { policy, storage, applyPolicy }
+}
+
+export async function inspectLocalDisk(api, runId) {
+  const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
+  assert.equal(status.mode, 'on-demand')
+  assert.ok(status.localBytes > 0, 'The environment retains its local backing')
+  if (status.published)
+    assert.equal(status.published.local, true, 'Base retirement uses a local consolidation receipt')
+  return status
 }
 
 export async function storageSmoke({
@@ -86,38 +46,29 @@ export async function storageSmoke({
   const runId = randomUUID()
   const workspace = `/data/runs/${runId}/workspace`
   await mkdir(path.join(root, 'data/runs', runId, 'workspace'), { recursive: true })
-  const {
-    origin,
-    policy,
-    storage,
-    applyPolicy,
-  } = storageFixture || await prepareStorageOrigin({
-    root,
-    docker,
-    name,
-    api,
-  })
+  const { policy, storage, applyPolicy } = storageFixture || await prepareLocalStorage({ api, root })
   const inbox = path.join(root, 'data/runs', runId, 'chat-input')
   await mkdir(inbox)
+  const status = () => inspectLocalDisk(api, runId)
 
   async function start(first, { benchmark = false, soak = false } = {}) {
     const id = randomUUID()
-    const code = storageProbeCommand({
-      workspace,
-      first,
-      benchmark,
-      soak,
-    })
+    await writeFile(path.join(inbox, 'messages.json'), '[]')
     const plan = {
       id,
       runId,
       expires: null,
       sandbox: 'yolo',
       cwd: workspace,
-      command: ['/usr/local/bin/node', '-e', code],
+      command: ['/usr/local/bin/node', '-e', storageProbeCommand({
+        workspace,
+        first,
+        benchmark,
+        soak,
+      })],
       resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 },
       storage,
-      imports: [{ source: workspace, target: workspace }, ...(benchmark ? [{ source: `/data/runs/${runId}/chat-input`, target: '/run/cairn-chat', readOnly: true }] : [])],
+      imports: [{ source: workspace, target: workspace }, { source: `/data/runs/${runId}/chat-input`, target: '/run/cairn-chat', readOnly: true }],
     }
     await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
     await api(`/runs/${id}`, 'POST')
@@ -130,8 +81,6 @@ export async function storageSmoke({
     }
     catch { return '' }
   }
-
-  const status = async () => (await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json())
 
   async function ready(id) {
     try {
@@ -153,32 +102,36 @@ export async function storageSmoke({
     await until(async () => (await (await api('/health')).json()).activeRuns === 0)
   }
 
-  async function publish(id) {
-    const point = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
-    const hashes = new Set()
-    for (const block of point.manifest.blocks) {
-      if (!block.hash || hashes.has(block.hash))
-        continue
-      hashes.add(block.hash)
-      const bytes = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
-      assert.equal(blockDigest(bytes, block.hash), block.hash)
-      await writeFile(path.join(origin, block.hash), bytes)
+  async function finish(id) {
+    await writeFile(path.join(inbox, 'messages.json'), '[{"text":"finish"}]')
+    const exit = await (await api(`/runs/${id}/wait`, 'POST')).json()
+    assert.equal(exit.StatusCode, 0, await logs(id))
+    await until(async () => (await (await api('/health')).json()).activeRuns === 0)
+    let sample
+    try {
+      await until(async () => {
+        sample = await status()
+        return sample.dirtyBytes === 0 && sample.published?.local === true
+          && sample.completedGeneration > 0 && sample.published.generation >= sample.completedGeneration
+      })
     }
-
-    const backupId = randomUUID()
-    await api(`/disks/${runId}/published`, 'POST', { generation: point.manifest.generation, grantId: point.grantId, backupId })
-    await api(`/snapshots/${point.id}/discard`, 'DELETE')
-    return { point, backupId, hashes }
+    catch (error) {
+      console.error({
+        runId,
+        attempt: id,
+        storage: sample,
+        guest: await logs(id),
+      })
+      throw error
+    }
   }
 
   const first = await start(true)
   await ready(first)
-  const { point, backupId, hashes } = await publish(first)
-  assert.equal((await status()).mode, 'on-demand')
+  await status()
   docker('exec', name, 'test', '!', '-e', `/runner-state/disks/${runId}/data.ext4`)
-  await stop(first)
+  await finish(first)
 
-  // Opt-in sustained VM qualification, separate from the short CI smoke path.
   const soakSeconds = Number(process.env.CAIRN_STORAGE_SOAK_SECONDS || 0)
   if (soakSeconds > 0) {
     assert.ok(Number.isFinite(soakSeconds) && soakSeconds >= 60 && soakSeconds <= 3600)
@@ -187,157 +140,125 @@ export async function storageSmoke({
     const vmIdentity = () => JSON.parse(docker('exec', name, 'cat', `/runner-state/${attempt}.vm.json`)).vmId
     const initialVm = vmIdentity()
     const started = performance.now()
-    const publications = []
     const resources = []
     while (performance.now() - started < soakSeconds * 1000) {
       await setTimeout(5000)
-      const at = performance.now()
-      const saved = await publish(attempt)
-      publications.push({
-        generation: saved.point.manifest.generation,
-        totalMs: performance.now() - at,
-        pauseMs: saved.point.manifest.pauseMs,
-        indexMs: saved.point.manifest.indexMs,
-      })
-      assert.equal(vmIdentity(), initialVm, 'checkpoint must not replace the VM')
       const sample = await status()
+      assert.equal(vmIdentity(), initialVm, 'Local maintenance must not replace the VM')
       assert.equal(sample.waitingFor, null)
-      assert.equal(sample.published.backupId, saved.backupId)
       resources.push(sample.performance)
     }
 
-    const output = await logs(attempt)
-    const metrics = [...output.matchAll(/storage.soak (\{[^\n]+\})/g)].map(match => JSON.parse(match[1]))
-    assert.ok(metrics.length > soakSeconds / 2, 'guest must keep progressing under repeated backups')
+    const metrics = [...(await logs(attempt)).matchAll(/storage.soak (\{[^\n]+\})/g)].map(match => JSON.parse(match[1]))
+    assert.ok(metrics.length > soakSeconds / 2)
     for (let index = 1; index < metrics.length; index++)
-      assert.ok(metrics[index].writes > metrics[index - 1].writes, 'durable guest writes stalled')
-    assert.ok(publications.length >= 6)
-    assert.ok(metrics.at(-1).writes >= soakSeconds * 20, 'sustained durable write load')
-    assert.ok(Math.max(...metrics.map(sample => sample.maximumMs)) < 1000, 'guest disk stall exceeded the old controller timeout')
+      assert.ok(metrics[index].writes > metrics[index - 1].writes, 'Durable guest writes stalled')
+    assert.ok(metrics.at(-1).writes >= soakSeconds * 20)
+    assert.ok(Math.max(...metrics.map(sample => sample.maximumMs)) < 1000)
     assert.ok(resources.every(sample => sample.write.errors === 0 && sample.read.errors === 0))
     const evidence = {
       kind: 'storage-vm-soak',
       seconds: (performance.now() - started) / 1000,
       attempt,
       vmId: initialVm,
-      publications,
       metrics,
       resources,
       unintendedRestarts: 0,
-      source: 'real Firecracker/ublk journal, loopback immutable origin; not S3/WAN',
+      source: 'Real Firecracker/ublk local journal; no remote disk source or WAN',
     }
     if (process.env.CAIRN_STORAGE_SOAK_EVIDENCE)
       await writeFile(process.env.CAIRN_STORAGE_SOAK_EVIDENCE, JSON.stringify(evidence, null, 2))
     process.stdout.write(`${JSON.stringify(evidence)}\n`)
-    await stop(attempt)
-    // Verify durable guest contents on a new VM after all acknowledged backups.
-    const recovered = await start(false)
-    await ready(recovered)
-    await stop(recovered)
+    await finish(attempt)
   }
 
-  // Restore into a separate empty directory, retaining the source for comparison.
-  docker('exec', name, 'mv', `/runner-state/disks/${runId}`, `/runner-state/disks/source-${runId}`)
-  await writeFile(path.join(origin, 'offline'), '')
-  const restoredAt = Date.now()
-  await api(`/disks/${runId}/restore`, 'POST', { ...storage, manifest: point.manifest, backupId })
-  const metadataRestoreMs = Date.now() - restoredAt
-  // The node can retain verified boot blocks after the sustained workload.
-  // An unavailable origin only blocks reads that actually need remote bytes.
-  // Read the unused file too, so this outage probe still reaches a cold extent.
-  await writeFile(path.join(inbox, 'messages.json'), '[{"text":"measure"}]')
-  const blocked = await start(false, { benchmark: true })
-  await until(async () => (await status()).waitingFor === 'storage-unavailable')
-  const cancelledAt = Date.now()
-  await stop(blocked)
-  assert.ok(Date.now() - cancelledAt < 30000, 'blocked remote read remains cancellable')
-  await rm(path.join(origin, 'offline'))
-  await writeFile(path.join(origin, 'reads'), '')
-  const resumedAt = Date.now()
+  // Reopening the same local disk verifies the first guest's synced bytes.
   const resumed = await start(false)
   await ready(resumed)
-  const resumedMs = Date.now() - resumedAt
-  const fetched = new Set((await readFile(path.join(origin, 'reads'), 'utf8')).trim().split('\n').filter(Boolean))
-  assert.ok(fetched.size < hashes.size, 'unused data stays remote during boot')
-  // Verify a real CPU pause and automatic resume when the reserve changes.
   await applyPolicy({ ...policy, reserveMiB: 16777216 })
   await until(async () => (await status()).waitingFor === 'disk-space')
   await setTimeout(2000)
   const ticks = (await logs(resumed)).split('storage.tick').length
   await setTimeout(2000)
   assert.equal((await logs(resumed)).split('storage.tick').length, ticks)
-  // Emergency publication while paused must not strand CPUs after pressure clears.
-  await publish(resumed)
   await applyPolicy(policy)
   await until(async () => (await logs(resumed)).split('storage.tick').length > ticks)
+  // A blocked local disk also remains cancellable while CPUs are paused.
+  await applyPolicy({ ...policy, reserveMiB: 16777216 })
+  await until(async () => (await status()).waitingFor === 'disk-space')
+  const cancelledAt = Date.now()
   await stop(resumed)
-  // Identical snapshot, guest command and read workload; each sample gets a new
-  // controller, VM and empty disk directory. Restarting also clears the verified
-  // node cache; the host page cache is intentionally not flushed.
-  const sizes = new Map(point.manifest.blocks.filter(block => block.hash).map(block => [block.hash, block.size]))
+  assert.ok(Date.now() - cancelledAt < 30000, 'Local pressure remains cancellable')
+  await applyPolicy(policy)
+  const recovered = await start(false)
+  await ready(recovered)
+  await finish(recovered)
 
-  async function downloaded() {
-    const reads = (await readFile(path.join(origin, 'reads'), 'utf8')).trim().split('\n').filter(Boolean)
-    return reads.reduce((bytes, hash) => bytes + sizes.get(hash), 0)
+  // Inspect the actual local base, including prepared-environment indirection.
+  const withheld = JSON.parse(docker('exec', name, '/usr/local/bin/node', '-e', `
+    const fs=require('node:fs'),{DatabaseSync}=require('node:sqlite');
+    let directory='/runner-state/disks/${runId}';
+    if(fs.existsSync(directory+'/environment'))
+      directory='/runner-state/environments/'+fs.readFileSync(directory+'/environment','utf8').trim();
+    const db=new DatabaseSync(directory+'/lazy/journal-v2.sqlite',{readOnly:true});
+    const manifest=JSON.parse(db.prepare('SELECT manifest FROM state WHERE id=1').get().manifest);
+    db.close();
+    const hash=manifest.blocks.find(block=>block.hash)?.hash;
+    if(!/^(?:b3-)?[a-f0-9]{64}$/.test(hash))throw Error('Missing local base for integrity qualification');
+    const file=directory+'/lazy/cache/'+hash,backup=file+'.integrity-test';
+    fs.renameSync(file,backup);console.log(JSON.stringify({file,backup}));
+  `))
+  let integrityRefused = false
+  try {
+    docker('restart', name)
+    await reconnect()
+    const broken = await start(false)
+    const exit = await (await api(`/runs/${broken}/wait`, 'POST')).json()
+    assert.notEqual(exit.StatusCode, 0, 'A missing local base must refuse guest startup')
+    assert.ok(!(await logs(broken)).includes('storage.ready'))
+    integrityRefused = true
+  }
+  finally {
+    docker('exec', name, '/usr/local/bin/node', '-e', `require('node:fs').renameSync(${JSON.stringify(withheld.backup)},${JSON.stringify(withheld.file)})`)
+    docker('restart', name)
+    await reconnect()
   }
 
-  const modes = [
-    { mode: 'demand-http', latencyMs: 0 },
-    { mode: 'demand-http-delayed', latencyMs: 50 },
-  ]
+  // The controller and guest caches restart; the host page cache is not flushed.
+  // Every sample reads the same locally retained 32 MiB file and verifies its hash.
   for (let sample = 0; sample < 3; sample++) {
-    // Rotate order to reduce systematic warm-host effects.
-    for (let index = 0; index < modes.length; index++) {
-      const mode = modes[(index + sample) % modes.length]
-      docker('exec', name, 'mv', `/runner-state/disks/${runId}`, `/runner-state/disks/previous-${randomUUID()}`)
-      await writeFile(path.join(inbox, 'messages.json'), '[]')
-      await writeFile(path.join(origin, 'latency'), String(mode.latencyMs))
-      await writeFile(path.join(origin, 'reads'), '')
-      docker('restart', name)
-      docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
-      await reconnect()
-      const at = performance.now()
-      await api(`/disks/${runId}/restore`, 'POST', { ...storage, manifest: point.manifest, backupId })
-      const restoreMs = performance.now() - at
-      const id = await start(false, { benchmark: true })
-      await ready(id)
-      const availableMs = performance.now() - at
-      const bytesAtReady = await downloaded()
-      assert.equal((await status()).mode, 'on-demand')
-      assert.ok(bytesAtReady < [...sizes.values()].reduce((a, b) => a + b, 0), 'ready before full download')
-      await writeFile(path.join(inbox, 'messages.json'), '[{"text":"measure"}]')
-      const metrics = await until(async () => {
-        const match = (await logs(id)).match(/storage.metrics (\{[^\n]+\})/)
-        return match && JSON.parse(match[1])
-      })
-      const bytesAfterReads = await downloaded()
-      assert.ok(bytesAfterReads > bytesAtReady, 'cold read workload must fetch remote bytes')
-      assert.ok(Number.isFinite(metrics.mibPerSecond) && metrics.mibPerSecond > 0)
-      process.stdout.write(`${JSON.stringify({
-        benchmark: 'conversation-disk',
-        sample,
-        ...mode,
-        restoreMs,
-        availableMs,
-        bootMs: availableMs - restoreMs,
-        bytesAtReady,
-        bytesAfterReads,
-        ...metrics,
-        source: 'loopback HTTP with optional per-request delay; not S3/WAN',
-      })}\n`)
-      await stop(id)
-    }
+    await writeFile(path.join(inbox, 'messages.json'), '[]')
+    docker('restart', name)
+    await reconnect()
+    const at = performance.now()
+    const id = await start(false, { benchmark: true })
+    await ready(id)
+    const bootMs = performance.now() - at
+    await writeFile(path.join(inbox, 'messages.json'), '[{"text":"measure"}]')
+    const metrics = await until(async () => {
+      const match = (await logs(id)).match(/storage.metrics (\{[^\n]+\})/)
+      return match && JSON.parse(match[1])
+    })
+    assert.ok(Number.isFinite(metrics.mibPerSecond) && metrics.mibPerSecond > 0)
+    await status()
+    process.stdout.write(`${JSON.stringify({
+      benchmark: 'local-conversation-disk',
+      sample,
+      bootMs,
+      remoteEncodedBytes: 0,
+      ...metrics,
+      source: 'Same-node controller/VM restart, local journal, warm host page cache; no WAN',
+    })}\n`)
+    await finish(id)
   }
 
+  await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true })
   process.stdout.write(`${JSON.stringify({
-    mode: 'on-demand-controller',
-    metadataRestoreMs,
-    resumedMs,
-    fetchedBlocks: fetched.size,
-    remoteBlocks: hashes.size,
-    cancellableOutage: true,
+    mode: 'local-journal-controller',
     pressureResume: true,
+    pressureCancellation: true,
+    integrityRefused,
+    sameNodeDurability: true,
     status: 'passed',
-    source: 'loopback immutable origin, not S3 benchmark',
   })}\n`)
 }

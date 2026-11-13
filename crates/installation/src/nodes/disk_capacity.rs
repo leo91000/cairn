@@ -75,7 +75,8 @@ pub(super) fn accounting(
         "hostFreeBytes": sample.free_bytes,
         "hostReserveBytes": reserve,
         "poolReserveBytes": pool_reserve(limit),
-        "reclaimableBytes": super::eviction::reclaimable_bytes(db, node)?.min(sample.used_bytes),
+        // Local environments are never evicted to reclaim their backing.
+        "reclaimableBytes": 0,
         "unsynchronizedBytes": unsynchronized
     }))
 }
@@ -247,9 +248,6 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
         } else {
             current
         };
-        if current < task_limit_mib && allowance == current && request.current_mi_b == current {
-            super::eviction::request(db, node)?;
-        }
         grants.push(json!({
             "attemptId": request.attempt_id, "allowanceMiB": allowance,
             // This authenticated pre-request value lets a controller reconcile

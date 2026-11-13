@@ -33,8 +33,8 @@ impl LazyDisk {
         Ok(manifest["size"].as_u64().unwrap())
     }
 
-    /// Conservative local backing: only exclusively allocated decoded cache
-    /// objects referenced by the current base. Journal frames and SQLite are
+    /// Conservative local backing: only exclusively allocated base block files
+    /// referenced by the current base. Journal frames and SQLite are
     /// deliberately withheld; old append frames are not current backing.
     pub(crate) fn cached_backing_bytes(directory: &Path) -> io::Result<u64> {
         use std::os::unix::fs::MetadataExt;
@@ -124,17 +124,12 @@ impl LazyDisk {
         Ok(self.accounting.lock().map_err(failure)?.clone())
     }
 
-    pub(crate) fn dirty_since(&self) -> Option<i64> {
-        let at = self.dirty_since.load(Ordering::Acquire);
-        (at >= 0).then_some(at)
-    }
-
     pub(super) fn update_accounting(&self, journal: &journal::Journal) -> io::Result<()> {
         let mut accounting = self.accounting.lock().map_err(failure)?;
         let published = accounting["published"].take();
         *accounting = journal.stats();
-        self.dirty_since.store(
-            accounting["dirtySince"].as_i64().unwrap_or(-1),
+        self.journal_bytes.store(
+            accounting["journalBytes"].as_u64().unwrap_or(0),
             Ordering::Release,
         );
         accounting["published"] = published;

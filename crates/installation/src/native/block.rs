@@ -1,4 +1,4 @@
-//! Host-mounted ext4 over the same journal, remote source and clean cache as VMs.
+//! Host-mounted ext4 over the same local journal and base blocks as VMs.
 mod closing;
 
 use super::{atomic_write, workspace};
@@ -462,6 +462,12 @@ impl Completion {
     }
 }
 
+async fn open_volume(directory: &Path, allowance: u64) -> Result<Arc<Volume>> {
+    let volume = storage::runtime::load(directory).await?;
+    volume.limit_backing(allowance)?;
+    Ok(volume)
+}
+
 pub(super) async fn mount(
     state: &Path,
     run: &str,
@@ -508,7 +514,7 @@ pub(super) async fn mount(
         })?;
         let physical = crate::file_lock::exclusive(&directory.join("lock"), DISK_BUSY)?;
         record_runtime(directory, plan).await?;
-        let volume = storage::runtime::load(directory).await?;
+        let volume = open_volume(directory, requested).await?;
         let runtime: Value =
             serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
         let vm = vm_disk(&runtime);
@@ -660,9 +666,17 @@ impl Mounted {
             // Keep the mount and its leases alive through an uncancellable
             // metadata commit; the caller owns the native lifecycle lock.
             let disk = self.volume.disk.clone();
-            let result = tokio::task::spawn_blocking(move || disk.grow(bytes))
-                .await
-                .map_err(Error::internal)?;
+            let result = tokio::task::spawn_blocking(move || {
+                // Fold sealed generations into the base first: none may later
+                // reinstall the previous geometry. A concurrent consolidation
+                // leaves them pending, and growth retries on the next tick.
+                if disk.sealed_pending() {
+                    disk.consolidate()?;
+                }
+                disk.grow(bytes)
+            })
+            .await
+            .map_err(Error::internal)?;
             match result {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
                 result => result?,
@@ -762,7 +776,7 @@ struct CloseOperations<'a> {
 #[async_trait::async_trait]
 impl closing::Operations for CloseOperations<'_> {
     async fn flush(&self) -> std::io::Result<Option<u64>> {
-        sync_io(self.target).await?;
+        self.volume.finish_fenced(sync_io(self.target)).await?;
         Ok(used_bytes(self.target).ok())
     }
 
@@ -969,7 +983,7 @@ pub async fn status(state: &Path, run: &str) -> Result<Value> {
         Err(error) => return Err(error.into()),
     }
 
-    let volume = storage::runtime::load(&directory).await?;
+    let volume = storage::runtime::load_for_inspection(&directory).await?;
     let mut status = volume.inspect().await?;
     status["paused"] = volume.paused().into();
     Ok(status)
@@ -1153,53 +1167,6 @@ pub fn free_bytes(path: &Path) -> Result<u64> {
     Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
 }
 
-pub async fn evict(data: &Path, state: &Path, run: &str, expected: &Value) -> Result<Value> {
-    let root = workspace::directory(state, run)?;
-    let _owner =
-        crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-    let lease = environment::lock(state, run, DISK_BUSY).await?;
-    if root.join("block-restore.pending.json").exists()
-        || lease.directory.join("restore.pending").exists()
-        || !root.join("block-initialized").exists()
-    {
-        return Err(Error::conflict(
-            "Native recovery must finish before cache eviction.",
-        ));
-    }
-    let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
-    let volume = storage::runtime::load(&lease.directory).await?;
-    let status = volume.inspect().await?;
-    if attempt != text(expected, "attempt")
-        || status["dirtyBytes"] != 0
-        || status["published"]["backupId"] != expected["backupId"]
-        || status["published"]["generation"] != expected["generation"]
-        || status["grantId"] != expected["grantId"]
-        || expected["backupId"].as_str().is_none()
-        || expected["generation"].as_i64().is_none()
-    {
-        return Err(Error::conflict(
-            "Native cache has no matching acknowledged S3 generation.",
-        ));
-    }
-    let (state, directory) = (state.to_owned(), lease.directory.clone());
-    let evicted =
-        tokio::task::spawn_blocking(move || storage::cache::evict_clean(&state, &directory))
-            .await
-            .map_err(Error::internal)??;
-    remove(&root.join("tmp")).await?;
-    cleanup_attempt_files(data, state_path(&lease.directory)?, run).await?;
-    let mut status = volume.inspect().await?;
-    status["evictedBytes"] = evicted.into();
-    Ok(status)
-}
-
-fn state_path(directory: &Path) -> Result<&Path> {
-    directory
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| Error::bad("Invalid native disk directory."))
-}
-
 async fn remove(path: &Path) -> Result<()> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
@@ -1208,42 +1175,6 @@ async fn remove(path: &Path) -> Result<()> {
         Ok(_) => tokio::fs::remove_file(path).await?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
-async fn cleanup_attempt_files(data: &Path, state: &Path, run: &str) -> Result<()> {
-    remove(&data.join("runs").join(run)).await?;
-    let mut entries = tokio::fs::read_dir(state).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        if entry
-            .path()
-            .extension()
-            .is_some_and(|extension| extension == "run")
-            && tokio::fs::read_to_string(entry.path())
-                .await
-                .is_ok_and(|owner| owner == run)
-        {
-            let attempt = entry
-                .path()
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            crate::validation::uuid(&attempt)?;
-            for extension in ["log", "lease"] {
-                remove(&state.join(&attempt).with_extension(extension)).await?;
-            }
-            remove(
-                &state
-                    .join("roots")
-                    .join(&attempt)
-                    .with_extension("plan.json"),
-            )
-            .await?;
-            remove(&state.join("roots").join(&attempt)).await?;
-            remove(&data.join("runner-plans").join(format!("{attempt}.json"))).await?;
-        }
     }
     Ok(())
 }
@@ -1315,6 +1246,56 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_volume_admission_consolidates_overwrites_before_the_task_allowance_is_exhausted()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/native");
+        let block = 4 * 1024 * 1024u64;
+        let disk = storage::runtime::create(
+            &directory.join("lazy"),
+            &json!({
+                "version": 1, "size": 4 * block, "blockSize": block,
+                "blocks": (0..4).map(|index| json!({ "offset": index * block, "size": block, "hash": null })).collect::<Vec<_>>()
+            }),
+            &json!({
+                "master": "http://127.0.0.1:1/", "grant": "native-allowance",
+                "policy": { "reserveMiB": 64, "reservePercent": 1 }
+            }),
+        )
+        .await
+        .unwrap();
+        for value in 1..=3 {
+            disk.write_at(0, &vec![value; block as usize]).unwrap();
+        }
+        drop(disk);
+        // Use the constructor invoked before the real native ublk mount, with
+        // its issued allowance, without configuring Volume::limit_backing here.
+        let volume = open_volume(&directory, 2 * block).await.unwrap();
+        let writing = volume.clone();
+        let mut writer = tokio::task::spawn_blocking(move || writing.write_at(0, b"native"));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let blocked = !writer.is_finished();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), &mut writer).await;
+        if result.is_err() {
+            volume.stop.cancel();
+            let _ = writer.await;
+        }
+        assert!(
+            blocked,
+            "native admission must wait for retained journal history"
+        );
+        result.unwrap().unwrap().unwrap();
+        assert_eq!(
+            volume.disk.accounting().unwrap()["published"]["local"],
+            true
+        );
+        assert!(storage::runtime::retained_backing_bytes(&directory).unwrap() < 2 * block);
+        let mut bytes = [0; 6];
+        volume.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"native");
+    }
 
     #[tokio::test]
     async fn vm_views_reject_redirected_bind_and_runtime_directories() {

@@ -149,7 +149,7 @@ async fn prepare_source(
     }
     if directory.join("data.ext4").exists() && !marker.exists() {
         return Err(Error::conflict(
-            "This conversation still has a legacy local disk and cannot start with S3-backed storage.",
+            "This conversation still has a legacy local disk and cannot start with journal-backed storage.",
         ));
     }
     let policy: super::policy::Policy = serde_json::from_value(context["policy"].clone())?;
@@ -272,7 +272,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
-    async fn raw_legacy_disk_cannot_start_as_a_new_s3_disk() {
+    async fn raw_legacy_disk_cannot_replace_a_journal() {
         let root = tempfile::tempdir().unwrap();
         let disk = root.path().join("disks/conversation");
         std::fs::create_dir_all(&disk).unwrap();
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(signature, [0x53, 0xef]);
         assert!(!directory.join("data.ext4").exists());
         assert!(volume.source.grant_id().is_err());
-        assert!(!volume.disk.has_remote_base().unwrap());
+        assert!(!volume.disk.has_base_blocks().unwrap());
         let context = super::super::LazyDisk::context(&directory.join("lazy")).unwrap();
         assert!(context.get("master").is_none() && context.get("grant").is_none());
         let physical = crate::file_lock::exclusive(&directory.join("lock"), "busy").unwrap();

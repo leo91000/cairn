@@ -133,6 +133,7 @@ mod tests {
         volume: Arc<storage::runtime::Volume>,
         root: std::path::PathBuf,
         flush_error: AtomicI32,
+        flush_write: AtomicBool,
         retire_error: AtomicBool,
         presealed: bool,
     }
@@ -155,6 +156,16 @@ mod tests {
             let error = self.flush_error.swap(0, Ordering::SeqCst);
             if error != 0 {
                 return Err(std::io::Error::from_raw_os_error(error));
+            }
+            if self.flush_write.swap(false, Ordering::SeqCst) {
+                let writing = self.volume.clone();
+                self.volume
+                    .finish_fenced(async move {
+                        tokio::task::spawn_blocking(move || writing.write_at(0, b"dirty"))
+                            .await
+                            .map_err(std::io::Error::other)?
+                    })
+                    .await?;
             }
             std::fs::File::open(self.root.join("payload"))?.sync_all()?;
             Ok(Some(9))
@@ -238,6 +249,7 @@ mod tests {
             volume,
             root: owner.directory.clone(),
             flush_error: AtomicI32::new(0),
+            flush_write: AtomicBool::new(false),
             retire_error: AtomicBool::new(false),
             presealed: false,
         };
@@ -247,6 +259,85 @@ mod tests {
             filesystem,
             workspace_owner,
         )
+    }
+
+    #[tokio::test]
+    async fn fenced_flush_releases_ownership_when_tmp_consumes_the_task_allowance() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().to_owned();
+        let (run, mut closing, operations, workspace_owner) = fixture(&state, None).await;
+        let volume = operations.volume.clone();
+        volume.limit_backing(0).unwrap();
+        operations.flush_write.store(true, Ordering::Release);
+        let mut finish = tokio::spawn(async move {
+            let result = StorageClose::default()
+                .finish(closing.close(&operations))
+                .await;
+            if result.is_err() {
+                // Settle the old broken path after the timeout cancels its I/O.
+                closing.aborted = true;
+                closing.close(&operations).await.unwrap();
+            }
+            result
+        });
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut finish).await;
+        if result.is_err() {
+            volume.stop.cancel();
+            let _ = finish.await;
+        }
+        drop(workspace_owner);
+        assert!(
+            result.is_ok(),
+            "fenced task pressure must not strand filesystem flush"
+        );
+        assert_eq!(result.unwrap().unwrap().unwrap(), Completion::FailedFlush);
+        assert!(environment::lock(&state, &run, "probe").await.is_ok());
+        assert!(workspace::execution_ownership(&state, &run).await.is_ok());
+        let mut bytes = [0; 9];
+        volume.disk.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"preserved");
+    }
+
+    #[tokio::test]
+    async fn fenced_flush_consolidates_history_without_extending_the_task_allowance() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().to_owned();
+        let (run, mut closing, operations, _workspace_owner) = fixture(&state, None).await;
+        let volume = operations.volume.clone();
+        let bytes = vec![9; 4096];
+        let writes = (0..256)
+            .map(|_| storage::DiskWrite {
+                offset: 0,
+                bytes: &bytes,
+            })
+            .collect::<Vec<_>>();
+        for batch in writes.chunks(128) {
+            volume.disk.write_batch(batch).unwrap();
+        }
+        let allowance = 512 * 1024;
+        let directory = environment::directory(&state, &run).unwrap();
+        assert!(storage::runtime::retained_backing_bytes(&directory).unwrap() > allowance);
+        volume.limit_backing(allowance).unwrap();
+        operations.flush_write.store(true, Ordering::Release);
+        let mut finish = tokio::spawn(async move {
+            let result = StorageClose::default()
+                .finish(closing.close(&operations))
+                .await;
+            if result.is_err() {
+                closing.aborted = true;
+                closing.close(&operations).await.unwrap();
+            }
+            result
+        });
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut finish).await;
+        if result.is_err() {
+            volume.stop.cancel();
+            let _ = finish.await;
+        }
+        assert_eq!(result.unwrap().unwrap().unwrap(), Completion::Flushed);
+        let mut bytes = [0; 5];
+        volume.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"dirty");
     }
 
     #[tokio::test]
@@ -301,11 +392,6 @@ mod tests {
             assert!(environment::lock(&state, &run, "probe").await.is_err());
             assert!(
                 crate::native::block::action(&state, &run, true)
-                    .await
-                    .is_err()
-            );
-            assert!(
-                crate::native::block::evict(root.path(), &state, &run, &json!({}))
                     .await
                     .is_err()
             );

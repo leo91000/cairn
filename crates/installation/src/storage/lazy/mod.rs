@@ -1,4 +1,5 @@
-//! Demand-paged immutable base with a durable local write journal.
+//! Immutable local base blocks with a durable local write journal. The node
+//! consolidates sealed journal generations into new base blocks itself.
 use super::{Disk, DiskWrite};
 use rusqlite::{Connection, params};
 use serde_json::Value;
@@ -8,12 +9,14 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
 const BLOCK: u64 = 4 * 1024 * 1024;
 const MAX_IO: usize = 8 * 1024 * 1024;
+/// Zero pages of a base block file are left as holes.
+const PAGE: usize = 4096;
 
 mod growth;
 
@@ -25,8 +28,8 @@ fn block_digest(bytes: &[u8]) -> String {
     super::digest::block(bytes)
 }
 
-/// Immutable plaintext blocks. Implementations must bound transfers and propagate
-/// unavailable data as an error; the mount/controller owns retry and cancellation.
+/// Immutable plaintext blocks of a legacy remote base. A disk never reads them:
+/// every base block is a local file, and a missing one is an integrity error.
 pub trait BlockSource: Send + Sync {
     fn fetch(&self, hash: &str) -> io::Result<Vec<u8>>;
 }
@@ -41,10 +44,22 @@ pub struct LazyDisk {
     #[cfg(test)]
     commit_failure: std::sync::atomic::AtomicBool,
     accounting: Mutex<Value>,
-    dirty_since: AtomicI64,
     base: Mutex<Arc<Value>>,
     source: Arc<dyn BlockSource>,
-    cache: Mutex<()>,
+    consolidating: Mutex<()>,
+    scratch: scratch::Scratch,
+    background: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    consolidation_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    consolidation_admission_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    consolidation_copy_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    consolidation_commit_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    consolidation_stop: tokio_util::sync::CancellationToken,
+    sealed_pending: AtomicBool,
+    journal_bytes: AtomicU64,
     blocks: Arc<memory::BlockCache>,
     records: Mutex<memory::BytesCache>,
     foreground: Arc<Mutex<memory::WorkingSet>>,
@@ -108,8 +123,40 @@ fn validate(manifest: &Value) -> io::Result<u64> {
     Ok(size)
 }
 
+/// A base is only mountable when this node holds every block it references.
+/// Contents are authenticated when each block is read.
+fn check_base_blocks(directory: &Path, manifest: &Value) -> io::Result<()> {
+    for block in manifest["blocks"].as_array().unwrap() {
+        let Some(hash) = block["hash"].as_str() else {
+            continue;
+        };
+        let complete =
+            std::fs::symlink_metadata(directory.join("cache").join(hash)).is_ok_and(|metadata| {
+                metadata.is_file() && Some(metadata.len()) == block["size"].as_u64()
+            });
+        if !complete {
+            return Err(missing_block());
+        }
+    }
+    Ok(())
+}
+
+fn missing_block() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "A local base block is missing; this disk depends on data the node does not hold",
+    )
+}
+
+fn corrupt_block() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Local base block integrity check failed",
+    )
+}
+
 impl LazyDisk {
-    pub(crate) fn has_remote_base(&self) -> io::Result<bool> {
+    pub(crate) fn has_base_blocks(&self) -> io::Result<bool> {
         let base = self.base.lock().map_err(failure)?;
         Ok(base["blocks"]
             .as_array()
@@ -120,6 +167,10 @@ impl LazyDisk {
 
     pub(crate) fn start_write_admission(&self) -> super::metrics::Sample<'_> {
         self.metrics.write_admission.start()
+    }
+
+    pub(crate) fn performance_identity(&self) -> String {
+        Self::identity(&self.directory).to_owned()
     }
 
     fn identity(directory: &Path) -> &str {
@@ -191,6 +242,9 @@ impl LazyDisk {
             .mode(0o600)
             .open(directory.join("journal.lock"))?;
         lock.try_lock().map_err(failure)?;
+        if let Some((manifest, _)) = initial {
+            check_base_blocks(directory, manifest)?;
+        }
         let db = journal::metadata(directory, initial)?;
         let manifest: String = db
             .query_row("SELECT manifest FROM state WHERE id=1", [], |row| {
@@ -199,9 +253,33 @@ impl LazyDisk {
             .map_err(failure)?;
         let manifest: Value = serde_json::from_str(&manifest).map_err(failure)?;
         let size = validate(&manifest)?;
+        if initial.is_none() {
+            check_base_blocks(directory, &manifest)?;
+        }
+        let sealed_pending: bool = db
+            .query_row("SELECT EXISTS(SELECT 1 FROM sealed)", [], |row| row.get(0))
+            .map_err(failure)?;
         let journal = journal::Journal::open(directory, &db, size)?;
+        let captures = db
+            .prepare("SELECT manifest FROM sealed WHERE manifest IS NOT NULL")
+            .map_err(failure)?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(failure)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(failure)?
+            .iter()
+            .map(|manifest| serde_json::from_str::<Value>(manifest).map_err(failure))
+            .collect::<io::Result<Vec<_>>>()?;
+        let needed = std::iter::once(&manifest)
+            .chain(&captures)
+            .flat_map(|manifest| manifest["blocks"].as_array().unwrap())
+            .filter_map(|block| block["hash"].as_str())
+            .collect();
+        if let Err(error) = super::cache::retire(&directory.join("cache"), &needed) {
+            tracing::warn!(kind = ?error.kind(), "Could not retire orphan local blocks");
+        }
         let mut accounting = journal.stats();
-        let dirty_since = accounting["dirtySince"].as_i64().unwrap_or(-1);
+        let journal_bytes = accounting["journalBytes"].as_u64().unwrap_or(0);
         accounting["published"] = journal::published(&db)?;
         timing.finish();
         let blocks = memory::BlockCache::for_directory(directory)?;
@@ -216,10 +294,22 @@ impl LazyDisk {
             #[cfg(test)]
             commit_failure: std::sync::atomic::AtomicBool::new(false),
             accounting: Mutex::new(accounting),
-            dirty_since: AtomicI64::new(dirty_since),
             base: Mutex::new(Arc::new(manifest)),
             source,
-            cache: Mutex::new(()),
+            consolidating: Mutex::new(()),
+            scratch: scratch::Scratch::default(),
+            background: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            consolidation_hook: Mutex::new(None),
+            #[cfg(test)]
+            consolidation_admission_hook: Mutex::new(None),
+            #[cfg(test)]
+            consolidation_copy_hook: Mutex::new(None),
+            #[cfg(test)]
+            consolidation_commit_hook: Mutex::new(None),
+            consolidation_stop: tokio_util::sync::CancellationToken::new(),
+            sealed_pending: AtomicBool::new(sealed_pending),
+            journal_bytes: AtomicU64::new(journal_bytes),
             blocks,
             records: Mutex::new(memory::BytesCache::new(32 * 1024 * 1024)),
             foreground,
@@ -322,94 +412,132 @@ impl LazyDisk {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(bytes);
         }
-        let directory = self.directory.join("cache");
-        let target = directory.join(hash);
-        if let Ok(file) = File::open(&target) {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            (&file).take(BLOCK + 1).read_to_end(&mut bytes)?;
-            if bytes.len() == length && self.verified(hash, &bytes) {
-                self.metrics
-                    .disk_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let now = std::time::SystemTime::now();
-                if file.set_modified(now).is_ok()
-                    && let Some(state) = self.node_state()
-                {
-                    let _ = super::cache::touched(state, &target, now);
-                }
-                return self.remember_block(hash, bytes, foreground);
-            }
-            let _ = std::fs::remove_file(&target);
-        }
-        let fetch = self.metrics.remote.start();
-        let bytes = self.source.fetch(hash)?;
-        if bytes.len() != length || !self.verified(hash, &bytes) {
-            return Err(failure("Remote block integrity check failed"));
-        }
-        fetch.finish(bytes.len());
-        // Cache persistence is optional: it never determines whether an acknowledged
-        // write survives. Refusing a cache fill must not turn a valid read into EIO.
-        let _ = self.cache_block(hash, &bytes);
+        let bytes = self.stored_block(hash, length)?;
+        self.metrics
+            .disk_hits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.remember_block(hash, bytes, foreground)
     }
 
-    /// Optional immutable bytes, bounded by the same node quota for downloads
-    /// and locally reconstructed publications. Reopened entries are verified.
-    fn cache_block(&self, hash: &str, bytes: &[u8]) -> io::Result<()> {
-        use std::io::Write;
-        let directory = self.directory.join("cache");
-        let target = directory.join(hash);
-        let _cache = self.cache.lock().map_err(failure)?;
-        if target.exists() {
+    /// Base blocks are the disk itself, never refetched: a missing or altered
+    /// file fails the read instead of being replaced or treated as zeros.
+    fn stored_block(&self, hash: &str, length: usize) -> io::Result<Vec<u8>> {
+        use std::io::Read;
+        let file = match File::open(self.directory.join("cache").join(hash)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(missing_block()),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::with_capacity(length);
+        (&file).take(BLOCK + 1).read_to_end(&mut bytes)?;
+        if bytes.len() != length || !self.verified(hash, &bytes) {
+            return Err(corrupt_block());
+        }
+        Ok(bytes)
+    }
+
+    /// Write one base block durably. Its file is complete and synced before
+    /// its name appears; the caller syncs the directory before a base names it.
+    /// Zero pages stay holes, so a sparse block does not allocate its full size.
+    fn persist_block(&self, hash: &str, bytes: &[u8], consolidating: bool) -> io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        if self.stored_block(hash, bytes.len()).is_ok() {
+            File::open(self.directory.join("cache").join(hash))?.sync_all()?;
             return Ok(());
         }
-        let node_reservation = if let Some(state) = self.node_state() {
-            let policy = std::fs::read(state.join("storage-policy.json"))
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<super::policy::Policy>(&bytes).ok())
-                .unwrap_or_default();
-            let Some(reservation) = super::cache::reserve(state, &policy, bytes.len() as u64)?
-            else {
-                return Ok(());
-            };
-            Some(reservation)
+        let directory = self.directory.join("cache");
+        let _headroom = if consolidating {
+            self.admit_block(bytes.len() as u64)?
         } else {
             None
         };
         std::fs::create_dir_all(&directory)?;
-        // Standalone disks retain a small fallback cache; controller volumes
-        // share the node budget and can use its available working set.
-        if node_reservation.is_none() {
-            let mut entries = std::fs::read_dir(&directory)?
-                .filter_map(Result::ok)
-                .filter_map(|entry| {
-                    entry.metadata().ok().map(|m| {
-                        (
-                            entry.path(),
-                            m.len(),
-                            m.modified().unwrap_or(std::time::UNIX_EPOCH),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
-            entries.sort_by_key(|entry| entry.2);
-            let mut used = entries.iter().map(|entry| entry.1).sum::<u64>();
-            for (path, size, _) in entries {
-                if used.saturating_add(bytes.len() as u64) <= 32 * 1024 * 1024 {
-                    break;
+        File::open(&self.directory)?.sync_all()?;
+        let file = tempfile::Builder::new()
+            .prefix(super::cache::TEMPORARY_BLOCK)
+            .tempfile_in(&directory)?;
+        if consolidating {
+            self.scratch.track_block(
+                file.path().file_name().unwrap(),
+                file.as_file(),
+                bytes.len() as u64,
+            )?;
+        }
+        file.as_file().set_len(bytes.len() as u64)?;
+        let mut run = None;
+        for (index, page) in bytes.chunks(PAGE).enumerate() {
+            let start = index * PAGE;
+            let zero = page.iter().all(|byte| *byte == 0);
+            match (run, zero) {
+                (None, false) => run = Some(start),
+                (Some(from), true) => {
+                    file.as_file()
+                        .write_all_at(&bytes[from..start], from as u64)?;
+                    run = None;
                 }
-                std::fs::remove_file(path)?;
-                used = used.saturating_sub(size);
+                _ => {}
             }
         }
-        let mut file = tempfile::NamedTempFile::new_in(&directory)?;
-        file.write_all(bytes)?;
-        file.persist_noclobber(&target).map_err(failure)?;
-        if let Some(reservation) = &node_reservation {
-            reservation.filled(&target, bytes.len() as u64)?;
+        if let Some(from) = run {
+            file.as_file().write_all_at(&bytes[from..], from as u64)?;
         }
+        #[cfg(test)]
+        journal::crash_point(&self.directory, "consolidation_block_written");
+        file.as_file().sync_all()?;
+        #[cfg(test)]
+        journal::crash_point(&self.directory, "consolidation_block_synced");
+        if consolidating {
+            self.scratch.persist(&self.directory, file, hash)?;
+        } else {
+            file.persist(directory.join(hash)).map_err(failure)?;
+        }
+        #[cfg(test)]
+        journal::crash_point(&self.directory, "consolidation_block_renamed");
         Ok(())
+    }
+
+    /// Consolidation preserves the whole node reserve while retaining both
+    /// old and replacement backing until the durable base swap.
+    fn admit_block(
+        &self,
+        bytes: u64,
+    ) -> io::Result<Option<super::cache::WriteReservation<'static>>> {
+        let Some(state) = self.node_state() else {
+            return Ok(None);
+        };
+        let admission = super::cache::admission()?;
+        // A policy change applies to every new block admission, including
+        // changes made while an earlier block was being reconstructed.
+        let policy = std::fs::read(state.join("storage-policy.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<super::policy::Policy>(&bytes).ok())
+            .unwrap_or_default();
+        let (total, free) = super::policy::space(&self.directory)?;
+        let reserve = policy.reserve(total);
+        let (_, quota_free) = crate::microvm::budget::disk_space(&self.directory, total, u64::MAX)?;
+        let quota_required = reserve
+            .saturating_add(super::cache::pending_write_bytes())
+            .saturating_add(bytes);
+        if free <= reserve.saturating_add(bytes) || quota_free <= quota_required {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "Journal consolidation is waiting for disk space",
+            ));
+        }
+        let reservation = super::cache::reserve_write(&admission, bytes)?;
+        crate::microvm::budget::charge_disk(state, bytes.div_ceil(4096) * 4096)?;
+        #[cfg(test)]
+        {
+            let hook = self
+                .consolidation_admission_hook
+                .lock()
+                .map_err(failure)?
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        Ok(Some(reservation))
     }
 }
 
@@ -527,6 +655,7 @@ mod clone;
 mod generations;
 mod journal;
 mod memory;
+mod scratch;
 mod state;
 
 impl LazyDisk {

@@ -1273,8 +1273,7 @@ jobs:
           CAIRN_RETENTION_TURNS: 4
           CAIRN_RETENTION_CRASH_AFTER: 2
           CAIRN_RETENTION_ADMISSION: 'true'
-          CAIRN_RETENTION_PUBLISH: 'true'
-          CAIRN_RETENTION_ASYNC_PUBLISH: 'true'
+          CAIRN_RETENTION_LOCAL_CONSOLIDATION: 'true'
         run: node tests/runner-retention-smoke.mjs "$SMOKE_IMAGE"
       - name: Report remaining disk space
         if: always()

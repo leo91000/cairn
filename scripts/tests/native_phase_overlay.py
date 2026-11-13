@@ -23,6 +23,9 @@ def instrument(source, role):
     if any(name in scope.get_identifiers() for scope in scopes(symtable.symtable(source, '<native-fixture>', 'exec'))
            for name in (OBSERVER, 'start_diagnostics')):
         raise ValueError('Native fixture uses a reserved diagnostic binding')
+    resume_anchor = "            resumed = start(run, measure='nativeEvicted')\n"
+    if resume_anchor not in source:
+        resume_anchor = "            resumed = start(run, measure='nativeLocalRestart')\n"
     insertions = [
         ("    binary = Path(sys.argv[1]).resolve(strict=True)\n",
          "    from native_phase_diagnostics import start as start_diagnostics\n    " + OBSERVER + " = start_diagnostics(" + repr(role) + ")\n"),
@@ -33,7 +36,7 @@ def instrument(source, role):
          "                progress('artifact-check-complete')\n"),
         ("                before = manager('metrics')['remoteRequests']\n", "                progress('restored-measure-trigger')\n"),
         ("                eventually(lambda: (managed(run) / 'measure-ready').exists())\n", "                progress('restored-measure-read')\n"),
-        ("            resumed = start(run, measure='nativeEvicted')\n", "            progress('post-eviction-resume-complete')\n"),
+        (resume_anchor, "            progress('post-local-resume-complete')\n"),
     ]
     observed = source
     for anchor, addition in insertions:

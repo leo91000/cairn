@@ -6,10 +6,13 @@ struct Offline;
 
 impl BlockSource for Offline {
     fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-        Err(io::Error::other(
-            "All blocks must be served from verified local data",
-        ))
+        panic!("A local disk must never fetch remote blocks")
     }
+}
+
+fn local_block(directory: &std::path::Path, hash: &str, bytes: &[u8]) {
+    std::fs::create_dir_all(directory.join("cache")).unwrap();
+    std::fs::write(directory.join("cache").join(hash), bytes).unwrap();
 }
 
 #[test]
@@ -99,8 +102,8 @@ fn repeated_publications_keep_hot_bytes_and_later_writes_without_admitting_cold_
         assert_eq!(&bytes[3072..], &[value; 1024]);
     }
     assert_eq!(disk.performance()["remoteFetch"]["count"], 0);
-    // Optional published disk bytes may survive; evict them to isolate the RAM
-    // admission guarantee exercised by this test.
+    // Simulate missing backing to isolate RAM admission. Production never
+    // evicts these local base files.
     std::fs::remove_dir_all(root.path().join("cache")).unwrap();
     assert!(
         disk.read_at(BLOCK, &mut bytes).is_err(),
@@ -165,35 +168,33 @@ async fn controller_retains_verified_blocks_between_conversations_and_releases_t
         "blocks": [{ "offset": 0, "size": bytes.len(), "hash": hash }]
     });
     let first_directory = root.path().join("disks/first/lazy");
+    local_block(&first_directory, &hash, &bytes);
     let first = LazyDisk::create(&first_directory, &manifest, Arc::new(Offline)).unwrap();
-    std::fs::create_dir(first_directory.join("cache")).unwrap();
     let file = first_directory.join("cache").join(&hash);
-    std::fs::write(&file, bytes).unwrap();
     let mut buffer = [0; 4096];
     first.read_at(0, &mut buffer).unwrap();
     assert_eq!(buffer, [37; 4096]);
     std::fs::remove_file(file).unwrap();
     drop(first);
 
-    let second = LazyDisk::create(
-        &root.path().join("disks/second/lazy"),
-        &manifest,
-        Arc::new(Offline),
-    )
-    .unwrap();
+    let second_directory = root.path().join("disks/second/lazy");
+    local_block(&second_directory, &hash, &bytes);
+    let second = LazyDisk::create(&second_directory, &manifest, Arc::new(Offline)).unwrap();
+    std::fs::remove_file(second_directory.join("cache").join(&hash)).unwrap();
     second.read_at(0, &mut buffer).unwrap();
     assert_eq!(buffer, [37; 4096]);
     assert_eq!(second.performance()["memoryHits"], 1);
     drop(second);
     drop(controller);
 
-    let after_shutdown = LazyDisk::create(
-        &root.path().join("disks/after-shutdown/lazy"),
-        &manifest,
-        Arc::new(Offline),
-    )
-    .unwrap();
-    assert!(after_shutdown.read_at(0, &mut buffer).is_err());
+    let after_directory = root.path().join("disks/after-shutdown/lazy");
+    local_block(&after_directory, &hash, &bytes);
+    let after_shutdown = LazyDisk::create(&after_directory, &manifest, Arc::new(Offline)).unwrap();
+    std::fs::remove_file(after_directory.join("cache").join(&hash)).unwrap();
+    assert_eq!(
+        after_shutdown.read_at(0, &mut buffer).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
 }
 
 #[test]
@@ -212,11 +213,10 @@ fn small_interleaved_reads_reuse_verified_blocks_across_conversation_disks() {
         "version": 1, "size": 9 * BLOCK, "blockSize": BLOCK, "blocks": blocks
     });
     let directory = root.path().join("disks/first/lazy");
-    let first = LazyDisk::create(&directory, &manifest, Arc::new(Offline)).unwrap();
-    std::fs::create_dir(directory.join("cache")).unwrap();
-    for (hash, bytes) in data {
-        std::fs::write(directory.join("cache").join(hash), bytes).unwrap();
+    for (hash, bytes) in &data {
+        local_block(&directory, hash, bytes);
     }
+    let first = LazyDisk::create(&directory, &manifest, Arc::new(Offline)).unwrap();
     let mut buffer = [0; 4096];
     for _ in 0..64 {
         for index in 0..9 {
@@ -230,14 +230,12 @@ fn small_interleaved_reads_reuse_verified_blocks_across_conversation_disks() {
         "Each block should be verified once"
     );
 
-    // The second owned manifest authorizes the same immutable blocks. It has
-    // neither a local disk cache nor a working remote source.
-    let second = LazyDisk::create(
-        &root.path().join("disks/second/lazy"),
-        &manifest,
-        Arc::new(Offline),
-    )
-    .unwrap();
+    // The second disk owns its local base, and may reuse verified node RAM.
+    let second_directory = root.path().join("disks/second/lazy");
+    for (hash, bytes) in &data {
+        local_block(&second_directory, hash, bytes);
+    }
+    let second = LazyDisk::create(&second_directory, &manifest, Arc::new(Offline)).unwrap();
     for index in 0..9 {
         second.read_at(index * BLOCK, &mut buffer).unwrap();
         assert!(buffer.iter().all(|&byte| byte == index as u8 + 1));
@@ -245,103 +243,49 @@ fn small_interleaved_reads_reuse_verified_blocks_across_conversation_disks() {
     assert_eq!(second.performance()["memoryHits"], 9);
 
     let unrelated = tempfile::tempdir().unwrap();
-    let third = LazyDisk::create(
-        &unrelated.path().join("disks/third/lazy"),
-        &manifest,
-        Arc::new(Offline),
-    )
-    .unwrap();
     assert!(
-        third.read_at(0, &mut buffer).is_err(),
-        "Another node cannot use this node's cached plaintext"
+        LazyDisk::create(
+            &unrelated.path().join("disks/third/lazy"),
+            &manifest,
+            Arc::new(Offline),
+        )
+        .is_err(),
+        "Another node cannot mount a base it does not hold"
     );
 
     let mut wrong_extent = manifest;
     wrong_extent["size"] = 4096.into();
     wrong_extent["blocks"].as_array_mut().unwrap().truncate(1);
     wrong_extent["blocks"][0]["size"] = 4096.into();
-    let malformed = LazyDisk::create(
-        &root.path().join("disks/malformed/lazy"),
-        &wrong_extent,
-        Arc::new(Offline),
-    )
-    .unwrap();
+    let malformed_directory = root.path().join("disks/malformed/lazy");
+    let hash = wrong_extent["blocks"][0]["hash"].as_str().unwrap();
+    local_block(&malformed_directory, hash, &data[hash]);
     assert!(
-        malformed.read_at(0, &mut buffer).is_err(),
-        "A cache hit cannot bypass extent verification"
+        LazyDisk::create(&malformed_directory, &wrong_extent, Arc::new(Offline)).is_err(),
+        "A memory cache hit cannot bypass owned-base extent verification"
     );
 }
 
 #[test]
-fn an_unavailable_conversation_source_does_not_block_another_owned_source() {
-    use std::sync::{Mutex, mpsc};
-    use std::time::Duration;
-
-    struct WaitingSource {
-        started: mpsc::Sender<()>,
-        release: Mutex<mpsc::Receiver<()>>,
-    }
-
-    impl BlockSource for WaitingSource {
-        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-            self.started.send(()).unwrap();
-            self.release.lock().unwrap().recv().unwrap();
-            Err(io::Error::other("Source remains unavailable"))
-        }
-    }
-
-    struct AvailableSource;
-
-    impl BlockSource for AvailableSource {
-        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-            Ok(vec![7; 4096])
-        }
-    }
-
+fn a_missing_local_base_is_refused_without_blocking_another_owned_disk() {
     let root = tempfile::tempdir().unwrap();
-    let hash = cairn_installation::storage::digest::block(&vec![7; 4096]);
+    let bytes = vec![7; 4096];
+    let hash = cairn_installation::storage::digest::block(&bytes);
     let manifest = json!({
         "version": 1, "size": 4096, "blockSize": 4 * 1024 * 1024,
-        "blocks": [{"offset": 0, "size": 4096, "hash": hash}]
+        "blocks": [{ "offset": 0, "size": 4096, "hash": hash }]
     });
-    let (started, waiting) = mpsc::channel();
-    let (release, released) = mpsc::channel();
-    let first = LazyDisk::create(
-        &root.path().join("disks/unavailable/lazy"),
+    let missing = LazyDisk::create(
+        &root.path().join("disks/missing/lazy"),
         &manifest,
-        Arc::new(WaitingSource {
-            started,
-            release: Mutex::new(released),
-        }),
-    )
-    .unwrap();
-    let second = LazyDisk::create(
-        &root.path().join("disks/available/lazy"),
-        &manifest,
-        Arc::new(AvailableSource),
-    )
-    .unwrap();
-
-    std::thread::scope(|scope| {
-        let first = scope.spawn(|| first.read_at(0, &mut [0; 4096]));
-        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
-        let (completed, result) = mpsc::channel();
-        let second = scope.spawn(move || {
-            let mut bytes = [0; 4096];
-            let read = second.read_at(0, &mut bytes).map(|()| bytes);
-            completed.send(read).unwrap();
-        });
-        let independent = result.recv_timeout(Duration::from_secs(1));
-        // Always release and join the stalled source, including the failing
-        // baseline, so this test cannot strand a worker indefinitely.
-        release.send(()).unwrap();
-        assert!(first.join().unwrap().is_err());
-        second.join().unwrap();
-        assert_eq!(
-            independent
-                .expect("A separate source must not inherit another conversation's wait")
-                .unwrap(),
-            [7; 4096]
-        );
-    });
+        Arc::new(Offline),
+    );
+    assert_eq!(missing.err().unwrap().kind(), io::ErrorKind::InvalidData);
+    let directory = root.path().join("disks/available/lazy");
+    local_block(&directory, &hash, &bytes);
+    let owned = LazyDisk::create(&directory, &manifest, Arc::new(Offline)).unwrap();
+    let mut buffer = [0; 4096];
+    owned.read_at(0, &mut buffer).unwrap();
+    assert_eq!(buffer, [7; 4096]);
+    assert_eq!(owned.performance()["remoteFetch"]["count"], 0);
 }

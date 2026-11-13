@@ -94,13 +94,9 @@ impl Worker {
             .spawn(crate::project_archives::maintain(s.clone()));
         self.tasks
             .spawn(crate::plugins::conditions::maintain(s.clone()));
-        self.tasks
-            .spawn(crate::nodes::publication::maintain(s.clone()));
-        self.tasks
-            .spawn(crate::nodes::shared_blocks::maintain(s.clone()));
+        // Disks are local to their node: no publication, eviction or remote
+        // object collection runs. Storage status is still observed.
         self.tasks.spawn(crate::nodes::storage::monitor(s.clone()));
-        self.tasks
-            .spawn(crate::nodes::eviction::maintain(s.clone()));
         self.tasks
             .spawn(crate::nodes::exclusive::maintain(s.clone()));
         self.tasks.spawn(clean_conversations(s.clone()));
@@ -363,6 +359,66 @@ mod tests {
             assert_eq!(db.attempt_fixture("leased")?.unwrap()["released"], false);
             Ok(())
         }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_storage_observation_never_schedules_a_publication() {
+        use crate::{node_fixture::StoreNodeFixture, run_fixture::DbRunFixture};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let observed = Arc::new(AtomicUsize::new(0));
+        let calls = observed.clone();
+        let controller = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let calls = calls.clone();
+            async move {
+                if request.uri().path().ends_with("/storage-status") {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                }
+                axum::Json(json!({ "mode": "on-demand", "dirtyBytes": 1, "localBytes": 4096 }))
+            }
+        });
+        let (listener, address) = crate::common::bind().await;
+        let server = crate::common::serve(listener, controller);
+        let mut config = crate::common::config(root.path());
+        config.runner_url = format!("http://{address}");
+        let service = Service::new(config).await.unwrap();
+        service
+            .store
+            .put_node_fixture(json!({ "id": crate::nodes::LOCAL_NODE_ID, "revoked": false }))
+            .await
+            .unwrap();
+        let run = crate::config::id();
+        service
+            .store
+            .transaction({
+                let run = run.clone();
+                move |db| {
+                    db.add_run_fixture(
+                        &json!({
+                            "id": run, "taskId": run, "status": "succeeded", "createdAt": now(),
+                            "isolated": true, "nodeId": crate::nodes::LOCAL_NODE_ID,
+                            "storage": { "mode": "on-demand", "dirtyBytes": 1 }
+                        }),
+                        None,
+                    )?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        service.worker.start(service.clone()).await.unwrap();
+        service.node_publication_notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while observed.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(service.store.run(&run).await.unwrap()["backup"].is_null());
+        service.shutdown.cancel();
+        server.abort();
     }
 
     #[tokio::test]

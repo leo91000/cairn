@@ -352,9 +352,9 @@ import ast, os, unittest
 from pathlib import Path
 source=Path(${JSON.stringify(source)})
 tree=ast.parse(source.read_text())
-method=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='test_fixture_clock_collects_deferred_garbage_and_retains_uncertain_tombstones')
+method=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='test_fixture_purge_preserves_old_remote_objects_and_queued_tombstones')
 # Exercise the actual path lookup, assertion and chmod. The following Moto
-# server/Rust fixture work remains a real seven-test CI step, never local work.
+# server/Rust fixture work remains a real eight-test CI step, never local work.
 prefix=ast.Module(body=method.body[:3],type_ignores=[])
 exec(compile(ast.fix_missing_locations(prefix),str(source),'exec'),dict(Path=Path,os=os,self=unittest.TestCase(),__file__=str(Path.cwd()/'scripts/tests/test_native_s3_memory.py')))
 `
@@ -381,7 +381,7 @@ exec(compile(ast.fix_missing_locations(prefix),str(source),'exec'),dict(Path=Pat
   }
 })
 
-it('verifies the pinned candidate qualifier before the seven preparation tests', (t) => {
+it('verifies the pinned candidate qualifier before the eight preparation tests', (t) => {
   const directory = temporary(t)
   const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
   const step = workflow.jobs['native-runtime'].steps.find(value => value.name === 'Verify the exact reference binaries')

@@ -67,13 +67,6 @@ impl RemoteSource {
         Ok(self)
     }
 
-    pub(crate) fn replay(&self) {
-        let source = self.clone();
-        self.runtime.spawn(async move {
-            let _ = source.reconcile().await;
-        });
-    }
-
     pub(crate) fn acknowledge(
         &self,
         state: &Path,
@@ -359,7 +352,7 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
     #[tokio::test]
-    async fn failed_report_survives_cancellation_and_replays_without_another_read() {
+    async fn legacy_report_survives_cancellation_and_can_be_reconciled_explicitly() {
         use axum::{
             Json, Router,
             http::StatusCode,
@@ -468,7 +461,7 @@ mod tests {
         .unwrap();
         assert!(restarted.waiting());
         accepted.store(true, Ordering::SeqCst);
-        restarted.replay();
+        restarted.reconcile().await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while restarted.waiting() {
                 tokio::time::sleep(Duration::from_millis(5)).await;

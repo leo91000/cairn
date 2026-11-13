@@ -393,9 +393,10 @@ impl Vm {
         let volume = crate::storage::runtime::load(&disk_dir).await?;
         if volume.disk.size() != resources.disk_mi_b * 1024 * 1024 {
             return Err(Error::conflict(
-                "VM disk size does not match its S3-backed journal.",
+                "VM disk size does not match its local journal.",
             ));
         }
+        volume.limit_backing(resources.disk_mi_b * 1024 * 1024)?;
         let jail = state.join("jails/firecracker").join(&id).join("root");
         let mut vm = Self {
             socket: jail.join("v.sock"),
@@ -577,17 +578,33 @@ impl Vm {
             tracing::warn!(vm_id = id, message = %error.message, "Could not finalize VM suspension accounting");
         }
         cancel_reads();
-        drop(volume);
         for console in self.consoles.drain(..) {
             let _ = console.await;
         }
 
         timing.next("unmount");
-        if let Some(mounted) = self.mounted.take()
-            && let Ok(Err(error)) = tokio::task::spawn_blocking(move || mounted.close()).await
+        let drained = if let Some(mounted) = self.mounted.take() {
+            match tokio::task::spawn_blocking(move || mounted.close()).await {
+                Ok(Ok(())) => true,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "Could not close VM block backend");
+                    false
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Could not join VM block backend cleanup");
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        if drained
+            && let Some(volume) = &volume
+            && let Err(error) = volume.seal_stopped().await
         {
-            tracing::warn!(%error, "Could not close VM block backend");
+            tracing::warn!(%error, "Could not seal stopped VM journal; its durable tail is retained");
         }
+        drop(volume);
 
         timing.next("network_cleanup");
         self.network.remove().await;

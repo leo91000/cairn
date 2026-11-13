@@ -154,7 +154,7 @@ impl Capacity {
                         self.max_task_bytes / (1024 * MIB),
                     ),
                     "waiting-conversation" => {
-                        "Additional capacity is reserved for a conversation waiting to start. Cairn reclaims synchronized inactive caches first.".into()
+                        "Additional capacity is reserved for a conversation waiting to start. Existing local environments remain on this node.".into()
                     }
                     "granted" => {
                         "Cairn granted additional shared capacity and is expanding the filesystem.".into()
@@ -326,7 +326,7 @@ mod tests {
         }
     }
 
-    fn remote_manifest(hash: &str) -> Value {
+    fn local_manifest(hash: &str) -> Value {
         let block = 4 * MIB;
         json!({ "version": 1, "size": 5 * block, "blockSize": block,
             "blocks": (0..5).map(|index| json!({ "offset": index * block, "size": block, "hash": hash })).collect::<Vec<_>>() })
@@ -344,13 +344,14 @@ mod tests {
         std::fs::write(root.join("attempt"), &attempt).unwrap();
         let payload = vec![7; 4 * MIB as usize];
         let hash = crate::storage::digest::block(&payload);
+        std::fs::create_dir_all(directory.join("cache")).unwrap();
+        std::fs::write(directory.join("cache").join(&hash), &payload).unwrap();
         let disk = crate::storage::LazyDisk::create(
             &directory,
-            &remote_manifest(&hash),
+            &local_manifest(&hash),
             std::sync::Arc::new(Offline),
         )
         .unwrap();
-        std::fs::create_dir(directory.join("cache")).unwrap();
         std::fs::write(directory.join("cache").join(&hash), &payload).unwrap();
         record_retained(&directory, &attempt, 20 * MIB)
             .await
@@ -399,9 +400,11 @@ mod tests {
             .join("lazy");
         let payload = vec![7; 4 * MIB as usize];
         let hash = crate::storage::digest::block(&payload);
+        std::fs::create_dir_all(directory.join("cache")).unwrap();
+        std::fs::write(directory.join("cache").join(&hash), &payload).unwrap();
         let disk = crate::storage::LazyDisk::create(
             &directory,
-            &remote_manifest(&hash),
+            &local_manifest(&hash),
             std::sync::Arc::new(Offline),
         )
         .unwrap();
@@ -424,8 +427,7 @@ mod tests {
             .observe(&attempt, 20 * MIB, 16 * MIB, 64 * MIB)
             .unwrap();
         let sample = capacity.report(state.path(), 40 * MIB).await.unwrap();
-        assert_eq!(sample.owned_bytes[&attempt], 0);
-        std::fs::create_dir(directory.join("cache")).unwrap();
+        assert!(sample.owned_bytes[&attempt] > 0 && sample.owned_bytes[&attempt] <= 4 * MIB);
         std::fs::write(directory.join("cache").join(&hash), &payload).unwrap();
         std::fs::write(directory.join("cache").join("obsolete-hash"), &payload).unwrap();
         let sample = capacity.report(state.path(), 48 * MIB).await.unwrap();

@@ -1,4 +1,4 @@
-"""Run encrypted node recovery against a loopback S3 server with synthetic credentials.
+"""Qualify local disks and retention of legacy remote objects in a synthetic bucket.
 
 Run: uv run --with 'moto[server]==5.2.3' python scripts/tests/node_s3_test.py
 Requires the AWS CLI and the project's pinned pnpm/Rust tools.
@@ -74,15 +74,19 @@ def configure_native_s3():
         resource.setrlimit(resource.RLIMIT_NOFILE, (NATIVE_S3_OPEN_FILES, hard))
 
 
-def run_case(repo, env, case):
-    result = subprocess.run(['pnpm', 'test:backend', '-p', 'cairn-installation', '--test', 'nodes', case,
-                             '--', '--ignored', '--nocapture'], cwd=repo, env=env,
+def run_qualification(repo, env, arguments, label):
+    result = subprocess.run(['pnpm', 'test:backend', *arguments], cwd=repo, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     print(result.stdout, end='', flush=True)
     result.check_returncode()
     import re
     if not re.search(r'^test result: ok\. [1-9][0-9]* passed; 0 failed;', result.stdout, re.MULTILINE):
-        raise RuntimeError(f'No passing S3 qualification selected by {case!r}')
+        raise RuntimeError(f'No passing qualification selected by {label!r}')
+
+
+def run_case(repo, env, case):
+    run_qualification(repo, env, ['-p', 'cairn-installation', '--test', 'nodes', case,
+                                 '--', '--ignored', '--nocapture'], case)
 
 
 def main():
@@ -117,13 +121,15 @@ def main():
         env['AWS_CONFIG_FILE'] = '/dev/null'
         env['AWS_SHARED_CREDENTIALS_FILE'] = '/dev/null'
         if args.native_runtime:
+            client.put_object(Bucket='cairn-node-test', Key='qualification-preserved-object', Body=b'keep legacy disk objects')
             if not args.qualifier:
                 parser.error('--native-runtime requires --qualifier')
             subprocess.run([os.sys.executable, 'scripts/tests/native_runtime_test.py',
                             str(args.native_runtime.resolve()), str(args.qualifier.resolve())],
                            cwd=args.repo, env=env, check=True)
             remaining = client.list_objects_v2(Bucket='cairn-node-test')
-            assert remaining.get('KeyCount', 0) == 0, 'Native purge left remote objects'
+            assert remaining.get('KeyCount', 0) == 1, 'Native qualification created or deleted disk objects'
+            assert client.get_object(Bucket='cairn-node-test', Key='qualification-preserved-object')['Body'].read() == b'keep legacy disk objects'
             return
         if args.compression_benchmark:
             subprocess.run(['node', 'scripts/test-backend.mjs', '-p', 'cairn-installation', '--release', '--test', 'block_codec_performance',
@@ -146,11 +152,17 @@ def main():
                                 'master_reuses_unchanged_blocks', '--', '--ignored', '--nocapture', '--test-threads=1'],
                                cwd=args.repo, env=env, check=True)
             return
-        run_case(args.repo, env, 'encrypted_recovery_points')
-        remaining = client.list_objects_v2(Bucket='cairn-node-test')
-        assert remaining.get('KeyCount', 0) == 0, 'Conversation purge must remove all remote recovery objects'
-        for case in ['active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications', 'compressed_publications', 'coalesced_final_publication']:
-            run_case(args.repo, env, case)
+        # The old recovery/movement/collection scenarios no longer describe
+        # production. Exercise local storage, retirement and launch without S3.
+        client.put_object(Bucket='cairn-node-test', Key='qualification-preserved-object', Body=b'keep legacy disk objects')
+        for selected in ['storage::', 'storage_migration::', 'native::block::', 'microvm::pool::', 'runner::']:
+            run_qualification(args.repo, env, ['--workspace', '--lib', selected], selected)
+        run_qualification(args.repo, env, ['-p', 'cairn-installation', '--test', 'worker'], 'worker')
+        run_qualification(args.repo, env, ['--workspace', '--example', 'native_storage_qualifier',
+                                         'stopped_inspection_keeps_its_generation_across_a_monitor_period'],
+                          'stopped local journal inspection')
+        assert client.list_objects_v2(Bucket='cairn-node-test').get('KeyCount', 0) == 1
+        assert client.get_object(Bucket='cairn-node-test', Key='qualification-preserved-object')['Body'].read() == b'keep legacy disk objects'
 
     finally:
         server.stop()

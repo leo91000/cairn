@@ -37,19 +37,6 @@ fn fixture(root: &Path, source: Arc<Published>) -> LazyDisk {
     .unwrap()
 }
 
-fn retain(disk: &LazyDisk, source: &Published, generation: i64) -> Value {
-    let manifest = disk.capture(generation).unwrap();
-    for extent in manifest["blocks"].as_array().unwrap() {
-        if let Some(hash) = extent["hash"].as_str() {
-            source.0.lock().unwrap().insert(
-                hash.to_owned(),
-                disk.captured_block(generation, hash).unwrap(),
-            );
-        }
-    }
-    manifest
-}
-
 #[test]
 fn discard_preserves_neighbours_new_writes_and_sealed_generations_across_reopen() {
     let root = tempfile::tempdir().unwrap();
@@ -59,16 +46,17 @@ fn discard_preserves_neighbours_new_writes_and_sealed_generations_across_reopen(
     let old = disk.seal_completed().unwrap();
     disk.discard(512, 2 * BLOCK as usize - 1024).unwrap();
     disk.write_at(BLOCK + 1024, b"newer").unwrap();
-    let old_manifest = retain(&disk, &source, old);
-    let old_hash = old_manifest["blocks"][0]["hash"].as_str().unwrap();
+    assert_eq!(disk.consolidate().unwrap(), Some(old));
+    let old_hash = disk.base.lock().unwrap()["blocks"][0]["hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(
-        source
-            .fetch(old_hash)
+        std::fs::read(root.path().join("cache").join(old_hash))
             .unwrap()
             .iter()
             .all(|byte| *byte == 0x3a)
     );
-    disk.commit_published(old, "old").unwrap();
     drop(disk);
     let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
     let mut actual = vec![0; 2 * BLOCK as usize];
@@ -80,7 +68,8 @@ fn discard_preserves_neighbours_new_writes_and_sealed_generations_across_reopen(
     assert_eq!(actual, expected);
     disk.discard(0, 2 * BLOCK as usize).unwrap();
     let next = disk.seal_completed().unwrap();
-    let manifest = retain(&disk, &source, next);
+    assert_eq!(disk.consolidate().unwrap(), Some(next));
+    let manifest = disk.base.lock().unwrap().as_ref().clone();
     assert!(
         manifest["blocks"]
             .as_array()
@@ -88,17 +77,16 @@ fn discard_preserves_neighbours_new_writes_and_sealed_generations_across_reopen(
             .iter()
             .all(|extent| extent["hash"].is_null())
     );
-    disk.commit_published(next, "trimmed").unwrap();
-    drop(disk);
-    // A restored zero manifest has no S3 dependency at all.
-    let disk = LazyDisk::create(
-        &root.path().join("restored"),
-        &manifest,
-        Arc::new(Published::default()),
-    )
-    .unwrap();
+    assert!(
+        std::fs::read_dir(root.path().join("cache"))
+            .unwrap()
+            .next()
+            .is_none(),
+        "a fully discarded disk keeps no base block files"
+    );
     disk.read_at(0, &mut actual).unwrap();
     assert!(actual.iter().all(|byte| *byte == 0));
+    assert!(source.0.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -198,25 +186,27 @@ fn discard_crash_child() {
 }
 
 #[test]
-fn discarding_unavailable_base_bytes_never_fetches_them_and_keeps_live_neighbours() {
+fn discarding_damaged_base_bytes_never_reads_them_and_keeps_live_neighbours() {
     let root = tempfile::tempdir().unwrap();
     let bytes = vec![0x4a; BLOCK as usize];
-    let hash = crate::storage::digest::block(&bytes);
-    let source = Arc::new(Published::default());
-    let manifest = single_block(BLOCK, BLOCK, &hash.into());
-    let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
+    let manifest = local_base(root.path(), &[Some(bytes.clone())]);
+    let file = root.path().join("cache").join(block_digest(&bytes));
+    std::fs::write(&file, vec![0x4b; BLOCK as usize]).unwrap();
+    let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Published::default())).unwrap();
     disk.discard(1024, 4096).unwrap();
     let mut discarded = [1; 4096];
     disk.read_at(1024, &mut discarded).unwrap();
     assert_eq!(discarded, [0; 4096]);
     assert!(disk.read_at(0, &mut [0; 1024]).is_err());
+    disk.seal().unwrap();
     assert!(
-        disk.capture(disk.seal().unwrap()).is_err(),
-        "missing live neighbours must still fail publication"
+        disk.consolidate().is_err(),
+        "damaged live neighbours must still fail consolidation"
     );
     disk.discard(0, BLOCK as usize).unwrap();
     let generation = disk.seal().unwrap();
-    assert!(disk.capture(generation).unwrap()["blocks"][0]["hash"].is_null());
+    assert_eq!(disk.consolidate().unwrap(), Some(generation));
+    assert!(disk.base.lock().unwrap()["blocks"][0]["hash"].is_null());
 }
 
 #[test]

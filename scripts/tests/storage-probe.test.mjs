@@ -5,6 +5,7 @@ import { once } from 'node:events'
 import {
   mkdir,
   mkdtemp,
+  readFile,
   rm,
   stat,
   writeFile,
@@ -33,23 +34,52 @@ async function fixture() {
   await writeFile(path.join(workspace, 'saved'), 'journal survives')
   await writeFile(path.join(workspace, 'unused'), unused)
   await writeFile(path.join(workspace, 'unused.sha256'), createHash('sha256').update(unused).digest('hex'))
-  return { root, workspace, inbox }
+  const bin = path.join(root, 'bin')
+  const syncCalls = path.join(root, 'sync-calls')
+  const syncRelease = path.join(root, 'sync-release')
+  await mkdir(bin)
+  // Exercise the real probe's synchronous subprocess without flushing the host.
+  // The test controls completion and failure through this private barrier.
+  await writeFile(path.join(bin, 'sync'), `#!${process.execPath}
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(syncCalls)}, JSON.stringify(process.argv.slice(2)) + '\\n');
+while (!fs.existsSync(${JSON.stringify(syncRelease)}))
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+process.exit(Number(fs.readFileSync(${JSON.stringify(syncRelease)}, 'utf8')));
+`, { mode: 0o755 })
+  return {
+    root,
+    workspace,
+    inbox,
+    bin,
+    syncCalls,
+    syncRelease,
+  }
 }
 
-function probe({ workspace, inbox }) {
+function probe({
+  workspace,
+  inbox,
+  bin,
+  syncRelease,
+}) {
   const command = storageProbeCommand({
     workspace,
     inbox,
     first: false,
     benchmark: true,
   })
-  const child = spawn(process.execPath, ['-e', command], { stdio: ['ignore', 'pipe', 'pipe'] })
-  const exited = once(child, 'exit')
+  const child = spawn(process.execPath, ['-e', command], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, PATH: bin },
+  })
+  const exited = once(child, 'close')
   let output = ''
   let errors = ''
   child.stdout.on('data', chunk => output += chunk)
   child.stderr.on('data', chunk => errors += chunk)
   cleanups.push(async () => {
+    await writeFile(syncRelease, '0')
     if (child.exitCode === null && child.signalCode === null)
       child.kill('SIGKILL')
     await exited
@@ -129,4 +159,35 @@ it('preserves hard filesystem failures in the benchmark', async () => {
   expect((await guest.exited)[0]).toBe(1)
   expect(guest.errors()).toContain('EISDIR')
   expect(guest.output()).not.toContain('storage.metrics')
+})
+
+it('finishes successfully only after the explicit completion message', async () => {
+  const files = await fixture()
+  const guest = probe(files)
+  await guest.waitFor('storage.ready')
+  expect(guest.child.exitCode).toBeNull()
+  await expect(stat(files.syncCalls)).rejects.toThrow('ENOENT')
+  await writeFile(files.inbox, '[{"text":"finish"}]')
+  await expect.poll(async () => readFile(files.syncCalls, 'utf8').catch(() => '')).toBe('[]\n')
+  expect(guest.child.exitCode).toBeNull()
+  expect(guest.output()).not.toContain('storage.finished')
+  await writeFile(files.syncRelease, '0')
+  expect((await guest.exited)[0], guest.errors()).toBe(0)
+  expect(guest.output()).toContain('storage.finished')
+  expect(guest.output()).not.toContain('storage.metrics')
+  expect(await readFile(files.syncCalls, 'utf8')).toBe('[]\n')
+})
+
+it('fails completion when the synchronization subprocess fails', async () => {
+  const files = await fixture()
+  const guest = probe(files)
+  await guest.waitFor('storage.ready')
+  await writeFile(files.inbox, '[{"text":"finish"}]')
+  await expect.poll(async () => readFile(files.syncCalls, 'utf8').catch(() => '')).toBe('[]\n')
+  expect(guest.child.exitCode).toBeNull()
+  await writeFile(files.syncRelease, '7')
+  expect((await guest.exited)[0]).toBe(1)
+  expect(guest.errors()).toContain('Command failed: sync')
+  expect(guest.output()).not.toContain('storage.finished')
+  expect(await readFile(files.syncCalls, 'utf8')).toBe('[]\n')
 })

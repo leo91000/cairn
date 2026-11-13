@@ -259,6 +259,14 @@ impl StorageClose {
         }
     }
 
+    pub(super) async fn finish_budgeted(
+        &mut self,
+        volume: &Arc<storage::runtime::Volume>,
+        closing: impl std::future::Future<Output = Result<block::Completion>>,
+    ) -> Result<block::Completion> {
+        volume.finish_fenced(self.finish(closing)).await
+    }
+
     pub(super) async fn finish(
         &mut self,
         closing: impl std::future::Future<Output = Result<block::Completion>>,
@@ -695,7 +703,9 @@ impl Controller {
                     let mut storage_close = StorageClose::new(live_access);
                     loop {
                         let result = storage_close
-                            .finish(async { mounted.mount.lock().await.close().await })
+                            .finish_budgeted(&mounted.volume, async {
+                                mounted.mount.lock().await.close().await
+                            })
                             .await;
                         match result {
                             Ok(completion) => {
@@ -1453,7 +1463,18 @@ impl Controller {
                 _ = timer.tick() => {
                     let leased = self.leased(id).await;
                     let expired = self.expired(id, plan["expires"].as_i64()).await;
-                    let workspace_bytes = view.filesystems.iter().try_fold(0u64, |total, path| block::used_bytes(path).map(|used| total.saturating_add(used)))?;
+                    let workspace_bytes = view.filesystems.iter().try_fold(0u64, |total, path| {
+                        block::used_bytes(path).map(|used| total.saturating_add(used))
+                    })?;
+                    let disk_directory = crate::storage::environment::directory(
+                        &self.state, text(&plan, "runId"),
+                    )?;
+                    let local_backing = tokio::task::spawn_blocking(move || {
+                        crate::storage::runtime::retained_backing_bytes(&disk_directory)
+                    })
+                    .await
+                    .map_err(Error::internal)??;
+                    let workspace_bytes = workspace_bytes.max(local_backing);
                     let temporary_bytes = disk::bytes_if_present(&temporary).await?;
                     let conversation_bytes = workspace_bytes.saturating_add(temporary_bytes);
                     let conversation_limit = self.monitor_capacity(id, &plan, workspace_bytes, temporary_bytes).await?;
@@ -1523,6 +1544,13 @@ impl Controller {
                 .unwrap_or((self.disk_budget(plan), None));
             (allowance, notice, capacity.negotiated)
         };
+        if let Some(mounted) = &mounted {
+            // Apply current grants even while geometry growth retries. Managed
+            // /tmp shares the task allowance and cannot finance journal writes.
+            mounted
+                .volume
+                .limit_backing(allowance.saturating_sub(temporary))?;
+        }
         if let Some(notice) = notice {
             let directory = self.data.join("runs").join(run).join("chat-input");
             crate::nodes::workspace::publish_native_notice(
@@ -2504,22 +2532,12 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 }
             }
         }
-        ("POST", ["disks", run, "evict"]) => {
-            let _disk = disk::lock(&controller.state).await?;
-            uuid(run)?;
-            if controller
-                .active
-                .lock()
-                .await
-                .values()
-                .any(|attempt| attempt.run == *run)
-            {
-                return Err(Error::conflict(
-                    "Native execution must finish stopping before cache eviction.",
-                ));
-            }
-            let expected = input(request, 16384).await?;
-            block::evict(&controller.data, &controller.state, run, &expected).await?
+        ("POST", ["disks", _, "evict"]) => {
+            // Local base blocks are the conversation disk itself. An older
+            // manager may still request eviction; nothing is ever evicted.
+            return Err(Error::conflict(
+                "Native conversation disks are local and are never evicted.",
+            ));
         }
         ("POST", ["disks", run, "restore"]) => {
             let _disk = disk::lock(&controller.state).await?;
@@ -2829,6 +2847,85 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fenced_task_pressure_settles_an_admitted_write_before_draining_its_access() {
+        use crate::storage::Disk;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_root, controller) = fixture().await;
+        let directory = controller.state.join("disks").join(crate::config::id());
+        drop(
+            storage::runtime::create(
+                &directory.join("lazy"),
+                &json!({
+                    "version": 1, "size": 4096, "blockSize": 4194304,
+                    "blocks": [{ "offset": 0, "size": 4096, "hash": null }]
+                }),
+                &json!({
+                    "master": "http://127.0.0.1:1/", "grant": "accepted-native-write",
+                    "policy": { "reserveMiB": 64, "reservePercent": 1 }
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        let volume = storage::runtime::load(&directory).await.unwrap();
+        volume.write_at(0, b"acknowledged").unwrap();
+        volume.limit_backing(0).unwrap();
+        let pool = disk::lock(&controller.state).await.unwrap();
+        let live_access = Arc::new(Mutex::new(()));
+        let admitted = live_access.clone().lock_owned().await;
+        let mut storage_close = StorageClose::new(live_access);
+        let settled = Arc::new(AtomicBool::new(false));
+        let observed = settled.clone();
+        let writing = volume.clone();
+        let accepted = tokio::spawn(async move {
+            let _pool = pool;
+            let _admitted = admitted;
+            let result = tokio::task::spawn_blocking(move || writing.write_at(0, b"pending"))
+                .await
+                .unwrap();
+            observed.store(true, Ordering::Release);
+            result
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while volume.status().unwrap()["performance"]["writeAdmission"]["inFlight"] != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let finalizing = volume.clone();
+        let mut finish = tokio::spawn(async move {
+            storage_close
+                .finish_budgeted(&finalizing, async move {
+                    assert!(
+                        settled.load(Ordering::Acquire),
+                        "accepted access must actually drain"
+                    );
+                    Ok(block::Completion::Flushed)
+                })
+                .await
+        });
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut finish).await;
+        if result.is_err() {
+            volume.stop.cancel();
+            let _ = finish.await;
+        }
+        let written = accepted.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "quota handling must precede accepted-access drainage"
+        );
+        assert_eq!(
+            result.unwrap().unwrap().unwrap(),
+            block::Completion::Flushed
+        );
+        assert_eq!(written.unwrap_err().raw_os_error(), Some(libc::EIO));
+        let mut bytes = [0; 12];
+        volume.disk.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"acknowledged");
+    }
 
     pub(crate) async fn validate_staged_plan(data: &Path, id: &str) -> Result<Value> {
         let (_root, mut controller) = fixture().await;

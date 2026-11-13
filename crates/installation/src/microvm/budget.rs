@@ -171,6 +171,16 @@ pub async fn cgroup() -> Result<PathBuf> {
 }
 
 pub fn allocated(directory: &Path) -> io::Result<u64> {
+    allocated_with(directory, &mut |_, metadata| {
+        metadata.blocks().saturating_mul(512)
+    })
+}
+
+/// Account each file from one metadata sample, including concurrent reclamation.
+pub(crate) fn allocated_with(
+    directory: &Path,
+    account: &mut impl FnMut(&Path, &std::fs::Metadata) -> u64,
+) -> io::Result<u64> {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -185,9 +195,9 @@ pub fn allocated(directory: &Path) -> io::Result<u64> {
             Err(error) => return Err(error),
         };
         if metadata.is_dir() {
-            bytes = bytes.saturating_add(allocated(&entry.path())?);
+            bytes = bytes.saturating_add(allocated_with(&entry.path(), account)?);
         } else if metadata.is_file() {
-            bytes = bytes.saturating_add(metadata.blocks().saturating_mul(512));
+            bytes = bytes.saturating_add(account(&entry.path(), &metadata));
         }
     }
     Ok(bytes)

@@ -15,6 +15,13 @@ export function storageProbeCommand({
       assert.equal(fs.readFileSync(file,'utf8'),'journal survives');
       const savedReadMs=performance.now()-started;
       console.log('storage.ready'); setInterval(()=>console.log('storage.tick'),1000);
+      setInterval(()=>{
+        let messages;
+        try {messages=JSON.parse(fs.readFileSync(${JSON.stringify(inbox)},'utf8'));}
+        catch(error) {if(error.code==='ENOENT'||error instanceof SyntaxError)return;throw error;}
+        if(!Array.isArray(messages)||!messages.some(message=>message?.text==='finish'))return;
+        cp.execFileSync('sync'); console.log('storage.finished'); process.exit(0);
+      },50);
       if(${soak}) {
         const fd=fs.openSync(file+'.load','w+'), data=Buffer.alloc(4096), read=Buffer.alloc(4096);
         let sequence=0, maximumMs=0;const latencies=[];
