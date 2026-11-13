@@ -972,7 +972,8 @@ test('reloading after a conflict keeps a node granted elsewhere and the owner\'s
   // Meanwhile, another window grants merge-c, then merge-a is revoked.
   const current = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
   await workspace.api(`/api/agents/${agent.id}`, 'PUT', { ...current, access: { ...current.access, nodes: [first, theirs] } })
-  await workspace.api(`/api/nodes/${first}/revoke`, 'POST', {})
+  const revoked = await workspace.api(`/api/nodes/${first}/revoke`, 'POST', { discardWorkingFiles: true })
+  expect(revoked.node.revoked).toBe(true)
 
   const bar = page.getByRole('region', { name: 'Unsaved changes' })
   await bar.getByRole('button', { name: 'Save', exact: true }).click()

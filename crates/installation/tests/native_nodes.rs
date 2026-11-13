@@ -5040,6 +5040,40 @@ async fn expired_backend_override_replaces_a_pending_destination_without_pinning
             .await
             .unwrap();
         assert_eq!(placed["nodeId"], replacement["id"]);
+        let reserved = f.service.store.run(&rid).await.unwrap();
+        assert_eq!(reserved["targetNodeId"], replacement["id"]);
+        assert_eq!(reserved["environmentState"], "expired");
+        assert!(reserved["pinnedNodeId"].is_null());
+        placement::materialize(&f.service, &attempt).await.unwrap();
+        let (run_id, attempt_id) = (rid.clone(), attempt.clone());
+        f.service
+            .store
+            .transaction(move |db| {
+                let current = db.run(&run_id)?.unwrap();
+                let held = db.attempt(&attempt_id)?.unwrap();
+                let mut checkpoint = db
+                    .checkpoint_boundary(&run_id)?
+                    .unwrap_or_else(|| json!({}));
+                checkpoint["runnerId"] = attempt_id.clone().into();
+                checkpoint["nodeId"] = held.node_id.into();
+                db.save_checkpoint_boundary(&run_id, &checkpoint)?;
+                db.change_run(
+                    &run_id,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Running),
+                        cancel_requested_at: Some(None),
+                        ..Default::default()
+                    },
+                )?;
+                placement::publish_admission(
+                    db,
+                    &run_id,
+                    &attempt_id,
+                    &current["environmentAdmissionRevision"],
+                )
+            })
+            .await
+            .unwrap();
         let admitted = f.service.store.run(&rid).await.unwrap();
         assert!(admitted["targetNodeId"].is_null());
         assert!(admitted["pinnedNodeId"].is_null());
