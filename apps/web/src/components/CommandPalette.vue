@@ -7,6 +7,7 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
+  shallowRef,
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
@@ -312,9 +313,27 @@ const results = computed(() => {
   }
   return [...ranked, ask]
 })
+// Live work can move results between groups while a pointer is pressed. Keep
+// its target in place until the click has been delivered.
+const pressedResults = shallowRef<Command[]>()
+const displayedResults = computed(() => pressedResults.value ?? results.value)
+let releaseTimer: ReturnType<typeof setTimeout> | undefined
+
+function holdResults(event: PointerEvent) {
+  if (event.button === 0 && event.isPrimary) {
+    clearTimeout(releaseTimer)
+    pressedResults.value = displayedResults.value
+  }
+}
+
+function releaseResults() {
+  clearTimeout(releaseTimer)
+  releaseTimer = setTimeout(() => pressedResults.value = undefined, 0)
+}
+
 const grouped = computed(() => {
   const groups: Array<{ name: string, items: Array<{ command: Command, index: number }> }> = []
-  results.value.forEach((command, index) => {
+  displayedResults.value.forEach((command, index) => {
     const group = groups.find(item => item.name === command.group) ?? groups[groups.push({ name: command.group, items: [] }) - 1]
     group.items.push({ command, index })
   })
@@ -329,10 +348,17 @@ watch(active, async () => {
 const previous = document.activeElement as HTMLElement | null
 onBeforeUnmount(() => {
   // A modal dialog keeps the page inert until it closes.
+  clearTimeout(releaseTimer)
+  window.removeEventListener('pointerup', releaseResults)
+  window.removeEventListener('pointercancel', releaseResults)
+  window.removeEventListener('blur', releaseResults)
   dialog.value?.close()
   previous?.focus()
 })
 onMounted(() => {
+  window.addEventListener('pointerup', releaseResults)
+  window.addEventListener('pointercancel', releaseResults)
+  window.addEventListener('blur', releaseResults)
   dialog.value?.showModal()
   input.value?.focus()
 })
@@ -343,7 +369,7 @@ function run(command: Command) {
 }
 
 function keydown(event: KeyboardEvent) {
-  const total = results.value.length
+  const total = displayedResults.value.length
   if (event.key === 'ArrowDown' || (event.ctrlKey && event.key === 'n')) {
     event.preventDefault()
     active.value = (active.value + 1) % total
@@ -354,7 +380,7 @@ function keydown(event: KeyboardEvent) {
   }
   else if (event.key === 'Enter' && !event.isComposing) {
     event.preventDefault()
-    const command = results.value[active.value]
+    const command = displayedResults.value[active.value]
     if (command)
       run(command)
   }
@@ -406,6 +432,7 @@ function cancel() {
         ref="list"
         class="min-h-0 flex-1 overflow-y-auto p-2 [scrollbar-width:thin]"
         role="listbox"
+        @pointerdown="holdResults"
       >
         <template v-for="group in grouped" :key="group.name">
           <p class="eyebrow px-3 pb-1.5 pt-2.5">
