@@ -117,7 +117,7 @@ An interrupted worker's checkpoint is retained only for fencing until it stops;
 then it is replaced by a fresh checkpoint. Logical detachment moves the old
 manager/provider namespace and captures its exact old references before admission.
 A durable phase makes interrupted replacement-directory creation replayable.
-Physical erasure and old S3 reclamation keep retrying independently afterward;
+Physical erasure of the detached local namespace keeps retrying independently afterward;
 identity-qualified cleanup cannot erase a new environment. A destination that
 still holds the old disk waits for its durable deletion acknowledgement.
 
