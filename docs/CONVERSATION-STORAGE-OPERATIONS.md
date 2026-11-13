@@ -67,8 +67,8 @@ Disabling automatic expiration means an operator must arrange explicit cleanup.
 Integrity and space protection continue to stop unsafe I/O. Remote synchronization
 and backup-lag states no longer describe local disks.
 
-After every native workload process is fenced, filesystem flushing can still need
-journal headroom. Close first consolidates retained journal history under the same
+After every native workload process is fenced, admitted access and filesystem
+flushing can still need journal headroom. Close consolidates history under the same
 budgets. If the task allowance still cannot admit the pending writes, or that
 consolidation cannot proceed, finalization reports a flush failure and preserves
 the acknowledged crash prefix while releasing physical ownership. Unflushed kernel

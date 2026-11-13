@@ -776,7 +776,7 @@ struct CloseOperations<'a> {
 #[async_trait::async_trait]
 impl closing::Operations for CloseOperations<'_> {
     async fn flush(&self) -> std::io::Result<Option<u64>> {
-        self.volume.flush_fenced(sync_io(self.target)).await?;
+        self.volume.finish_fenced(sync_io(self.target)).await?;
         Ok(used_bytes(self.target).ok())
     }
 

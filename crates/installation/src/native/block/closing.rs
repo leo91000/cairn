@@ -160,7 +160,7 @@ mod tests {
             if self.flush_write.swap(false, Ordering::SeqCst) {
                 let writing = self.volume.clone();
                 self.volume
-                    .flush_fenced(async move {
+                    .finish_fenced(async move {
                         tokio::task::spawn_blocking(move || writing.write_at(0, b"dirty"))
                             .await
                             .map_err(std::io::Error::other)?
@@ -269,10 +269,9 @@ mod tests {
         let volume = operations.volume.clone();
         volume.limit_backing(0).unwrap();
         operations.flush_write.store(true, Ordering::Release);
-        let owned_state = state.clone();
         let mut finish = tokio::spawn(async move {
             let result = StorageClose::default()
-                .finish(&owned_state, closing.close(&operations))
+                .finish(closing.close(&operations))
                 .await;
             if result.is_err() {
                 // Settle the old broken path after the timeout cancels its I/O.
@@ -322,7 +321,7 @@ mod tests {
         operations.flush_write.store(true, Ordering::Release);
         let mut finish = tokio::spawn(async move {
             let result = StorageClose::default()
-                .finish(&state, closing.close(&operations))
+                .finish(closing.close(&operations))
                 .await;
             if result.is_err() {
                 closing.aborted = true;

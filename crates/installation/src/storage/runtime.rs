@@ -998,13 +998,13 @@ impl Disk for Volume {
 
 impl Volume {
     /// Every workload is fenced. Fold journal history to release task headroom
-    /// while the filesystem flush runs. If even the consolidated backing cannot
+    /// while accepted access drains and the filesystem flushes. If backing cannot
     /// admit its pending writes, fail them so syncfs can report a crash-prefix
     /// close instead of retaining ownership forever. No allowance is enlarged.
-    pub(crate) async fn flush_fenced<T>(
+    pub(crate) async fn finish_fenced<T>(
         self: &Arc<Self>,
-        flush: impl std::future::Future<Output = io::Result<T>>,
-    ) -> io::Result<T> {
+        flush: impl std::future::Future<Output = T>,
+    ) -> T {
         tokio::pin!(flush);
         let mut timer = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
