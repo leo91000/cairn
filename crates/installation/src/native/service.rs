@@ -5436,6 +5436,37 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_publication_fence_needs_no_native_disk_or_publication_api() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let publication = crate::config::id();
+        let root = workspace::directory(&controller.state, &run).unwrap();
+        let body = json!({ "backupId": publication });
+        let response = route(
+            controller.clone(),
+            request(&format!("/disks/{run}/publication-fence"), &body),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["fenced"],
+            publication
+        );
+        assert!(!root.exists());
+        let error = route(
+            controller,
+            request(&format!("/disks/{run}/published"), &body),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error.status, 404 | 405));
+    }
+
+    #[tokio::test]
     async fn late_retirement_retry_preserves_the_next_native_environment() {
         let (_fixture, controller) = fixture().await;
         let run = crate::config::id();

@@ -23,8 +23,8 @@ mod assignment;
 
 pub mod policy;
 
-pub mod runtime;
 pub(crate) mod legacy_fences;
+pub mod runtime;
 
 pub mod cache;
 

@@ -18,11 +18,11 @@ pub mod moves;
 pub mod native_mode;
 pub mod placement;
 pub mod relay;
+pub(crate) mod retired_publications;
 pub mod run_placement;
 pub(crate) mod settings;
 pub mod snapshots;
 pub mod storage;
-pub(crate) mod retired_publications;
 pub mod transport;
 pub mod workspace;
 

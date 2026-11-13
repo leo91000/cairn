@@ -573,7 +573,7 @@ mod tests {
             "nodes":[crate::nodes::LOCAL_NODE_ID], "attempt":attempt, "attemptNode":crate::nodes::LOCAL_NODE_ID,
             "attempts":[], "managerPlans":[attempt], "process":null, "isolated":true,
             "accountId":null, "workspaces":[], "projects":[], "fenced":true, "local":true,
-            "publications":crate::nodes::publication::RetiredPublications::default(),
+            "publications":crate::nodes::retired_publications::RetiredPublications::default(),
             "cleaned":false, "error":null, "retryAfter":null
         });
         manager
@@ -682,7 +682,7 @@ mod tests {
             "attempts":[], "managerPlans":[old,foreign],
             "diskAttempts":scopes,
             "process":null, "isolated":true, "accountId":null, "workspaces":[], "projects":[], "fenced":true, "local":true,
-            "publications":crate::nodes::publication::RetiredPublications::default(), "cleaned":false, "error":null, "retryAfter":null
+            "publications":crate::nodes::retired_publications::RetiredPublications::default(), "cleaned":false, "error":null, "retryAfter":null
         });
         manager
             .store
@@ -729,6 +729,46 @@ mod tests {
         assert_eq!(std::fs::read(&fresh_log).unwrap(), b"new private output");
         assert!(foreign_log.exists());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn legacy_publication_fence_needs_no_vm_disk_or_publication_api() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let state = broker.state.clone();
+        let run = crate::config::id();
+        let publication = crate::config::id();
+        let app = router(broker);
+        let request = |operation: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/disks/{run}/{operation}"))
+                .header("authorization", format!("Bearer {SECRET}"))
+                .body(Body::from(json!({ "backupId": publication }).to_string()))
+                .unwrap()
+        };
+        let response = app
+            .clone()
+            .oneshot(request("publication-fence"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["fenced"],
+            publication
+        );
+        assert!(!state.join("disks").join(&run).exists());
+        assert!(matches!(
+            app.oneshot(request("published"))
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            404 | 405
+        ));
     }
 
     #[tokio::test]

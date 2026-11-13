@@ -733,6 +733,17 @@ mod retirement_tests {
         let service = Service::new(crate::common::config(root.path()))
             .await
             .unwrap();
+        use crate::node_fixture::StoreNodeFixture;
+        let legacy_node = crate::config::id();
+        service
+            .store
+            .put_node_fixture(json!({
+                "id": legacy_node,
+                "local": false,
+                "revoked": true
+            }))
+            .await
+            .unwrap();
         let retired_run = crate::config::id();
         let retained_run = crate::config::id();
         let (retired, retained) = (retired_run.clone(), retained_run.clone());
@@ -756,7 +767,7 @@ mod retirement_tests {
                 db.put("node-disk-grants", &grant)?;
                 db.0.execute("INSERT INTO shared_publications VALUES(?1,?1)", [run])?;
                 db.0.execute("INSERT INTO shared_references VALUES(?1,'shared')", [run])?;
-                db.0.execute("INSERT INTO direct_journal_acknowledgements VALUES(?1,?1,'legacy-node',0)", [run])?;
+                db.0.execute("INSERT INTO direct_journal_acknowledgements(publication,run_id,node_id,retired) VALUES(?1,?1,?2,0)", rusqlite::params![run, legacy_node])?;
                 db.0.execute("INSERT INTO direct_read_authorizations VALUES(?1,'shared','shared',?1)", [run])?;
             }
             db.0.execute("INSERT INTO shared_references VALUES(?1,'exclusive')", [&retired])?;
