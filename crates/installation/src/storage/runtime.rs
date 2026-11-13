@@ -128,7 +128,8 @@ pub struct Volume {
     directory: PathBuf,
     policy: RwLock<Policy>,
     task_limit: AtomicU64,
-    task_usage: Mutex<Option<(std::time::Instant, u64)>>,
+    task_usage: Mutex<Option<TaskUsage>>,
+    task_pending: super::cache::PendingWrites,
     active_since: AtomicI64,
     active_attempt: Mutex<String>,
     pressure: AtomicBool,
@@ -136,6 +137,12 @@ pub struct Volume {
     fault: AtomicBool,
     paused: AtomicBool,
     transition: Mutex<Option<std::time::Instant>>,
+}
+
+struct TaskUsage {
+    sampled: std::time::Instant,
+    bytes: u64,
+    revision: u64,
 }
 
 impl Drop for Volume {
@@ -155,6 +162,37 @@ pub fn live(directory: &Path) -> Option<Arc<Volume>> {
         Entry::Open { volume, .. } => volume.upgrade(),
         Entry::Replacing => None,
     }
+}
+
+/// Task accounting excludes only the bounded internal replacement copy.
+/// Node accounting continues to use every physically allocated file.
+pub(crate) fn retained_backing_bytes(directory: &Path) -> io::Result<u64> {
+    let entry = registry()
+        .lock()
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .get(directory)
+        .cloned();
+    let (volume, disk) = if let Some(entry) = entry {
+        // Native capacity sampling runs in the blocking pool. Wait for the
+        // registry update rather than briefly charging an internal copy.
+        let entry = entry
+            .lock()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        match entry.as_ref() {
+            Some(Entry::Open { volume, disk }) => (volume.upgrade(), disk.upgrade()),
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    if let Some(volume) = volume {
+        let (bytes, _) = volume.disk.retained_backing(directory)?;
+        return Ok(bytes.saturating_add(volume.task_pending.bytes()));
+    }
+    if let Some(disk) = disk {
+        return disk.retained_backing(directory).map(|(bytes, _)| bytes);
+    }
+    allocated(directory)
 }
 
 fn closing_error() -> Error {
@@ -265,6 +303,7 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
         policy: RwLock::new(policy),
         task_limit: AtomicU64::new(u64::MAX),
         task_usage: Mutex::new(None),
+        task_pending: super::cache::PendingWrites::default(),
         active_since: AtomicI64::new(0),
         active_attempt: Mutex::new(String::new()),
         pressure: AtomicBool::new(false),
@@ -318,8 +357,12 @@ fn monitor_consolidation(volume: &Arc<Volume>, journal_threshold: u64) {
             if !volume.consolidates() {
                 continue;
             }
+            // Leave journal headroom before a small task reaches its allowance.
+            let threshold = journal_threshold
+                .min(volume.task_limit.load(Ordering::Acquire) / 4)
+                .max(4096);
             if !volume.disk.sealed_pending()
-                && (volume.disk.journal_bytes() >= journal_threshold
+                && (volume.disk.journal_bytes() >= threshold
                     || (volume.disk.journal_bytes() > 0
                         && (volume.pressure.load(Ordering::Acquire)
                             || volume.space_pressure.load(Ordering::Acquire))))
@@ -970,23 +1013,30 @@ impl Volume {
             .task_usage
             .lock()
             .map_err(|error| io::Error::other(error.to_string()))?;
-        let refresh = sample
-            .as_ref()
-            .is_none_or(|(at, _)| at.elapsed() >= std::time::Duration::from_secs(1));
+        let revision = self.disk.backing_revision();
+        let refresh = sample.as_ref().is_none_or(|usage| {
+            usage.sampled.elapsed() >= std::time::Duration::from_secs(1)
+                || usage.revision != revision
+        });
         if refresh {
-            *sample = Some((std::time::Instant::now(), allocated(&self.directory)?));
+            let (bytes, revision) = self.disk.retained_backing(&self.directory)?;
+            *sample = Some(TaskUsage {
+                sampled: std::time::Instant::now(),
+                bytes: bytes.saturating_add(self.task_pending.bytes()),
+                revision,
+            });
         }
-        Ok(sample.as_ref().unwrap().1.saturating_add(incoming) <= limit)
+        Ok(sample.as_ref().unwrap().bytes.saturating_add(incoming) <= limit)
     }
 
     fn charge_task(&self, incoming: u64) -> io::Result<()> {
-        if let Some((_, used)) = self
+        if let Some(usage) = self
             .task_usage
             .lock()
             .map_err(|error| io::Error::other(error.to_string()))?
             .as_mut()
         {
-            *used = used.saturating_add(incoming);
+            usage.bytes = usage.bytes.saturating_add(incoming);
         }
         Ok(())
     }
@@ -1026,6 +1076,7 @@ impl Volume {
                 let _headroom =
                     super::cache::reserve_write(&guard, bytes as u64 * 4 + 1024 * 1024)?;
                 crate::microvm::budget::charge_disk(state, incoming)?;
+                let _task_pending = self.task_pending.reserve(incoming)?;
                 self.charge_task(incoming)?;
                 drop(guard);
                 let result = write();
@@ -1771,6 +1822,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn small_task_consolidates_journal_history_before_its_allowance_is_full() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        volume.limit_backing(2 * 1024 * 1024).unwrap();
+        let bytes = [7; 4096];
+        let writes: Vec<_> = (0..128)
+            .map(|_| DiskWrite {
+                offset: 0,
+                bytes: &bytes,
+            })
+            .collect();
+        volume.disk.write_batch(&writes).unwrap();
+        assert!(volume.task_has_room(4096).unwrap());
+        assert!(!volume.pressure.load(Ordering::Acquire));
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while volume.disk.accounting().unwrap()["dirtyBytes"] != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!volume.pressure.load(Ordering::Acquire));
+        assert!(!volume.paused());
+        assert_eq!(volume.disk.completed().unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn quota_admission_tolerates_segments_reclaimed_during_accounting() {
         use std::sync::atomic::AtomicBool;
         let root = tempfile::tempdir().unwrap();
@@ -1815,6 +1893,123 @@ mod tests {
             "reclamation failed healthy admission: {errors:?}"
         );
         assert!(!volume.fault.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn consolidation_scratch_is_excluded_for_vm_and_native_but_work_and_tmp_stay_capped() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/conversation");
+        let block = 4 * 1024 * 1024u64;
+        let manifest = json!({
+            "version": 1, "size": 2 * block, "blockSize": block,
+            "blocks": (0..2).map(|index| json!({ "offset": index * block, "size": block, "hash": null })).collect::<Vec<_>>()
+        });
+        let disk = create(
+            &directory.join("lazy"),
+            &manifest,
+            &json!({
+                "master": "http://127.0.0.1:1/", "grant": "bounded-scratch",
+                "policy": { "reserveMiB": 64, "reservePercent": 1 }
+            }),
+        )
+        .await
+        .unwrap();
+        disk.write_at(0, &vec![7; block as usize]).unwrap();
+        disk.write_at(block, &vec![9; block as usize]).unwrap();
+        drop(disk);
+        let volume = load(&directory).await.unwrap();
+        volume.disk.seal().unwrap();
+        let old_segments: Vec<_> = std::fs::read_dir(directory.join("lazy"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "segment")
+            })
+            .collect();
+        assert!(!old_segments.is_empty());
+        let before = allocated(&directory).unwrap();
+        let limit = before + 2 * 1024 * 1024;
+        volume.limit_backing(limit).unwrap();
+        let copied = Arc::new(AtomicBool::new(false));
+        let observed = copied.clone();
+        let writer = volume.clone();
+        let state = root.path().to_owned();
+        volume.disk.on_consolidation_copy_ready(Box::new(move || {
+            let physical = allocated(&writer.directory).unwrap();
+            assert!(
+                physical > limit,
+                "fixture must cross the task limit with its copy"
+            );
+            assert!(
+                crate::microvm::budget::disk_bytes(&state).unwrap() >= physical,
+                "the shared node budget includes the complete internal copy"
+            );
+            let retained = retained_backing_bytes(&writer.directory).unwrap();
+            assert!(retained <= before + 64 * 1024);
+            assert!(physical - retained <= 2 * block);
+            *writer.task_usage.lock().unwrap() = None;
+            assert!(
+                writer.task_has_room(4096).unwrap(),
+                "VM admission counts only retained data"
+            );
+            let temporary = writer.directory.join("tmp");
+            std::fs::create_dir_all(&temporary).unwrap();
+            let user_file = temporary.join("working-files");
+            std::fs::write(&user_file, vec![3; 4 * 1024 * 1024]).unwrap();
+            assert!(
+                retained_backing_bytes(&writer.directory).unwrap() > limit,
+                "native accounting includes /tmp"
+            );
+            *writer.task_usage.lock().unwrap() = None;
+            assert!(
+                !writer.task_has_room(4096).unwrap(),
+                "copy credit must not hide user files"
+            );
+            std::fs::remove_file(user_file).unwrap();
+            *writer.task_usage.lock().unwrap() = None;
+            writer.write_at(0, b"next").unwrap();
+            observed.store(true, Ordering::Release);
+        }));
+        let committed = Arc::new(AtomicBool::new(false));
+        let observed = committed.clone();
+        let writer = volume.clone();
+        volume.disk.on_consolidation_committed(Box::new(move || {
+            // Simulate reclamation before the maintenance future returns. A
+            // newly created file at an old name must never inherit its credit.
+            for path in old_segments {
+                let held = path.with_extension("retired-test");
+                std::fs::rename(&path, &held).unwrap();
+                std::fs::write(&path, vec![1; 4096]).unwrap();
+                std::fs::remove_file(held).unwrap();
+            }
+            assert_eq!(
+                retained_backing_bytes(&writer.directory).unwrap(),
+                allocated(&writer.directory).unwrap()
+            );
+            *writer.task_usage.lock().unwrap() = None;
+            assert!(
+                !writer.task_has_room(4 * 1024 * 1024).unwrap(),
+                "the new base counts immediately"
+            );
+            observed.store(true, Ordering::Release);
+        }));
+        volume.disk.consolidate().unwrap().unwrap();
+        assert!(copied.load(Ordering::Acquire));
+        assert!(committed.load(Ordering::Acquire));
+        assert_eq!(
+            retained_backing_bytes(&directory).unwrap(),
+            allocated(&directory).unwrap()
+        );
+        let mut bytes = [0; 4];
+        volume.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"next");
+        assert!(
+            volume.disk.accounting().unwrap()["dirtyBytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
     }
 
     #[tokio::test]

@@ -14,7 +14,8 @@ static ADMISSION: Mutex<()> = Mutex::new(());
 static PENDING_WRITES: PendingWrites = PendingWrites(AtomicU64::new(0));
 pub(super) const TEMPORARY_BLOCK: &str = ".block-";
 
-struct PendingWrites(AtomicU64);
+#[derive(Default)]
+pub(crate) struct PendingWrites(AtomicU64);
 
 pub(crate) struct WriteReservation<'a> {
     pending: &'a PendingWrites,
@@ -22,7 +23,11 @@ pub(crate) struct WriteReservation<'a> {
 }
 
 impl PendingWrites {
-    fn reserve(&self, bytes: u64) -> io::Result<WriteReservation<'_>> {
+    pub(crate) fn bytes(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn reserve(&self, bytes: u64) -> io::Result<WriteReservation<'_>> {
         self.0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
                 pending.checked_add(bytes)
@@ -64,7 +69,15 @@ pub(super) fn retire(
     directory: &Path,
     needed: &std::collections::HashSet<&str>,
 ) -> io::Result<u64> {
-    let _admission = admission()?;
+    let admission = admission()?;
+    retire_admitted(directory, needed, &admission)
+}
+
+pub(super) fn retire_admitted(
+    directory: &Path,
+    needed: &std::collections::HashSet<&str>,
+    _admission: &MutexGuard<'_, ()>,
+) -> io::Result<u64> {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),

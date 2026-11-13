@@ -1460,7 +1460,7 @@ impl Controller {
                         &self.state, text(&plan, "runId"),
                     )?;
                     let local_backing = tokio::task::spawn_blocking(move || {
-                        crate::microvm::budget::allocated(&disk_directory)
+                        crate::storage::runtime::retained_backing_bytes(&disk_directory)
                     })
                     .await
                     .map_err(Error::internal)??;

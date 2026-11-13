@@ -47,11 +47,16 @@ pub struct LazyDisk {
     base: Mutex<Arc<Value>>,
     source: Arc<dyn BlockSource>,
     consolidating: Mutex<()>,
+    scratch: scratch::Scratch,
     background: tokio::sync::Mutex<()>,
     #[cfg(test)]
     consolidation_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     consolidation_admission_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    consolidation_copy_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    consolidation_commit_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     consolidation_stop: tokio_util::sync::CancellationToken,
     sealed_pending: AtomicBool,
     journal_bytes: AtomicU64,
@@ -292,11 +297,16 @@ impl LazyDisk {
             base: Mutex::new(Arc::new(manifest)),
             source,
             consolidating: Mutex::new(()),
+            scratch: scratch::Scratch::default(),
             background: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             consolidation_hook: Mutex::new(None),
             #[cfg(test)]
             consolidation_admission_hook: Mutex::new(None),
+            #[cfg(test)]
+            consolidation_copy_hook: Mutex::new(None),
+            #[cfg(test)]
+            consolidation_commit_hook: Mutex::new(None),
             consolidation_stop: tokio_util::sync::CancellationToken::new(),
             sealed_pending: AtomicBool::new(sealed_pending),
             journal_bytes: AtomicU64::new(journal_bytes),
@@ -446,6 +456,13 @@ impl LazyDisk {
         let file = tempfile::Builder::new()
             .prefix(super::cache::TEMPORARY_BLOCK)
             .tempfile_in(&directory)?;
+        if consolidating {
+            self.scratch.track_block(
+                file.path().file_name().unwrap(),
+                file.as_file(),
+                bytes.len() as u64,
+            )?;
+        }
         file.as_file().set_len(bytes.len() as u64)?;
         let mut run = None;
         for (index, page) in bytes.chunks(PAGE).enumerate() {
@@ -469,7 +486,11 @@ impl LazyDisk {
         file.as_file().sync_all()?;
         #[cfg(test)]
         journal::crash_point(&self.directory, "consolidation_block_synced");
-        file.persist(directory.join(hash)).map_err(failure)?;
+        if consolidating {
+            self.scratch.persist(&self.directory, file, hash)?;
+        } else {
+            file.persist(directory.join(hash)).map_err(failure)?;
+        }
         #[cfg(test)]
         journal::crash_point(&self.directory, "consolidation_block_renamed");
         Ok(())
@@ -634,6 +655,7 @@ mod clone;
 mod generations;
 mod journal;
 mod memory;
+mod scratch;
 mod state;
 
 impl LazyDisk {

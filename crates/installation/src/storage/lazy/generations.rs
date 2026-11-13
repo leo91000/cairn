@@ -85,6 +85,16 @@ impl LazyDisk {
         *self.consolidation_admission_hook.lock().unwrap() = Some(hook);
     }
 
+    #[cfg(test)]
+    pub(crate) fn on_consolidation_copy_ready(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.consolidation_copy_hook.lock().unwrap() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn on_consolidation_committed(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.consolidation_commit_hook.lock().unwrap() = Some(hook);
+    }
+
     /// Fold every sealed generation into a new local base, then retire its
     /// journal segments and the block files no base references. Each block
     /// file and its directory are durable before the base names it. A crash
@@ -106,6 +116,7 @@ impl LazyDisk {
         let Some(generation) = generation else {
             return Ok(None);
         };
+        self.prepare_consolidation_scratch()?;
         #[cfg(test)]
         {
             let hook = self.consolidation_hook.lock().map_err(failure)?.take();
@@ -135,6 +146,13 @@ impl LazyDisk {
         };
         #[cfg(test)]
         journal::crash_point(&self.directory, "consolidation_blocks_written");
+        #[cfg(test)]
+        {
+            let hook = self.consolidation_copy_hook.lock().map_err(failure)?.take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         match File::open(self.directory.join("cache")) {
             Ok(directory) => directory.sync_all()?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -476,6 +494,7 @@ impl LazyDisk {
         validate(&next_base)?;
         let tx = db.transaction().map_err(failure)?;
         let mut base = self.base.lock().map_err(failure)?;
+        let previous_base = base.clone();
         tx.execute("UPDATE state SET manifest=?1 WHERE id=1", [manifest])
             .map_err(failure)?;
         tx.execute("DELETE FROM segments WHERE generation<=?1", [generation])
@@ -504,6 +523,19 @@ impl LazyDisk {
             .collect::<io::Result<Vec<_>>>()?;
         #[cfg(test)]
         journal::crash_point(&self.directory, &format!("{phase}_transaction"));
+        let needed: std::collections::HashSet<_> = std::iter::once(next_base.as_ref())
+            .chain(&captured)
+            .flat_map(|manifest| manifest["blocks"].as_array().unwrap())
+            .filter_map(|block| block["hash"].as_str())
+            .collect();
+        let replaced = previous_base["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|block| block["hash"].as_str())
+            .filter(|hash| !needed.contains(hash))
+            .map(|hash| std::path::Path::new("cache").join(hash));
+        let mut scratch = self.scratch.commit(&self.directory)?;
         if let Err(error) = tx.commit() {
             journal.fail();
             return Err(failure(error));
@@ -512,6 +544,8 @@ impl LazyDisk {
         #[cfg(test)]
         journal::crash_point(&self.directory, &format!("{phase}_committed"));
         let retired = journal.retire(generation);
+        scratch.retire(&self.directory, retired.iter().cloned().chain(replaced));
+        drop(scratch);
         self.update_accounting(&journal)?;
         self.accounting.lock().map_err(failure)?["published"] = receipt;
         self.sealed_pending
@@ -520,21 +554,28 @@ impl LazyDisk {
         drop(db);
         drop(journal);
         drop(publication);
+        #[cfg(test)]
+        {
+            let hook = self
+                .consolidation_commit_hook
+                .lock()
+                .map_err(failure)?
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         timing.next("reclaim");
         // Reclamation failures do not undo the durable base. Recovery retries
         // orphan deletion before serving the disk; newer frames stay owned.
-        if let Err(error) = journal::Journal::reclaim(&self.directory, &retired) {
+        let reclaimed = journal::Journal::reclaim(&self.directory, &retired);
+        if let Err(error) = &reclaimed {
             tracing::warn!(target: "cairn_performance", operation="journal_reclaim_failed", kind=?error.kind());
         }
         #[cfg(test)]
         journal::crash_point(&self.directory, &format!("{phase}_reclaimed"));
         timing.next("retire_blocks");
-        let needed = std::iter::once(next_base.as_ref())
-            .chain(&captured)
-            .flat_map(|manifest| manifest["blocks"].as_array().unwrap())
-            .filter_map(|block| block["hash"].as_str())
-            .collect();
-        match super::super::cache::retire(&self.directory.join("cache"), &needed) {
+        match self.retire_consolidation_blocks(&needed, reclaimed.is_ok()) {
             Ok(bytes) => {
                 tracing::info!(target: "cairn_performance", operation = "blocks_retired", id = Self::identity(&self.directory), phase, bytes);
             }

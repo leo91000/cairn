@@ -507,3 +507,57 @@ fn consolidation_rechecks_a_reserve_increase_before_admitting_the_next_block() {
     assert_eq!(disk.consolidate().unwrap(), Some(generation));
     assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0);
 }
+
+#[test]
+fn failed_consolidations_keep_only_one_bounded_internal_copy_on_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let environment = root.path().join("disks/owned");
+    let directory = environment.join("lazy");
+    let manifest = local_base(&directory, &[None, None]);
+    let disk = LazyDisk::create(&directory, &manifest, source()).unwrap();
+    let low = super::super::super::policy::Policy {
+        reserve_mi_b: 64,
+        reserve_percent: 1,
+        ..Default::default()
+    };
+    let policy_path = root.path().join("storage-policy.json");
+    let (total, _) = super::super::super::policy::space(&directory).unwrap();
+    for value in 1..=3 {
+        std::fs::write(&policy_path, serde_json::to_vec(&low).unwrap()).unwrap();
+        disk.write_at(0, &vec![value; 4096]).unwrap();
+        disk.write_at(BLOCK, &vec![value + 10; 4096]).unwrap();
+        disk.seal().unwrap();
+        let path = policy_path.clone();
+        disk.on_consolidation_block_admitted(Box::new(move || {
+            let raised = super::super::super::policy::Policy {
+                reserve_mi_b: total.div_ceil(1024 * 1024) * 2,
+                reserve_percent: 1,
+                ..Default::default()
+            };
+            std::fs::write(path, serde_json::to_vec(&raised).unwrap()).unwrap();
+        }));
+        assert_eq!(
+            disk.consolidate().unwrap_err().kind(),
+            io::ErrorKind::StorageFull
+        );
+        assert_eq!(
+            block_files(&directory).len(),
+            1,
+            "a retry left an older candidate copy"
+        );
+        let physical = crate::microvm::budget::allocated(&environment).unwrap();
+        let (retained, _) = disk.retained_backing(&environment).unwrap();
+        assert!(physical > retained);
+        assert!(physical - retained <= disk.size());
+        assert!(base_hashes(&disk).is_empty());
+    }
+    std::fs::write(policy_path, serde_json::to_vec(&low).unwrap()).unwrap();
+    disk.consolidate().unwrap().unwrap();
+    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0);
+    assert_eq!(
+        disk.retained_backing(&environment).unwrap().0,
+        crate::microvm::budget::allocated(&environment).unwrap()
+    );
+    assert_eq!(read(&disk, 0, 4096), vec![3; 4096]);
+    assert_eq!(read(&disk, BLOCK, 4096), vec![13; 4096]);
+}

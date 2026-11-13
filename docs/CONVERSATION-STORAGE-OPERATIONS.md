@@ -18,8 +18,9 @@ remote download replaces missing or damaged data.
 Completed turns seal a durable generation after filesystem synchronization. The
 node consolidates it in the background, outside guest I/O and turn completion.
 While the environment is mounted, a five-second check also seals a crash-consistent
-prefix once the journal reaches 1 GiB, or when journal backing causes space or
-task-allowance pressure. Two background consolidations can run on a
+prefix once the journal reaches 1 GiB, or a quarter of the task allowance when
+smaller. Journal space or task-allowance pressure also triggers this work.
+Two background consolidations can run on a
 node at once. Space failures retry after a minute; they never discard the journal.
 Prepared environments remain journal-backed until assigned to a conversation.
 
@@ -42,13 +43,23 @@ after expiration or explicit conversation deletion likewise needs no publication
 ## Capacity and integrity
 
 The node budget and physical free-space reserve cover the complete local
-environment, including journal, base blocks and managed temporary files. Native
-automatic growth stays bounded by the installation's per-task allowance. Old
-sealed generations are consolidated before growth changes the disk geometry.
+environment, including journal, base blocks, internal consolidation copies and
+managed temporary files. VM and native task allowances count retained base blocks,
+journal and managed `/tmp`. Native automatic growth stays bounded by that
+allowance. Old sealed generations are consolidated before growth changes the disk geometry.
 Consolidation needs temporary room for replacement blocks before retiring old
 segments. Guest writes and consolidation both preserve the full configured node
 reserve and respect the node budget. No other environment is evicted for admission
 or growth.
+
+Only the internal replacement copy is outside the task allowance. Its logical
+size is bounded by the existing disk, and failed retries remove the previous
+candidate before creating another. This grants no additional working-file or
+`/tmp` capacity. At the base swap, the new base counts as retained data; the
+temporary credit covers only the still-present files it replaces until they are
+reclaimed. The copy remains fully charged to the shared node budget, including
+its actual filesystem allocation. Each new block admission uses the current full
+node reserve. If node headroom is insufficient, consolidation waits for space.
 
 A full node waits for space. Consolidating overwritten journal history, expiring
 environments and deleting conversations are the ways Cairn releases disk backing.
