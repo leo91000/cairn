@@ -144,7 +144,7 @@ impl LazyDisk {
 
     /// A failed attempt cannot accumulate another copy on its next retry.
     /// Keep captured legacy snapshots; their files then count as retained data.
-    pub(super) fn prepare_consolidation_scratch(&self) -> io::Result<()> {
+    pub(super) fn prepare_consolidation_scratch(&self, replaced_bytes: u64) -> io::Result<()> {
         let _publication = self.publication.write().map_err(failure)?;
         let base = self.base.lock().map_err(failure)?.clone();
         let captured = {
@@ -187,7 +187,7 @@ impl LazyDisk {
         scratch.retained = needed;
         // Logical copied data is bounded by the existing geometry. Account its
         // actual file allocations (including extent metadata) to the node.
-        scratch.logical_limit = self.size();
+        scratch.logical_limit = replaced_bytes.min(self.size());
         scratch.logical_bytes = 0;
         scratch.limit = u64::MAX;
         self.scratch.revision.fetch_add(1, Ordering::Release);

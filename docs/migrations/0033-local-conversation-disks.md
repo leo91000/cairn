@@ -40,6 +40,16 @@ Subsequent starts do not repeat the migration, even while physical retirement is
 still retrying. Disk deletion on the node needs no publication or base-block read.
 Missing local base blocks prevent mount rather than triggering a remote restore.
 
+The task allowance counts the active base, retained journals and managed `/tmp`.
+Only the internal transient consolidation copy is excluded. Its logical size is
+bounded by the replaced blocks and the existing disk; this grants no additional
+working capacity. The shared node budget still counts its complete physical
+allocation, and each block admission applies the node's current full reserve.
+Consolidation waits if node headroom is insufficient. The new base counts towards
+the task allowance immediately at the swap; any remaining transient credit covers
+only the replaced files awaiting reclamation. VM and native accounting use the
+same rule.
+
 This change adds **no schema change**: `DATABASE_VERSION` remains 32, introduced
 by [detached publication acknowledgements](0032-detached-publication-acknowledgements.md).
 Managers using schema 31 cannot open this database. Managers supporting schema 32
@@ -61,6 +71,13 @@ les pièces jointes et les artefacts sont conservés. Ces critères s’applique
 aux conversations dans la corbeille. **Poussez vos commits et
 sauvegardez les fichiers à conserver avant de mettre à jour.** Les environnements
 jamais publiés sur une node non révoquée restent utilisables.
+
+Le socle actif, les journaux conservés et `/tmp` restent facturés à la tâche.
+Seule la copie interne transitoire de consolidation est hors plafond tâche,
+bornée par les blocs remplacés, sans augmenter la capacité accordée à l’agent.
+Elle reste intégralement comptée dans le budget de la node et respecte sa réserve
+courante complète ; sans espace node, la consolidation attend. Le nouveau socle
+est facturé à la tâche dès le swap, en VM comme en natif.
 
 Le bucket S3, ses identifiants, `storage-s3.json`, les variables `STORAGE_S3_*` et
 les données de Garage ne sont pas effacés. L’exploitant peut les retirer lorsqu’il

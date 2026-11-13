@@ -116,7 +116,18 @@ impl LazyDisk {
         let Some(generation) = generation else {
             return Ok(None);
         };
-        self.prepare_consolidation_scratch()?;
+        let changed: Vec<_> = self
+            .journal
+            .lock()
+            .map_err(failure)?
+            .changed(generation)
+            .into_iter()
+            .collect();
+        let replaced_bytes = changed
+            .iter()
+            .map(|index| (self.size() - index * BLOCK).min(BLOCK))
+            .sum();
+        self.prepare_consolidation_scratch(replaced_bytes)?;
         #[cfg(test)]
         {
             let hook = self.consolidation_hook.lock().map_err(failure)?.take();
@@ -132,13 +143,6 @@ impl LazyDisk {
         let (base, manifest) = {
             let _publication = self.publication.read().map_err(failure)?;
             let base = self.base.lock().map_err(failure)?.clone();
-            let changed = self
-                .journal
-                .lock()
-                .map_err(failure)?
-                .changed(generation)
-                .into_iter()
-                .collect();
             let manifest = self.rebuild(generation, &base, changed, |hash, bytes| {
                 self.persist_block(hash, bytes, true)
             })?;

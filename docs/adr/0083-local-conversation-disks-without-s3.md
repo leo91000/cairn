@@ -193,8 +193,23 @@ sauvegarde de la machine reste à la charge de son exploitant. Aucun environneme
 n’est évincé : seules la consolidation de son journal, l’expiration de
 l’environnement et la suppression de la conversation libèrent de l’espace. Si
 l’expiration automatique est désactivée, rien ne libère l’espace d’une node pleine
-sans action explicite. La réserve disque de la node et la limite de stockage par
-tâche s’appliquent à ce volume complet ; une admission sans espace attend.
+sans action explicite. Le budget partagé de la node et sa réserve disque courante
+complète s’appliquent au volume physique total, copie interne de consolidation
+comprise ; une admission sans espace attend.
+
+Le plafond de stockage par tâche facture le socle actif, les journaux conservés
+et le `/tmp` géré. Seule la copie interne transitoire de consolidation en est
+exclue. Son volume logique est borné par les blocs remplacés, donc par le disque
+existant ; elle n’augmente jamais la capacité de travail accordée à l’agent. Elle
+reste intégralement comptée dans le budget de la node et chaque nouvelle admission
+de bloc respecte sa réserve courante complète. Si l’espace node manque, la
+consolidation attend. Une tentative échouée ne peut pas accumuler de nouvelles
+copies à chaque reprise.
+
+Le nouveau socle est facturé à la tâche dès le swap. Le crédit transitoire porte
+alors uniquement sur les anciens fichiers encore présents à libérer, dans la
+limite de la copie remplacée ; il ne masque ni le nouveau socle, ni de nouvelles
+écritures, ni `/tmp`. Ce même contrat s’applique aux environnements VM et natifs.
 
 Les guides d’exploitation, le code et les interfaces sont mis à jour par les
 changements qui appliquent cette décision.
