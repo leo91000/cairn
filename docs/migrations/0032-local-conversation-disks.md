@@ -18,7 +18,9 @@ then expires environments with any of these indications of a possible remote bas
 - A shared publication with block references, or a disk grant that names remote
   publications. These cover interrupted publication bookkeeping and missing point
   records; the manager does not assume those bases are safely local.
-- An owner node, recorded on the run or checkpoint, that is already revoked.
+- An owner node, recorded on the run, checkpoint or unreleased execution admission,
+  that is already revoked. This includes a materialized admission whose checkpoint
+  was never published.
 
 Pending publication demand without a point does not establish a remote base.
 Never-published environments on nodes that have not been revoked keep their

@@ -74,12 +74,17 @@ fn migrate(db: &mut Db<'_>) -> Result<()> {
             remote.insert(text(&grant, "runId").to_owned());
         }
     }
-    let revoked = db
+    let mut revoked_environments = HashSet::new();
+    for node in db
         .nodes_boundary()?
         .into_iter()
         .filter(|node| node["revoked"] == true)
-        .map(|node| text(&node, "id").to_owned())
-        .collect::<HashSet<_>>();
+    {
+        revoked_environments.extend(crate::environment_expiration::runs_on_node(
+            db,
+            text(&node, "id"),
+        )?);
+    }
     let runs = db.json_rows(
         "SELECT json_set(boundary,'$.id',id,'$.nodeId',placement_node_id) FROM runs",
         [],
@@ -92,10 +97,7 @@ fn migrate(db: &mut Db<'_>) -> Result<()> {
         {
             continue;
         }
-        let checkpoint = crate::nodes::db_checkpoint(db, id)?;
-        let on_revoked = [text(&run, "nodeId"), text(&checkpoint, "nodeId")]
-            .iter()
-            .any(|node| revoked.contains(*node));
+        let on_revoked = revoked_environments.contains(id);
         let has_remote_base = remote.contains(id)
             || run["backup"]["id"].is_string()
             || run["storage"]["published"]["backupId"].is_string();
@@ -219,6 +221,43 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn revoked_materialized_admission_expires_without_a_published_checkpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.put_node_fixture(&json!({ "id": ACTIVE, "revoked": false }))?;
+                db.put_node_fixture(&json!({ "id": REVOKED, "revoked": true }))?;
+                for (id, node) in [("orphaned", REVOKED), ("local", ACTIVE)] {
+                    run(db, id, None)?;
+                    db.put_attempt_fixture(&json!({
+                        "id": format!("admission-{id}"), "runId": id, "nodeId": node,
+                        "role": "execution", "diskMaterialized": true, "released": false,
+                    }))?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store.transaction(migrate).await.unwrap();
+        let orphaned = store.run("orphaned").await.unwrap();
+        assert_eq!(orphaned["environmentState"], "expired");
+        assert_eq!(orphaned["environmentExpirationCause"], "storage-migration");
+        let retired = store.list("environment-retirements").await.unwrap();
+        assert_eq!(retired.len(), 1);
+        assert_eq!(retired[0]["attempts"][0]["id"], "admission-orphaned");
+        assert_eq!(retired[0]["attempts"][0]["nodeId"], REVOKED);
+        let local = store.run("local").await.unwrap();
+        assert!(local["environmentState"].is_null());
+        assert_eq!(local["sessionId"], "retained-session");
+        store.transaction(migrate).await.unwrap();
+        assert_eq!(
+            store.list("environment-retirements").await.unwrap(),
+            retired
+        );
     }
 
     #[tokio::test]
