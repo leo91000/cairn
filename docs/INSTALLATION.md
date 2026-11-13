@@ -80,9 +80,13 @@ copying their files back. The [migration and release note](migrations/0033-local
 describe this loss: push commits and
 save files to keep before updating. The update does not erase old
 `data/storage-s3.json`, `garage.env`, `garage.toml`, Garage data, external buckets
-or environment values. Rerunning the installer leaves those files untouched.
+or environment values. Rerunning the installer preserves those files' contents.
 The update supervisor and installer reruns retain any existing Garage service
 and its saved configuration; this also lets a stopped legacy service start again.
+The installer repairs ownership of an existing legacy storage configuration left
+by an interrupted installation. If that installation has no saved `compose.json`,
+restore its previous Compose configuration from backup before rerunning; the
+installer refuses to start an old image without its required storage service.
 Once rollback is no
 longer needed, the operator can stop and remove that service and its data,
 credentials and bucket. Do not remove unrelated Docker services or volumes.

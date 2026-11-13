@@ -232,6 +232,10 @@ def install(origin, code):
         raise RuntimeError('An unrelated /usr/local/bin/cairn already exists. Move it before installing Cairn; it will not be overwritten.')
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(ROOT, 0o700)
+    compose_file = ROOT / 'compose.json'
+    legacy_storage = ROOT / 'data/storage-s3.json'
+    if not compose_file.exists() and (legacy_storage.exists() or legacy_storage.is_symlink()):
+        raise RuntimeError('The legacy installation has storage configuration but no saved Compose file. Restore the previous Compose configuration from backup before rerunning the installer; existing identity and storage are retained.')
     claimed = claimed_identity(origin)
     config_file = ROOT / 'installation.json'
     if config_file.exists():
@@ -252,7 +256,6 @@ def install(origin, code):
             os.chown(directory, 1000, 1000)
 
     deployment = compose(image, origin)
-    compose_file = ROOT / 'compose.json'
     if compose_file.exists():
         try:
             previous = json.loads(compose_file.read_text())['services']

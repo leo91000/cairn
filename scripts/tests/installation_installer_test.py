@@ -16,6 +16,42 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 class Installer(unittest.TestCase):
+    def test_interrupted_legacy_install_without_compose_refuses_before_docker_or_rewrites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = {
+                'installation.json': json.dumps({
+                    'origin': 'https://cairn.example.test',
+                    'image': 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64,
+                }).encode(),
+                'data/storage-s3.json': b'opaque legacy credentials',
+                'garage.env': b'legacy environment',
+                'garage.toml': b'legacy configuration',
+            }
+            for name, contents in legacy.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(contents)
+                path.chmod(0o600)
+            binaries = root / 'bin'
+            binaries.mkdir()
+            docker = binaries / 'docker'
+            docker.write_text("#!/usr/bin/env python3\nfrom pathlib import Path\nimport os\nPath(os.environ['CAIRN_INSTALLATION_ROOT'], 'docker-called').touch()\n")
+            docker.chmod(0o755)
+            result = subprocess.run(
+                ['python3', str(write_supervisors(root)[0]),
+                 'https://cairn.example.test', '--claim-code', 'a' * 64],
+                env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
+                     'CAIRN_INSTALLATION_ROOT': directory}, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Restore the previous Compose configuration', result.stderr)
+            self.assertFalse((root / 'compose.json').exists())
+            self.assertFalse((root / 'claim.env').exists())
+            self.assertFalse((root / 'docker-called').exists())
+            for name, contents in legacy.items():
+                self.assertEqual((root / name).read_bytes(), contents)
+            self.assertNotIn('opaque legacy credentials', result.stdout + result.stderr)
+
     def test_legacy_storage_owner_repair_preserves_private_bytes_and_refuses_links(self):
         spec = importlib.util.spec_from_file_location('installation_host', REPO / 'deploy/installations/host.py')
         host = importlib.util.module_from_spec(spec)
