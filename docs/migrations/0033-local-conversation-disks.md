@@ -26,6 +26,8 @@ Pending publication demand without a point does not establish a remote base.
 Never-published environments on nodes that have not been revoked keep their
 journals and sessions, and lose obsolete backup-error status. Already detached
 and pending expirations use their existing retirement queue. No block is fetched.
+The same criteria apply to environments retained in Trash. Conversations whose
+permanent purge is already underway keep their existing cleanup.
 The old execution checkpoint is captured by retirement, so its process/lease is
 fenced before a new environment can start; active missions without a scheduled
 wait resume in an empty environment.
@@ -53,7 +55,8 @@ configuration are left for a later change.
 Les disques de travail restent désormais uniquement sur leur node, sans copie S3.
 La mise à jour supprime les fichiers de travail des conversations existantes dont
 l’environnement dépend de S3, ainsi que ceux des nodes déjà révoquées. L’historique,
-les pièces jointes et les artefacts sont conservés. **Poussez vos commits et
+les pièces jointes et les artefacts sont conservés. Ces critères s’appliquent aussi
+aux conversations dans la corbeille. **Poussez vos commits et
 sauvegardez les fichiers à conserver avant de mettre à jour.** Les environnements
 jamais publiés sur une node non révoquée restent utilisables.
 

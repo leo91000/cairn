@@ -91,9 +91,12 @@ fn migrate(db: &mut Db<'_>) -> Result<()> {
     )?;
     for run in runs {
         let id = text(&run, "id");
+        let purging = db
+            .conversation_for_run(id)?
+            .is_some_and(|chat| chat.lifecycle == cairn_contracts::ConversationLifecycle::Purging);
         if run["environmentState"] == "expired"
             || crate::environment_expiration::pending(db, id)?
-            || crate::conversation_lifecycle::require_active_run(db, id).is_err()
+            || purging
         {
             continue;
         }
@@ -253,6 +256,66 @@ mod tests {
         let local = store.run("local").await.unwrap();
         assert!(local["environmentState"].is_null());
         assert_eq!(local["sessionId"], "retained-session");
+        store.transaction(migrate).await.unwrap();
+        assert_eq!(
+            store.list("environment-retirements").await.unwrap(),
+            retired
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_expires_remote_and_revoked_trash_without_restarting_permanent_purge() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.put_node_fixture(&json!({ "id": ACTIVE, "revoked": false }))?;
+                db.put_node_fixture(&json!({ "id": REVOKED, "revoked": true }))?;
+                for (id, node, published) in [
+                    ("trash-remote", ACTIVE, true),
+                    ("trash-revoked", REVOKED, false),
+                    ("trash-local", ACTIVE, false),
+                    ("purging", ACTIVE, true),
+                ] {
+                    run(db, id, Some(node))?;
+                    db.save_conversation_boundary(&json!({
+                        "id": format!("chat-{id}"), "runId": id,
+                        "lifecycle": if id == "purging" { "purging" } else { "trash" },
+                        "previousLifecycle": "active", "paused": true,
+                        "trashedAt": 1, "purgeAt": now() + 86_400_000,
+                    }))?;
+                    if published {
+                        db.put(
+                            "node-backups",
+                            &json!({
+                                "id": format!("point-{id}"), "runId": id, "destination": "s3",
+                            }),
+                        )?;
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store.transaction(migrate).await.unwrap();
+        for id in ["trash-remote", "trash-revoked"] {
+            let run = store.run(id).await.unwrap();
+            assert_eq!(run["environmentState"], "expired", "{id}");
+            assert_eq!(run["environmentExpirationCause"], "storage-migration");
+            let chat = store
+                .conversation_boundary(&format!("chat-{id}"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(chat["lifecycle"], "trash");
+        }
+        for id in ["trash-local", "purging"] {
+            let run = store.run(id).await.unwrap();
+            assert!(run["environmentState"].is_null(), "{id}");
+            assert_eq!(run["sessionId"], "retained-session");
+        }
+        let retired = store.list("environment-retirements").await.unwrap();
+        assert_eq!(retired.len(), 2);
         store.transaction(migrate).await.unwrap();
         assert_eq!(
             store.list("environment-retirements").await.unwrap(),
