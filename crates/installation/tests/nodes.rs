@@ -1931,6 +1931,92 @@ async fn remote_disk_restores_use_the_nodes_direct_manager_origin() {
 }
 
 #[tokio::test]
+async fn same_node_restore_preserves_native_vm_layout_without_permitting_backend_changes() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let controller = Router::new().route(
+        "/disks/{id}/restore",
+        axum::routing::post({
+            let calls = calls.clone();
+            move |Json(body): Json<Value>| {
+                let calls = calls.clone();
+                async move {
+                    assert_eq!(body["manifest"]["runtime"]["backend"], "native");
+                    assert_eq!(body["manifest"]["runtime"]["disk"], "vm");
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({ "ready": true }))
+                }
+            }
+        }),
+    );
+    let (runner, server) = common::serve_locally(controller).await;
+    let owner = Owner::with_runner(common::HOST.into(), runner).await;
+    let run = json!({ "id": id(), "nodeId": LOCAL_NODE_ID });
+    let mut node = json!({ "id": LOCAL_NODE_ID, "capabilities": { "backend": "native" } });
+    owner
+        .service
+        .store
+        .put_node_fixture(node.clone())
+        .await
+        .unwrap();
+    let mut manifest = json!({
+        "version": 1, "size": snapshots::BLOCK, "blockSize": snapshots::BLOCK,
+        "blocks": [{ "offset": 0, "size": snapshots::BLOCK, "hash": null }],
+        "runtime": { "backend": "native", "disk": "vm", "storage": "ublk-rootless-v1", "os": "linux", "arch": "x86_64" }
+    });
+    let point_id = id();
+    let mut point = json!({
+        "id": point_id, "runId": run["id"], "nodeId": LOCAL_NODE_ID,
+        "destination": "s3", "blockFormat": "shared-v1",
+        "manifest": owner.encrypt_manifest(&point_id, &manifest)
+    });
+    cairn_installation::nodes::restore::start(&owner.service, &run, LOCAL_NODE_ID, &point)
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    node["capabilities"]["backend"] = "firecracker".into();
+    owner
+        .service
+        .store
+        .put_node_fixture(node.clone())
+        .await
+        .unwrap();
+    let error =
+        cairn_installation::nodes::restore::start(&owner.service, &run, LOCAL_NODE_ID, &point)
+            .await
+            .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("cannot change the environment's backend")
+    );
+
+    node["capabilities"]["backend"] = "native".into();
+    owner.service.store.put_node_fixture(node).await.unwrap();
+    manifest["runtime"]["backend"] = "firecracker".into();
+    point["manifest"] = owner.encrypt_manifest(&point_id, &manifest);
+    let error =
+        cairn_installation::nodes::restore::start(&owner.service, &run, LOCAL_NODE_ID, &point)
+            .await
+            .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("cannot change the environment's backend")
+    );
+    let error = cairn_installation::nodes::restore::start(&owner.service, &run, &id(), &point)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("cannot change the environment's node")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
 async fn outbound_transport_streams_only_to_the_authenticated_node() {
     let owner = Owner::new().await;
     let identity = owner

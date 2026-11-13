@@ -29,7 +29,7 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
     }
     let record = s.node_boundary(node).await?;
     let manifest = super::publication::manifest(s, backup).await?;
-    let native_disk = manifest["kind"] == "native-ext4-v1";
+    let native_disk = crate::native::block::mounts_block(&manifest);
     if native_disk != crate::native::policy::node_native(&record) {
         return Err(Error::conflict(
             "Restoration cannot change the environment's backend.",
