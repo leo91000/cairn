@@ -393,10 +393,10 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   const destinationNode = await destinationResponse.json()
   const agent = (await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === detail.run.snapshot.agent.id)
   await workspace.api(`/api/agents/${agent.id}`, 'PUT', { ...agent, access: { ...agent.access, nodes: [node.nodeId, destinationNode.nodeId] } })
-  workspace.service.store.updateRun(detail.run.id, { nodeId: node.nodeId, resources: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 }, backup: { capturedAt: Date.now() - 120000, status: 'ready' } } as any)
+  workspace.service.store.updateRun(detail.run.id, { nodeId: node.nodeId, resources: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 } } as any)
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  // Routine synchronization stays out of the header: the conversation menu names the node and its sync.
+  // Routine local storage stays out of the header; the menu names the node.
   const chip = page.locator('.chat-header').getByRole('button', { name: /^Execution node/ })
   const details = page.getByRole('button', { name: 'Chat details', exact: true })
   const nodeAction = page.getByRole('menu', { name: 'Chat details', exact: true }).getByRole('menuitem', { name: 'Execution node', exact: true })
@@ -479,7 +479,6 @@ test('conversation placement distinguishes a preference from a strict pin and sh
       dirtyBytes: 183890000,
       dirtySince: Date.now() - 60000,
     },
-    backup: { id: randomUUID(), capturedAt: Date.now() - 120000, status: 'saving' },
   } as any)
   await heartbeat()
   await details.click()
@@ -497,7 +496,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
     },
   } as any)
   await heartbeat()
-  // Overdue synchronization needs a look: the header names it, without the node.
+  // Pending journal consolidation is visible in the header.
   await expect(chip).toHaveText('Disk full', { timeout: 15000 })
   await expect(chip).toHaveAccessibleName('Execution node: Disk full')
   // The chip appears already filled, so the header's mounted live region announces it.
