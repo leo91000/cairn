@@ -2226,6 +2226,37 @@
       ],
       "type": "object"
     },
+    "ChatShare": {
+      "additionalProperties": false,
+      "description": "One revocable, unlisted live conversation link. Times are Unix milliseconds.",
+      "properties": {
+        "expiresAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "publicUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "token",
+        "publicUrl",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
     "ChatSideQuestion": {
       "properties": {
         "answer": {
@@ -15206,6 +15237,27 @@
       "required": [
         "chatId",
         "paused"
+      ],
+      "type": "object"
+    },
+    "SetChatShareInput": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "expiresInHours": {
+          "default": 24,
+          "format": "uint32",
+          "maximum": 720,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "chatId",
+        "expiresInHours"
       ],
       "type": "object"
     },

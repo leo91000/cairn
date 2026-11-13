@@ -303,6 +303,8 @@ fn main() {
     export::<WaitMemberProgress>(root, &mut generator, Contract::Deserialize);
     export::<PluginWaitData>(root, &mut generator, Contract::Deserialize);
 
+    export::<ChatShare>(root, &mut generator, Contract::Deserialize);
+    export::<SetChatShareInput>(root, &mut generator, Contract::Deserialize);
     export::<ConversationRetention>(root, &mut generator, Contract::Deserialize);
     export::<GetConversationRetentionInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatExecution>(root, &mut generator, Contract::Deserialize);
@@ -364,6 +366,9 @@ fn main() {
     export::<NodeInput>(root, &mut generator, Contract::Deserialize);
     let chat_clients = serde_json::json!(
         [
+        {"name":"getChatShare","input":"ChatInput","output":"ChatShare","method":"GET","path":"/chats/{chatId}/share"},
+        {"name":"setChatShare","input":"SetChatShareInput","output":"ChatShare","method":"PUT","path":"/chats/{chatId}/share"},
+        {"name":"revokeChatShare","input":"ChatInput","output":"ChatShare","method":"DELETE","path":"/chats/{chatId}/share"},
         {"name":"answerChatQuestion","input":"AnswerChatQuestionInput","output":"ChatQuestion","method":"POST","path":"/chats/{chatId}/questions/{questionId}/answer","bodyField":"answer"},
         {"name":"cancelChatQuestion","input":"ChatQuestionInput","output":"ChatQuestion","method":"POST","path":"/chats/{chatId}/questions/{questionId}/cancel"},
         {"name":"askChatSideQuestion","input":"AskChatSideQuestionInput","output":"ChatSideQuestion","method":"POST","path":"/chats/{chatId}/side-questions","bodyField":"question"},

@@ -1099,3 +1099,26 @@ impl ConversationStatus {
         }
     }
 }
+
+/// One revocable, unlisted live conversation link. Times are Unix milliseconds.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatShare {
+    pub token: Option<String>,
+    pub public_url: Option<String>,
+    #[ts(type = "number | null")]
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetChatShareInput {
+    pub chat_id: ConversationId,
+    #[serde(default = "default_share_hours")]
+    #[schemars(range(min = 1, max = 720))]
+    pub expires_in_hours: u32,
+}
+
+fn default_share_hours() -> u32 {
+    24
+}

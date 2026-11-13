@@ -202,6 +202,7 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<(Value, Vec<String>)>
         db.revoke_mcp_run(run_id)?;
     }
     unshare_artifacts(db, chat.run_id.as_deref().unwrap_or(""))?;
+    crate::conversation_sharing::revoke(db, &chat.id)?;
     db.delete(&format!("chat-title-pending:{id}"))?;
     if let Some(run) = run.filter(|run| run_is_active(Some(run))) {
         db.change_run(

@@ -16,6 +16,21 @@ pub(crate) struct ChatOperation {
 
 pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
+        name: "get_chat_share",
+        scope: "manage",
+        description: "Read the current unlisted conversation link. Requires installation owner or management access.",
+    },
+    ChatOperation {
+        name: "set_chat_share",
+        scope: "manage",
+        description: "Share a live conversation and every published artifact version without sign-in. Only when explicitly requested. Expires in 24 hours by default, configurable from 1 to 720 hours. Replaces and revokes the previous link; future messages and files are included until expiry. Search indexing is disabled.",
+    },
+    ChatOperation {
+        name: "revoke_chat_share",
+        scope: "manage",
+        description: "Revoke the conversation link and its artifact access immediately. Already downloaded copies cannot be recalled.",
+    },
+    ChatOperation {
         name: "upload_chat_attachment",
         scope: "manage",
         description: "Upload a file to a conversation as base64 data (up to 10 MiB decoded, subject to transport request limits). Supply a fresh UUID attachmentId; identical retries are safe. Include its ID in message.attachmentIds to send it.",
@@ -159,6 +174,14 @@ pub(crate) fn chat_operation(name: &str) -> Option<&'static ChatOperation> {
 impl ChatOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let (input, output) = match self.name {
+            "get_chat_share" | "revoke_chat_share" => (
+                schema_for::<ChatInput>(Contract::Deserialize),
+                schema_for::<ChatShare>(Contract::Serialize),
+            ),
+            "set_chat_share" => (
+                schema_for::<SetChatShareInput>(Contract::Deserialize),
+                schema_for::<ChatShare>(Contract::Serialize),
+            ),
             "upload_chat_attachment" => (
                 schema_for::<UploadChatAttachmentInput>(Contract::Deserialize),
                 schema_for::<ChatAttachment>(Contract::Serialize),
@@ -287,6 +310,12 @@ impl ChatOperation {
         context: ResumeContext,
         member_account: Option<String>,
     ) -> Result<Value> {
+        if matches!(
+            self.name,
+            "get_chat_share" | "set_chat_share" | "revoke_chat_share"
+        ) {
+            return crate::conversation_sharing::manage(s, self.name, input, context).await;
+        }
         let reader = super::personal::listing_reader(&context);
         let (bearer, origin) = match context {
             ResumeContext::Human(account) => (None, crate::native::policy::Origin::Human(account)),

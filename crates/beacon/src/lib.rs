@@ -358,6 +358,8 @@ pub async fn router_with_installation_hosts(
                             "/api/public/installations/{installation}/artifacts/{token}",
                             get(relay::public_artifact),
                         )
+                        .route("/api/public/installations/{installation}/conversations/{token}", get(relay::public_artifact))
+                        .route("/api/public/installations/{installation}/conversations/{token}/artifacts/{artifact}", get(relay::public_artifact))
                         .route("/oauth/register", post(mcp::register))
                         .route("/oauth/authorize", get(mcp::authorize))
                         .route("/oauth/token", post(mcp::exchange))

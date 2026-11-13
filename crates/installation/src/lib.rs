@@ -26,6 +26,7 @@ pub mod config;
 pub mod context_usage;
 pub mod conversation_deletion;
 pub mod conversation_lifecycle;
+mod conversation_sharing;
 pub mod delegation;
 pub mod direct;
 pub mod environment_expiration;

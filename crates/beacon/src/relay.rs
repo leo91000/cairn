@@ -1128,12 +1128,25 @@ enum Capability {
 #[derive(Clone)]
 pub(super) struct PublicOfflinePage;
 
+#[derive(Clone)]
+pub(super) struct PublicConversationPage;
+
 pub(super) async fn public_artifact(
     State(service): State<Service>,
-    Path((installation, token)): Path<(String, String)>,
+    Path(parameters): Path<std::collections::HashMap<String, String>>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Result<Response, ApiError> {
+    let installation = &parameters["installation"];
+    let token = &parameters["token"];
+    let conversation = request.uri().path().contains("/conversations/");
+    let artifact = parameters.get("artifact");
+    if artifact.is_some_and(|artifact| uuid::Uuid::parse_str(artifact).is_err()) {
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Public file not found",
+        ));
+    }
     super::consume_limit(
         &service.pool,
         &format!(
@@ -1143,7 +1156,7 @@ pub(super) async fn public_artifact(
         30,
     )
     .await?;
-    if uuid::Uuid::parse_str(&installation).is_err() || uuid::Uuid::parse_str(&token).is_err() {
+    if uuid::Uuid::parse_str(installation).is_err() || uuid::Uuid::parse_str(token).is_err() {
         return Err(ApiError::Http(
             StatusCode::NOT_FOUND,
             "Public file not found",
@@ -1151,7 +1164,7 @@ pub(super) async fn public_artifact(
     }
     let claimed: Option<(String,)> =
         query_as("SELECT id FROM installations WHERE id = $1 AND owner_id IS NOT NULL")
-            .bind(&installation)
+            .bind(installation)
             .fetch_optional(&service.pool)
             .await?;
     if claimed.is_none() {
@@ -1165,7 +1178,7 @@ pub(super) async fn public_artifact(
         .connections
         .lock()
         .unwrap()
-        .get(&installation)
+        .get(installation)
         .cloned();
     if tunnel.is_none() || tunnel.as_ref().is_some_and(|tunnel| *tunnel.stop.borrow()) {
         let page = Html(
@@ -1186,21 +1199,32 @@ pub(super) async fn public_artifact(
         response.extensions_mut().insert(PublicOfflinePage);
         return Ok(response);
     }
-    let mut target = format!("/api/shared-artifacts/{token}");
+    let mut target = if conversation {
+        format!("/api/shared-conversations/{token}")
+    } else {
+        format!("/api/shared-artifacts/{token}")
+    };
+    if let Some(artifact) = artifact {
+        target.push_str(&format!("/artifacts/{artifact}"));
+    }
     if let Some(query) = request.uri().query() {
         target.push('?');
         target.push_str(query);
     }
-    send(
+    let mut response = send(
         &service,
         tunnel,
         0,
         String::new(),
-        Capability::PublicArtifact(token),
+        Capability::PublicArtifact(token.clone()),
         &target,
         request,
     )
-    .await
+    .await?;
+    if conversation && artifact.is_none() && response.status().is_success() {
+        response.extensions_mut().insert(PublicConversationPage);
+    }
+    Ok(response)
 }
 
 async fn require_current_protocol(service: &Service, installation: &str) -> Result<(), ApiError> {
