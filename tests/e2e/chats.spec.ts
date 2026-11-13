@@ -1205,6 +1205,43 @@ test('conversation navigation uses desktop search and the phone switcher without
   await workspace.restart()
 })
 
+test('workspace shortcuts open search while the initial refresh is pending', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await useRelayForHttpMocks(page)
+  let refreshRequests = 0
+  let releaseRefresh!: () => void
+  const refreshPending = new Promise<void>((resolve) => {
+    releaseRefresh = resolve
+  })
+  await page.route('**/api/mcps', async (route) => {
+    refreshRequests++
+    await refreshPending
+    await route.continue()
+  })
+
+  try {
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const message = page.getByRole('textbox', { name: 'Message', exact: true })
+    await message.fill('Keep this draft during startup')
+    await expect.poll(() => refreshRequests).toBeGreaterThan(0)
+    const palette = page.getByRole('dialog', { name: 'Search and commands', exact: true })
+    const search = palette.getByRole('combobox', { name: 'Search', exact: true })
+
+    for (const shortcut of ['Control+k', 'Meta+k']) {
+      await page.keyboard.press(shortcut)
+      await expect(search).toBeFocused()
+      await search.press('Escape')
+      await expect(palette).toHaveCount(0)
+      await expect(message).toBeFocused()
+      await expect(message).toHaveValue('Keep this draft during startup')
+    }
+  }
+  finally {
+    releaseRefresh()
+  }
+})
+
 test('workspace search opens legacy trash and restores a conversation without losing another draft', async ({ page, workspace }) => {
   const active = await workspace.api('/api/chats', 'POST', {})
   const trashed = await workspace.api('/api/chats', 'POST', {})

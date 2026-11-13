@@ -1,5 +1,14 @@
 # Android 0.6.0 / web parity
 
+## Search during workspace startup (2026-11-13)
+
+Web registers its existing workspace shortcuts before the initial resource lists
+finish loading, so Ctrl+K and Cmd+K open search as soon as the composer is usable.
+Closing search keeps the draft and returns focus to the composer. Android keeps
+its existing native header search action; it has no web keyboard-listener startup
+dependency. Search operations and authorization on public MCP and
+`cairn_installation` are unchanged.
+
 ## One search button in the Android Fil (2026-11-08)
 
 Android drops the Fil's own filter button (« Filtrer le fil ») and its field,
