@@ -1,5 +1,4 @@
-//! Capacity waits outlive code workers, while admitted moves retain their durable
-//! placement/fencing state. Only bounded recent tool results live in memory.
+//! Node changes retain their durable expiration/fencing state. Only bounded recent tool results live in memory.
 use super::moves;
 use crate::{
     error::{Error, Result},
@@ -8,7 +7,7 @@ use crate::{
 use cairn_contracts::{NodeMoveOperation, NodeMoveOperationState as State, NodeMoveStarted};
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -31,7 +30,6 @@ struct Entry {
 pub(crate) struct Operations {
     slots: Arc<Semaphore>,
     entries: Mutex<HashMap<String, Entry>>,
-    waiting: Mutex<HashSet<String>>,
 }
 
 impl Default for Operations {
@@ -39,23 +37,11 @@ impl Default for Operations {
         Self {
             slots: Arc::new(Semaphore::new(8)),
             entries: Mutex::default(),
-            waiting: Mutex::default(),
         }
     }
 }
 
 impl Operations {
-    pub(crate) fn claim_wait(&self, run: &str) -> Result<()> {
-        if !self.waiting.lock().unwrap().insert(run.to_owned()) {
-            return Err(Error::conflict("A movement is already pending."));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn finish_wait(&self, run: &str) {
-        self.waiting.lock().unwrap().remove(run);
-    }
-
     pub(crate) fn start(
         &self,
         service: Service,
@@ -108,10 +94,7 @@ impl Operations {
             );
         }
         let origin = crate::native::policy::origin();
-        // The configured capacity bound remains authoritative inside moves. The
-        // extra bound covers its existing controller/DB preparation and cleanup.
-        let timeout =
-            Duration::from_secs(args["waitSeconds"].as_u64().unwrap_or(0).min(3600) + 120);
+        let timeout = Duration::from_secs(120);
         tokio::spawn(async move {
             let _permit = permit;
             let work = crate::native::policy::DELEGATION.scope(

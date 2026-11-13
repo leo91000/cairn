@@ -19,6 +19,7 @@ impl Controller {
         value["status"] = if fresh { "ok" } else { "degraded" }.into();
         value["backend"] = "native".into();
         value["nodeProtocol"] = 2.into();
+        value["diskRetirementProtocol"] = crate::storage::retirement::PROTOCOL.into();
         value["directStorageProtocol"] = 1.into();
         value["runtimeId"] = crate::nodes::component_runtime().into();
         value["dataRoot"] = json!(self.data);
@@ -147,7 +148,7 @@ mod tests {
                 .method("POST")
                 .uri(format!("/disks/{run}/delete"))
                 .header("authorization", "Bearer synthetic-private-controller-token")
-                .body(Body::empty())
+                .body(Body::from(r#"{"permanentlyDeleted":true}"#))
                 .unwrap();
             let mut deleting =
                 tokio::spawn(

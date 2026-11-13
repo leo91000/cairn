@@ -6,5 +6,8 @@ export interface MoveToNodeInput {
   runId: RunId
   nodeId: NodeId
   requiredTags?: Array<string> | null
-  waitSeconds: number
+  /**
+   * Confirms that the conversation's working files are lost by the node change.
+   */
+  discardWorkingFiles: boolean
 }

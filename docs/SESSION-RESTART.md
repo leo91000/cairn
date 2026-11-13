@@ -12,7 +12,7 @@ A repeated confirmation returns the pending intention, so a lost HTTP response
 can be retried. The handler never reads or rewrites the worker's checkpoint.
 The next queued message, after the user resumes, consumes that intention in
 `continue_run` before `launch_turn` clears it in the same transaction. Continuation also reads the
-checkpoint `freshSession` flag used by explicit backend migration. Both paths transfer the visible transcript,
+checkpoint `freshSession` flag. These same-node restarts transfer the visible transcript,
 reset launch/controller recovery state, and preserve the prepared workspace.
 A subsequent ordinary message resumes the newly established session normally.
 

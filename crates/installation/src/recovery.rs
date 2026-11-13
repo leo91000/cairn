@@ -278,6 +278,39 @@ async fn fence_attempt_authorized(
         .await
 }
 
+/// Fences the last execution of a detached environment. Its checkpoint has been reset,
+/// so the retirement keeps the identity it captured.
+pub(crate) async fn fence_retired(
+    s: &Service,
+    attempt: Option<&str>,
+    node: Option<&str>,
+    process: Option<&ProcessIdentity>,
+    isolated: bool,
+) -> Result<()> {
+    if let Some(process) = process {
+        fence_process(process).await?;
+    }
+    let Some(attempt) = attempt else {
+        return Ok(());
+    };
+    let owned = s.store.attempt(attempt).await?;
+    // A released attempt was confirmed stopped before its capacity was returned.
+    if isolated && owned.is_some_and(|owned| crate::nodes::is_active_attempt(&owned)) {
+        let runner_url = crate::nodes::transport::url_for_node(s, node);
+        fence_runner(
+            s,
+            &runner_url,
+            attempt,
+            &crate::authorization::Authorization::default(),
+        )
+        .await?;
+    }
+    let attempt = attempt.to_owned();
+    s.store
+        .transaction(move |db| crate::nodes::placement::release_in(db, &attempt))
+        .await
+}
+
 async fn fence_runner(
     s: &Service,
     runner_url: &str,

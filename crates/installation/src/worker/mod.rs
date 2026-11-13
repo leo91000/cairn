@@ -45,6 +45,9 @@ pub struct Worker {
     run_preparation_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     wake: Notify,
     conversation_cleanup: Notify,
+    retirement: Notify,
+    retirement_admission: Notify,
+    pub(crate) retirement_cleanup: Mutex<()>,
     initialized: OnceCell<()>,
     maintenance: AtomicI64,
     tasks: TaskTracker,
@@ -101,6 +104,8 @@ impl Worker {
         self.tasks
             .spawn(crate::nodes::exclusive::maintain(s.clone()));
         self.tasks.spawn(clean_conversations(s.clone()));
+        self.tasks.spawn(detach_environments(s.clone()));
+        self.tasks.spawn(retire_environments(s.clone()));
         self.tasks.spawn(schedule_tasks(s.clone()));
         self.tasks.spawn(self.clone().run_forever(s));
         Ok(())
@@ -128,6 +133,12 @@ impl Worker {
 
     pub fn notify_conversation_cleanup(&self) {
         self.conversation_cleanup.notify_one();
+    }
+
+    /// Wakes the retirement of expired environments, after an expiration or a stopped run.
+    pub fn notify_retirement(&self) {
+        self.retirement.notify_one();
+        self.retirement_admission.notify_one();
     }
 
     /// Coalesce wakeups without losing work queued during an active scheduling pass.
@@ -202,6 +213,12 @@ async fn schedule_tasks(s: Arc<Service>) {
 /// Recovers executions and unfinished cleanup from the previous worker process.
 fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
     db.restore_chat_summaries(None)?;
+    crate::nodes::placement::release_unclaimed(db, None)?;
+    // Earlier versions removed an expired environment before the next message
+    // and moved environments between nodes. Neither survives an update.
+    crate::environment_expiration::finish_legacy_cleaning(db)?;
+    crate::nodes::moves::abandon_legacy_moves(db)?;
+    crate::backend_migration::abandon_legacy_conversions(db)?;
     for run in db.active_run_states()? {
         let id = &run.id;
         if run.status != RunStatus::Running {
@@ -268,6 +285,54 @@ async fn clean_conversations(s: Arc<Service>) {
     }
 }
 
+/// Admission owns only execution fencing and logical namespace detachment.
+/// Slow physical erasure has a separate loop and never delays this one.
+async fn detach_environments(s: Arc<Service>) {
+    let mut timer = tokio::time::interval(Duration::from_secs(5));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = s.shutdown.cancelled() => break,
+            _ = timer.tick() => {},
+            () = s.worker.retirement_admission.notified() => {},
+        }
+        let work = async {
+            s.detach_stopped_environments().await?;
+            s.detach_retired_environments().await
+        };
+        tokio::select! {
+            () = s.shutdown.cancelled() => break,
+            result = work => {
+                if let Err(error) = result {
+                    audit(&s.store, "environment.detachment_failed", json!({ "message": error.message })).await;
+                }
+            },
+        }
+    }
+}
+
+/// Detaches stopped expired environments and retires their old disks and files.
+async fn retire_environments(s: Arc<Service>) {
+    let mut timer = tokio::time::interval(Duration::from_secs(5));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = s.shutdown.cancelled() => break,
+            _ = timer.tick() => {}
+            () = s.worker.retirement.notified() => {}
+        }
+        tokio::select! {
+            () = s.shutdown.cancelled() => break,
+            result = s.cleanup_retired_environments() => {
+                if let Err(error) = result {
+                    let detail = json!({ "message": error.message });
+                    audit(&s.store, "environment.retirement_failed", detail).await;
+                }
+            }
+        }
+    }
+}
+
 /// Records an audit entry for a failure the worker already handled.
 async fn audit(store: &Store, action: &str, detail: Value) {
     if let Err(error) = store.audit(action, detail).await {
@@ -279,6 +344,26 @@ async fn audit(store: &Store, action: &str, detail: Value) {
 mod tests {
     use super::*;
     use crate::{mission_fixture::MissionFixture, validation::text};
+
+    #[tokio::test]
+    async fn restart_releases_an_unclaimed_fresh_environment_reservation_but_keeps_execution_proofs()
+     {
+        use crate::{attempt_fixture::DbAttemptFixture, run_fixture::DbRunFixture};
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            db.add_run_fixture(&json!({ "id": "run", "taskId": "task", "status": "succeeded", "createdAt": 0, "environmentExpiredAt": 1 }), None)?;
+            checkpoint::RunCheckpoint { runner_id: Some(Some("bound".into())), ..Default::default() }.store_in(db, "run")?;
+            for (attempt, leased) in [("unclaimed", false), ("bound", false), ("leased", true)] {
+                db.put_attempt_fixture(&json!({ "id": attempt, "runId": "run", "released": false, "leaseRequired": leased, "diskMaterialized": false }))?;
+            }
+            restore_after_restart(db)?;
+            assert_eq!(db.attempt_fixture("unclaimed")?.unwrap()["released"], true);
+            assert_eq!(db.attempt_fixture("bound")?.unwrap()["released"], false);
+            assert_eq!(db.attempt_fixture("leased")?.unwrap()["released"], false);
+            Ok(())
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn committed_work_and_deployment_release_wake_the_scheduler() {

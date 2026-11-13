@@ -42,6 +42,100 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// A completed retirement reaps only its captured old attempts, never the new
+/// environment's canonical disk, bootstrap state or manager namespace.
+async fn erase_native_attempts(
+    controller: &Controller,
+    run: &str,
+    known: &[String],
+    only_known: bool,
+) -> Result<()> {
+    if only_known && known.is_empty() {
+        return Ok(());
+    }
+    {
+        let active = controller.active.lock().await;
+        if known.iter().any(|id| active.contains_key(id)) {
+            return Err(Error::conflict("A retired native attempt is still active."));
+        }
+    }
+    crate::storage::retirement::seed_attempts(&controller.state, &controller.data, run, known)
+        .await?;
+    let mut entries = tokio::fs::read_dir(&controller.state).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if entry
+            .path()
+            .extension()
+            .is_none_or(|extension| extension != "run")
+        {
+            continue;
+        }
+        let id = entry
+            .path()
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        if only_known && !known.contains(&id) {
+            continue;
+        }
+        let owner = match tokio::fs::read_to_string(entry.path()).await {
+            Ok(owner) => owner,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if owner != run {
+            continue;
+        }
+        uuid(&id)?;
+        if controller.active.lock().await.contains_key(&id) {
+            return Err(Error::conflict("A native attempt is still active."));
+        }
+        atomic_write(&controller.file(&id, "stopped"), b"1").await?;
+        for extension in ["log", "lease", "terminal"] {
+            require_removed(tokio::fs::remove_file(controller.file(&id, extension)).await)?;
+        }
+        require_removed(
+            tokio::fs::remove_file(
+                controller
+                    .state
+                    .join("roots")
+                    .join(&id)
+                    .with_extension("plan.json"),
+            )
+            .await,
+        )?;
+        require_removed(tokio::fs::remove_dir_all(controller.state.join("roots").join(&id)).await)?;
+        require_removed(
+            tokio::fs::remove_file(
+                controller
+                    .data
+                    .join("runner-plans")
+                    .join(format!("{id}.json")),
+            )
+            .await,
+        )?;
+    }
+    for directory in [
+        controller.state.clone(),
+        controller.state.join("roots"),
+        controller.data.join("runner-plans"),
+    ] {
+        if directory.is_dir() {
+            tokio::fs::File::open(directory).await?.sync_all().await?;
+        }
+    }
+    Ok(())
+}
+
+fn require_removed(result: std::io::Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 const MAX_PLAN: u64 = 8_000_000;
 const MAX_LOG: u64 = 64 * 1024 * 1024;
 const MAX_TERMINAL_METADATA: u64 = 128;
@@ -2436,6 +2530,22 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
             let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
+            let value = input(request, 4096).await?;
+            let retirement = if *action == "delete" {
+                crate::storage::retirement::Retirement::begin(&controller.state, run, &value)
+                    .await?
+            } else {
+                None
+            };
+            if let Some(retirement) = &retirement
+                && retirement.completed().await?
+            {
+                erase_native_attempts(&controller, run, retirement.attempts(), true).await?;
+                return Ok(
+                    Json(json!({ "deleted": true, "retirementId": retirement.id() }))
+                        .into_response(),
+                );
+            }
             let root = workspace::directory(&controller.state, run)?;
             private_dir(&root).await?;
             let _owner = crate::file_lock::exclusive(
@@ -2483,50 +2593,42 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             if *action == "delete" {
                 controller.bootstrap.forget(run);
                 let stage = controller.data.join("runs").join(run);
-                if stage.exists() {
-                    tokio::fs::remove_dir_all(stage).await?;
+                if stage.exists()
+                    && !stage
+                        .join(crate::conversation_deletion::retired::MANAGER_NAMESPACE)
+                        .exists()
+                {
+                    tokio::fs::remove_dir_all(&stage).await?;
+                    tokio::fs::File::open(stage.parent().unwrap())
+                        .await?
+                        .sync_all()
+                        .await?;
                 }
-                let mut entries = tokio::fs::read_dir(&controller.state).await?;
-                while let Some(entry) = entries.next_entry().await? {
-                    if entry
-                        .path()
-                        .extension()
-                        .is_some_and(|extension| extension == "run")
-                        && tokio::fs::read_to_string(entry.path())
-                            .await
-                            .is_ok_and(|owner| owner == *run)
-                    {
-                        let id = entry
-                            .path()
-                            .file_stem()
-                            .unwrap()
-                            .to_string_lossy()
-                            .into_owned();
-                        uuid(&id)?;
-                        for extension in ["log", "lease", "terminal"] {
-                            let _ = tokio::fs::remove_file(controller.file(&id, extension)).await;
-                        }
-                        let _ = tokio::fs::remove_file(
-                            controller
-                                .state
-                                .join("roots")
-                                .join(&id)
-                                .with_extension("plan.json"),
-                        )
-                        .await;
-                        let _ = tokio::fs::remove_dir_all(controller.state.join("roots").join(&id))
-                            .await;
-                        let _ = tokio::fs::remove_file(
-                            controller
-                                .data
-                                .join("runner-plans")
-                                .join(format!("{id}.json")),
-                        )
-                        .await;
-                    }
+                erase_native_attempts(
+                    &controller,
+                    run,
+                    retirement.as_ref().map_or(&[], |value| value.attempts()),
+                    false,
+                )
+                .await?;
+            }
+            for directory in [
+                controller.state.join("roots"),
+                controller.data.join("runner-plans"),
+            ] {
+                if directory.is_dir() {
+                    tokio::fs::File::open(directory).await?.sync_all().await?;
                 }
             }
-            json!({ "deleted": *action == "delete", "pruned": *action == "prune", "retiredGrants": retired_grants })
+            if let Some(retirement) = &retirement {
+                retirement.commit(&root).await?;
+            }
+            json!({
+                "deleted": *action == "delete",
+                "pruned": *action == "prune",
+                "retiredGrants": retired_grants,
+                "retirementId": retirement.as_ref().map(crate::storage::retirement::Retirement::id),
+            })
         }
         ("POST", ["runs", id, "artifact"]) => {
             let value = input(request, 16384).await?;
@@ -5298,6 +5400,218 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn native_retirement_retries_attempt_cleanup_before_persisting_its_receipt() {
+        for bad_log in [true, false] {
+            let (_fixture, controller) = fixture().await;
+            let (run, attempt, retirement) = (
+                crate::config::id(),
+                crate::config::id(),
+                crate::config::id(),
+            );
+            tokio::fs::write(controller.file(&attempt, "run"), run.as_bytes())
+                .await
+                .unwrap();
+            let roots = controller.state.join("roots");
+            private_dir(&roots).await.unwrap();
+            let directory = roots.join(&attempt);
+            if bad_log {
+                private_dir(&directory).await.unwrap();
+                tokio::fs::write(directory.join("provider-home"), b"old private home")
+                    .await
+                    .unwrap();
+                private_dir(&controller.file(&attempt, "log"))
+                    .await
+                    .unwrap();
+            } else {
+                tokio::fs::write(&directory, b"transient wrong file type")
+                    .await
+                    .unwrap();
+            }
+            let path = format!("/disks/{run}/delete");
+            let body = json!({ "retirementId":retirement });
+            assert!(
+                route(controller.clone(), request(&path, &body))
+                    .await
+                    .is_err()
+            );
+            let receipt = controller
+                .state
+                .join("disk-retirements")
+                .join(&run)
+                .join(&retirement);
+            assert!(
+                !receipt.exists(),
+                "failed cleanup was permanently acknowledged"
+            );
+            if bad_log {
+                tokio::fs::remove_dir(controller.file(&attempt, "log"))
+                    .await
+                    .unwrap();
+            } else {
+                tokio::fs::remove_file(&directory).await.unwrap();
+            }
+            assert_eq!(
+                route(controller, request(&path, &body))
+                    .await
+                    .unwrap()
+                    .status(),
+                200
+            );
+            assert!(receipt.exists());
+            assert!(!directory.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn identified_native_retirement_preserves_a_shared_manager_namespace() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let old = workspace::directory(&controller.state, &run).unwrap();
+        private_dir(&old.join("data")).await.unwrap();
+        tokio::fs::write(old.join("data/old.txt"), b"old disk")
+            .await
+            .unwrap();
+        let manager = controller.data.join("runs").join(&run);
+        private_dir(&manager).await.unwrap();
+        tokio::fs::write(
+            manager.join(crate::conversation_deletion::retired::MANAGER_NAMESPACE),
+            b"manager",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(manager.join("new.txt"), b"new remote environment")
+            .await
+            .unwrap();
+        let path = format!("/disks/{run}/delete");
+        assert_eq!(
+            route(controller.clone(), request(&path, &json!({})))
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert!(old.join("data/old.txt").exists());
+        route(
+            controller,
+            request(&path, &json!({ "retirementId":crate::config::id() })),
+        )
+        .await
+        .unwrap();
+        assert!(!old.join("data").exists());
+        assert_eq!(
+            tokio::fs::read(manager.join("new.txt")).await.unwrap(),
+            b"new remote environment"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_native_cleanup_hints_preserve_the_completed_replacement() {
+        let (_fixture, controller) = fixture().await;
+        let (run, old, fresh, retirement) = (
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+        );
+        tokio::fs::write(controller.file(&old, "log"), b"legacy private output")
+            .await
+            .unwrap();
+        let old_root = controller.state.join("roots").join(&old);
+        private_dir(&old_root).await.unwrap();
+        tokio::fs::write(old_root.join("home"), b"legacy private home")
+            .await
+            .unwrap();
+        let endpoint = format!("/disks/{run}/delete");
+        let body = json!({ "retirementId":retirement,"attempts":[old] });
+        assert_eq!(
+            route(controller.clone(), request(&endpoint, &body))
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert!(!controller.file(&old, "log").exists());
+        assert!(!old_root.exists());
+        let disk = workspace::directory(&controller.state, &run).unwrap();
+        tokio::fs::write(disk.join("replacement"), b"new disk")
+            .await
+            .unwrap();
+        tokio::fs::write(controller.file(&fresh, "run"), run.as_bytes())
+            .await
+            .unwrap();
+        tokio::fs::write(controller.file(&fresh, "log"), b"new private output")
+            .await
+            .unwrap();
+        let fresh_root = controller.state.join("roots").join(&fresh);
+        private_dir(&fresh_root).await.unwrap();
+        tokio::fs::write(fresh_root.join("home"), b"new private home")
+            .await
+            .unwrap();
+        assert_eq!(
+            route(controller.clone(), request(&endpoint, &body))
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            tokio::fs::read(disk.join("replacement")).await.unwrap(),
+            b"new disk"
+        );
+        assert_eq!(
+            tokio::fs::read(controller.file(&fresh, "log"))
+                .await
+                .unwrap(),
+            b"new private output"
+        );
+        assert_eq!(
+            tokio::fs::read(fresh_root.join("home")).await.unwrap(),
+            b"new private home"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_retirement_retry_preserves_the_next_native_environment() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let retirement = crate::config::id();
+        let root = workspace::directory(&controller.state, &run).unwrap();
+        private_dir(&root.join("data")).await.unwrap();
+        tokio::fs::write(root.join("data/old"), b"old environment")
+            .await
+            .unwrap();
+        let path = format!("/disks/{run}/delete");
+        let body = json!({ "retirementId": retirement });
+        let held = disk::lock(&controller.state).await.unwrap();
+        let mut late = Box::pin(route(controller.clone(), request(&path, &body)));
+        assert!(futures_util::poll!(&mut late).is_pending());
+        drop(held);
+        // Leave the original waiter descheduled while its retry overtakes it.
+        let acknowledged = route(controller.clone(), request(&path, &body))
+            .await
+            .unwrap();
+        assert_eq!(acknowledged.status(), 200);
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("data/new"), b"next environment").unwrap();
+        assert_eq!(late.await.unwrap().status(), 200);
+        assert_eq!(
+            std::fs::read(root.join("data/new")).unwrap(),
+            b"next environment"
+        );
+        // Reopen the durable receipt before attempting ownership of an
+        // environment that is now executing.
+        let _active = crate::file_lock::exclusive(&root.join("owner.lock"), "active").unwrap();
+        let repeated = route(controller.clone(), request(&path, &body))
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), 200);
+        assert_eq!(
+            std::fs::read(root.join("data/new")).unwrap(),
+            b"next environment"
+        );
+    }
+
+    #[tokio::test]
     async fn deleting_a_managed_workspace_does_not_follow_its_symlink_or_remove_unrelated_files() {
         let (_root, controller) = fixture().await;
         let outside = tempfile::tempdir().unwrap();
@@ -5323,7 +5637,10 @@ pub(crate) mod tests {
             .unwrap();
         route(
             controller,
-            request(&format!("/disks/{run}/delete"), &json!({})),
+            request(
+                &format!("/disks/{run}/delete"),
+                &json!({ "permanentlyDeleted": true }),
+            ),
         )
         .await
         .unwrap();

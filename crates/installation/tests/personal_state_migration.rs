@@ -31,9 +31,14 @@ fn snapshot(db: &Connection) -> Snapshot {
     tables
         .into_iter()
         .map(|(name, sql)| {
-            let mut statement = db
-                .prepare(&format!("SELECT * FROM \"{}\"", name.replace('"', "\"\"")))
-                .unwrap();
+            // The independent version-32 migration changes ACK ownership layout.
+            // Preserve all legacy pin columns; its new defaults/index are checked separately.
+            let (sql,query) = if name == "direct_journal_acknowledgements" {
+                ("retained acknowledgement columns".to_owned(),"SELECT publication,run_id,node_id,retired FROM direct_journal_acknowledgements ORDER BY publication".to_owned())
+            } else {
+                (sql,format!("SELECT * FROM \"{}\"",name.replace('"',"\"\"")))
+            };
+            let mut statement = db.prepare(&query).unwrap();
             let count = statement.column_count();
             let rows = statement
                 .query_map([], |r| {
@@ -227,7 +232,7 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        31
+        32
     );
 
     // The real service serves each account its own preserved outcomes.
@@ -335,7 +340,7 @@ async fn v17_upgrade_preserves_legacy_paid_retry_and_checkpoint() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        31
+        32
     );
 }
 
@@ -376,6 +381,6 @@ fn malformed_previous_read_state_rolls_back_schema_data_and_version() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        31
+        32
     );
 }

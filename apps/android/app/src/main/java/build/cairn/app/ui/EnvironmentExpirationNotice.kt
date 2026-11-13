@@ -14,9 +14,9 @@ internal fun EnvironmentExpirationNotice(state: String, error: String?) {
         Text("Environnement de travail expiré", style = MaterialTheme.typography.titleSmall)
         Text(
             if (state == "cleaning")
-                "Suppression de l’environnement après inactivité. Attendez la fin du nettoyage avant d’envoyer un message."
+                "Suppression de l’ancien environnement. Attendez la fin du nettoyage avant d’envoyer un message."
             else
-                "L’environnement a été supprimé après inactivité. Votre prochain message crée un nouvel environnement à partir de l’historique de la conversation.",
+                "L’environnement de travail a expiré. Votre prochain message crée un nouvel environnement à partir de l’historique de la conversation.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Text(

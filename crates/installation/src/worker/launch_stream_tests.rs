@@ -113,6 +113,7 @@ async fn rpc_flood_on_service(
     let mut execution = Execution {
         s: &service,
         id: id.clone(),
+        admission_revision: run["environmentAdmissionRevision"].clone(),
         run: &mut run,
         account: &mut account,
         preparation: None,
@@ -230,6 +231,7 @@ async fn canonical_refresh_preserves_account_rotations_on_retained_output_path()
     let mut execution = Execution {
         s: &service,
         id: id.clone(),
+        admission_revision: run["environmentAdmissionRevision"].clone(),
         run: &mut run,
         account: &mut account,
         preparation: None,
@@ -468,6 +470,7 @@ async fn actual_attempt_cleanup_precedes_same_account_refresh_and_real_account_s
     let mut execution = Execution {
         s,
         id: old.run_id.clone(),
+        admission_revision: run["environmentAdmissionRevision"].clone(),
         run: &mut run,
         account: &mut account,
         preparation: None,

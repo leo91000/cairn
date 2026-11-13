@@ -89,7 +89,8 @@ Existing environments stay on their node unless explicitly moved; pinned work
 waits for that node. Incoming directing people still contribute to provenance.
 Pending or failed privilege confirmation does not trigger automatic capacity
 relocation or recovery to another node. Ordinary recovery remains available after
-confirmation or an explicit node revocation. The owner preview includes incoming
+confirmation. Explicit node revocation expires its environments after confirmation
+of working-file loss. The owner preview includes incoming
 move requests and active destination reservations; changes invalidate confirmation.
 No new placements on a transitioning node overtake its stop. Existing work keeps
 files and thread history; an interrupted engine resumes under the confirmed mode

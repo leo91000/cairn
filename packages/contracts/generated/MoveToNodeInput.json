@@ -2,6 +2,11 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "properties": {
+    "discardWorkingFiles": {
+      "default": false,
+      "description": "Confirms that the conversation's working files are lost by the node change.",
+      "type": "boolean"
+    },
     "nodeId": {
       "format": "uuid",
       "type": "string"
@@ -23,13 +28,6 @@
       "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
       "format": "uuid",
       "type": "string"
-    },
-    "waitSeconds": {
-      "default": 0,
-      "format": "uint64",
-      "maximum": 3600,
-      "minimum": 0,
-      "type": "integer"
     }
   },
   "required": [

@@ -1366,6 +1366,30 @@
           ],
           "default": null
         },
+        "environmentExpirationCause": {
+          "default": null,
+          "pattern": "^(inactivity|node-change|node-revocation|storage-migration)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "environmentExpiredAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "environmentState": {
+          "default": null,
+          "pattern": "^(cleaning|expired)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "error": {
           "default": null,
           "type": [
@@ -2609,6 +2633,14 @@
     },
     "environmentError": {
       "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "environmentExpirationCause": {
+      "default": null,
+      "pattern": "^(inactivity|node-change|node-revocation|storage-migration)$",
       "type": [
         "string",
         "null"

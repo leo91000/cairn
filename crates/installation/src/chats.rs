@@ -290,6 +290,10 @@ fn conversation_view_with_run(
         lifecycle_error: chat.lifecycle_error,
         environment_state: chat.environment_state,
         environment_expired_at: chat.environment_expired_at,
+        environment_expiration_cause: serde_json::from_value(run_field(
+            "environmentExpirationCause",
+        ))
+        .unwrap_or_default(),
         environment_error: chat.environment_error,
         requested_by: chat.requested_by,
         wakeup: chat.wakeup,
@@ -699,7 +703,6 @@ fn require_sendable(
     messages: &[Message],
     id: &str,
 ) -> Result<()> {
-    crate::conversation_lifecycle::require_environment_state_ready(chat.environment_state)?;
     let undelivered = messages
         .iter()
         .filter(|message| message.status != MessageStatus::Delivered)
@@ -1219,10 +1222,14 @@ fn continue_run(
         None => return Err(Error::conflict("Run checkpoint not found")),
     };
     let provider = Provider::of_run(snapshot)?;
-    crate::conversation_lifecycle::require_environment_state_ready(chat.environment_state)?;
-    let expired = chat.environment_state == Some(EnvironmentState::Expired);
-    let restart_requested =
-        expired || chat.session_restart_requested || checkpoint.fresh_session == Some(true);
+    let expired = chat.environment_state == Some(EnvironmentState::Expired)
+        || run["environmentState"] == "expired";
+    let fresh_environment_without_session =
+        run["environmentExpiredAt"].is_number() && !run["sessionId"].is_string();
+    let restart_requested = expired
+        || fresh_environment_without_session
+        || chat.session_restart_requested
+        || checkpoint.fresh_session == Some(true);
     if provider != Provider::of_run(run)? || restart_requested {
         if !expired && run["sessionId"].is_string() {
             checkpoint.workspace_initialized = Some(true);
@@ -1289,7 +1296,7 @@ fn continue_run(
         recovery_pending: Some(true),
         boundary: Some(json!({
             "chatExecution": serde_json::to_value(execution)?,
-            "environmentState": null,
+            "environmentState": if expired { json!("expired") } else { run["environmentState"].clone() },
             // The next turn's adapter announces again whether it can answer side questions.
             "sideQuestions": null,
             "sideQuestionsCompacting": null,
@@ -1325,6 +1332,21 @@ fn launch_turn(
     if chat.agent_id != snapshot["snapshot"]["agent"]["id"] {
         return Ok(());
     }
+    // Rebuild backend-dependent preparation if an explicit choice committed
+    // while the snapshot was being prepared. The message stays queued.
+    let current = db.run(chat.run_id.as_deref().unwrap_or(""))?;
+    let same_environment = match (&run, &current) {
+        (Some(expected), Some(current)) => {
+            expected["id"] == current["id"]
+                && expected["environmentAdmissionRevision"]
+                    == current["environmentAdmissionRevision"]
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    if !same_environment {
+        return Ok(());
+    }
     let waking = message["wakeup"].is_object();
     let unchanged = if waking {
         let current = db.run(chat.run_id.as_deref().unwrap_or(""))?;
@@ -1350,7 +1372,12 @@ fn launch_turn(
     {
         return Ok(());
     }
-    crate::conversation_lifecycle::require_environment_state_ready(chat.environment_state)?;
+    // The interrupted environment is detached once its execution has stopped.
+    if let Some(run) = &run
+        && crate::environment_expiration::pending(db, text(run, "id"))?
+    {
+        return Ok(());
+    }
     crate::coding_agent_configuration::freeze_message(db, &mut snapshot, run.as_ref(), &message)?;
     Provider::of_run(&snapshot)?
         .adapter()
@@ -1726,6 +1753,7 @@ impl Service {
     pub async fn chat_tick(&self, active: &HashSet<String>) -> Result<()> {
         self.expire_attachment_uploads().await?;
         let side_open = self.side_question_chats().await?;
+        let expiring = crate::environment_expiration::pending_runs(self).await?;
         for chat in self.store.conversations().await? {
             // Before anything holds the conversation (trash, cleaning, a pending agent
             // switch): a stopped turn's side questions fail now.
@@ -1743,7 +1771,10 @@ impl Service {
                 }
             }
             if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
-                || chat.environment_state == Some(EnvironmentState::Cleaning)
+                || chat
+                    .run_id
+                    .as_ref()
+                    .is_some_and(|run| expiring.contains(run))
             {
                 continue;
             }
@@ -2008,6 +2039,34 @@ mod tests {
         execution: ChatExecution,
     ) -> Result<()> {
         super::continue_run(db, &fixture_chat(chat), run, snapshot, execution)
+    }
+
+    #[tokio::test]
+    async fn stale_chat_preparation_preserves_the_new_backend_and_the_queued_message() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            db.add_run_fixture(&json!({
+                "id": "run", "taskId": "chat", "createdAt": 0, "status": "succeeded",
+                "environmentState": "expired", "environmentAdmissionRevision": "old",
+                "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID, "provider": "codex", "access": { "backend": "firecracker" } } },
+            }), None)?;
+            db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": crate::config::MAIN_AGENT_ID, "environmentState": "expired" }))?;
+            let stale = db.run("run")?.unwrap();
+            let message = db.put_message(&json!({ "id": "next", "chatId": "chat", "text": "Keep queued", "status": "queued", "createdAt": 1 }))?;
+            let mut chosen = stale["snapshot"].clone();
+            chosen["agent"]["access"]["backend"] = "native".into();
+            db.change_run("run", crate::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(chosen)?),
+                boundary: Some(json!({ "environmentAdmissionRevision": "new" })),
+                ..Default::default()
+            })?;
+            let before = db.run("run")?.unwrap();
+            launch_turn(db, "chat", Some(stale.clone()), message, stale)?;
+            assert_eq!(db.run("run")?.unwrap(), before);
+            assert_eq!(db.messages("chat")?[0]["status"], "queued");
+            Ok(())
+        }).await.unwrap();
     }
 
     #[tokio::test]

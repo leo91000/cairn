@@ -2,6 +2,11 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "properties": {
+    "discardWorkingFiles": {
+      "default": false,
+      "description": "Confirms that the working files of the node's conversations are lost.",
+      "type": "boolean"
+    },
     "nodeId": {
       "format": "uuid",
       "type": "string"

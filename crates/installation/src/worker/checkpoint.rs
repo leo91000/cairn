@@ -816,7 +816,11 @@ impl Checkpoint {
                     saved.remaining_ms =
                         Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
                 }
-                if let Some(changes) = changes.run {
+                if let Some(changes) = changes.run
+                    && !crate::environment_expiration::pending(db, &id)?
+                {
+                    // Late engine events still belong to the history, but cannot
+                    // reattach a session to the environment already detached.
                     db.change_run(&id, changes)?;
                 }
                 if let Some(saved) = &saved {

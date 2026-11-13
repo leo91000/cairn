@@ -196,6 +196,7 @@ async function main() {
     }
 
     let sessionId
+    let lastPlan
     let previousVm
     let evictedVm
     let crashRecoveryPassed = false
@@ -250,6 +251,7 @@ async function main() {
         chat,
         imports: [{ source: `${runRoot}/home`, target: '/home/node' }, { source: `${runRoot}/workspace`, target: chat.cwd }, { source: `${runRoot}/output`, target: `${runRoot}/output` }, { source: `${runRoot}/chat-input`, target: '/run/cairn-chat' }],
       }
+      lastPlan = plan
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
       const before = records().length
       const started = Date.now()
@@ -332,7 +334,7 @@ async function main() {
         if (delayedPublication) {
           pendingPublication = await completedSnapshot()
           assert.ok(pendingPublication.manifest.generation > 0)
-          await api(`/disks/${runId}/delete`, 'POST', {}, 425)
+          await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true }, 425)
           assert.equal(state(vmId), 'Paused', 'Unacknowledged journal protects its retained VMM')
           protectedEvictions++
         }
@@ -406,14 +408,59 @@ async function main() {
       for (const task of active) {
         await api(`/runs/${task.id}`, 'DELETE')
         await api(`/runs/${task.id}/wait`, 'POST')
-        await api(`/disks/${task.run}/delete`, 'POST', {})
+        await api(`/disks/${task.run}/delete`, 'POST', { permanentlyDeleted: true })
       }
 
       activeAdmissionPassed = true
     }
 
-    await api(`/disks/${runId}/delete`, 'POST', {})
+    await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true })
     await until(async () => (await (await api('/health')).json()).pool.occupied === 0)
+    let identifiedRetirementPassed = false
+    if (retention > 0) {
+      assert.ok(lastPlan, 'the retirement qualification requires a real Codex plan')
+      const attempt = randomUUID()
+      const plan = {
+        ...lastPlan,
+        id: attempt,
+        expires: Date.now() + 120000,
+        chat: {
+          ...lastPlan.chat,
+          attemptId: attempt,
+          sessionId: undefined,
+          execution: { ...lastPlan.chat.execution, messageId: randomUUID(), text: 'Reply RETENTION_NATIVE_OK.' },
+        },
+      }
+      await writeFile(path.join(root, 'data/runner-plans', `${attempt}.json`), JSON.stringify(plan))
+      await api(`/runs/${attempt}`, 'POST')
+      assert.equal((await (await api(`/runs/${attempt}/wait`, 'POST')).json()).StatusCode, 0)
+      await until(async () => (await (await api('/health')).json()).pool.retained_runs.includes(runId))
+      const journal = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
+      assert.ok(journal.dirtyBytes > 0, 'a retained Codex guest has unpublished writes')
+      await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true }, 425)
+      const retirementId = randomUUID()
+      const retired = await (await api(`/disks/${runId}/delete`, 'POST', { retirementId })).json()
+      assert.equal(retired.deleted, true)
+      assert.equal(retired.retirementId, retirementId)
+      await until(async () => (await (await api('/health')).json()).pool.retained === 0)
+      const remaining = JSON.parse(docker('exec', name, 'node', '-e', `
+        const fs=require('node:fs');
+        console.log(JSON.stringify({
+          log:fs.existsSync('/runner-state/${attempt}.log'),
+          owner:fs.existsSync('/runner-state/${attempt}.run'),
+          plan:fs.existsSync('/data/runner-plans/${attempt}.json'),
+          receipt:fs.existsSync('/runner-state/disk-retirements/${runId}/${retirementId}')
+        }));
+      `))
+      assert.deepEqual(remaining, {
+        log: false,
+        owner: false,
+        plan: false,
+        receipt: true,
+      })
+      identifiedRetirementPassed = true
+    }
+
     const runnerLog = stripVTControlCharacters(runnerLogs())
     const reclamation = runnerLog.split('\n').filter(line => line.includes('event="memory_reclaimed"')).map((line) => {
       const value = field => Number(line.match(new RegExp(`${field}=(\\d+)`))?.[1])
@@ -445,6 +492,7 @@ async function main() {
       contextPreserved: true,
       pausedCapturePassed: retention > 0,
       deletionReaped: true,
+      identifiedRetirementPassed,
     }
     if (process.env.CAIRN_RETENTION_EVIDENCE)
       await writeFile(process.env.CAIRN_RETENTION_EVIDENCE, JSON.stringify(evidence, null, 2))

@@ -22,9 +22,14 @@ fn snapshot(db: &Connection) -> BTreeMap<String, (String, Vec<Vec<Value>>)> {
     tables
         .into_iter()
         .map(|(name, sql)| {
-            let mut statement = db
-                .prepare(&format!("SELECT * FROM \"{}\"", name.replace('"', "\"\"")))
-                .unwrap();
+            // The independent version-32 migration changes ACK ownership layout.
+            // Preserve all legacy pin columns; its new defaults/index are checked separately.
+            let (sql,query) = if name == "direct_journal_acknowledgements" {
+                ("retained acknowledgement columns".to_owned(),"SELECT publication,run_id,node_id,retired FROM direct_journal_acknowledgements ORDER BY publication".to_owned())
+            } else {
+                (sql,format!("SELECT * FROM \"{}\"",name.replace('"',"\"\"")))
+            };
+            let mut statement = db.prepare(&query).unwrap();
             let count = statement.column_count();
             let rows = statement
                 .query_map([], |r| {
@@ -82,7 +87,7 @@ async fn upgrades_real_previous_store_with_order_privacy_and_unrelated_data_inta
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        31
+        32
     );
     for table in ["chat_messages", "chat_questions"] {
         assert_eq!(

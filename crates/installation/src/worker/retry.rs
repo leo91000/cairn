@@ -133,7 +133,6 @@ pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
         Err(error) if error.is_conflict() => return Ok(false),
         Err(error) => return Err(error),
     }
-    crate::nodes::moves::release_terminal_destination_in(db, id)?;
     let message = "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; resume when ready.";
     let mut retry = run.retry;
     if let Some(retry) = &mut retry {

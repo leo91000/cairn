@@ -36,11 +36,6 @@ impl Worker {
         s.store
             .transaction(move |db| {
                 authorize.authorize(db)?;
-                let conversion = crate::backend_migration::cancel_in(db, &run_id)?;
-                let run = required(db.run_state(&run_id)?, "Run not found")?;
-                if conversion && !run.status.is_active() {
-                    return Ok(());
-                }
                 request_cancel(db, &run_id, is_active)
             })
             .await?;
@@ -83,8 +78,8 @@ impl Worker {
                 authorize.authorize(db)?;
                 let chat = crate::chats::pause_in(db, &id, true)?;
                 if let Some(run_id) = chat["runId"].as_str() {
-                    crate::backend_migration::cancel_in(db, run_id)?;
                     crate::chats::coding_agent::cancel_in(db, run_id)?;
+                    crate::environment_expiration::cancel_continuation_in(db, run_id)?;
                     crate::chats::continuation::cancel_for_run(db, run_id)?;
                     let run = required(db.run_state(run_id)?, "Run not found")?;
                     if run.status.is_active() {
@@ -291,11 +286,12 @@ impl Worker {
 }
 
 fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
+    crate::environment_expiration::cancel_continuation_in(db, id)?;
     crate::chats::coding_agent::cancel_in(db, id)?;
     let run = required(db.run_state(id)?, "Run not found")?;
     let waiting = crate::chats::continuation::cancel_for_run(db, id)?;
     if !run.status.is_active() {
-        if waiting {
+        if waiting || crate::environment_expiration::pending(db, id)? {
             return db.audit("run.wakeup.cancelled", &json!({ "id": id }));
         }
         return Err(Error::conflict("This run has already finished."));
@@ -311,7 +307,6 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
     // its in-memory slot; cancellation must settle this wait even in that gap.
     // Executing or recovering runs are settled by their worker once stopped.
     if (!is_active || run.status == RunStatus::Waiting) && !run.recovery_pending {
-        crate::nodes::moves::release_terminal_destination_in(db, id)?;
         let patch = crate::runs::RunChanges {
             status: Some(RunStatus::Cancelled),
             finished_at: Some(Some(now())),
@@ -359,11 +354,6 @@ fn requeue(
     if turn_mismatch {
         return Err(Error::conflict(
             "This turn changed before it could be resumed. Refresh the conversation.",
-        ));
-    }
-    if run["backendMigration"].is_object() {
-        return Err(Error::conflict(
-            "Wait for the backend migration to finish before resuming.",
         ));
     }
     crate::conversation_lifecycle::require_active_run(db, id)?;

@@ -708,8 +708,13 @@ fn snapshot(db: &Connection) -> Value {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
+        // Version 32 adds an environment-detachment marker; its default and
+        // uniqueness are checked by the acknowledgement migration regression.
         let fields = columns
             .iter()
+            .filter(|column| {
+                table != "direct_journal_acknowledgements" || column.as_str() != "detached"
+            })
             .map(|c| format!("quote({c})"))
             .collect::<Vec<_>>()
             .join(",");

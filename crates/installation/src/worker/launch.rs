@@ -71,12 +71,23 @@ async fn execute_inner(
     sensitive: &History,
 ) -> Result<()> {
     let id = text(run, "id").to_owned();
+    if !run["environmentExpiredAt"].is_null() {
+        if !s.config.runner_url.is_empty() {
+            crate::conversation_deletion::ensure_local_retirement_protocol(s)
+                .await
+                .map_err(|error| {
+                    Error::unavailable(format!("{} {}", placement::NO_CAPACITY, error.message))
+                })?;
+        }
+        crate::conversation_deletion::retired::mark_manager_namespace(s, &id).await?;
+    }
     let mut timing = Operation::new("agent_prepare", &id, "mark_running");
     let mut execution = Execution {
         s,
         provider: Provider::of_run(run)?,
         directory: s.config.data_dir.join("runs").join(&id),
         id,
+        admission_revision: run["environmentAdmissionRevision"].clone(),
         run,
         account: &mut admission.account,
         preparation: admission.preparation.take(),
@@ -89,25 +100,34 @@ async fn execute_inner(
         #[cfg(test)]
         output_probe: None,
     };
-    execution.mark_running().await?;
-    timing.next("access");
-    execution.refresh_access().await?;
-    execution.resolve_backend().await?;
-    timing.next("workspace");
-    let mut workspace = execution.prepare(existing).await?;
-    timing.next("session_lookup");
-    let mut resume = execution.resume_session(&workspace).await?;
-    timing.finish();
-    let mut log_total = 0;
-    loop {
-        match execution
-            .attempt(&mut workspace, resume.as_deref(), &mut log_total)
-            .await?
-        {
-            Attempt::Finished => return Ok(()),
-            Attempt::Resume(session) => resume = Some(session),
+    let result = async {
+        execution.mark_running().await?;
+        timing.next("access");
+        execution.refresh_access().await?;
+        execution.resolve_backend().await?;
+        timing.next("workspace");
+        let mut workspace = execution.prepare(existing).await?;
+        timing.next("session_lookup");
+        let mut resume = execution.resume_session(&workspace).await?;
+        timing.finish();
+        let mut log_total = 0;
+        loop {
+            match execution
+                .attempt(&mut workspace, resume.as_deref(), &mut log_total)
+                .await?
+            {
+                Attempt::Finished => return Ok(()),
+                Attempt::Resume(session) => resume = Some(session),
+            }
         }
     }
+    .await;
+    if let Some((runner, _)) = execution.reservation.take() {
+        // No controller received this attempt: ownership did not reach its
+        // durable checkpoint, so preparation must release the reservation.
+        placement::release(s, &runner).await?;
+    }
+    result
 }
 
 /// A controller may have accepted a first attempt before its engine created a
@@ -137,6 +157,7 @@ struct Execution<'a> {
     s: &'a Arc<Service>,
     id: String,
     run: &'a mut Value,
+    admission_revision: Value,
     account: &'a mut Option<Lease>,
     preparation: Option<tokio::sync::OwnedMutexGuard<()>>,
     cancel: &'a CancellationToken,
@@ -228,34 +249,84 @@ impl Execution<'_> {
     /// the concrete backend shares the atomic admission transaction, so retries
     /// cannot turn an already-created environment into another execution kind.
     async fn resolve_backend(&mut self) -> Result<()> {
-        if policy(&self.run["snapshot"]["agent"])["backend"] != "auto" {
+        let automatic = policy(&self.run["snapshot"]["agent"])["backend"] == "auto";
+        let fresh_environment = self.run["environmentState"] == "expired";
+        if !automatic && !fresh_environment {
             return Ok(());
         }
         let runner = crate::config::id();
-        let placement = placement::reserve(self.s, self.run, &runner).await?;
+        let mut admission = self.run.clone();
+        admission["environmentAdmissionRevision"] = self.admission_revision.clone();
+        let placement = placement::reserve(self.s, &admission, &runner).await?;
+        self.reservation = Some((runner.clone(), placement.clone()));
         *self.run = self.s.store.run(&self.id).await?;
         if !execution::uses_vm(self.run, &self.s.config) {
             // Development's shared process has no controller or retained node disk.
             // Keep the selected backend, but never give recovery a node to contact.
             placement::release(self.s, &runner).await?;
+            self.reservation = None;
+            if fresh_environment {
+                let revision = self.admission_revision.clone();
+                let id = self.id.clone();
+                let generation = crate::config::id();
+                self.checkpoint
+                    .update_and_publish(
+                        |checkpoint| {
+                            checkpoint.prepared = None;
+                            checkpoint.node_id = None;
+                            checkpoint.runner_id = None;
+                            checkpoint.runtime_id = None;
+                            checkpoint.workspace_initialized = None;
+                            checkpoint.generation = Some(generation);
+                        },
+                        move |db| {
+                            let current = db
+                                .run(&id)?
+                                .ok_or_else(|| Error::not_found("Run not found"))?;
+                            crate::environment_expiration::require_admission_revision(
+                                &current, &revision,
+                            )
+                        },
+                    )
+                    .await?;
+            }
             return Ok(());
         }
         let saved_runner = runner.clone();
         let state = self.s.store.run_state(&self.id).await?;
         let node = placement["nodeId"].as_str().map(str::to_owned);
         let runtime = placement["runtimeId"].clone();
+        let id = self.id.clone();
+        let revision = self.admission_revision.clone();
+        let generation = crate::config::id();
         self.checkpoint
-            .update(|checkpoint| {
-                checkpoint.bind_paid_admission(&saved_runner, &state);
-                checkpoint.turn_pending = None;
-                checkpoint.recovery_deadline_ms = None;
-                checkpoint.terminal_code = None;
-                checkpoint.provider_failed = None;
-                checkpoint.node_id = Some(node);
-                checkpoint.runtime_id = Some(Some(runtime));
-            })
+            .update_and_publish(
+                |checkpoint| {
+                    if fresh_environment {
+                        checkpoint.prepared = None;
+                        checkpoint.workspace_initialized = None;
+                        checkpoint.generation = Some(generation);
+                    }
+                    checkpoint.bind_paid_admission(&saved_runner, &state);
+                    checkpoint.turn_pending = None;
+                    checkpoint.recovery_deadline_ms = None;
+                    checkpoint.terminal_code = None;
+                    checkpoint.provider_failed = None;
+                    checkpoint.node_id = Some(node);
+                    checkpoint.runtime_id = Some(Some(runtime));
+                },
+                move |db| {
+                    let current = db
+                        .run(&id)?
+                        .ok_or_else(|| Error::not_found("Run not found"))?;
+                    crate::environment_expiration::require_admission_revision(&current, &revision)?;
+                    if !current["cancelRequestedAt"].is_null() {
+                        return Err(Error::conflict("Execution stopped before preparation."));
+                    }
+                    Ok(())
+                },
+            )
             .await?;
-        self.reservation = Some((runner, placement));
         Ok(())
     }
 
@@ -328,6 +399,15 @@ impl Execution<'_> {
     /// including whether execution needs a VM.
     async fn refresh_access(&mut self) -> Result<()> {
         let s = self.s;
+        let (id, revision) = (self.id.clone(), self.admission_revision.clone());
+        s.store
+            .read(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                crate::environment_expiration::require_admission_revision(&current, &revision)
+            })
+            .await?;
         let current = s
             .agent_snapshot(text(&self.run["snapshot"]["agent"], "id"))
             .await?;
@@ -341,14 +421,23 @@ impl Execution<'_> {
         let current_policy = policy(&current);
         self.run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
         let snapshot = serde_json::from_value(self.run["snapshot"].clone())?;
+        let revision = self.admission_revision.clone();
+        let id = self.id.clone();
         s.store
-            .change_run(
-                &self.id,
-                crate::runs::RunChanges {
-                    snapshot: Some(snapshot),
-                    ..Default::default()
-                },
-            )
+            .transaction(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                crate::environment_expiration::require_admission_revision(&current, &revision)?;
+                db.change_run(
+                    &id,
+                    crate::runs::RunChanges {
+                        snapshot: Some(snapshot),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
             .await?;
         Ok(())
     }
@@ -375,7 +464,18 @@ impl Execution<'_> {
             ),
             ..Default::default()
         };
-        s.store.change_run(&self.id, patch).await?;
+        let revision = self.admission_revision.clone();
+        let id = self.id.clone();
+        s.store
+            .transaction(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                crate::environment_expiration::require_admission_revision(&current, &revision)?;
+                db.change_run(&id, patch)?;
+                Ok(())
+            })
+            .await?;
         *self.run = s.store.run(&self.id).await?;
         timing.next("environment");
         let mut env = self
@@ -401,6 +501,36 @@ impl Execution<'_> {
         crate::delegation::authorize_async(s, self.run).await?;
         credentials.authorize(s).await?;
         authorization.recheck().await?;
+        if !execution::uses_vm(self.run, &s.config) && self.run["environmentState"] == "expired" {
+            let id = self.id.clone();
+            let revision = self.admission_revision.clone();
+            self.checkpoint
+                .update_and_publish(
+                    |_| {},
+                    move |db| {
+                        let current = db
+                            .run(&id)?
+                            .ok_or_else(|| Error::not_found("Run not found"))?;
+                        crate::environment_expiration::require_admission_revision(
+                            &current, &revision,
+                        )?;
+                        if !current["cancelRequestedAt"].is_null() {
+                            return Err(Error::conflict("Execution stopped before admission."));
+                        }
+                        db.update_run_placement(
+                            &id,
+                            nodes::run_placement::PlacementChanges {
+                                node_id: Some(None),
+                                target_node_id: Some(None),
+                                ..Default::default()
+                            },
+                        )?;
+                        db.update_run_boundary(&id, &json!({ "environmentState":null }))
+                    },
+                )
+                .await?;
+            *self.run = s.store.run(&self.id).await?;
+        }
         timing.finish();
         Ok(Workspace {
             prepared,
@@ -423,7 +553,7 @@ impl Execution<'_> {
         let s = self.s;
         if existing && self.checkpoint.read(|c| c.prepared().is_none()).await {
             // A fresh generation keeps a half-prepared workspace from being reused.
-            let generation = crate::config::id()[..8].to_owned();
+            let generation = crate::config::id();
             self.checkpoint
                 .update(|c| c.generation = Some(generation))
                 .await?;
@@ -467,10 +597,18 @@ impl Execution<'_> {
         };
         let saved_prepared = prepared.clone();
         let publication = authorization.clone();
+        let id = self.id.clone();
+        let revision = self.admission_revision.clone();
         self.checkpoint
             .update_and_publish(
                 |c| c.prepared = Some(Some(saved_prepared)),
-                move |db| publication.authorize_in(db),
+                move |db| {
+                    let current = db
+                        .run(&id)?
+                        .ok_or_else(|| Error::not_found("Run not found"))?;
+                    crate::environment_expiration::require_admission_revision(&current, &revision)?;
+                    publication.authorize_in(db)
+                },
             )
             .await?;
         authorization.recheck().await?;
@@ -569,8 +707,13 @@ impl Execution<'_> {
             ..Default::default()
         };
         let id = self.id.clone();
+        let revision = self.admission_revision.clone();
         s.store
             .transaction(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                crate::environment_expiration::require_admission_revision(&current, &revision)?;
                 db.change_run(&id, patch)?;
                 db.event(
                     &id,
@@ -911,18 +1054,33 @@ impl Execution<'_> {
             Some(reservation) => reservation,
             None => {
                 let runner = crate::config::id();
-                let placement =
-                    placement::reserve(s, &s.store.run(&self.id).await?, &runner).await?;
+                let mut admission = s.store.run(&self.id).await?;
+                admission["environmentAdmissionRevision"] = self.admission_revision.clone();
+                let placement = placement::reserve(s, &admission, &runner).await?;
                 (runner, placement)
             }
         };
+        self.reservation = Some((runner.clone(), placement.clone()));
         timing.next("materialize");
+        if !self.run["environmentExpiredAt"].is_null() {
+            crate::conversation_deletion::require_retirement_protocol(
+                s,
+                text(&placement, "nodeId"),
+            )
+            .await
+            .map_err(|error| {
+                Error::unavailable(format!("{} {}", placement::NO_CAPACITY, error.message))
+            })?;
+        }
         workspace.authorization.recheck().await?;
         placement::materialize(s, &runner).await?;
         let node_id = placement["nodeId"].as_str().map(str::to_owned);
         let runtime_id = placement["runtimeId"].clone();
         let state = s.store.run_state(&self.id).await?;
         let publication = workspace.authorization.clone();
+        let admitted_run = self.id.clone();
+        let admitted_attempt = runner.clone();
+        let admitted_revision = self.admission_revision.clone();
         self.checkpoint
             .update_and_publish(
                 |c| {
@@ -934,9 +1092,19 @@ impl Execution<'_> {
                     c.node_id = Some(node_id);
                     c.runtime_id = Some(Some(runtime_id));
                 },
-                move |db| publication.authorize_in(db),
+                move |db| {
+                    publication.authorize_in(db)?;
+                    placement::publish_admission(
+                        db,
+                        &admitted_run,
+                        &admitted_attempt,
+                        &admitted_revision,
+                    )
+                },
             )
             .await?;
+        // The persisted checkpoint now owns fencing/release on subsequent errors.
+        self.reservation = None;
         drop(self.preparation.take());
         s.worker.notify();
         timing.next("plan");
@@ -957,6 +1125,7 @@ impl Execution<'_> {
         timing.next("placement_commit");
         let publication = workspace.authorization.clone();
         let run_id = self.id.clone();
+        let revision = self.admission_revision.clone();
         let changes = crate::nodes::run_placement::PlacementChanges {
             node_id: Some(serde_json::from_value(placement["nodeId"].clone())?),
             resources: Some(serde_json::from_value(placement["resources"].clone())?),
@@ -966,6 +1135,10 @@ impl Execution<'_> {
         };
         s.store
             .transaction(move |db| {
+                let current = db
+                    .run(&run_id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                crate::environment_expiration::require_admission_revision(&current, &revision)?;
                 publication.authorize_in(db)?;
                 db.update_run_placement(&run_id, changes)
             })
@@ -1636,6 +1809,207 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expiration_retires_materialized_admission_rejected_before_checkpoint_publication() {
+        use crate::{agent_fixture::StoreAgentFixture, node_fixture::StoreNodeFixture};
+        use axum::{Json, Router, http::StatusCode, response::IntoResponse};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let (original, mut run) = preparation_fixture(root.path()).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let deleted = Arc::new(AtomicUsize::new(0));
+        let calls = deleted.clone();
+        let router = Router::new().fallback(move |request: axum::extract::Request| {
+            let calls = calls.clone();
+            async move {
+                if request.uri().path() == "/health" {
+                    return Json(json!({ "diskRetirementProtocol":2 })).into_response();
+                }
+                if request.method() == axum::http::Method::DELETE {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                }
+                StatusCode::NOT_FOUND.into_response()
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut cloned = (*original).clone();
+        cloned.config.public_url = format!("http://{address}");
+        cloned.config.runner_url = format!("http://{address}");
+        let service = Arc::new(cloned);
+        let (node, replacement, attempt) = (
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+        );
+        for id in [&node, &replacement] {
+            service
+                .store
+                .put_node_fixture(json!({
+                    "id": id, "status": "online", "accepting": true, "executionReady": true,
+                    "runtimeId": nodes::component_runtime(), "lastSeen": now(), "slots": 2,
+                }))
+                .await
+                .unwrap();
+        }
+        let mut agent = service
+            .agent_snapshot(crate::config::MAIN_AGENT_ID)
+            .await
+            .unwrap();
+        agent["access"]["nodes"] = json!([node, replacement]);
+        service.store.put_agent_fixture(agent).await.unwrap();
+        let mut snapshot = run["snapshot"].clone();
+        snapshot["agent"]["access"]["nodes"] = json!([node, replacement]);
+        let id = text(&run, "id").to_owned();
+        service
+            .store
+            .change_run(
+                &id,
+                crate::runs::RunChanges {
+                    snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .store
+            .update_run_placement(
+                &id,
+                nodes::run_placement::PlacementChanges {
+                    pinned_node_id: Some(Some(node.clone())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        run = service.store.run(&id).await.unwrap();
+        assert_ne!(run["snapshot"]["agent"]["access"]["backend"], "auto");
+        let saved = RunCheckpoint::from_value(json!({ "prepared": { "backend": "firecracker", "isolated": true }, "completed": false, "remainingMs": 60000 })).unwrap();
+        saved.store(&service.store, &id).await.unwrap();
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+        let authority = Authority::for_run(&service, &run).await.unwrap();
+        let publication = crate::plugins::run_credentials::Authorization::new(
+            &service,
+            authority,
+            &RunCredentials::default(),
+        );
+        placement::reserve(&service, &run, &attempt).await.unwrap();
+        placement::materialize(&service, &attempt).await.unwrap();
+        service
+            .worker
+            .active
+            .lock()
+            .await
+            .insert(id.clone(), CancellationToken::new());
+        service
+            .expire_environment(
+                &id,
+                crate::environment_expiration::Expiration::new(
+                    cairn_contracts::EnvironmentExpirationCause::NodeChange,
+                ),
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        let state = service.store.run_state(&id).await.unwrap();
+        let result = checkpoint
+            .update_and_publish(
+                |saved| {
+                    saved.bind_paid_admission(&attempt, &state);
+                    saved.node_id = Some(Some(node.clone()));
+                },
+                move |db| publication.authorize_in(db),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(checkpoint.snapshot().await.runner_id().is_none());
+        service.worker.active.lock().await.remove(&id);
+        service.detach_stopped_environments().await.unwrap();
+        let queued = service.store.list("environment-retirements").await.unwrap();
+        assert!(
+            queued[0]["attempts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|owned| owned["id"] == attempt)
+        );
+        let mut revoked = service.node_boundary(&node).await.unwrap();
+        revoked["revoked"] = true.into();
+        service.store.put_node_fixture(revoked).await.unwrap();
+        service.retire_environments().await.unwrap();
+        assert_eq!(
+            deleted.load(Ordering::SeqCst),
+            1,
+            "the orphan admission was fenced"
+        );
+        assert!(
+            service
+                .store
+                .attempt(&attempt)
+                .await
+                .unwrap()
+                .unwrap()
+                .released
+        );
+        let next = service.store.run(&id).await.unwrap();
+        let admitted = crate::config::id();
+        assert_eq!(
+            placement::reserve(&service, &next, &admitted)
+                .await
+                .unwrap()["nodeId"],
+            replacement
+        );
+        placement::release(&service, &admitted).await.unwrap();
+        server.abort();
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_stale_preparation_cannot_overwrite_a_new_backend_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let id = text(&run, "id").to_owned();
+        run["environmentAdmissionRevision"] = "old-selection".into();
+        let mut snapshot = run["snapshot"].clone();
+        snapshot["agent"]["access"]["backend"] = "native".into();
+        service.store.change_run(&id, crate::runs::RunChanges {
+            snapshot: Some(serde_json::from_value(snapshot.clone()).unwrap()),
+            boundary: Some(json!({ "environmentState": "expired", "environmentAdmissionRevision": "new-selection" })),
+            ..Default::default()
+        }).await.unwrap();
+        let checkpoint = Checkpoint::new(
+            service.store.clone(),
+            id.clone(),
+            RunCheckpoint::fresh(Some(60_000)),
+        );
+        let cancel = CancellationToken::new();
+        let mut account = None;
+        let sensitive = History::default();
+        let mut execution = Execution {
+            s: &service,
+            id: id.clone(),
+            admission_revision: "old-selection".into(),
+            run: &mut run,
+            account: &mut account,
+            preparation: None,
+            cancel: &cancel,
+            checkpoint: &checkpoint,
+            sensitive: &sensitive,
+            observation: None,
+            provider: Provider::Codex,
+            directory: root.path().into(),
+            attempt_id: String::new(),
+            reservation: None,
+            output_probe: None,
+        };
+        let error = execution.refresh_access().await.unwrap_err();
+        assert!(placement::is_no_capacity(&error), "{error:?}");
+        assert_eq!(service.store.run(&id).await.unwrap()["snapshot"], snapshot);
+        assert!(service.store.attempts().await.unwrap().is_empty());
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn initial_preparation_rechecks_revocation_between_remote_lookup_and_clone() {
         use axum::{Router, routing::get};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1783,6 +2157,7 @@ mod tests {
         let mut execution = Execution {
             s: &service,
             id,
+            admission_revision: run["environmentAdmissionRevision"].clone(),
             run: &mut run,
             account: &mut account,
             preparation: None,
@@ -1877,6 +2252,7 @@ mod tests {
                 let execution = Execution {
                     s: &service,
                     id: id.clone(),
+                    admission_revision: run["environmentAdmissionRevision"].clone(),
                     run: &mut run,
                     account: &mut account,
                     preparation: None,

@@ -6,16 +6,15 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class MoveToNodeInput(
+    val discardWorkingFiles: Boolean = false,
     val nodeId: String,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val requiredTags: List<String>? = null,
     val runId: String,
-    val waitSeconds: Int = 0,
 ) {
     init {
         java.util.UUID.fromString(nodeId)
         requiredTags?.let { require(it.size <= 32) }
         java.util.UUID.fromString(runId)
-        require(waitSeconds in 0..3600)
     }
 }

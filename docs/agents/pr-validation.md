@@ -110,11 +110,11 @@ The threshold follows an observed 22.49 GiB completed-run allocation plus
 headroom, not a measured peak bound. An insufficient runner fails before
 compilation with its capacity recorded, instead of losing logs to ENOSPC.
 
-For a focused physical backend-migration check, dispatch `ci.yaml` with
+For a focused confirmed backend-change check, dispatch `ci.yaml` with
 `backend-only=true` and `backend-qualification=backend-migration`. The optional
 case runs in a separate 30-minute disposable job after the normal backend job
-succeeds. The new job checks out the same commit and uses the regular isolated
-loopback-S3 launcher to build and run exactly the selected case; it shares no
+succeeds. The new job checks out the same commit and uses the isolated backend launcher
+to run the VM/native confirmation and expiration regression; it shares no
 compiled artifacts with the backend job. The default is `none`; this selected
 case does not replace native-runtime or other affected specialist
 qualifications.

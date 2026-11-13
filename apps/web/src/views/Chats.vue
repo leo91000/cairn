@@ -1793,7 +1793,7 @@ function key(event: KeyboardEvent) {
               title="Working environment expired"
             >
               <p>
-                {{ detail.environmentState === 'cleaning' ? 'Removing the working environment after inactivity. Please wait before sending another message.' : 'The working environment was removed after inactivity. Your next message starts a fresh environment using the conversation history.' }}
+                {{ detail.environmentState === 'cleaning' ? 'Removing the previous working environment. Please wait before sending another message.' : 'The working environment expired. Your next message starts a fresh environment using the conversation history.' }}
                 History, uploaded attachments, published files and shared links are retained. Unpushed changes and other working files are no longer available.
               </p>
               <p v-if="detail.environmentError">
