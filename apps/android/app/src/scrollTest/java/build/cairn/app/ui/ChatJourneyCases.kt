@@ -40,7 +40,7 @@ abstract class ChatJourneyCases {
     }
 
     @Test
-    fun `native chat sends a message answers questions edits queue and opens a versioned artifact`() {
+    fun chatMessagesQuestionsArtifactsAndConversationSharing() {
         MockWebServer().use { server ->
             val chatId = "00000000-0000-4000-8000-000000000088"
             val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
