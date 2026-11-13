@@ -39,6 +39,9 @@ is drained after volume release, including overlapping seals and retries; status
 observation never interrupts that work. Stopping a retained VM
 releases RAM while preserving its disk, irrespective of this counter. Disk deletion
 after expiration or explicit conversation deletion likewise needs no publication.
+Once the VMM and its block backend have stopped, any acknowledged shutdown writes
+receive a final seal and background consolidation without advancing the completed
+turn's boundary. Anonymous prepared disks stay journal-backed.
 
 ## Capacity and integrity
 

@@ -107,11 +107,23 @@ export async function storageSmoke({
     const exit = await (await api(`/runs/${id}/wait`, 'POST')).json()
     assert.equal(exit.StatusCode, 0, await logs(id))
     await until(async () => (await (await api('/health')).json()).activeRuns === 0)
-    await until(async () => {
-      const sample = await status()
-      return sample.dirtyBytes === 0 && sample.published?.local === true
-        && sample.completedGeneration > 0 && sample.published.generation >= sample.completedGeneration
-    })
+    let sample
+    try {
+      await until(async () => {
+        sample = await status()
+        return sample.dirtyBytes === 0 && sample.published?.local === true
+          && sample.completedGeneration > 0 && sample.published.generation >= sample.completedGeneration
+      })
+    }
+    catch (error) {
+      console.error({
+        runId,
+        attempt: id,
+        storage: sample,
+        guest: await logs(id),
+      })
+      throw error
+    }
   }
 
   const first = await start(true)

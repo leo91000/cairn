@@ -749,6 +749,21 @@ impl Volume {
         Ok(generation)
     }
 
+    /// The VMM and block backend have stopped. Fold their final acknowledged
+    /// metadata writes without moving the last completed-turn boundary.
+    pub(crate) async fn seal_stopped(self: &Arc<Self>) -> Result<()> {
+        if !self.consolidates() {
+            return Ok(());
+        }
+        if self.disk.journal_bytes() > 0 {
+            self.seal().await?;
+        }
+        if self.disk.sealed_pending() {
+            tokio::spawn(consolidate(self.disk.clone()));
+        }
+        Ok(())
+    }
+
     /// Prepared disks stay entirely journal-backed until a conversation claims them.
     fn consolidates(&self) -> bool {
         self.source
@@ -2167,6 +2182,73 @@ mod tests {
                 .unwrap();
         }));
         (wait, release)
+    }
+
+    #[tokio::test]
+    async fn stopped_vm_consolidates_shutdown_writes_after_its_completed_seal() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        let disk = volume.disk.clone();
+        volume.write_at(0, b"completed").unwrap();
+        let completed = volume.seal_completed().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while disk.accounting().unwrap()["dirtyBytes"] != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Guest shutdown can write superblock/journal metadata after the
+        // completed response was sealed, even though no user turn remains.
+        volume.write_at(16, b"shutdown").unwrap();
+        volume.stop.cancel();
+        volume.seal_stopped().await.unwrap();
+        drop(volume);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while disk.accounting().unwrap()["dirtyBytes"] != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("stopped VM journal tail was never consolidated");
+        assert_eq!(disk.completed().unwrap().unwrap()["generation"], completed);
+        assert!(
+            disk.accounting().unwrap()["published"]["generation"]
+                .as_i64()
+                .unwrap()
+                > completed
+        );
+        let mut bytes = [0; 8];
+        disk.read_at(16, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"shutdown");
+    }
+
+    #[tokio::test]
+    async fn stopped_prepared_volume_remains_journal_backed() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("environments").join(crate::config::id());
+        drop(
+            create_prepared(
+                &directory.join("lazy"),
+                &json!({
+                    "version": 1, "size": 4096, "blockSize": 4194304,
+                    "blocks": [{ "offset": 0, "size": 4096, "hash": null }]
+                }),
+                &json!({
+                    "unassigned": true,
+                    "policy": { "reserveMiB": 64, "reservePercent": 1 }
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        let volume = load(&directory).await.unwrap();
+        volume.write_at(0, b"seed").unwrap();
+        volume.stop.cancel();
+        volume.seal_stopped().await.unwrap();
+        assert!(!volume.disk.sealed_pending());
+        assert!(!volume.disk.has_base_blocks().unwrap());
+        assert!(volume.disk.completed().unwrap().is_none());
     }
 
     #[tokio::test]
