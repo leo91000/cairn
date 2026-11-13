@@ -615,6 +615,12 @@ pub async fn check(s: &Service, run: &Value) -> Result<()> {
     let configured = !s.config.runner_url.is_empty();
     s.store
         .transaction(move |db| {
+            if let Some(current) = db.run(text(&run, "id"))? {
+                crate::environment_expiration::require_admission_revision(
+                    &current,
+                    &run["environmentAdmissionRevision"],
+                )?;
+            }
             let automatic = without_stale_target(db, &run)?;
             let run = automatic.as_ref().unwrap_or(&run);
             let snapshot = Snapshot::load(db, run, configured)?;

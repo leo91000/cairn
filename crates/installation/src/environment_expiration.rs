@@ -86,6 +86,13 @@ struct Pending {
     cancelled: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetiredAttempt {
+    id: String,
+    node_id: String,
+}
+
 /// What the retired environment still occupies, captured when it was detached.
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,6 +105,9 @@ struct Retirement {
     nodes: Vec<String>,
     attempt: Option<String>,
     attempt_node: Option<String>,
+    /// Includes admission that materialized before checkpoint publication failed.
+    #[serde(default)]
+    attempts: Vec<RetiredAttempt>,
     process: Option<ProcessIdentity>,
     isolated: bool,
     account_id: Option<String>,
@@ -138,7 +148,9 @@ pub(crate) fn runs_on_node(db: &Db<'_>, node: &str) -> Result<Vec<String>> {
     let mut runs =
         db.0.prepare_cached(
             "SELECT runs.id FROM runs LEFT JOIN run_checkpoints ON run_checkpoints.run_id=runs.id
-             WHERE (runs.placement_node_id=?1 OR json_extract(run_checkpoints.state,'$.nodeId')=?1)
+             WHERE (runs.placement_node_id=?1 OR json_extract(run_checkpoints.state,'$.nodeId')=?1
+                OR EXISTS(SELECT 1 FROM placements p JOIN attempts a ON a.id=p.id
+                    WHERE p.run_id=runs.id AND p.node_id=?1 AND p.role='execution' AND a.released=0))
                AND json_type(runs.boundary,'$.environmentState') IS NOT 'text'",
         )?
         .query_map([node], |row| row.get::<_, String>(0))?
@@ -413,6 +425,24 @@ fn detach_environment_in(
             nodes.push(node);
         }
     }
+    let attempts = db
+        .attempts()?
+        .into_iter()
+        .filter(|attempt| {
+            attempt.run_id == run_id
+                && !attempt.released
+                && attempt.role == crate::nodes::placement::AttemptRole::Execution
+        })
+        .map(|attempt| RetiredAttempt {
+            id: attempt.id,
+            node_id: attempt.node_id,
+        })
+        .collect::<Vec<_>>();
+    for attempt in &attempts {
+        if !nodes.contains(&attempt.node_id) {
+            nodes.push(attempt.node_id.clone());
+        }
+    }
     let retirement = Retirement {
         id: id(),
         run_id: run_id.to_owned(),
@@ -421,6 +451,7 @@ fn detach_environment_in(
         nodes,
         attempt: checkpoint.runner_id().map(str::to_owned),
         attempt_node: checkpoint.node_id.clone().flatten(),
+        attempts,
         process: checkpoint.process().cloned(),
         isolated: run["isolated"] == true || checkpoint.isolated(),
         account_id: run["accountId"].as_str().map(str::to_owned),
@@ -714,6 +745,19 @@ impl Service {
                 retirement.isolated,
             )
             .await?;
+            for attempt in &retirement.attempts {
+                if retirement.attempt.as_deref() == Some(attempt.id.as_str()) {
+                    continue;
+                }
+                crate::recovery::fence_retired(
+                    self,
+                    Some(&attempt.id),
+                    Some(&attempt.node_id),
+                    None,
+                    true,
+                )
+                .await?;
+            }
             retirement.fenced = true;
         }
         if !retirement.local {

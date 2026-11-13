@@ -347,6 +347,15 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
             format!("{used_side_questions}\u{10ffff}")
         ],
     )?;
+    // Physical purge already fenced execution and deleted/forgot every disk.
+    // Retire admission that never reached checkpoint publication as well.
+    for attempt in db
+        .attempts()?
+        .into_iter()
+        .filter(|attempt| attempt.run_id == run && !attempt.released)
+    {
+        crate::nodes::placement::release_in(db, &attempt.id)?;
+    }
     db.delete_checkpoint(run)?;
     crate::environment_expiration::forget_in(db, run)?;
     for key in [format!("turn-speed:{run}"), format!("chat-error:{cid}")]
@@ -388,6 +397,22 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn completed_purge_releases_admission_missing_from_the_checkpoint() {
+        use crate::{attempt_fixture::DbAttemptFixture, run_fixture::DbRunFixture};
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            db.add_run_fixture(&json!({ "id": "run", "taskId": "chat", "status": "succeeded", "createdAt": 0 }), None)?;
+            db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
+            db.put_attempt_fixture(&json!({ "id": "unpublished", "runId": "run", "diskMaterialized": true, "released": false }))?;
+            forget(db, "chat", "run")?;
+            assert!(db.run("run")?.is_none());
+            assert_eq!(db.attempt_fixture("unpublished")?.unwrap()["released"], true);
+            Ok(())
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn forgetting_retired_identities_does_not_decode_the_lifetime_ledger() {

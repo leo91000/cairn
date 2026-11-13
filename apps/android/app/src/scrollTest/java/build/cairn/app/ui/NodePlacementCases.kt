@@ -1579,22 +1579,30 @@ abstract class NodePlacementCases {
                     .isNotEmpty()
             }
             compose.onNodeWithText("Migrer cette conversation…").performScrollTo().performClick()
+            val inConfirmation = hasAnyAncestor(isDialog())
             compose
-                .onNodeWithText(
-                    if (expired) "La première admission attend la capacité"
-                    else "Les fichiers de travail de cette conversation seront perdus.",
-                    substring = true,
+                .onNode(
+                    hasText(
+                        if (expired) "La première admission attend la capacité"
+                        else "Les fichiers de travail de cette conversation seront perdus.",
+                        substring = true,
+                    ) and inConfirmation
                 )
                 .assertExists()
             if (expired) {
                 compose
-                    .onNodeWithText(
-                        "L’historique, les pièces jointes et les artefacts sont conservés",
-                        substring = true,
+                    .onNode(
+                        hasText(
+                            "L’historique, les pièces jointes et les artefacts sont conservés",
+                            substring = true,
+                        ) and inConfirmation
                     )
                     .assertExists()
                 compose
-                    .onNodeWithText("L’environnement d’origine est conservé", substring = true)
+                    .onNode(
+                        hasText("L’environnement d’origine est conservé", substring = true) and
+                            inConfirmation
+                    )
                     .assertDoesNotExist()
             }
             assertTrue(submitted.isEmpty())
@@ -1602,7 +1610,7 @@ abstract class NodePlacementCases {
             // The migration renders before connect() finishes refreshing the workspace, and
             // vm.perform ignores actions until then.
             compose.waitUntil(10000) { !vm.state.value.busy }
-            compose.onNodeWithText("Confirmer").performClick()
+            compose.onNode(hasText("Confirmer") and inConfirmation).performClick()
             compose.waitUntil(10000) { submitted.isNotEmpty() }
             assertEquals("native", submitted[0]["backend"]?.jsonPrimitive?.content)
             assertEquals(

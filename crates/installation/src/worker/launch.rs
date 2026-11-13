@@ -1691,6 +1691,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expiration_retires_materialized_admission_rejected_before_checkpoint_publication() {
+        use crate::{agent_fixture::StoreAgentFixture, node_fixture::StoreNodeFixture};
+        use axum::{Router, http::StatusCode};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let (original, mut run) = preparation_fixture(root.path()).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let deleted = Arc::new(AtomicUsize::new(0));
+        let calls = deleted.clone();
+        let router = Router::new().fallback(move |request: axum::extract::Request| {
+            let calls = calls.clone();
+            async move {
+                if request.method() == axum::http::Method::DELETE {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                }
+                StatusCode::NOT_FOUND
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut cloned = (*original).clone();
+        cloned.config.public_url = format!("http://{address}");
+        cloned.config.runner_url = format!("http://{address}");
+        let service = Arc::new(cloned);
+        let (node, replacement, attempt) = (
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+        );
+        for id in [&node, &replacement] {
+            service
+                .store
+                .put_node_fixture(json!({
+                    "id": id, "status": "online", "accepting": true, "executionReady": true,
+                    "runtimeId": nodes::component_runtime(), "lastSeen": now(), "slots": 2,
+                }))
+                .await
+                .unwrap();
+        }
+        let mut agent = service
+            .agent_snapshot(crate::config::MAIN_AGENT_ID)
+            .await
+            .unwrap();
+        agent["access"]["nodes"] = json!([node, replacement]);
+        service.store.put_agent_fixture(agent).await.unwrap();
+        let mut snapshot = run["snapshot"].clone();
+        snapshot["agent"]["access"]["nodes"] = json!([node, replacement]);
+        let id = text(&run, "id").to_owned();
+        service
+            .store
+            .change_run(
+                &id,
+                crate::runs::RunChanges {
+                    snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .store
+            .update_run_placement(
+                &id,
+                nodes::run_placement::PlacementChanges {
+                    pinned_node_id: Some(Some(node.clone())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        run = service.store.run(&id).await.unwrap();
+        assert_ne!(run["snapshot"]["agent"]["access"]["backend"], "auto");
+        let saved = RunCheckpoint::from_value(json!({ "prepared": { "backend": "firecracker", "isolated": true }, "completed": false, "remainingMs": 60000 })).unwrap();
+        saved.store(&service.store, &id).await.unwrap();
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+        let authority = Authority::for_run(&service, &run).await.unwrap();
+        let publication = crate::plugins::run_credentials::Authorization::new(
+            &service,
+            authority,
+            &RunCredentials::default(),
+        );
+        placement::reserve(&service, &run, &attempt).await.unwrap();
+        placement::materialize(&service, &attempt).await.unwrap();
+        service
+            .worker
+            .active
+            .lock()
+            .await
+            .insert(id.clone(), CancellationToken::new());
+        service
+            .expire_environment(
+                &id,
+                crate::environment_expiration::Expiration::new(
+                    cairn_contracts::EnvironmentExpirationCause::NodeChange,
+                ),
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        let state = service.store.run_state(&id).await.unwrap();
+        let result = checkpoint
+            .update_and_publish(
+                |saved| {
+                    saved.bind_paid_admission(&attempt, &state);
+                    saved.node_id = Some(Some(node.clone()));
+                },
+                move |db| publication.authorize_in(db),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(checkpoint.snapshot().await.runner_id().is_none());
+        service.worker.active.lock().await.remove(&id);
+        service.detach_stopped_environments().await.unwrap();
+        let queued = service.store.list("environment-retirements").await.unwrap();
+        assert!(
+            queued[0]["attempts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|owned| owned["id"] == attempt)
+        );
+        let mut revoked = service.node_boundary(&node).await.unwrap();
+        revoked["revoked"] = true.into();
+        service.store.put_node_fixture(revoked).await.unwrap();
+        service.retire_environments().await.unwrap();
+        assert_eq!(
+            deleted.load(Ordering::SeqCst),
+            1,
+            "the orphan admission was fenced"
+        );
+        assert!(
+            service
+                .store
+                .attempt(&attempt)
+                .await
+                .unwrap()
+                .unwrap()
+                .released
+        );
+        let next = service.store.run(&id).await.unwrap();
+        let admitted = crate::config::id();
+        assert_eq!(
+            placement::reserve(&service, &next, &admitted)
+                .await
+                .unwrap()["nodeId"],
+            replacement
+        );
+        placement::release(&service, &admitted).await.unwrap();
+        server.abort();
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn a_stale_preparation_cannot_overwrite_a_new_backend_selection() {
         let root = tempfile::tempdir().unwrap();
         let (service, mut run) = preparation_fixture(root.path()).await;

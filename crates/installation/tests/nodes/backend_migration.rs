@@ -1390,3 +1390,40 @@ async fn a_stop_accepted_before_expiration_is_preserved_for_moves_and_revocation
         assert_eq!(current["cancelRequestedAt"], stopped_at);
     }
 }
+
+#[tokio::test]
+async fn a_stale_capacity_check_cannot_erase_a_replacement_destination() {
+    let change = Change::new(RunStatus::Succeeded).await;
+    let replacement = id();
+    change
+        .owner
+        .put_node_fixture(schedulable_node(&replacement, &limits(4, 8192, 65536)))
+        .await;
+    change
+        .owner
+        .grant_nodes(
+            &change.agent,
+            json!([change.source, change.destination, replacement]),
+        )
+        .await;
+    let (status, moved) = change
+        .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    let stale = change.owner.run(&change.run).await;
+    change
+        .owner
+        .grant_nodes(&change.agent, json!([change.source, replacement]))
+        .await;
+    let (status, selected) = change.move_to(json!({ "nodeId": replacement })).await;
+    assert_eq!(status, StatusCode::OK, "{selected}");
+    assert!(
+        placement::check(&change.owner.service, &stale)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        change.owner.run(&change.run).await["targetNodeId"],
+        replacement
+    );
+}
