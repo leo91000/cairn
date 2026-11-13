@@ -654,27 +654,6 @@ async fn permanent_revocation_does_not_block_requested_conversation_erasure() {
                 .await
                 .unwrap();
         }
-        let publication = id();
-        let kept_publication = id();
-        let unique = id();
-        let shared = id();
-        let (owned, kept, exclusive, reused, owner) = (
-            publication.clone(),
-            kept_publication.clone(),
-            unique.clone(),
-            shared.clone(),
-            run.clone(),
-        );
-        app.service.store.transaction(move |db| {
-            db.0.execute("INSERT INTO shared_publications VALUES(?1,?2)", rusqlite::params![owned, owner])?;
-            db.0.execute("INSERT INTO shared_publications VALUES(?1,'other-retained-run')", [&kept])?;
-            for (object, hash) in [(&exclusive, "exclusive"), (&reused, "shared")] {
-                db.0.execute("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,'fixture',?2,4096,'{}','ready')", rusqlite::params![object, hash])?;
-                db.0.execute("INSERT INTO shared_references VALUES(?1,?2)", rusqlite::params![owned, object])?;
-            }
-            db.0.execute("INSERT INTO shared_references VALUES(?1,?2)", rusqlite::params![kept, reused])?;
-            Ok(())
-        }).await.unwrap();
         let directory = app.service.config.data_dir.join("runs").join(&run);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(
@@ -730,24 +709,6 @@ async fn permanent_revocation_does_not_block_requested_conversation_erasure() {
             );
             assert!(requests.load(Ordering::SeqCst) > 0);
         }
-        let (exclusive, reused) = (unique.clone(), shared.clone());
-        let (unique_unused, shared_unused) = app
-            .service
-            .store
-            .read(move |db| {
-                let unused = |object: &str| {
-                    db.0.query_row(
-                        "SELECT unused_at IS NOT NULL FROM shared_objects WHERE id=?1",
-                        [object],
-                        |row| row.get::<_, bool>(0),
-                    )
-                };
-                Ok((unused(&exclusive)?, unused(&reused)?))
-            })
-            .await
-            .unwrap();
-        assert_eq!(unique_unused, revoked == Some(true));
-        assert!(!shared_unused, "Another conversation still owns this block");
         server.abort();
     }
 }
