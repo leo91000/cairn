@@ -1463,3 +1463,156 @@ async fn stale_disk_cleanup_reuses_retirement_and_refuses_a_current_environment(
     assert_eq!(retained[0]["id"], retirement);
     assert_eq!(retained[0]["nodes"], json!([change.source]));
 }
+
+#[tokio::test]
+async fn failed_manager_erasure_allows_destination_admission_and_preserves_its_new_resources() {
+    use cairn_installation::{
+        accounts::{Account, Lease},
+        provider::Provider,
+    };
+    let change = Change::new(RunStatus::Succeeded).await;
+    let run_id = change.run.clone();
+    let invalid = change
+        .owner
+        .service
+        .config
+        .data_dir
+        .parent()
+        .unwrap()
+        .to_owned();
+    change
+        .owner
+        .service
+        .store
+        .transaction(move |db| {
+            db.update_run_boundary(
+                &run_id,
+                &json!({ "workspaces": [{ "kind":"worktree", "path":invalid }] }),
+            )
+        })
+        .await
+        .unwrap();
+    let manager = change
+        .owner
+        .service
+        .config
+        .data_dir
+        .join("runs")
+        .join(&change.run);
+    tokio::fs::create_dir_all(&manager).await.unwrap();
+    tokio::fs::write(manager.join("old.txt"), b"old environment")
+        .await
+        .unwrap();
+    let (status, moved) = change
+        .move_to(json!({ "nodeId":change.destination, "discardWorkingFiles":true }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    change
+        .owner
+        .service
+        .store
+        .update_run_boundary(
+            &change.run,
+            json!({ "backup":{ "id":id() }, "storage":{ "dirtyBytes":4096 } }),
+        )
+        .await
+        .unwrap();
+    change.owner.service.retire_environments().await.unwrap();
+    let failed = change.retirements().await;
+    assert_eq!(failed[0]["local"], true);
+    assert_eq!(failed[0]["cleaned"], false);
+    assert!(failed[0]["error"].is_string());
+    assert!(!change.admission_blocked().await);
+    assert!(change.owner.run(&change.run).await["backup"].is_null());
+    assert!(change.owner.run(&change.run).await["storage"].is_null());
+    let run = change.owner.run(&change.run).await;
+    let reservation = id();
+    let admitted = placement::reserve(&change.owner.service, &run, &reservation)
+        .await
+        .unwrap();
+    assert_eq!(admitted["nodeId"], change.destination);
+    tokio::fs::create_dir_all(&manager).await.unwrap();
+    tokio::fs::write(manager.join("new.txt"), b"new environment")
+        .await
+        .unwrap();
+    let account = Account::new(
+        Provider::Codex,
+        "Replacement environment",
+        cairn_contracts::AccountState::Ready,
+    );
+    let lease = Lease {
+        account_id: account.id.clone(),
+        provider: Provider::Codex,
+        run_id: change.run.clone(),
+        home: manager.join("codex"),
+        model: "fixture".into(),
+    };
+    let point =
+        json!({ "id":id(), "runId":change.run, "destination":"s3", "bucket":"new-environment" });
+    let grant = json!({ "id":id(), "runId":change.run, "nodeId":change.destination });
+    let (new_point, new_grant) = (
+        point["id"].as_str().unwrap().to_owned(),
+        grant["id"].as_str().unwrap().to_owned(),
+    );
+    let retired = failed[0]["id"].as_str().unwrap().to_owned();
+    let source = change.source.clone();
+    change
+        .owner
+        .service
+        .store
+        .transaction(move |db| {
+            db.save_coding_account(&account)?;
+            db.reserve_account_lease(&lease)?;
+            db.put("node-backups", &point)?;
+            db.put("node-disk-grants", &grant)?;
+            let mut record = db.get("environment-retirements", &retired)?.unwrap();
+            record["workspaces"] = json!([]);
+            record["retryAfter"] = Value::Null;
+            db.put("environment-retirements", &record)?;
+            let mut node = db.node_boundary(&source)?.unwrap();
+            node["revoked"] = true.into();
+            db.put_node_fixture(&node)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    change.owner.service.retire_environments().await.unwrap();
+    assert!(change.retirements().await.is_empty());
+    assert_eq!(
+        tokio::fs::read(manager.join("new.txt")).await.unwrap(),
+        b"new environment"
+    );
+    assert!(
+        change
+            .owner
+            .service
+            .store
+            .get("node-backups", &new_point)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        change
+            .owner
+            .service
+            .store
+            .get("node-disk-grants", &new_grant)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        change
+            .owner
+            .service
+            .store
+            .read(|db| Ok(db.account_leases()?.len()))
+            .await
+            .unwrap(),
+        1
+    );
+    placement::release(&change.owner.service, &reservation)
+        .await
+        .unwrap();
+}

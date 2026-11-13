@@ -1014,7 +1014,11 @@ mod ownership_tests {
 }
 
 /// Fences and deletes every attempt artifact of `run`: plans, logs and VM records.
-pub(super) async fn erase_attempt_content(broker: &Broker, run: &str) -> Result<()> {
+pub(super) async fn erase_attempt_content(
+    broker: &Broker,
+    run: &str,
+    permanent: bool,
+) -> Result<()> {
     let mut attempts = HashSet::new();
     let plans = broker.data.join("runner-plans");
     if plans.is_dir() {
@@ -1025,6 +1029,14 @@ pub(super) async fn erase_attempt_content(broker: &Broker, run: &str) -> Result<
                 continue;
             };
             if vm_plan_run_id(&entry.path()).await?.as_deref() != Some(run) {
+                continue;
+            }
+            // The bundled controller shares the manager's plans volume. A plan
+            // prepared on a different node is outside this controller's ownership.
+            let owned = ["run", "vm.json", "stopped", "lease"]
+                .iter()
+                .any(|extension| broker.state_file(attempt, extension).exists());
+            if !permanent && !owned {
                 continue;
             }
             // Fence a delayed start before removing its short-lived credentials.

@@ -2741,7 +2741,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paid_move_recovery_at_ceiling_is_not_a_free_controller_retry() {
+    async fn legacy_move_metadata_cannot_bypass_the_controller_recovery_ceiling() {
         let (_root, service, _chat, run, _workspace) = fixture().await;
         for (movement, same_attempt) in [(true, true), (false, true), (true, false)] {
             let id = run.clone();
@@ -2775,10 +2775,7 @@ mod tests {
                         "controllerRecoveries": 4, "controllerRecoveryReservation": "attempt",
                     }))?;
                     saved.store_in(db, &id)?;
-                    assert_eq!(
-                        finish_recovery(db, &id, Some(&saved))?,
-                        movement && same_attempt
-                    );
+                    assert!(!finish_recovery(db, &id, Some(&saved))?);
                     let durable = RunCheckpoint::load_in(db, &id)?.unwrap();
                     assert_eq!(durable.controller_recoveries(), 4);
                     Ok(())

@@ -336,7 +336,7 @@ mod tests {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 31);
+        assert_eq!(version, crate::store::DATABASE_VERSION);
         upgrade(&mut connection).unwrap();
         connection.pragma_update(None, "user_version", 29).unwrap();
         assert!(upgrade(&mut connection).is_err());

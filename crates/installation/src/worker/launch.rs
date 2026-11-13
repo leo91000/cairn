@@ -71,6 +71,16 @@ async fn execute_inner(
     sensitive: &History,
 ) -> Result<()> {
     let id = text(run, "id").to_owned();
+    if !run["environmentExpiredAt"].is_null() {
+        if !s.config.runner_url.is_empty() {
+            crate::conversation_deletion::ensure_local_retirement_protocol(s)
+                .await
+                .map_err(|error| {
+                    Error::unavailable(format!("{} {}", placement::NO_CAPACITY, error.message))
+                })?;
+        }
+        crate::conversation_deletion::retired::mark_manager_namespace(s, &id).await?;
+    }
     let mut timing = Operation::new("agent_prepare", &id, "mark_running");
     let mut execution = Execution {
         s,
@@ -467,7 +477,7 @@ impl Execution<'_> {
         let s = self.s;
         if existing && self.checkpoint.read(|c| c.prepared().is_none()).await {
             // A fresh generation keeps a half-prepared workspace from being reused.
-            let generation = crate::config::id()[..8].to_owned();
+            let generation = crate::config::id();
             self.checkpoint
                 .update(|c| c.generation = Some(generation))
                 .await?;
@@ -967,6 +977,16 @@ impl Execution<'_> {
             }
         };
         timing.next("materialize");
+        if !self.run["environmentExpiredAt"].is_null() {
+            crate::conversation_deletion::require_retirement_protocol(
+                s,
+                text(&placement, "nodeId"),
+            )
+            .await
+            .map_err(|error| {
+                Error::unavailable(format!("{} {}", placement::NO_CAPACITY, error.message))
+            })?;
+        }
         workspace.authorization.recheck().await?;
         placement::materialize(s, &runner).await?;
         let node_id = placement["nodeId"].as_str().map(str::to_owned);
@@ -1693,7 +1713,7 @@ mod tests {
     #[tokio::test]
     async fn expiration_retires_materialized_admission_rejected_before_checkpoint_publication() {
         use crate::{agent_fixture::StoreAgentFixture, node_fixture::StoreNodeFixture};
-        use axum::{Router, http::StatusCode};
+        use axum::{Json, Router, http::StatusCode, response::IntoResponse};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let root = tempfile::tempdir().unwrap();
         let (original, mut run) = preparation_fixture(root.path()).await;
@@ -1704,10 +1724,13 @@ mod tests {
         let router = Router::new().fallback(move |request: axum::extract::Request| {
             let calls = calls.clone();
             async move {
+                if request.uri().path() == "/health" {
+                    return Json(json!({ "diskRetirementProtocol":1 })).into_response();
+                }
                 if request.method() == axum::http::Method::DELETE {
                     calls.fetch_add(1, Ordering::SeqCst);
                 }
-                StatusCode::NOT_FOUND
+                StatusCode::NOT_FOUND.into_response()
             }
         });
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });

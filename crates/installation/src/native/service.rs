@@ -2498,7 +2498,11 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             if *action == "delete" {
                 controller.bootstrap.forget(run);
                 let stage = controller.data.join("runs").join(run);
-                if stage.exists() {
+                if stage.exists()
+                    && !stage
+                        .join(crate::conversation_deletion::retired::MANAGER_NAMESPACE)
+                        .exists()
+                {
                     tokio::fs::remove_dir_all(stage).await?;
                 }
                 let mut entries = tokio::fs::read_dir(&controller.state).await?;
@@ -5321,6 +5325,48 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn identified_native_retirement_preserves_a_shared_manager_namespace() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let old = workspace::directory(&controller.state, &run).unwrap();
+        private_dir(&old.join("data")).await.unwrap();
+        tokio::fs::write(old.join("data/old.txt"), b"old disk")
+            .await
+            .unwrap();
+        let manager = controller.data.join("runs").join(&run);
+        private_dir(&manager).await.unwrap();
+        tokio::fs::write(
+            manager.join(crate::conversation_deletion::retired::MANAGER_NAMESPACE),
+            b"manager",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(manager.join("new.txt"), b"new remote environment")
+            .await
+            .unwrap();
+        let path = format!("/disks/{run}/delete");
+        assert_eq!(
+            route(controller.clone(), request(&path, &json!({})))
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert!(old.join("data/old.txt").exists());
+        route(
+            controller,
+            request(&path, &json!({ "retirementId":crate::config::id() })),
+        )
+        .await
+        .unwrap();
+        assert!(!old.join("data").exists());
+        assert_eq!(
+            tokio::fs::read(manager.join("new.txt")).await.unwrap(),
+            b"new remote environment"
+        );
+    }
+
+    #[tokio::test]
     async fn late_retirement_retry_preserves_the_next_native_environment() {
         let (_fixture, controller) = fixture().await;
         let run = crate::config::id();
@@ -5387,7 +5433,10 @@ pub(crate) mod tests {
             .unwrap();
         route(
             controller,
-            request(&format!("/disks/{run}/delete"), &json!({})),
+            request(
+                &format!("/disks/{run}/delete"),
+                &json!({ "permanentlyDeleted": true }),
+            ),
         )
         .await
         .unwrap();

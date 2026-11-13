@@ -1024,7 +1024,7 @@ def main():
                 retained=metrics.pop('vmFlatRetained'), remote=metrics.pop('vmFlatRemote'),
                 conditions='Guest layout simulated by mkfs; real protected native controller/ext4/idmap/ublk and loopback S3. Ownership inspected offline; no Firecracker guest boot.')]
             manager('purge', run=vm_run)
-            api('/disks/' + vm_run + '/delete')
+            api('/disks/' + vm_run + '/delete', {'permanentlyDeleted': True})
 
             # Real host administration and both directions of a multi-conversation
             # transition. This runs only on the disposable CI VM guarded above.
@@ -1235,7 +1235,7 @@ def main():
             for index, current in enumerate(runs):
                 progress('purge-' + str(index + 1) + '-of-' + str(len(runs)))
                 manager('purge', run=current)
-                api('/disks/' + current + '/delete')
+                api('/disks/' + current + '/delete', {'permanentlyDeleted': True})
                 if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
                     # Backup purge and permanent local disk deletion are
                     # separate operations; exercise both before checking state.

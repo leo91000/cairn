@@ -1,4 +1,6 @@
 //! Retryable conversation deletion and disk cleanup. No archival or data export.
+pub(crate) mod retired;
+
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -48,6 +50,65 @@ async fn forget_deleted_disk(s: &Service, run: &str, node: &str) -> Result<()> {
         .await
 }
 
+fn local_retirement_key(s: &Service) -> String {
+    format!(
+        "local-retirement-protocol:{}",
+        crate::auth::digest(&s.config.runner_url)
+    )
+}
+
+/// A verified upgrade fences the bundled controller's old unqualified mutations.
+/// Keep that proof while it is offline; remote conversations need not wait for it.
+pub(crate) async fn ensure_local_retirement_protocol(s: &Service) -> Result<()> {
+    if s.config.runner_url.is_empty()
+        || s.store.kv(&local_retirement_key(s)).await? == Some(json!(true))
+    {
+        return Ok(());
+    }
+    require_retirement_protocol(s, crate::nodes::LOCAL_NODE_ID).await
+}
+
+/// A legacy controller may execute an ignored body after the HTTP caller times
+/// out. Check support before sending a destructive request, and still verify ACKs.
+pub(crate) async fn require_retirement_protocol(s: &Service, node: &str) -> Result<()> {
+    let base = if node == crate::nodes::LOCAL_NODE_ID {
+        s.config.runner_url.clone()
+    } else {
+        crate::nodes::controller_url(s, node)
+    };
+    if base.is_empty() {
+        return Err(Error::unavailable("The execution node is unavailable."));
+    }
+    let response = s
+        .http
+        .get(format!("{base}/health"))
+        .bearer_auth(crate::execution::secret(&s.config.data_dir, "runner-secret").await?)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|_| {
+            Error::unavailable("The execution node's retirement protocol is unavailable.")
+        })?;
+    if !response.status().is_success() {
+        return Err(Error::unavailable(
+            "The execution node's retirement protocol is unavailable.",
+        ));
+    }
+    let health: Value = response.json().await.map_err(Error::internal)?;
+    let supported = health["diskRetirementProtocol"] == 1;
+    if node == crate::nodes::LOCAL_NODE_ID {
+        s.store
+            .set(&local_retirement_key(s), json!(supported), None)
+            .await?;
+    }
+    if !supported {
+        return Err(Error::unavailable(
+            "Upgrade the execution node before admitting a fresh working environment.",
+        ));
+    }
+    Ok(())
+}
+
 async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -> Result<()> {
     if run.is_empty() {
         return Ok(());
@@ -83,8 +144,12 @@ async fn disk_on(
     let node = destination
         .or(checkpoint["nodeId"].as_str())
         .unwrap_or(crate::nodes::LOCAL_NODE_ID);
+    if retirement.is_some() {
+        require_retirement_protocol(s, node).await?;
+    }
     let body = match retirement {
         Some(id) => json!({ "retirementId": id }),
+        None if action == "delete" => json!({ "permanentlyDeleted": true }),
         None => json!({}),
     };
     let response = s
@@ -390,6 +455,7 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
 }
 
 pub async fn purge(s: &Service, chat: Value) -> Result<()> {
+    let _retirement = s.worker.retirement_cleanup.lock().await;
     let _previews = crate::artifacts::preview::JOBS
         .acquire()
         .await
@@ -401,6 +467,7 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
     }
     delete_disks(s, &run).await?;
     crate::nodes::publication::purge(s, &run).await?;
+    s.purge_retired_resources(&run).await?;
     files(s, &chat).await?;
     s.store.transaction(move |db| forget(db, &cid, &run)).await
 }
@@ -509,23 +576,88 @@ mod retirement_tests {
     };
 
     #[tokio::test]
+    async fn verified_bundled_controller_upgrade_does_not_block_remote_turns_when_offline() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let app = axum::Router::new().fallback(move || {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({ "diskRetirementProtocol":1 }))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::common::config(root.path());
+        config.runner_url = url;
+        let service = Service::new(config).await.unwrap();
+        ensure_local_retirement_protocol(&service).await.unwrap();
+        server.abort();
+        let _ = server.await;
+        ensure_local_retirement_protocol(&service).await.unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_controller_never_receives_a_destructive_retirement_request() {
+        let posts = Arc::new(AtomicUsize::new(0));
+        let observed = posts.clone();
+        let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let observed = observed.clone();
+            async move {
+                if request.method() == "POST" {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+                axum::Json(json!({ "deleted":true }))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::common::config(root.path());
+        config.runner_url = url;
+        let service = Service::new(config).await.unwrap();
+        let error = delete_retired_disk(
+            &service,
+            &crate::config::id(),
+            crate::nodes::LOCAL_NODE_ID,
+            true,
+            &crate::config::id(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message.contains("Upgrade"), "{}", error.message);
+        assert_eq!(posts.load(Ordering::SeqCst), 0);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
     async fn retired_disk_requires_the_exact_durable_acknowledgement() {
         let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let count = Arc::new(AtomicUsize::new(0));
         let observed = requests.clone();
-        let app = axum::Router::new().fallback(move |axum::Json(body): axum::Json<Value>| {
-            let (count, observed) = (count.clone(), observed.clone());
-            async move {
-                observed.lock().await.push(body.clone());
-                let reply = match count.fetch_add(1, Ordering::SeqCst) {
-                    0 => json!({ "deleted": true }),
-                    1 => json!({ "deleted": true, "retirementId": crate::config::id() }),
-                    2 => json!({ "deleted": false, "retirementId": body["retirementId"] }),
-                    _ => json!({ "deleted": true, "retirementId": body["retirementId"] }),
-                };
-                axum::Json(reply)
-            }
-        });
+        let app = axum::Router::new()
+            .route(
+                "/health",
+                axum::routing::get(|| async { axum::Json(json!({ "diskRetirementProtocol":1 })) }),
+            )
+            .fallback(move |axum::Json(body): axum::Json<Value>| {
+                let (count, observed) = (count.clone(), observed.clone());
+                async move {
+                    observed.lock().await.push(body.clone());
+                    let reply = match count.fetch_add(1, Ordering::SeqCst) {
+                        0 => json!({ "deleted": true }),
+                        1 => json!({ "deleted": true, "retirementId": crate::config::id() }),
+                        2 => json!({ "deleted": false, "retirementId": body["retirementId"] }),
+                        _ => json!({ "deleted": true, "retirementId": body["retirementId"] }),
+                    };
+                    axum::Json(reply)
+                }
+            });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

@@ -86,7 +86,7 @@ struct Pending {
     cancelled: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RetiredAttempt {
     id: String,
@@ -94,7 +94,7 @@ struct RetiredAttempt {
 }
 
 /// What the retired environment still occupies, captured when it was detached.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Retirement {
     id: String,
@@ -115,8 +115,13 @@ struct Retirement {
     projects: Vec<Value>,
     /// The previous execution is confirmed stopped, or its node lease lapsed.
     fenced: bool,
-    /// Manager files, recovery references and the provider run home are removed.
+    /// Manager namespaces and recovery/account references are logically detached.
     local: bool,
+    #[serde(default)]
+    publications: crate::nodes::publication::RetiredPublications,
+    /// Physical erasure may keep retrying after the new environment is admitted.
+    #[serde(default)]
+    cleaned: bool,
     error: Option<String>,
     retry_after: Option<i64>,
 }
@@ -209,6 +214,7 @@ pub(crate) async fn pending_runs(s: &Service) -> Result<std::collections::HashSe
 pub(crate) fn detached_worktrees(db: &Db<'_>, run: &str) -> Result<Vec<(Vec<Value>, Vec<Value>)>> {
     let mut environments = retirements(db, run)?
         .into_iter()
+        .filter(|retirement| !retirement.local)
         .map(|retirement| (retirement.workspaces, retirement.projects))
         .collect::<Vec<_>>();
     if let Some(pending) = db.get(PENDING, run)? {
@@ -329,7 +335,7 @@ pub(crate) fn request_in(
                 preferred_node_id: (expiration.cause != Cause::NodeRevocation).then_some(None),
                 ..Default::default()
             })),
-            boundary: Some(json!({ "workspaces": [], "backup": null, "storage": null })),
+            boundary: Some(json!({ "workspaces": [], "backup": null, "storage": null, "environmentRetirementId":null })),
             ..Default::default()
         },
     )?;
@@ -468,6 +474,7 @@ fn detach_environment_in(
             .collect(),
         ..Default::default()
     };
+    let retirement_id = retirement.id.clone();
     db.put(RETIREMENTS, &serde_json::to_value(retirement)?)?;
 
     // Unclaimed destinations of an interrupted earlier move are not part of any environment.
@@ -500,6 +507,7 @@ fn detach_environment_in(
         "environmentState": "expired",
         "environmentExpiredAt": expired_at,
         "environmentExpirationCause": expiration.cause,
+        "environmentRetirementId": retirement_id,
         // The retirement fences the old execution. Recovery must not contact
         // its node before the next environment is placed.
         "isolated": false,
@@ -773,9 +781,43 @@ impl Service {
         Ok(())
     }
 
-    /// Removes what retired environments still occupy, oldest first. A failed step
-    /// retries later without delaying other retirements.
+    /// Fencing and logical namespace detachment run independently of slow erasure.
+    pub(crate) async fn detach_retired_environments(&self) -> Result<()> {
+        for value in self.store.list(RETIREMENTS).await? {
+            let mut retirement: Retirement = serde_json::from_value(value)?;
+            if retirement.local || retirement.retry_after.unwrap_or(0) > now() {
+                continue;
+            }
+            let preparation = self.worker.run_preparation_lock(&retirement.run_id).await;
+            let Ok(_preparation) = preparation.try_lock_owned() else {
+                continue;
+            };
+            let Some(current) = self.store.get(RETIREMENTS, &retirement.id).await? else {
+                continue;
+            };
+            retirement = serde_json::from_value(current)?;
+            if retirement.local {
+                continue;
+            }
+            if let Err(error) = self.detach_retirement(&mut retirement).await {
+                self.store
+                    .transaction(move |db| {
+                        save_progress(db, retirement, Some(error.message), false)
+                    })
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Convenience for explicit cleanup and tests; the worker uses two independent loops.
     pub async fn retire_environments(&self) -> Result<()> {
+        self.detach_retired_environments().await?;
+        self.cleanup_retired_environments().await
+    }
+
+    /// Physical retirement cannot hold the logical-detachment loop or admission.
+    pub(crate) async fn cleanup_retired_environments(&self) -> Result<()> {
         let _cleanup = self.worker.retirement_cleanup.lock().await;
         let mut due = self
             .store
@@ -784,28 +826,50 @@ impl Service {
             .into_iter()
             .map(serde_json::from_value::<Retirement>)
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        due.retain(|retirement| retirement.retry_after.unwrap_or(0) <= now());
+        due.retain(|retirement| {
+            retirement.local && retirement.fenced && retirement.retry_after.unwrap_or(0) <= now()
+        });
         due.sort_by_key(|retirement| retirement.expired_at);
-        let mut progressed = false;
         for mut retirement in due {
             if self.shutdown.is_cancelled() {
                 break;
             }
-            let result = self.retire(&mut retirement).await;
-            progressed |= retirement.fenced && retirement.local;
-            let error = result.err().map(|error| error.message);
-            let done = error.is_none() && retirement.nodes.is_empty();
+            let error = self
+                .retire(&mut retirement)
+                .await
+                .err()
+                .map(|error| error.message);
+            let done = error.is_none() && retirement.nodes.is_empty() && retirement.cleaned;
             self.store
                 .transaction(move |db| save_progress(db, retirement, error, done))
                 .await?;
         }
-        if progressed {
-            self.worker.notify();
+        self.worker.notify();
+        Ok(())
+    }
+
+    /// Explicit purge still waits for every detached namespace to be erased.
+    /// The caller owns the retirement cleanup gate and has fenced all disks/ACKs.
+    pub(crate) async fn purge_retired_resources(&self, run: &str) -> Result<()> {
+        let owned = run.to_owned();
+        for retirement in self.store.read(move |db| retirements(db, &owned)).await? {
+            let directory = crate::conversation_deletion::retired::directory(self, &retirement.id);
+            if tokio::fs::try_exists(directory).await? {
+                crate::conversation_deletion::retired::erase(
+                    self,
+                    run,
+                    &retirement.id,
+                    &retirement.workspaces,
+                    &retirement.projects,
+                    &retirement.publications,
+                )
+                .await?;
+            }
         }
         Ok(())
     }
 
-    async fn retire(&self, retirement: &mut Retirement) -> Result<()> {
+    async fn detach_retirement(&self, retirement: &mut Retirement) -> Result<()> {
         if !retirement.fenced {
             crate::recovery::fence_retired(
                 self,
@@ -832,25 +896,30 @@ impl Service {
         }
         if !retirement.local {
             let run = retirement.run_id.clone();
-            let preparation = self.worker.run_preparation_lock(&run).await;
-            let _preparation = preparation.lock_owned().await;
-            self.accounts
-                .recover_run(
-                    self,
-                    &json!({ "id": run, "accountId": retirement.account_id }),
-                )
+            let _publication = self.node_backup_operation.lock(&run).await;
+            let _readers = self.node_backup_operation.drain(&run).await;
+            crate::conversation_deletion::retired::detach(self, &run, &retirement.id).await?;
+            let mut detached = retirement.clone();
+            *retirement = self
+                .store
+                .transaction(move |db| {
+                    detached.publications =
+                        crate::nodes::publication::detach_environment_in(db, &run)?;
+                    db.remove_account_lease(&run)?;
+                    db.update_run_boundary(&run, &json!({ "backup":null, "storage":null }))?;
+                    detached.local = true;
+                    db.put(RETIREMENTS, &serde_json::to_value(&detached)?)?;
+                    Ok(detached)
+                })
                 .await?;
-            crate::nodes::publication::expire_environment(self, &run).await?;
-            crate::conversation_deletion::detach_retired_worktrees(
-                self,
-                &run,
-                &retirement.workspaces,
-                &retirement.projects,
-            )
-            .await?;
-            crate::conversation_deletion::remove_run_files(self, &run).await?;
-            retirement.local = true;
+            // This commit opens admission, independently of physical cleanup.
+            self.worker.notify();
+            self.worker.notify_retirement();
         }
+        Ok(())
+    }
+
+    async fn retire(&self, retirement: &mut Retirement) -> Result<()> {
         let mut failure = None;
         let mut remaining = Vec::new();
         for node in std::mem::take(&mut retirement.nodes) {
@@ -868,6 +937,28 @@ impl Service {
             }
         }
         retirement.nodes = remaining;
+        let released = serde_json::to_value(&retirement)?;
+        self.store
+            .write(move |db| db.put(RETIREMENTS, &released))
+            .await?;
+        self.worker.notify();
+        if !retirement.cleaned {
+            match crate::conversation_deletion::retired::erase(
+                self,
+                &retirement.run_id,
+                &retirement.id,
+                &retirement.workspaces,
+                &retirement.projects,
+                &retirement.publications,
+            )
+            .await
+            {
+                Ok(()) => retirement.cleaned = true,
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
         failure.map_or(Ok(()), Err)
     }
 }
@@ -879,6 +970,9 @@ fn save_progress(
     done: bool,
 ) -> Result<()> {
     let run = retirement.run_id.clone();
+    let current = db
+        .run(&run)?
+        .is_some_and(|run| run["environmentRetirementId"] == retirement.id);
     if done {
         db.remove(RETIREMENTS, &retirement.id)?;
     } else {
@@ -888,6 +982,7 @@ fn save_progress(
     }
     // The expired conversation shows why its previous environment is still retained.
     if let Some(mut chat) = db.conversation_for_run(&run)?
+        && current
         && chat.environment_error != error
         && (error.is_none()
             || chat.environment_state == Some(ConversationEnvironmentState::Expired))
@@ -902,6 +997,23 @@ fn save_progress(
 mod tests {
     use super::*;
     use crate::run_fixture::DbRunFixture;
+
+    #[tokio::test]
+    async fn an_older_retirement_cannot_replace_or_clear_the_new_environments_error() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            let (run,chat,newest) = (id(),id(),id());
+            db.add_run_fixture(&json!({ "id":run, "taskId":chat, "status":"succeeded", "createdAt":0, "environmentState":"expired", "environmentRetirementId":newest }),None)?;
+            db.save_conversation_boundary(&json!({ "id":chat,"runId":run,"environmentState":"expired","environmentExpiredAt":42,"environmentError":"new cleanup failure" }))?;
+            let old = Retirement { id:id(),run_id:run.clone(),expired_at:42,..Retirement::default() };
+            save_progress(db,old.clone(),Some("old cleanup failure".into()),false)?;
+            assert_eq!(db.conversation_boundary(&chat)?.unwrap()["environmentError"],"new cleanup failure");
+            save_progress(db,old,None,true)?;
+            assert_eq!(db.conversation_boundary(&chat)?.unwrap()["environmentError"],"new cleanup failure");
+            Ok(())
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn startup_finishes_legacy_cleaning_once_and_preserves_its_expiration_time() {

@@ -20,7 +20,12 @@ impl Retirement {
     /// The caller also holds its normal disk ownership during deletion/commit.
     pub(crate) async fn begin(state: &Path, run: &str, request: &Value) -> Result<Option<Self>> {
         let Some(id) = request.get("retirementId").filter(|id| !id.is_null()) else {
-            return Ok(None);
+            if request["permanentlyDeleted"] == true {
+                return Ok(None);
+            }
+            return Err(Error::conflict(
+                "Disk deletion needs a retirement identity or permanent conversation deletion.",
+            ));
         };
         let id = id
             .as_str()

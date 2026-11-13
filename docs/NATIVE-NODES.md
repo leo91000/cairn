@@ -147,7 +147,12 @@ checks them under its storage lock before deletion. Receipts must survive disk
 recreation and controller restarts: delayed requests become no-ops. A manager
 requires the matching receipt acknowledgement before admitting a new environment
 of the same run on this node. Older controllers that ignore this identity must be
-upgraded before that readmission.
+upgraded before that readmission. Support is advertised as
+`diskRetirementProtocol: 1`; the manager checks it before issuing deletion as well
+as validating the identity in the acknowledgement. An unqualified deletion must
+explicitly declare permanent conversation deletion. A manager-owned run namespace
+is never erased as native node staging, and its marker is excluded from remote
+seeds.
 
 The native controller mounts ext4 directly on ublk, using the same local journal,
 scoped S3 block reads, encrypted immutable publications and cache as a VM. There

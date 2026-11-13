@@ -46,6 +46,7 @@ pub struct Worker {
     wake: Notify,
     conversation_cleanup: Notify,
     retirement: Notify,
+    retirement_admission: Notify,
     pub(crate) retirement_cleanup: Mutex<()>,
     initialized: OnceCell<()>,
     maintenance: AtomicI64,
@@ -103,6 +104,7 @@ impl Worker {
         self.tasks
             .spawn(crate::nodes::exclusive::maintain(s.clone()));
         self.tasks.spawn(clean_conversations(s.clone()));
+        self.tasks.spawn(detach_environments(s.clone()));
         self.tasks.spawn(retire_environments(s.clone()));
         self.tasks.spawn(schedule_tasks(s.clone()));
         self.tasks.spawn(self.clone().run_forever(s));
@@ -136,6 +138,7 @@ impl Worker {
     /// Wakes the retirement of expired environments, after an expiration or a stopped run.
     pub fn notify_retirement(&self) {
         self.retirement.notify_one();
+        self.retirement_admission.notify_one();
     }
 
     /// Coalesce wakeups without losing work queued during an active scheduling pass.
@@ -282,6 +285,32 @@ async fn clean_conversations(s: Arc<Service>) {
     }
 }
 
+/// Admission owns only execution fencing and logical namespace detachment.
+/// Slow physical erasure has a separate loop and never delays this one.
+async fn detach_environments(s: Arc<Service>) {
+    let mut timer = tokio::time::interval(Duration::from_secs(5));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = s.shutdown.cancelled() => break,
+            _ = timer.tick() => {},
+            () = s.worker.retirement_admission.notified() => {},
+        }
+        let work = async {
+            s.detach_stopped_environments().await?;
+            s.detach_retired_environments().await
+        };
+        tokio::select! {
+            () = s.shutdown.cancelled() => break,
+            result = work => {
+                if let Err(error) = result {
+                    audit(&s.store, "environment.detachment_failed", json!({ "message": error.message })).await;
+                }
+            },
+        }
+    }
+}
+
 /// Detaches stopped expired environments and retires their old disks and files.
 async fn retire_environments(s: Arc<Service>) {
     let mut timer = tokio::time::interval(Duration::from_secs(5));
@@ -292,13 +321,9 @@ async fn retire_environments(s: Arc<Service>) {
             _ = timer.tick() => {}
             () = s.worker.retirement.notified() => {}
         }
-        let work = async {
-            s.detach_stopped_environments().await?;
-            s.retire_environments().await
-        };
         tokio::select! {
             () = s.shutdown.cancelled() => break,
-            result = work => {
+            result = s.cleanup_retired_environments() => {
                 if let Err(error) = result {
                     let detail = json!({ "message": error.message });
                     audit(&s.store, "environment.retirement_failed", detail).await;

@@ -1695,6 +1695,99 @@ async fn automatic_shared_process_turns_do_not_acquire_a_managed_node_owner() {
 }
 
 #[tokio::test]
+async fn a_fresh_chat_turn_executes_while_its_old_manager_cleanup_keeps_failing() {
+    let mut fixture = Fixture::new().await;
+    let s = fixture.service.clone();
+    let chat = fixture.start_chat(message("Before expiration")).await;
+    let run = fixture.chat_run(&chat).await;
+    let first = fixture.until_finished(&run).await;
+    assert_eq!(first["status"], RunStatus::Succeeded, "{first}");
+    fixture.until_worker_quiescent().await;
+    fixture.stop(false).await;
+    let manager = s.config.data_dir.join("runs").join(&run);
+    tokio::fs::write(manager.join("old.txt"), b"old working files")
+        .await
+        .unwrap();
+    let (chat_id, run_id, invalid) = (chat.clone(), run.clone(), fixture.root.path().to_owned());
+    s.store
+        .transaction(move |db| {
+            let mut chat = db.conversation(&chat_id)?.unwrap();
+            let old = now() - 8 * 86_400_000;
+            chat.created_at = old;
+            chat.updated_at = old;
+            chat.last_activity_at = Some(old);
+            db.save_conversation(&chat)?;
+            db.change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    finished_at: Some(Some(old)),
+                    ..Default::default()
+                },
+            )?;
+            db.update_run_boundary(
+                &run_id,
+                &json!({ "workspaces":[{ "kind":"worktree", "path":invalid }] }),
+            )
+        })
+        .await
+        .unwrap();
+    s.save_conversation_retention(json!({ "inactivityDays":7 }))
+        .await
+        .unwrap();
+    s.cleanup_conversations().await.unwrap();
+    s.retire_environments().await.unwrap();
+    let pending = s.store.list("environment-retirements").await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["fenced"], true);
+    assert_eq!(pending[0]["local"], true);
+    assert_eq!(pending[0]["cleaned"], false);
+    assert!(pending[0]["error"].is_string());
+    s.chat_send(&chat, message("Fresh message while old cleanup fails"))
+        .await
+        .unwrap();
+    fixture.start().await;
+    let resumed = fixture
+        .until(&run, |run| {
+            run["status"] == RunStatus::Succeeded
+                && text(run, "summary").contains("Fresh message while old cleanup fails")
+        })
+        .await;
+    assert!(resumed["environmentExpiredAt"].is_number());
+    assert!(!manager.join("old.txt").exists());
+    assert_eq!(
+        s.store.list("environment-retirements").await.unwrap()[0]["cleaned"],
+        false
+    );
+    fixture.stop(false).await;
+    tokio::fs::write(manager.join("new.txt"), b"fresh working files")
+        .await
+        .unwrap();
+    s.store
+        .transaction(|db| {
+            for mut retired in db.list("environment-retirements")? {
+                retired["workspaces"] = json!([]);
+                retired["retryAfter"] = Value::Null;
+                db.put("environment-retirements", &retired)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    s.retire_environments().await.unwrap();
+    assert!(
+        s.store
+            .list("environment-retirements")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        tokio::fs::read(manager.join("new.txt")).await.unwrap(),
+        b"fresh working files"
+    );
+}
+
+#[tokio::test]
 async fn native_chat_turns_reuse_the_same_run_and_conversation() {
     let mut fixture = Fixture::new().await;
     let s = fixture.service.clone();

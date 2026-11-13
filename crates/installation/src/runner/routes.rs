@@ -114,6 +114,7 @@ async fn health(broker: &Broker) -> Result<Response> {
         "backend": Backend::Firecracker,
         "runtimeId": runtime_id,
         "nodeProtocol": NODE_PROTOCOL,
+        "diskRetirementProtocol": 1,
         "directStorageProtocol": 1,
         "sharedResources": broker.pool.budget().await.is_some(),
         "exclusiveReservations": true,
@@ -412,7 +413,7 @@ async fn disk_action(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    erase_attempt_content(broker, run).await?;
+    erase_attempt_content(broker, run, retirement.is_none()).await?;
     // Preserve the lock inode: an overlapping boot must contend on it.
     let mut leftovers = tokio::fs::read_dir(&directory).await?;
     while let Some(entry) = leftovers.next_entry().await? {

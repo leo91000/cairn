@@ -29,22 +29,33 @@ expiration, under the existing process, storage, preparation and worker locks.
 Once claimed, expiration is irreversible. The conversation immediately reports
 `environmentState: "expired"` and detaches its old environment in the writer
 transaction. Older `cleaning` environments are expired idempotently on startup.
+After the old execution stops (or its unreachable node's lease lapses), the
+manager moves its run files and local publication files into
+`retired-environments/<retirementId>/`. A writer transaction detaches the old
+account lease and exact recovery references. This opens admission before physical
+erasure: failed worktree deletion, provider-home erasure or remote publication
+retirement never blocks a fresh turn. Fencing and namespace detachment have their
+own worker loop, independent of slow physical cleanup.
+
 Physical retirement continues from a durable queue and retries failures after one
-minute, even if future automatic expiration is disabled. Messages and a new node
-choice remain available. Admission waits for the previous execution to be confirmed
-stopped, or for its lease to lapse if its node is unreachable. A node must delete
-the retired disk before admitting this run's next environment on that node; other
-nodes need not wait for that disk deletion. A revoked node's disk is forgotten.
-Each disk retirement sends its durable queue identity as `retirementId`. Native
-and VM controllers serialize retries and persist a completion receipt outside the
-disk before acknowledging it. These receipts survive subsequent environments and
-controller restarts, so a delayed duplicate cannot erase a new disk of the same
-run. Manual whole stale-disk cleanup uses the same durable queue and rechecks
-current ownership in its writer transaction; it cannot bypass retirement or
-admission barriers. They are retained permanently (one small receipt per retired environment on
-that node). The manager requires the matching acknowledgement: an older controller
-must be upgraded before this run can reuse its node. Explicit conversation deletion
-retains ADR-0041 behavior.
+minute, even if future automatic expiration is disabled. A node must delete the
+retired disk before admitting this run's next environment there; other nodes need
+not wait for that deletion. A revoked node's disk is forgotten. Each disk
+retirement sends its durable queue identity as `retirementId`. Native and VM
+controllers serialize retries and persist a completion receipt outside the disk
+before acknowledging it. Receipts survive subsequent environments and controller
+restarts, so delayed duplicates are harmless. They remain permanently (one small
+receipt per retired environment on that node).
+
+The manager checks `diskRetirementProtocol: 1` before sending deletion and requires
+the matching acknowledgement. Fresh environments require a compatible controller;
+legacy controllers cannot silently ignore the request identity. The bundled VM
+controller shares the manager volume, so its verified upgrade is also required
+before manager namespace reuse. That proof survives temporary controller outages.
+Controller deletion without an identity requires `permanentlyDeleted: true` and is
+reserved for irreversible conversation purge. Manual whole stale-disk cleanup uses
+the same durable queue and rechecks current ownership in its writer transaction.
+Explicit conversation deletion retains ADR-0041 behavior.
 
 After expiration, send a new message (and resume the queue if paused) to recreate
 the environment. The same conversation and run retain their history and artifacts;

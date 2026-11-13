@@ -583,7 +583,10 @@ mod tests {
             .method("POST")
             .uri(format!("/disks/{run}/{action}"))
             .header("authorization", format!("Bearer {credential}"))
-            .body(Body::from(json!({ "transfer": transfer }).to_string()))
+            .body(Body::from(
+                json!({ "transfer": transfer, "permanentlyDeleted": action == "delete" })
+                    .to_string(),
+            ))
             .unwrap();
         app.clone()
             .oneshot(request)
@@ -641,6 +644,47 @@ mod tests {
             std::fs::read_to_string(receipts.join(&retirement)).unwrap(),
             retirement
         );
+    }
+
+    #[tokio::test]
+    async fn vm_retirement_erases_only_its_own_attempt_plans_on_a_shared_volume() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let run = crate::config::id();
+        let (old, remote) = (crate::config::id(), crate::config::id());
+        let plans = broker.data.join("runner-plans");
+        private_dir(&plans).await.unwrap();
+        for attempt in [&old, &remote] {
+            std::fs::write(
+                plans.join(format!("{attempt}.json")),
+                json!({ "runId":run }).to_string(),
+            )
+            .unwrap();
+        }
+        std::fs::write(broker.state_file(&old, "run"), &run).unwrap();
+        let disk = broker.state.join("disks").join(&run);
+        private_dir(&disk).await.unwrap();
+        std::fs::write(disk.join("data.ext4"), b"old disk").unwrap();
+        let app = router(broker);
+        let endpoint = format!("/disks/{run}/delete");
+        let unidentified = app
+            .clone()
+            .oneshot(authorized_post(endpoint.clone(), Body::from("{}")))
+            .await
+            .unwrap();
+        assert_eq!(unidentified.status(), 409);
+        assert!(disk.join("data.ext4").exists());
+        let retired = app
+            .oneshot(authorized_post(
+                endpoint,
+                Body::from(json!({ "retirementId":crate::config::id() }).to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(retired.status(), 200);
+        assert!(!disk.join("data.ext4").exists());
+        assert!(!plans.join(format!("{old}.json")).exists());
+        assert!(plans.join(format!("{remote}.json")).exists());
     }
 
     #[tokio::test]

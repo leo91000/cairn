@@ -332,7 +332,7 @@ async function main() {
         if (delayedPublication) {
           pendingPublication = await completedSnapshot()
           assert.ok(pendingPublication.manifest.generation > 0)
-          await api(`/disks/${runId}/delete`, 'POST', {}, 425)
+          await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true }, 425)
           assert.equal(state(vmId), 'Paused', 'Unacknowledged journal protects its retained VMM')
           protectedEvictions++
         }
@@ -406,13 +406,13 @@ async function main() {
       for (const task of active) {
         await api(`/runs/${task.id}`, 'DELETE')
         await api(`/runs/${task.id}/wait`, 'POST')
-        await api(`/disks/${task.run}/delete`, 'POST', {})
+        await api(`/disks/${task.run}/delete`, 'POST', { permanentlyDeleted: true })
       }
 
       activeAdmissionPassed = true
     }
 
-    await api(`/disks/${runId}/delete`, 'POST', {})
+    await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true })
     await until(async () => (await (await api('/health')).json()).pool.occupied === 0)
     const runnerLog = stripVTControlCharacters(runnerLogs())
     const reclamation = runnerLog.split('\n').filter(line => line.includes('event="memory_reclaimed"')).map((line) => {

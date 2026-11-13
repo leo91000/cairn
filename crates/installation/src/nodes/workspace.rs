@@ -230,10 +230,13 @@ async fn seed_source(
     };
     let (mut writer, reader) = tokio::io::duplex(131072);
     let attempt = text(plan, "id").to_owned();
+    let initial = text(selection, "kind") == "initial";
     tokio::spawn(async move {
         // A failed transfer ends the stream early, which the receiver rejects.
         if let Err(error) = super::files::send_filtered(&source, &mut writer, |path| {
             project_root.as_deref() != Some(path)
+                && (!initial
+                    || path != Path::new(crate::conversation_deletion::retired::MANAGER_NAMESPACE))
         })
         .await
         {
@@ -827,5 +830,55 @@ mod native_inbox_tests {
                 message
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn initial_seed_never_marks_a_remote_stage_as_manager_owned() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            source
+                .path()
+                .join(crate::conversation_deletion::retired::MANAGER_NAMESPACE),
+            b"manager-only",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(source.path().join("input.txt"), b"required input")
+            .await
+            .unwrap();
+        let response = seed_source(
+            &json!({}),
+            &json!({ "id":crate::config::id() }),
+            source.path(),
+            &json!({ "kind":"initial" }),
+            false,
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let mut reader = tokio::io::BufReader::new(bytes.as_ref());
+        super::super::files::receive(&mut reader, target.path(), 1_000_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read(target.path().join("input.txt"))
+                .await
+                .unwrap(),
+            b"required input"
+        );
+        assert!(
+            !target
+                .path()
+                .join(crate::conversation_deletion::retired::MANAGER_NAMESPACE)
+                .exists()
+        );
     }
 }

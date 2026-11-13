@@ -4295,6 +4295,9 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
     let runner = Router::new().fallback(move |request: Request<Body>| {
         let recorded = recorded.clone();
         async move {
+            if request.uri().path() == "/health" {
+                return Json(json!({ "diskRetirementProtocol":1 }));
+            }
             recorded
                 .lock()
                 .unwrap()
