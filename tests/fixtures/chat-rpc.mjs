@@ -354,9 +354,10 @@ export function chatFixture() {
           completionText = '# Resumed\nThe saved conversation and work survived the restart.'
         }
         else {
-          writeFileSync(marker, JSON.stringify({ cwd: process.cwd() }))
           writeFileSync(path.join(process.cwd(), 'restart-work.txt'), 'preserved before restart')
           hold = true
+          // The worker test may interrupt us as soon as this readiness marker is complete.
+          writeFileSync(marker, JSON.stringify({ cwd: process.cwd() }))
         }
       }
 
