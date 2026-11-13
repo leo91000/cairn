@@ -14,11 +14,10 @@ import { createServer } from 'node:net'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
-import { blockDigest } from './block-digest.mjs'
 import { entrypointSmoke } from './runner-entrypoint-smoke.mjs'
 import { attemptOutput, inboxContains } from './runner-probe.mjs'
 import { retirementSmoke } from './runner-retirement-smoke.mjs'
-import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
+import { prepareLocalStorage, storageSmoke } from './runner-storage-smoke.mjs'
 import { udpSmoke } from './runner-udp-smoke.mjs'
 import { ublkDeviceArguments } from './ublk-devices.mjs'
 
@@ -233,7 +232,7 @@ console.log('probe.done');
     // First prove every listener is reachable outside the guest firewall.
     process.stdout.write(docker('exec', name, '/usr/local/bin/node', `${runRoot}/workspace/network-probe.mjs`, 'control', publicPeer, privatePeer))
     await reconnect()
-    const storageFixture = await prepareStorageOrigin({
+    const storageFixture = await prepareLocalStorage({
       root,
       docker,
       name,
@@ -343,68 +342,25 @@ console.log('probe.done');
               }
 
               if (data.includes('probe.pause') && mode === 'cancel') {
-                const captureStarted = Date.now()
-                const point = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
-                const firstCaptureMs = Date.now() - captureStarted
-                process.stdout.write(`${JSON.stringify({ phase: 'active-capture-sealed', durationMs: firstCaptureMs })}\n`)
-                assert.ok(point.manifest.size > 0)
-                assert.equal(point.manifest.onDemand, true)
-                const block = point.manifest.blocks.find(block => block.hash)
-                assert.ok(block, 'Active capture must contain durable guest data')
-                const bytes = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
-                assert.equal(blockDigest(bytes, block.hash), block.hash)
-                // New writes enter the next journal generation; the sealed one stays readable.
+                const vm = JSON.parse(docker('exec', name, 'cat', `/runner-state/${id}.vm.json`)).vmId
+                const before = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
+                assert.equal(before.mode, 'on-demand')
                 await writeFile(path.join(source, 'chat-input/messages.json'), '[{"text":"capture-update"}]')
-                process.stdout.write(`${JSON.stringify({ phase: 'capture-update-requested', elapsedMs: Date.now() - captureStarted })}\n`)
                 await until(() => {
                   const records = docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).map(line => JSON.parse(line))
-                  const text = attemptOutput(records)
-                  if (text.includes('probe.updated')) {
-                    process.stdout.write(`${JSON.stringify({ phase: 'capture-update-observed', elapsedMs: Date.now() - captureStarted })}\n`)
-                    return true
-                  }
-
-                  try {
-                    const exit = docker('exec', name, 'cat', `/runner-state/${id}.exit`)
-                    throw new Error(`Active capture guest exited ${exit}: ${text}`)
-                  }
-                  catch (error) {
-                    if (!error.status)
-                      throw error
-                  }
-
-                  return false
-                }, 180000, 'Active capture guest update')
-                const original = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
-                assert.deepEqual(original, bytes, 'The sealed capture stays immutable while the guest writes')
-                // Starting the next capture retires the previous capture handle.
-                const nextStarted = Date.now()
-                const next = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
-                const nextCaptureMs = Date.now() - nextStarted
-                assert.equal(next.manifest.onDemand, true)
-                assert.ok(next.manifest.generation > point.manifest.generation, 'New writes advance the journal generation')
-                assert.equal(next.manifest.blocks.length, point.manifest.blocks.length)
-                const changed = next.manifest.blocks.find((block, index) => block.hash && block.hash !== point.manifest.blocks[index].hash)
-                assert.ok(changed, 'The next generation includes guest writes')
-                const written = Buffer.from(await (await api(`/snapshots/${next.id}/${changed.hash}`)).arrayBuffer())
-                assert.equal(blockDigest(written, changed.hash), changed.hash)
-                docker('exec', name, 'test', '!', '-e', `/runner-state/disks/${runId}/data.ext4`)
-                await api(`/snapshots/${next.id}/discard`, 'DELETE')
-                process.stdout.write(`${JSON.stringify({
-                  mode: 'active-capture',
-                  firstCaptureMs,
-                  nextCaptureMs,
-                  generation: next.manifest.generation,
-                  status: 'passed',
-                })}\n`)
+                  return attemptOutput(records).includes('probe.updated')
+                }, 180000, 'Live local journal guest update')
+                assert.equal(JSON.parse(docker('exec', name, 'cat', `/runner-state/${id}.vm.json`)).vmId, vm, 'Local writes keep the same VMM')
+                const after = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
+                assert.equal(after.waitingFor, null)
+                assert.ok(after.localBytes > 0)
+                process.stdout.write(`${JSON.stringify({ mode: 'active-local-journal', status: 'passed' })}\n`)
                 await api(`/runs/${id}`, 'DELETE')
               }
 
               if (text.includes('probe.pause') && mode === 'crash') {
                 docker('kill', '--signal', 'KILL', name)
                 docker('start', name)
-                // The test origin is an exec process, so container restart killed it too.
-                docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
                 await reconnect()
               }
             }
@@ -459,7 +415,6 @@ console.log('probe.done');
       root,
       api,
       storage,
-      origin: storageFixture.origin,
       docker,
       image,
       networkName,

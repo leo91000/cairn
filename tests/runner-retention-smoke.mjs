@@ -16,8 +16,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { stripVTControlCharacters } from 'node:util'
-import { blockDigest } from './block-digest.mjs'
-import { prepareStorageOrigin } from './runner-storage-smoke.mjs'
+import { inspectLocalDisk, prepareLocalStorage } from './runner-storage-smoke.mjs'
 import { ublkDeviceArguments } from './ublk-devices.mjs'
 
 async function main() {
@@ -34,8 +33,7 @@ async function main() {
   const runId = randomUUID()
   const runRoot = `/data/runs/${runId}`
   const samples = []
-  const uploaded = new Set()
-  let publications = 0
+  let localConsolidations = 0
   const benchmarkStarted = Date.now()
   let broker
   let credentials = 0
@@ -127,74 +125,14 @@ async function main() {
       }
     }, 10000)}`
     await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
-    const { storage, origin } = await prepareStorageOrigin({
+    const { storage } = await prepareLocalStorage({
       root,
       docker,
       name,
       api,
     })
-    const delayedPublication = process.env.CAIRN_RETENTION_ASYNC_PUBLISH === 'true'
-    let pendingPublication
-    let delayedAcknowledgements = 0
-    let protectedEvictions = 0
-
-    async function publish(snapshot) {
-      if (snapshot.alreadyPublished)
-        return
-      for (const block of snapshot.manifest.blocks) {
-        if (!block.hash || uploaded.has(block.hash))
-          continue
-        const bytes = Buffer.from(await (await api(`/snapshots/${snapshot.id}/${block.hash}`)).arrayBuffer())
-        assert.equal(blockDigest(bytes, block.hash), block.hash)
-        await writeFile(path.join(origin, block.hash), bytes)
-        uploaded.add(block.hash)
-      }
-
-      const backupId = randomUUID()
-      await api(`/disks/${runId}/published`, 'POST', { generation: snapshot.manifest.generation, grantId: snapshot.grantId, backupId })
-      const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
-      assert.equal(status.published.backupId, backupId)
-      publications++
-    }
-
-    async function completedSnapshot() {
-      const response = await fetch(`${url}/disks/${runId}/snapshot-completed`, {
-        method: 'POST',
-        headers: { 'authorization': 'Bearer fixture-runner-token', 'content-type': 'application/json' },
-        body: '{}',
-        signal: AbortSignal.timeout(120000),
-      })
-      if ([404, 412].includes(response.status))
-        return (await api(`/disks/${runId}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
-      assert.ok(response.ok, `Completed generation capture: ${response.status}`)
-      return response.json()
-    }
-
-    async function flushPublication(snapshot = pendingPublication) {
-      if (!snapshot)
-        snapshot = await completedSnapshot()
-      await publish(snapshot)
-      if (snapshot.id)
-        await api(`/snapshots/${snapshot.id}/discard`, 'DELETE')
-      pendingPublication = undefined
-    }
-
-    async function publishForEviction() {
-      await flushPublication()
-      if (retention <= 0)
-        return
-
-      // A completed-turn prefix can precede queued block writes. Publish the
-      // current paused disk at each eviction boundary; other guest starts can
-      // give those queued writes time to land after an earlier acknowledgement.
-      await until(async () => {
-        const current = await (await api(`/disks/${runId}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
-        await flushPublication(current)
-        const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
-        return status.dirtyBytes === 0
-      })
-    }
-
+    assert.notEqual(process.env.CAIRN_RETENTION_ASYNC_PUBLISH, 'true', 'Use CAIRN_RETENTION_LOCAL_CONSOLIDATION for local disks')
+    assert.notEqual(process.env.CAIRN_RETENTION_PUBLISH, 'true', 'Remote publication is no longer a retention qualification')
     let sessionId
     let lastPlan
     let previousVm
@@ -309,35 +247,17 @@ async function main() {
           evictedVm = undefined
         }
 
-        if (pendingPublication) {
-          // The following real native turn has completed writes on this same
-          // VMM while the preceding generation still awaits acknowledgement.
-          await flushPublication()
-          const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
-          assert.ok(status.dirtyBytes > 0, 'An older receipt preserves the following turn\'s durable writes')
-          delayedAcknowledgements++
+        await inspectLocalDisk(api, runId)
+        if (process.env.CAIRN_RETENTION_LOCAL_CONSOLIDATION === 'true') {
+          await until(async () => {
+            const status = await inspectLocalDisk(api, runId)
+            return status.dirtyBytes === 0 && status.published?.local === true
+              && status.completedGeneration > 0 && status.published.generation >= status.completedGeneration
+          })
+          localConsolidations++
         }
 
-        for (let index = 0; index < 2; index++) {
-          const snapshot = await (await api(`/disks/${runId}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
-          assert.ok(snapshot.manifest.generation > 0)
-          assert.equal(snapshot.manifest.consistency, 'crash', 'CPU pause does not promise filesystem freeze')
-          assert.equal(state(vmId), 'Paused', 'Publication never wakes retained CPUs')
-          if (!delayedPublication && process.env.CAIRN_RETENTION_PUBLISH === 'true' && index === 0 && lease % 10 === 0) {
-            await publish(snapshot)
-            assert.equal(state(vmId), 'Paused', 'Publication acknowledgement also leaves CPUs paused')
-          }
-
-          await api(`/snapshots/${snapshot.id}/discard`, 'DELETE')
-        }
-
-        if (delayedPublication) {
-          pendingPublication = await completedSnapshot()
-          assert.ok(pendingPublication.manifest.generation > 0)
-          await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true }, 425)
-          assert.equal(state(vmId), 'Paused', 'Unacknowledged journal protects its retained VMM')
-          protectedEvictions++
-        }
+        assert.equal(state(vmId), 'Paused', 'Local consolidation never wakes retained CPUs')
       }
       else {
         assert.equal(health.pool.retained, 0)
@@ -364,7 +284,7 @@ async function main() {
       }
 
       if (retention > 0 && lease === Number(process.env.CAIRN_RETENTION_EXPIRE_AFTER ?? -1)) {
-        await publishForEviction()
+        await inspectLocalDisk(api, runId)
         await until(async () => (await (await api('/health')).json()).pool.retained === 0, (retention + 5) * 1000)
         previousVm = undefined
         evictedVm = vmId
@@ -373,9 +293,8 @@ async function main() {
     }
 
     assert.ok(credentials >= samples.length, 'Each turn renews account access')
-    // Admission/expiry/deletion require the current paused disk, including
-    // benchmarks where periodic completed-turn publication is disabled.
-    await publishForEviction()
+    // Local backing survives RAM eviction, expiry and explicit retirement.
+    await inspectLocalDisk(api, runId)
     let activeAdmissionPassed = false
     if (retention > 0 && process.env.CAIRN_RETENTION_ADMISSION === 'true') {
       const active = []
@@ -396,7 +315,7 @@ async function main() {
           command: ['/bin/sh', '-c', 'echo ACTIVE_TASK_OK; sleep 60'],
         }
         await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
-        await publishForEviction()
+        await inspectLocalDisk(api, runId)
         await api(`/runs/${id}`, 'POST')
         active.push({ id, run: taskRun })
         await until(() => docker('exec', name, 'node', '-e', `console.log(require('node:fs').existsSync('/runner-state/${id}.vm.json') ? 'yes' : 'no')`) === 'yes')
@@ -417,6 +336,8 @@ async function main() {
     await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true })
     await until(async () => (await (await api('/health')).json()).pool.occupied === 0)
     let identifiedRetirementPassed = false
+    let ordinaryRetirementPassed = false
+    let staleReceiptProtectedReplacement = false
     if (retention > 0) {
       assert.ok(lastPlan, 'the retirement qualification requires a real Codex plan')
       const attempt = randomUUID()
@@ -435,9 +356,9 @@ async function main() {
       await api(`/runs/${attempt}`, 'POST')
       assert.equal((await (await api(`/runs/${attempt}/wait`, 'POST')).json()).StatusCode, 0)
       await until(async () => (await (await api('/health')).json()).pool.retained_runs.includes(runId))
-      const journal = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
-      assert.ok(journal.dirtyBytes > 0, 'a retained Codex guest has unpublished writes')
-      await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true }, 425)
+      await inspectLocalDisk(api, runId)
+      const retainedVm = JSON.parse(docker('exec', name, 'cat', `/runner-state/${attempt}.vm.json`)).vmId
+      assert.equal(state(retainedVm), 'Paused')
       const retirementId = randomUUID()
       const retired = await (await api(`/disks/${runId}/delete`, 'POST', { retirementId })).json()
       assert.equal(retired.deleted, true)
@@ -459,6 +380,37 @@ async function main() {
         receipt: true,
       })
       identifiedRetirementPassed = true
+
+      const ordinary = randomUUID()
+      const replacement = {
+        ...plan,
+        id: ordinary,
+        chat: {
+          ...plan.chat,
+          attemptId: ordinary,
+          execution: { ...plan.chat.execution, messageId: randomUUID() },
+        },
+      }
+      await writeFile(path.join(root, 'data/runner-plans', `${ordinary}.json`), JSON.stringify(replacement))
+      await api(`/runs/${ordinary}`, 'POST')
+      assert.equal((await (await api(`/runs/${ordinary}/wait`, 'POST')).json()).StatusCode, 0)
+      await until(async () => (await (await api('/health')).json()).pool.retained_runs.includes(runId))
+      const replacementVm = JSON.parse(docker('exec', name, 'cat', `/runner-state/${ordinary}.vm.json`)).vmId
+      const repeated = await (await api(`/disks/${runId}/delete`, 'POST', { retirementId })).json()
+      assert.equal(repeated.retirementId, retirementId)
+      assert.equal(state(replacementVm), 'Paused', 'An older retirement cannot evict its replacement')
+      assert.ok((await (await api('/health')).json()).pool.retained_runs.includes(runId))
+      staleReceiptProtectedReplacement = true
+      const deleted = await (await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true })).json()
+      assert.equal(deleted.deleted, true, 'Explicit deletion needs no remote acknowledgement')
+      await until(async () => (await (await api('/health')).json()).pool.occupied === 0)
+      const ordinaryFiles = JSON.parse(docker('exec', name, 'node', '-e', `
+        const fs=require('node:fs');console.log(JSON.stringify([
+          '/runner-state/${ordinary}.log','/runner-state/${ordinary}.run','/data/runner-plans/${ordinary}.json'
+        ].map(path=>fs.existsSync(path))));
+      `))
+      assert.deepEqual(ordinaryFiles, [false, false, false])
+      ordinaryRetirementPassed = true
     }
 
     const runnerLog = stripVTControlCharacters(runnerLogs())
@@ -477,11 +429,9 @@ async function main() {
       image,
       cpuQuota,
       retentionSeconds: retention,
-      scope: 'Local real Firecracker/native Codex, synthetic account/model/MCP and loopback block origin. Model response deliberately delayed 1.5 s; preModel excludes that delay. No manager, production or WAN.',
+      scope: 'Local real Firecracker/native Codex, synthetic account/model/MCP and local working disks. Model response deliberately delayed 1.5 s; preModel excludes that delay. No manager, production or WAN.',
       durationMs: Date.now() - benchmarkStarted,
-      publications,
-      delayedAcknowledgements,
-      protectedEvictions,
+      localConsolidations,
       samples,
       reclamation,
       crashRecoveryPassed,
@@ -490,9 +440,11 @@ async function main() {
       renewedAccountLeases: credentials,
       mcpLeasesRenewedAndRemoved: true,
       contextPreserved: true,
-      pausedCapturePassed: retention > 0,
+      pausedLocalMaintenancePassed: retention > 0,
       deletionReaped: true,
       identifiedRetirementPassed,
+      ordinaryRetirementPassed,
+      staleReceiptProtectedReplacement,
     }
     if (process.env.CAIRN_RETENTION_EVIDENCE)
       await writeFile(process.env.CAIRN_RETENTION_EVIDENCE, JSON.stringify(evidence, null, 2))

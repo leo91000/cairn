@@ -13,7 +13,7 @@ import {
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
-import { prepareStorageOrigin } from './runner-storage-smoke.mjs'
+import { prepareLocalStorage } from './runner-storage-smoke.mjs'
 import { ublkDeviceArguments } from './ublk-devices.mjs'
 
 async function main() {
@@ -176,12 +176,11 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
     docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', ...ublkDeviceArguments(), '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${envelopeMiB}m`, '--cpus', '3', '-e', 'CONCURRENCY=4', '-e', 'CAIRN_READY_VM_POOL=false', '-e', 'RUST_LOG=warn,cairn_performance=info', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     url = `http://${docker('port', name, '4311/tcp')}`
     await until(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false))
-    const fixture = await prepareStorageOrigin({
+    const fixture = await prepareLocalStorage({
       root,
       docker,
       name,
       api,
-      maxDirtySeconds: 3600,
     })
     const owner = await makeEntry(fixture.storage, 'owner')
     const victim = await makeEntry(fixture.storage, 'victim')

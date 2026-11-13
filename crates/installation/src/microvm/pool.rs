@@ -1421,11 +1421,18 @@ mod tests {
         assert!(pool.slots.lock().await.retained.is_empty());
         for identified in [false, true] {
             let reservation = pool.reserve(&cold_plan(&run)).await.unwrap();
-            pool.slots.lock().await.retained.push_back(retained::Retained {
-                run: run.clone(), reservation, _volume: Some(volume.clone()),
-                budget: budget.clone(), key: serde_json::Value::Null,
-                expires: Instant::now() + Duration::from_secs(60),
-            });
+            pool.slots
+                .lock()
+                .await
+                .retained
+                .push_back(retained::Retained {
+                    run: run.clone(),
+                    reservation,
+                    _volume: Some(volume.clone()),
+                    budget: budget.clone(),
+                    key: serde_json::Value::Null,
+                    expires: Instant::now() + Duration::from_secs(60),
+                });
             if identified {
                 pool.retire_conversation(&run).await.unwrap();
             } else {

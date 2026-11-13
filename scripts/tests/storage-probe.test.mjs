@@ -130,3 +130,14 @@ it('preserves hard filesystem failures in the benchmark', async () => {
   expect(guest.errors()).toContain('EISDIR')
   expect(guest.output()).not.toContain('storage.metrics')
 })
+
+it('finishes successfully only after the explicit completion message', async () => {
+  const files = await fixture()
+  const guest = probe(files)
+  await guest.waitFor('storage.ready')
+  expect(guest.child.exitCode).toBeNull()
+  await writeFile(files.inbox, '[{"text":"finish"}]')
+  expect((await guest.exited)[0], guest.errors()).toBe(0)
+  expect(guest.output()).toContain('storage.finished')
+  expect(guest.output()).not.toContain('storage.metrics')
+})
