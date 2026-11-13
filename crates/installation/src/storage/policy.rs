@@ -6,26 +6,29 @@ use std::{path::Path, sync::Arc};
 pub use cairn_contracts::NodeStoragePolicy as Policy;
 
 pub fn for_node(value: &serde_json::Value) -> Result<Policy> {
-    let mut value = if value.is_object() {
+    let value = if value.is_object() {
         value.clone()
     } else {
         serde_json::Value::Object(serde_json::Map::new())
     };
-    if let Some(policy) = value.as_object_mut() {
-        for removed in ["cacheMiB", "backupSeconds", "maxDirtySeconds"] {
-            policy.remove(removed);
-        }
-    }
-    let policy: Policy =
-        serde_json::from_value(value).map_err(|_| Error::bad("Invalid node storage limits."))?;
+    let policy = decode_policy(value).map_err(|_| Error::bad("Invalid node storage limits."))?;
     policy.validate().map_err(Error::bad)?;
     Ok(policy)
 }
 
 /// Existing controller files and retained disk contexts can still carry the
 /// retired S3 policy fields. Public mutation inputs remain strict contracts.
-pub(crate) fn from_persisted(bytes: &[u8]) -> Result<Policy> {
-    for_node(&serde_json::from_slice(bytes)?)
+pub(crate) fn from_persisted(bytes: &[u8]) -> serde_json::Result<Policy> {
+    decode_policy(serde_json::from_slice(bytes)?)
+}
+
+fn decode_policy(mut value: serde_json::Value) -> serde_json::Result<Policy> {
+    if let Some(policy) = value.as_object_mut() {
+        for removed in ["cacheMiB", "backupSeconds", "maxDirtySeconds"] {
+            policy.remove(removed);
+        }
+    }
+    serde_json::from_value(value)
 }
 
 /// Private controller packet. Only committed policy changes advance this generation.
@@ -145,6 +148,15 @@ pub fn space(path: &Path) -> std::io::Result<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_decoding_keeps_validation_at_the_existing_callers() {
+        let bytes = br#"{"cacheMiB":20480,"reserveMiB":0}"#;
+        let policy = from_persisted(bytes).unwrap();
+        assert_eq!(policy.reserve_mi_b, 0);
+        assert!(policy.validate().is_err());
+        assert!(for_node(&serde_json::from_slice(bytes).unwrap()).is_err());
+    }
 
     #[test]
     fn persisted_s3_policy_fields_do_not_hide_the_local_reserve() {
