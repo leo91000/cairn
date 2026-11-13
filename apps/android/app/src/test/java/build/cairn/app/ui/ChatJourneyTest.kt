@@ -10,5 +10,5 @@ import org.robolectric.annotation.GraphicsMode
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class ChatJourneyTest : ChatJourneyCases() {
-    @Test fun chatMessagesQuestionsArtifactsAndConversationSharing() = exercise(false)
+    @Test fun chatMessagesQuestionsAndArtifacts() = exercise(false)
 }

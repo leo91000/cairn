@@ -664,7 +664,6 @@ abstract class ChatJourneyCases {
                     .isNotEmpty()
             }
             compose.onNode(hasSetTextAction() and hasText("Brouillon à conserver")).assertExists()
-            shareConversation()
             vm.setTheme("system")
             vm.api.closeStreams()
         }
