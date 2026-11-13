@@ -120,13 +120,14 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                     }
                     offset += length as u64;
                 }
-                disk.consolidate()?;
                 let mut status = disk.accounting()?;
                 status["completedGeneration"] = disk
                     .completed()?
                     .map_or(Value::Null, |value| value["generation"].clone());
                 Ok(json!({
-                    "generation": generation, "logicalBytes": disk.size(), "status": status,
+                    "generation": generation,
+                    "logicalBytes": disk.size(),
+                    "status": status,
                     "allocatedBytes": cairn_installation::microvm::budget::allocated(&owned)?
                 }))
             })
@@ -327,7 +328,9 @@ mod tests {
             // interval. Keep the captured generation through that same window.
             std::thread::sleep(std::time::Duration::from_secs(7));
             if !disk.has_sealed(generation)? {
-                return Err(Error::bad("Inspection generation was retired concurrently."));
+                return Err(Error::bad(
+                    "Inspection generation was retired concurrently.",
+                ));
             }
             let mut bytes = vec![0; 4];
             disk.read_at(0, &mut bytes)?;

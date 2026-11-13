@@ -661,6 +661,7 @@ describe('parallel CI coverage', () => {
     const containers = job.steps.findIndex(step => step.run?.includes('python3 tests/installation_update_containers.py'))
     expect(web).toBeGreaterThan(-1)
     expect(containers).toBeGreaterThan(web)
+    expect(job.steps[containers].run).toContain('pnpm test:backend --workspace --example native_storage_qualifier stopped_inspection_keeps_its_generation_across_a_monitor_period')
   })
 
   it('runs every network topology exactly once on independent hosts', () => {

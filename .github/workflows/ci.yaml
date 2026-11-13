@@ -527,6 +527,7 @@ jobs:
             pnpm test:backend --workspace --lib "$selected"
           done
           pnpm test:backend -p cairn-installation --test worker
+          pnpm test:backend --workspace --example native_storage_qualifier stopped_inspection_keeps_its_generation_across_a_monitor_period
       - uses: ./.github/actions/observe-rust-build
         if: always()
         with:
