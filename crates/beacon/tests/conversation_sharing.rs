@@ -245,6 +245,10 @@ async fn deleting_a_conversation_revokes_its_link_and_files() {
 #[tokio::test]
 async fn public_mcp_sharing_requires_manage_scope_and_matches_the_apps() {
     let (relay, chat, _, _) = fixture().await;
+    let worker = std::env::var_os("CAIRN_TEST_CODE_WORKER")
+        .map(std::path::PathBuf::from)
+        .expect("Use the credential-isolating backend launcher");
+    relay.installation.code_mode.use_worker(worker);
     let installation = relay.session["installations"][0]["id"].as_str().unwrap();
     for scope in ["read", "manage"] {
         let grant = relay
@@ -272,6 +276,13 @@ async fn public_mcp_sharing_requires_manage_scope_and_matches_the_apps() {
         let response: Value = response.json().await.unwrap();
         if scope == "read" {
             assert_eq!(response["result"]["isError"], true, "{response}");
+            assert!(
+                response["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("manage scope"),
+                "{response}"
+            );
             assert!(
                 change(&relay, &chat, reqwest::Method::GET, json!({}))
                     .await
@@ -302,5 +313,96 @@ async fn public_mcp_sharing_requires_manage_scope_and_matches_the_apps() {
             StatusCode::OK
         );
     }
+    relay.stop.cancel();
+}
+
+#[tokio::test]
+async fn oversized_replies_remain_readable_in_bounded_utf8_sections() {
+    let (relay, chat, run, _) = fixture().await;
+    let text = format!("LONG_REPLY_START{}LONG_REPLY_END", "λ<&".repeat(2_200_000));
+    let payload = json!({"type": "item.completed", "item": {"id": "long-reply", "type": "agent_message", "text": &text}});
+    relay
+        .installation
+        .store
+        .event(
+            &run,
+            &cairn_contracts::EventKind::ItemCompleted,
+            &text,
+            Some(payload),
+        )
+        .await
+        .unwrap();
+    let response = change(&relay, &chat, reqwest::Method::PUT, json!({})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let share: Value = response.json().await.unwrap();
+    let url = share["publicUrl"].as_str().unwrap();
+    let response = relay
+        .app
+        .client
+        .get(url)
+        .header("accept-encoding", "identity")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response.text().await.unwrap();
+    assert!(html.len() < 1_000_000);
+    assert!(html.contains("LONG_REPLY_START"));
+    assert!(!html.contains("LONG_REPLY_END"));
+    assert!(html.contains("λ&lt;&amp;"));
+    let query = html
+        .split("href=\"?message=")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .replace("&amp;", "&");
+    let next = format!("{url}?message={query}");
+    let response = relay
+        .app
+        .client
+        .get(&next)
+        .header("accept-encoding", "identity")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response.text().await.unwrap();
+    assert!(html.len() < 1_000_000);
+    assert!(html.contains("Continue message"));
+    let mut part = reqwest::Url::parse(&next).unwrap();
+    let message = part
+        .query_pairs()
+        .find(|(key, _)| key == "message")
+        .unwrap()
+        .1
+        .into_owned();
+    part.set_query(None);
+    part.query_pairs_mut()
+        .append_pair("message", &message)
+        .append_pair(
+            "offset",
+            &text.floor_char_boundary(text.len() - 100).to_string(),
+        );
+    let response = relay
+        .app
+        .client
+        .get(part.clone())
+        .header("accept-encoding", "identity")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("LONG_REPLY_END"));
+    part.set_query(None);
+    // LONG_REPLY_START is 16 ASCII bytes, followed by a two-byte lambda.
+    part.query_pairs_mut()
+        .append_pair("message", &message)
+        .append_pair("offset", "17");
+    assert_eq!(
+        relay.app.client.get(part).send().await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
     relay.stop.cancel();
 }

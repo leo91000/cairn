@@ -113,6 +113,44 @@ pub(crate) fn public_read(path: &str, method: &str, token: &str) -> bool {
         ["", "api", "shared-conversations", key, "artifacts", artifact] if *key == token && uuid(artifact).is_ok())
 }
 
+const MESSAGE_BYTES: usize = 64 * 1024;
+
+fn message_text(entry: &cairn_contracts::TimelineEntry) -> Option<(&'static str, &str)> {
+    match &entry.content {
+        TimelineContent::UserMessage { text, .. } => Some(("User", text)),
+        TimelineContent::AgentMessage {
+            text, echo: false, ..
+        } => Some(("Agent", text)),
+        _ => None,
+    }
+}
+
+fn render_message(
+    html: &mut String,
+    entry: &cairn_contracts::TimelineEntry,
+    offset: usize,
+) -> Result<()> {
+    let Some((label, text)) = message_text(entry) else {
+        return Ok(());
+    };
+    if offset > text.len() || !text.is_char_boundary(offset) {
+        return Err(Error::bad("Invalid message offset."));
+    }
+    let end = text.floor_char_boundary(offset.saturating_add(MESSAGE_BYTES).min(text.len()));
+    html.push_str(&format!(
+        "<article><strong>{label}</strong><pre>{}</pre>",
+        escape(&text[offset..end])
+    ));
+    if end < text.len() {
+        let entry_id: String = url::form_urlencoded::byte_serialize(entry.id.as_bytes()).collect();
+        html.push_str(&format!(
+            "<a href=\"?message={entry_id}&amp;offset={end}\">Continue message</a>"
+        ));
+    }
+    html.push_str("</article>");
+    Ok(())
+}
+
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -141,6 +179,13 @@ pub(crate) async fn http(
         .transpose()
         .map_err(|_| Error::bad("Invalid history cursor."))?
         .unwrap_or(i64::MAX);
+    let message = query.get("message").cloned();
+    let offset = query
+        .get("offset")
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .map_err(|_| Error::bad("Invalid message offset."))?
+        .unwrap_or(0);
     let (html, file) = s.store.read(move |db| {
         let tx = rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Deferred)?;
         let db = Db(&tx);
@@ -153,17 +198,17 @@ pub(crate) async fn http(
             return Ok((String::new(), Some(required(db.artifact(run, &artifact)?, MISSING)?)));
         }
         let mut html = format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex,nofollow,noarchive\"><meta name=\"referrer\" content=\"no-referrer\"><title>{}</title><style>body{{font:16px system-ui;margin:0;background:#f6f7f8;color:#20252b}}main{{max-width:850px;margin:auto;padding:24px}}article,aside{{background:white;border:1px solid #ddd;border-radius:12px;padding:20px;margin:16px 0}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}}a{{color:#276258}}small{{color:#58636e}}li{{margin:12px 0}}</style></head><body><main><small>Cairn · Shared conversation · Read only</small><h1>{}</h1><p>This link expires {} UTC. Messages and published files may update until then.</p>", escape(&conversation.title), escape(&conversation.title), chrono::DateTime::from_timestamp_millis(share.expires_at.unwrap_or_default()).map(|time| time.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default());
-        let (cards, more) = crate::timeline::page(&db, run, before, 100)?;
-        if more && let Some(first) = cards.first() {
-            html.push_str(&format!("<a href=\"?before={}\">Earlier messages</a>", first.position));
-        }
-        for card in cards {
-            let (label, text) = match card.content {
-                TimelineContent::UserMessage { text, .. } => ("User", text),
-                TimelineContent::AgentMessage { text, echo: false, .. } => ("Agent", text),
-                _ => continue,
-            };
-            html.push_str(&format!("<article><strong>{label}</strong><pre>{}</pre></article>", escape(&text)));
+        if let Some(message) = message {
+            let entry = required(crate::timeline::entry(&db, run, &message)?, MISSING)?;
+            if message_text(&entry).is_none() { return Err(Error::not_found(MISSING)); }
+            html.push_str("<nav><a href=\"?\">Back to conversation</a></nav>");
+            render_message(&mut html, &entry, offset)?;
+        } else {
+            let (cards, more) = crate::timeline::page(&db, run, before, 100)?;
+            if more && let Some(first) = cards.first() {
+                html.push_str(&format!("<a href=\"?before={}\">Earlier messages</a>", first.position));
+            }
+            for card in cards { render_message(&mut html, &card, 0)?; }
         }
         // Include every published version, regardless of its individual visibility.
         html.push_str("<aside><h2>Published files</h2><ul>");

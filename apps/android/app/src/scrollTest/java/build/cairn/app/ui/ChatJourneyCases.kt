@@ -19,7 +19,6 @@ import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
 import org.junit.Assert.*
 import org.junit.Rule
-import org.junit.Test
 
 abstract class ChatJourneyCases {
     @get:Rule val compose = createComposeRule()
@@ -39,11 +38,34 @@ abstract class ChatJourneyCases {
         androidx.work.testing.WorkManagerTestInitHelper.closeWorkDatabase()
     }
 
-    @Test
-    fun chatMessagesQuestionsArtifactsAndConversationSharing() {
+    protected fun exercise(sharingOnly: Boolean) {
         MockWebServer().use { server ->
             val chatId = "00000000-0000-4000-8000-000000000088"
             val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
+            fun shareConversation() {
+                compose.onNodeWithContentDescription("Options de la conversation").performClick()
+                compose.onNodeWithText("Partager la conversation").performClick()
+                waitText("Créer le lien")
+                compose.onNode(hasSetTextAction() and hasText("24")).assertExists()
+                compose.onNode(hasSetTextAction() and hasText("24")).performTextReplacement("72")
+                compose.onNodeWithText("Créer le lien").performScrollTo().performClick()
+                waitText("https://example.test/conversations/fixture-link")
+                val shareBody =
+                    calls.last { it.first == "PUT" && it.second.endsWith("/share") }.third
+                assertEquals(
+                    72,
+                    wireJson
+                        .parseToJsonElement(shareBody)
+                        .jsonObject["expiresInHours"]
+                        ?.jsonPrimitive
+                        ?.int,
+                )
+                screenshot("conversation-sharing", dialog = true)
+                compose.onNodeWithText("Révoquer le lien").performScrollTo().performClick()
+                waitText("Créer le lien")
+                assertTrue(calls.any { it.first == "DELETE" && it.second.endsWith("/share") })
+                compose.onNodeWithText("Fermer").performClick()
+            }
             var shared = false
             var answered = false
             var edited = false
@@ -440,6 +462,11 @@ abstract class ChatJourneyCases {
             compose.onNodeWithText("Terminé").performClick()
             compose.onNodeWithContentDescription("Envoyer").performClick()
             waitText("1 question · Répondre")
+            if (sharingOnly) {
+                shareConversation()
+                vm.api.closeStreams()
+                return@use
+            }
             assertTrue(
                 calls.any {
                     it.first == "POST" && it.second == "/api/installations/fixture/api/chats"
@@ -637,27 +664,7 @@ abstract class ChatJourneyCases {
                     .isNotEmpty()
             }
             compose.onNode(hasSetTextAction() and hasText("Brouillon à conserver")).assertExists()
-            compose.onNodeWithContentDescription("Options de la conversation").performClick()
-            compose.onNodeWithText("Partager la conversation").performClick()
-            waitText("Créer le lien")
-            compose.onNode(hasSetTextAction() and hasText("24")).assertExists()
-            compose.onNode(hasSetTextAction() and hasText("24")).performTextReplacement("72")
-            compose.onNodeWithText("Créer le lien").performScrollTo().performClick()
-            waitText("https://example.test/conversations/fixture-link")
-            val shareBody = calls.last { it.first == "PUT" && it.second.endsWith("/share") }.third
-            assertEquals(
-                72,
-                wireJson
-                    .parseToJsonElement(shareBody)
-                    .jsonObject["expiresInHours"]
-                    ?.jsonPrimitive
-                    ?.int,
-            )
-            screenshot("conversation-sharing", dialog = true)
-            compose.onNodeWithText("Révoquer le lien").performScrollTo().performClick()
-            waitText("Créer le lien")
-            assertTrue(calls.any { it.first == "DELETE" && it.second.endsWith("/share") })
-            compose.onNodeWithText("Fermer").performClick()
+            shareConversation()
             vm.setTheme("system")
             vm.api.closeStreams()
         }
