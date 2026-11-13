@@ -8,6 +8,7 @@ import {
   expect,
   expectSingleScroll,
   initializeRepository,
+  openChatDetails,
   test,
   workspacePath,
 } from './fixtures'
@@ -287,4 +288,39 @@ test('structured documents preview as tables, formatted data, inert pages, and v
   await expect.poll(() => animation.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(64)
   const firstFrame = await animation.screenshot()
   await expect.poll(async () => !(await animation.screenshot()).equals(firstFrame)).toBe(true)
+})
+
+test('conversation sharing defaults to one day, includes every private revision and revokes anonymous access', async ({ page, browser, workspace }) => {
+  test.setTimeout(60000)
+  const { chat, publish } = await deliverableRun(workspace)
+  await publish('Report draft', 'draft.txt', 'file', new TextEncoder().encode('First draft'), 'report', 1)
+  await publish('Report final', 'final.txt', 'file', new TextEncoder().encode('Final report'), 'report', 2)
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  const details = await openChatDetails(page)
+  await details.action('Share conversation').click()
+  const dialog = page.getByRole('dialog', { name: 'Share conversation', exact: true })
+  await expect(dialog.getByRole('spinbutton')).toHaveValue('24')
+  await dialog.getByRole('button', { name: 'Create link', exact: true }).click()
+  const link = dialog.getByRole('textbox', { name: 'Conversation public link' })
+  await expect(link).toBeVisible()
+  const url = await link.inputValue()
+  const anonymous = await browser.newContext()
+  try {
+    const recipient = await anonymous.newPage()
+    const response = await recipient.goto(url)
+    expect(response!.headers()['x-robots-tag']).toContain('noindex')
+    await expect(recipient.getByRole('link', { name: 'Report draft · v1' })).toBeVisible()
+    await expect(recipient.getByRole('link', { name: 'Report final · v2' })).toBeVisible()
+    const file = recipient.getByRole('link', { name: 'Report final · v2' })
+    const fileUrl = (await file.getAttribute('href'))!
+    expect(await (await anonymous.request.get(fileUrl)).text()).toBe('Final report')
+    await recipient.screenshot({ path: test.info().outputPath('shared-conversation.png') })
+    await dialog.getByRole('button', { name: 'Revoke link', exact: true }).click()
+    await expect(link).toBeHidden()
+    expect((await anonymous.request.get(url)).status()).toBe(404)
+    expect((await anonymous.request.get(fileUrl)).status()).toBe(404)
+  }
+  finally { await anonymous.close() }
 })

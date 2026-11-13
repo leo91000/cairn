@@ -1,5 +1,26 @@
 [
   {
+    "input": "ChatInput",
+    "method": "GET",
+    "name": "getChatShare",
+    "output": "ChatShare",
+    "path": "/chats/{chatId}/share"
+  },
+  {
+    "input": "SetChatShareInput",
+    "method": "PUT",
+    "name": "setChatShare",
+    "output": "ChatShare",
+    "path": "/chats/{chatId}/share"
+  },
+  {
+    "input": "ChatInput",
+    "method": "DELETE",
+    "name": "revokeChatShare",
+    "output": "ChatShare",
+    "path": "/chats/{chatId}/share"
+  },
+  {
     "bodyField": "answer",
     "input": "AnswerChatQuestionInput",
     "method": "POST",

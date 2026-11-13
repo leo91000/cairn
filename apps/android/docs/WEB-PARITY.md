@@ -820,3 +820,13 @@ reloaded history use the same order; resolved waits remain before resumed replie
 The wait commands, cancellation and public MCP/agent tool contracts are unchanged.
 `chat-wait.test.ts`, `ChatWaitTest`, the scheduled-wait browser journeys and
 `BackgroundWaitCases` cover this ordering on both platforms.
+
+## Expiring conversation links
+
+Owners can create, inspect, replace and revoke an unlisted live conversation link from
+conversation options on web and Android. Expiration is selectable from 1 to 720 hours,
+24 hours by default. Android uses the native share sheet; web copies the link.
+Recipients need no account. The public read-only page includes messages and every
+published artifact version, and disables indexing and caching. Expiration, revocation
+and conversation deletion deny both history and files. The same management operations
+are available through public MCP and cairn_installation with management authority.

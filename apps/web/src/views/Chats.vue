@@ -76,6 +76,7 @@ import ComposerAttachments from '../components/ComposerAttachments.vue'
 import ConnectionSheet from '../components/ConnectionSheet.vue'
 import ConversationDeletion from '../components/ConversationDeletion.vue'
 import ConversationRename from '../components/ConversationRename.vue'
+import ConversationSharing from '../components/ConversationSharing.vue'
 import ConversationSummary from '../components/ConversationSummary.vue'
 import Icon from '../components/Icon.vue'
 import MenuButton from '../components/MenuButton.vue'
@@ -105,6 +106,7 @@ import {
   Hourglass,
   KeyRound,
   Layers,
+  Link,
   LoaderCircle,
   Lock,
   Maximize2,
@@ -304,6 +306,7 @@ const history = ref(false)
 const historyView = ref<'active' | 'trash'>('active')
 const deletingConversation = ref<ChatDetail>()
 const deletionOpener = ref<HTMLElement>()
+const sharing = ref(false)
 const renaming = ref(false)
 const renameOpener = ref<HTMLElement>()
 const detailsOpen = ref(false)
@@ -1035,6 +1038,7 @@ function closeDeletion() {
 }
 
 function closeRename() {
+  sharing.value = false
   renaming.value = false
   void refocus(renameOpener.value)
 }
@@ -1072,6 +1076,16 @@ interface ConversationAction {
 const conversationActions = computed(() => {
   const chat = detail.value
   const actions: ConversationAction[] = []
+  if (chat && !inactive.value && state.installationRole === 'owner') {
+    actions.push({
+      id: 'share',
+      label: 'Share conversation',
+      icon: Link,
+      dialog: true,
+      run: () => { sharing.value = true },
+    })
+  }
+
   if (chat && !inactive.value) {
     actions.push({
       id: 'rename',
@@ -1327,6 +1341,7 @@ async function implementPlan(sourceId: string) {
 watch(chatId, (id) => {
   openedSubagent.value = null
   history.value = false
+  sharing.value = false
   renaming.value = false
   // Coming back to a conversation opens it again, so its current status is not news; the previous
   // conversation's status no longer applies.
@@ -1459,6 +1474,12 @@ function key(event: KeyboardEvent) {
     :chat="deletingConversation"
     @close="closeDeletion"
     @deleted="() => { deletingConversation = undefined; newConversation() }"
+  />
+  <ConversationSharing
+    v-if="sharing && detail"
+    :key="detail.id"
+    :chat-id="detail.id"
+    @close="sharing = false"
   />
   <ConversationRename
     v-if="renaming && detail"

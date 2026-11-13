@@ -763,6 +763,10 @@ pub(super) async fn public_security(request: Request, next: axum::middleware::Ne
         .path()
         .starts_with("/api/public/installations/");
     let mut response = next.run(request).await;
+    let conversation_page = response
+        .extensions()
+        .get::<relay::PublicConversationPage>()
+        .is_some();
     let beacon_offline_page = response
         .extensions()
         .get::<relay::PublicOfflinePage>()
@@ -790,7 +794,19 @@ pub(super) async fn public_security(request: Request, next: axum::middleware::Ne
                 media_type.trim().eq_ignore_ascii_case("text/html")
                     || media_type.trim().eq_ignore_ascii_case("image/svg+xml")
             });
-        if active_content && !beacon_offline_page {
+        if conversation_page {
+            headers.insert(
+                "x-robots-tag",
+                HeaderValue::from_static("noindex, nofollow, noarchive"),
+            );
+            headers.insert(
+                "content-security-policy",
+                HeaderValue::from_static(
+                    "default-src 'none'; style-src 'unsafe-inline'; sandbox allow-downloads",
+                ),
+            );
+        }
+        if active_content && !beacon_offline_page && !conversation_page {
             headers.insert(
                 "content-disposition",
                 HeaderValue::from_static("attachment"),
