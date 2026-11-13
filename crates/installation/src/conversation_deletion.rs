@@ -713,6 +713,119 @@ mod retirement_tests {
     }
 
     #[tokio::test]
+    async fn expiration_retires_local_metadata_without_changing_remote_deletions() {
+        fn remote_metadata(db: &mut Db<'_>) -> Result<Value> {
+            let objects = db.json_rows(
+                "SELECT json_object('id',id,'destination',destination,'hash',hash,'size',size,
+                 'location',location,'state',state,'unusedAt',unused_at,'retryAt',retry_at)
+                 FROM shared_objects ORDER BY id",
+                [],
+            )?;
+            let deletions = db.json_rows(
+                "SELECT json_object('id',id,'location',location,'key',key,'prefix',prefix,
+                 'retryAt',retry_at) FROM remote_deletions ORDER BY id",
+                [],
+            )?;
+            Ok(json!({ "objects": objects, "deletions": deletions }))
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+        let retired_run = crate::config::id();
+        let retained_run = crate::config::id();
+        let (retired, retained) = (retired_run.clone(), retained_run.clone());
+        service.store.transaction(move |db| {
+            db.0.execute_batch(
+                "INSERT INTO shared_objects VALUES('exclusive','legacy','exclusive',4096,'{}','ready',NULL,0);
+                 INSERT INTO shared_objects VALUES('shared','legacy','shared',4096,'{}','ready',NULL,0);
+                 INSERT INTO remote_deletions VALUES('existing','{}','existing-key',1,7);",
+            )?;
+            for run in [&retired, &retained] {
+                db.put("node-backups", &json!({ "id": run, "runId": run, "destination": "s3" }))?;
+                db.put("node-disk-grants", &json!({ "id": run, "runId": run }))?;
+                db.0.execute("INSERT INTO shared_publications VALUES(?1,?1)", [run])?;
+                db.0.execute("INSERT INTO shared_references VALUES(?1,'shared')", [run])?;
+                db.0.execute("INSERT INTO direct_journal_acknowledgements VALUES(?1,?1,'legacy-node',0)", [run])?;
+                db.0.execute("INSERT INTO direct_read_authorizations VALUES(?1,'shared','shared',?1)", [run])?;
+            }
+            db.0.execute("INSERT INTO shared_references VALUES(?1,'exclusive')", [&retired])?;
+            Ok(())
+        }).await.unwrap();
+        let remote_before = service.store.read(remote_metadata).await.unwrap();
+        let staging = service.config.data_dir.join("node-backups");
+        for run in [&retired_run, &retained_run] {
+            let directory = staging.join(run);
+            tokio::fs::create_dir_all(&directory).await.unwrap();
+            tokio::fs::write(directory.join("metadata"), b"legacy staging")
+                .await
+                .unwrap();
+        }
+        let operator_config = service.config.data_dir.join("storage-s3.json");
+        let operator_bytes = br#"{"bucket":"operator-owned"}"#;
+        tokio::fs::write(&operator_config, operator_bytes)
+            .await
+            .unwrap();
+
+        retire_disk_metadata(&service, &retired_run).await.unwrap();
+
+        assert!(!staging.join(&retired_run).exists());
+        assert_eq!(
+            tokio::fs::read(staging.join(&retained_run).join("metadata"))
+                .await
+                .unwrap(),
+            b"legacy staging"
+        );
+        assert_eq!(
+            tokio::fs::read(operator_config).await.unwrap(),
+            operator_bytes
+        );
+        for kind in ["node-backups", "node-disk-grants"] {
+            assert!(
+                service
+                    .store
+                    .get(kind, &retired_run)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                service
+                    .store
+                    .get(kind, &retained_run)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        service
+            .store
+            .read(move |db| {
+                for (table, column) in [
+                    ("shared_publications", "run_id"),
+                    ("shared_references", "publication"),
+                    ("direct_journal_acknowledgements", "run_id"),
+                    ("direct_read_authorizations", "run_id"),
+                ] {
+                    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column}=?1");
+                    for (run, expected) in [(&retired_run, 0), (&retained_run, 1)] {
+                        let remaining: i64 = db.0.query_row(&sql, [run], |row| row.get(0))?;
+                        assert_eq!(remaining, expected, "{table}: {run}");
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            service.store.read(remote_metadata).await.unwrap(),
+            remote_before
+        );
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn retired_disk_requires_the_exact_durable_acknowledgement() {
         let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let count = Arc::new(AtomicUsize::new(0));
