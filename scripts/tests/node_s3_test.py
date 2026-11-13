@@ -155,7 +155,7 @@ def main():
         # The old recovery/movement/collection scenarios no longer describe
         # production. Exercise local storage, retirement and launch without S3.
         client.put_object(Bucket='cairn-node-test', Key='qualification-preserved-object', Body=b'keep legacy disk objects')
-        for selected in ['storage::', 'storage_migration::', 'microvm::pool::', 'runner::']:
+        for selected in ['storage::', 'storage_migration::', 'native::block::', 'microvm::pool::', 'runner::']:
             run_qualification(args.repo, env, ['--workspace', '--lib', selected], selected)
         run_qualification(args.repo, env, ['-p', 'cairn-installation', '--test', 'worker'], 'worker')
         assert client.list_objects_v2(Bucket='cairn-node-test').get('KeyCount', 0) == 1

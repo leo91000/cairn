@@ -993,12 +993,9 @@ impl Disk for Volume {
 }
 
 impl Volume {
-    /// The VM's issued disk allowance covers its complete local backing. Native
-    /// supervision also includes its separate managed temporary filesystem.
+    /// Bound complete retained backing. Native supervision subtracts its managed
+    /// /tmp from the issued allowance; zero remaining bytes blocks new writes.
     pub(crate) fn limit_backing(&self, bytes: u64) -> Result<()> {
-        if bytes == 0 {
-            return Err(Error::bad("Disk allowance must be positive."));
-        }
         self.task_limit.store(bytes, Ordering::Release);
         *self.task_usage.lock().map_err(Error::internal)? = None;
         Ok(())
@@ -2010,6 +2007,31 @@ mod tests {
                 .unwrap()
                 > 0
         );
+    }
+
+    #[tokio::test]
+    async fn exhausted_backing_allowance_blocks_writes_until_capacity_returns() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        volume.limit_backing(0).unwrap();
+        let writing = volume.clone();
+        let mut writer = tokio::task::spawn_blocking(move || writing.write_at(0, b"retained"));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let blocked = !writer.is_finished();
+        volume.limit_backing(64 * 1024 * 1024).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), &mut writer).await;
+        if result.is_err() {
+            volume.stop.cancel();
+            let _ = writer.await;
+        }
+        assert!(
+            blocked,
+            "managed /tmp can consume all remaining task headroom"
+        );
+        result.unwrap().unwrap().unwrap();
+        let mut bytes = [0; 8];
+        volume.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"retained");
     }
 
     #[tokio::test]

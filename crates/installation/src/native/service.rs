@@ -1534,6 +1534,13 @@ impl Controller {
                 .unwrap_or((self.disk_budget(plan), None));
             (allowance, notice, capacity.negotiated)
         };
+        if let Some(mounted) = &mounted {
+            // Apply current grants even while geometry growth retries. Managed
+            // /tmp shares the task allowance and cannot finance journal writes.
+            mounted
+                .volume
+                .limit_backing(allowance.saturating_sub(temporary))?;
+        }
         if let Some(notice) = notice {
             let directory = self.data.join("runs").join(run).join("chat-input");
             crate::nodes::workspace::publish_native_notice(

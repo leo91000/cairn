@@ -817,10 +817,35 @@ def main():
             tail.unlink()
             api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=256, reason='granted')]))
             assert os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity, 'Grant replay shrank filesystem.'
-            for consistency in ('crash', 'filesystem'):
-                live = api('/runs/' + resumed + '/snapshot', dict(consistency=consistency))
-                assert live['manifest']['consistency'] == consistency
-                assert live['manifest']['kind'] == 'native-ext4-v1'
+            # The issued 384 MiB allowance also governs retained journal bytes,
+            # not just ext4 usage. Repeated durable overwrites must consolidate
+            # below the old 1 GiB threshold without stopping the native workload.
+            # Exercise local consolidation, not the obsolete S3 snapshot API.
+            before_local = (api('/disks/' + run + '/storage-status').get('published') or {}).get('generation', 0)
+            before_reads = manager('metrics')['remoteRequests']
+            overwrites = command(sys.executable, '-c', '''
+import json, os, sys, time
+path = sys.argv[1]
+started, cpu = time.monotonic(), time.process_time()
+with open(path, 'w+b', buffering=0) as stream:
+    for round in range(6):
+        data = bytes([round + 1]) * (4 * 1024 * 1024)
+        for offset in range(0, 64 * 1024 * 1024, len(data)):
+            assert os.pwrite(stream.fileno(), data, offset) == len(data)
+        os.fsync(stream.fileno())
+    assert os.pread(stream.fileno(), 4096, 64 * 1024 * 1024 - 4096) == bytes([6]) * 4096
+print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.stat(path).st_size,
+                     wallMs=(time.monotonic()-started)*1000, cpuMs=(time.process_time()-cpu)*1000)))
+''', str(managed(run) / 'overwrite-pressure'))
+            def advanced_local_generation():
+                current = api('/disks/' + run + '/storage-status').get('published') or {}
+                return current.get('local') is True and current.get('generation', 0) > before_local
+            eventually(advanced_local_generation)
+            assert command('systemctl', 'show', unit, '--property=MainPID', '--value').stdout.strip() == workload_pid, 'Journal history exhausted the native task allowance.'
+            metrics['nativeOverwriteConsolidation'] = dict(json.loads(overwrites.stdout), allowanceMiB=384,
+                                                          remoteRequests=manager('metrics')['remoteRequests']-before_reads)
+            assert metrics['nativeOverwriteConsolidation']['remoteRequests'] == 0
+            (managed(run) / 'overwrite-pressure').unlink()
             # No local environment can be evicted, including a current writer.
             try:
                 api('/disks/' + run + '/evict', dict(receipt, attempt=resumed))
