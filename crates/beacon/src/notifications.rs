@@ -395,7 +395,24 @@ pub(super) async fn unsubscribe(
 
 fn payload(installation: &str, event: &cairn_protocol::NotificationEvent) -> Option<Value> {
     use cairn_protocol::NotificationKind;
-    if uuid::Uuid::parse_str(&event.chat_id).is_err() {
+    let rule = match &event.kind {
+        NotificationKind::Alert {
+            rule_id: Some(rule),
+            ..
+        } => Some(rule),
+        _ => None,
+    };
+    if let Some(rule) = rule {
+        if !event.chat_id.is_empty()
+            || uuid::Uuid::parse_str(rule).is_err()
+            || !event
+                .members
+                .as_ref()
+                .is_some_and(|members| members.len() == 1)
+        {
+            return None;
+        }
+    } else if uuid::Uuid::parse_str(&event.chat_id).is_err() {
         return None;
     }
     let mut payload = match &event.kind {
@@ -418,6 +435,7 @@ fn payload(installation: &str, event: &cairn_protocol::NotificationEvent) -> Opt
             alert_id,
             title,
             body,
+            rule_id: _,
         } => {
             if event.id != *alert_id
                 || uuid::Uuid::parse_str(alert_id).is_err()
@@ -434,7 +452,11 @@ fn payload(installation: &str, event: &cairn_protocol::NotificationEvent) -> Opt
         }
     };
     payload["installationId"] = installation.into();
-    payload["chatId"] = event.chat_id.clone().into();
+    if let Some(rule) = rule {
+        payload["ruleId"] = rule.clone().into();
+    } else {
+        payload["chatId"] = event.chat_id.clone().into();
+    }
     Some(payload)
 }
 
@@ -497,6 +519,19 @@ pub(super) async fn deliver(
         let Some((account, endpoint, p256dh, auth)) = device else {
             continue;
         };
+        if matches!(
+            &event.kind,
+            cairn_protocol::NotificationKind::Alert {
+                rule_id: Some(_),
+                ..
+            }
+        ) && !event
+            .members
+            .as_ref()
+            .is_some_and(|members| members.contains(&account))
+        {
+            continue;
+        }
         if account != owner {
             match &event.kind {
                 cairn_protocol::NotificationKind::Question { question_id } => {
@@ -707,5 +742,37 @@ impl PushSender for WebPushSender {
             HyperWebPushClient::new().send(message.build()?).await
         };
         send.await.map_err(PushError::from)
+    }
+}
+
+#[cfg(test)]
+mod rule_alert_tests {
+    use super::*;
+    use cairn_protocol::{NotificationEvent, NotificationKind};
+
+    #[test]
+    fn a_rule_alert_has_a_real_installation_target_without_a_conversation() {
+        let alert = uuid::Uuid::new_v4().to_string();
+        let rule = uuid::Uuid::new_v4().to_string();
+        let event = NotificationEvent {
+            id: alert.clone(),
+            chat_id: String::new(),
+            kind: NotificationKind::Alert {
+                alert_id: alert.clone(),
+                title: "Rule limit".into(),
+                body: "Resume when ready".into(),
+                rule_id: Some(rule.clone()),
+            },
+            members: Some(vec![uuid::Uuid::new_v4().to_string()]),
+            question_recipients: None,
+        };
+        let installation = uuid::Uuid::new_v4().to_string();
+        let value = payload(&installation, &event).unwrap();
+        assert_eq!(value["ruleId"], rule);
+        assert_eq!(value["alertId"], alert);
+        assert!(value.get("chatId").is_none());
+        let mut unrestricted = event.clone();
+        unrestricted.members = None;
+        assert!(payload(&installation, &unrestricted).is_none());
     }
 }

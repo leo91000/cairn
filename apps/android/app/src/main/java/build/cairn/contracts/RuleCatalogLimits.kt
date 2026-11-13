@@ -8,7 +8,15 @@ import kotlinx.serialization.Serializable
 data class RuleCatalogLimits(
     val defaultLimits: HookRuleLimits,
     val maxConversationsPerHour: Long,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val maxCursorBytes: Long? = null,
     val maxNodes: Long,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val maxPending: Long? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val maxRecordedBytes: Long? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val maxRuleValuesBytes: Long? = null,
     val maxSteps: Long,
     val maxToolCalls: Long,
     val maxTriggeringsPerHour: Long,
@@ -16,7 +24,11 @@ data class RuleCatalogLimits(
 ) {
     init {
         require(maxConversationsPerHour >= 0L)
+        maxCursorBytes?.let { require(it >= 0L) }
         require(maxNodes >= 0L)
+        maxPending?.let { require(it >= 0L) }
+        maxRecordedBytes?.let { require(it >= 0L) }
+        maxRuleValuesBytes?.let { require(it >= 0L) }
         require(maxSteps >= 0L)
         require(maxToolCalls >= 0L)
         require(maxTriggeringsPerHour >= 0L)

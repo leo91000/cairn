@@ -1619,3 +1619,321 @@ async fn ignored_member_events_do_not_fill_waiting_slots_during_a_membership_out
     assert_eq!(listed["withoutEffect"], 1);
     assert_eq!(f.posts.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn a_short_wait_rechecks_membership_without_restarting_the_service() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let rule = rule(
+        &f,
+        MEMBER,
+        steps(&json!([
+            post("before", &f, &json!({})),
+            wait_step(600),
+            post("after", &f, &json!({})),
+        ])),
+        60,
+    )
+    .await;
+    emit(
+        &f,
+        "fresh-on-resume",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+    common::relay_fixture::remove_member(&f.s, MEMBER).await;
+    f.s.store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE hook_rule_triggerings SET next_at=0 WHERE status='waiting'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        history(&f, OWNER, &rule).await["triggerings"][0]["status"],
+        "stopped"
+    );
+}
+
+#[tokio::test]
+async fn a_membership_outage_backpressures_events_instead_of_failing_them_at_twenty() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let rule = rule(
+        &f,
+        MEMBER,
+        steps(&json!([post("post", &f, &json!({}))])),
+        60,
+    )
+    .await;
+    common::relay_fixture::authority_unavailable(&f.s, true).await;
+    let restarted = cairn_installation::service::Service::new(f.s.config.clone())
+        .await
+        .unwrap();
+    restarted
+        .plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    restarted.plugins.route_http_to(Some(f.http_origin.clone()));
+    for index in 0..30 {
+        emit(
+            &f,
+            &format!("outage-{index}"),
+            json!({ "channel": "support", "author": "alice" }),
+        )
+        .await;
+    }
+    engine::tick(&restarted).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    assert_eq!(listed["triggerings"].as_array().unwrap().len(), 20);
+    assert!(
+        listed["triggerings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["status"] == "waiting"),
+        "{listed}"
+    );
+    let queued =
+        f.s.store
+            .read(|db| {
+                Ok(db
+                    .0
+                    .query_row("SELECT count(*) FROM plugin_hook_events", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(queued, 10);
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn results_resume_from_step_records_without_growing_the_cursor() {
+    let f = granted().await;
+    let content = "result".repeat(1000);
+    let rule = rule(
+        &f,
+        OWNER,
+        steps(&json!([
+            post(
+                "first",
+                &f,
+                &json!({ "result": { "type": "formula", "expression": "payload.large" } })
+            ),
+            wait_step(600),
+            post(
+                "second",
+                &f,
+                &json!({ "result": { "type": "formula", "expression": "steps.first" } })
+            ),
+        ])),
+        60,
+    )
+    .await;
+    emit(
+        &f,
+        "result-reference",
+        json!({ "channel": "support", "author": "alice", "large": content }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let cursor =
+        f.s.store
+            .read(|db| {
+                Ok(db
+                    .0
+                    .query_row("SELECT cursor FROM hook_rule_triggerings", [], |r| {
+                        r.get::<_, String>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+    assert!(
+        cursor.len() < 512,
+        "Checkpoint unexpectedly contains result data."
+    );
+    assert!(!cursor.contains(&content));
+    f.s.store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE hook_rule_triggerings SET next_at=0 WHERE status='waiting'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    let result = detail(&f, OWNER, &listed["triggerings"][0]).await;
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(result["steps"][2]["result"], content);
+}
+
+#[tokio::test]
+async fn recorded_data_and_combined_inputs_have_byte_limits() {
+    let f = granted().await;
+    let content = "x".repeat(200_000);
+    let rule = crate::rule(&f, OWNER, json!([{
+        "type": "forEach", "id": "each", "itemName": "item",
+        "items": { "type": "literal", "value": [0,1,2,3,4,5,6,7,8,9] },
+        "body": [post("echo", &f, &json!({ "result": { "type": "formula", "expression": "payload.large" } }))],
+    }]), 60).await;
+    emit(
+        &f,
+        "large-results",
+        json!({ "channel": "support", "author": "alice", "large": content }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    let result = detail(&f, OWNER, &listed["triggerings"][0]).await;
+    assert_eq!(result["status"], "failed", "{result}");
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("recorded-data budget")
+    );
+    assert!(result["steps"].as_array().unwrap().len() < 10);
+    let bytes =
+        f.s.store
+            .read(|db| {
+                Ok(db.0.query_row(
+                    "SELECT recorded_bytes FROM hook_rule_triggerings",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+    assert!(bytes <= 1024 * 1024);
+
+    let f = granted().await;
+    let rule = crate::rule(
+        &f,
+        OWNER,
+        steps(&json!([post(
+            "oversized",
+            &f,
+            &json!({
+                "result": { "type": "formula", "expression": "payload.large" },
+                "author": { "type": "formula", "expression": "payload.large" },
+            })
+        )])),
+        60,
+    )
+    .await;
+    emit(
+        &f,
+        "large-input",
+        json!({ "channel": "support", "author": "alice", "large": "x".repeat(200_000) }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    let result = detail(&f, OWNER, &listed["triggerings"][0]).await;
+    assert_eq!(result["status"], "failed", "{result}");
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("action input exceeds")
+    );
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn remembered_values_are_bounded_across_rule_versions_and_can_be_reduced() {
+    let f = granted().await;
+    let stores = |offset: usize| {
+        json!(
+            (offset..offset + 6)
+                .map(|index| json!({
+                    "type": "action", "id": format!("store{index}"),
+                    "action": {
+                        "type": "storeValue", "scope": "rule", "name": format!("slot{index}"),
+                        "value": { "type": "formula", "expression": "payload.large" },
+                    },
+                }))
+                .collect::<Vec<_>>()
+        )
+    };
+    let rule = crate::rule(&f, OWNER, stores(0), 60).await;
+    for batch in 0..3 {
+        if batch > 0 {
+            let path = format!("/api/hook-rules/{rule}");
+            let (_, current) = call(&f, OWNER, "GET", &path, Value::Null).await;
+            let mut definition = current["definition"].clone();
+            definition["steps"] = stores(batch * 6);
+            let (status, edited) = call(&f, OWNER, "PUT", &path, json!({ "ruleId": rule, "revision": current["revision"], "definition": definition })).await;
+            assert_eq!(status, StatusCode::OK, "{edited}");
+        }
+        emit(
+            &f,
+            &format!("state-{batch}"),
+            json!({ "channel": "support", "author": "alice", "large": "x".repeat(60_000) }),
+        )
+        .await;
+        engine::tick(&f.s).await.unwrap();
+    }
+    let total =
+        f.s.store
+            .read(|db| {
+                Ok(db.0.query_row(
+                    "SELECT sum(length(CAST(value AS BLOB))) FROM hook_rule_values",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+    assert!(total <= 1024 * 1024);
+    let listed = history(&f, OWNER, &rule).await;
+    let newest = detail(&f, OWNER, &listed["triggerings"][0]).await;
+    assert_eq!(newest["status"], "failed", "{newest}");
+    assert!(
+        newest["error"]
+            .as_str()
+            .unwrap()
+            .contains("remembered values exceed")
+    );
+    let path = format!("/api/hook-rules/{rule}");
+    let (_, current) = call(&f, OWNER, "GET", &path, Value::Null).await;
+    let mut definition = current["definition"].clone();
+    definition["steps"] = json!([{
+        "type": "action", "id": "reduce",
+        "action": {
+            "type": "storeValue", "scope": "rule", "name": "slot0",
+            "value": { "type": "literal", "value": "small" },
+        },
+    }]);
+    let (status, edited) = call(
+        &f,
+        OWNER,
+        "PUT",
+        &path,
+        json!({ "ruleId": rule, "revision": current["revision"], "definition": definition }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    emit(
+        &f,
+        "reduce-state",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(
+        history(&f, OWNER, &rule).await["triggerings"][0]["status"],
+        "completed"
+    );
+}

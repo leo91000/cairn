@@ -26,4 +26,6 @@ class NativePushDeviceTest : NativePushCases() {
     @Test
     fun allInstallationsAndRevocation() =
         bothInstallationsNotifyButRemovedMembersAndLoggedOutDevicesDoNot()
+
+    @Test fun ruleBudgetAlerts() = ruleBudgetAlertsReachTheirCreatorWithoutAConversation()
 }

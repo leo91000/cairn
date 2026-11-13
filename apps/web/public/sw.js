@@ -6,7 +6,20 @@ globalThis.addEventListener('push', (event) => {
   }
   catch { return }
 
-  if (!/^[\da-f-]{36}$/.test(data.installationId) || !/^[\da-f-]{36}$/.test(data.chatId))
+  if (!/^[\da-f-]{36}$/.test(data.installationId))
+    return
+  if (/^[\da-f-]{36}$/.test(data.ruleId) && /^[\da-f-]{36}$/.test(data.alertId) && typeof data.title === 'string' && typeof data.body === 'string') {
+    event.waitUntil(globalThis.registration.showNotification(data.title.slice(0, 120), {
+      body: data.body.slice(0, 300),
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
+      tag: `${data.installationId}:rule-${data.ruleId}`,
+      data: { url: `/installations/${data.installationId}/chats?rule=${data.ruleId}` },
+    }))
+    return
+  }
+
+  if (!/^[\da-f-]{36}$/.test(data.chatId))
     return
   // Execution alerts (node unavailable, failover, backup failure) carry their own short text.
   if (/^[\da-f-]{36}$/.test(data.alertId) && typeof data.title === 'string' && typeof data.body === 'string') {

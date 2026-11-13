@@ -7,7 +7,8 @@ règles »).
 One immediate transaction creates five empty tables and advances `user_version`:
 
 - `hook_rule_triggerings`: one row per triggering, with its pinned version, its event,
-  its interpreter position, the action pending or in flight, its counters and state;
+  its interpreter position, the action pending or in flight, its counters, recorded
+  byte budget and state;
   unique per rule and queued event.
 - `hook_rule_receipts`: delivery deduplication while events are queued and hourly
   accounting independent of history; lifting a budget clears its accounting.

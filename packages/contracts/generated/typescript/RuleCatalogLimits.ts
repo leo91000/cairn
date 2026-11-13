@@ -12,4 +12,8 @@ export interface RuleCatalogLimits {
   maxSteps: number
   maxToolCalls: number
   maxNodes: number
+  maxRecordedBytes?: number | null
+  maxCursorBytes?: number | null
+  maxRuleValuesBytes?: number | null
+  maxPending?: number | null
 }

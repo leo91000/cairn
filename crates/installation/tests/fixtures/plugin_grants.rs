@@ -185,6 +185,7 @@ impl Fixture {
                 "retry": { "type": "boolean" },
                 "retryAfter": { "type": "number" },
                 "delay": { "type": "number" },
+                "large": { "type": "string" },
                 "agentView": { "type": "boolean" },
                 "result": {},
                 "instance": { "type": "string" },

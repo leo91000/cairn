@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS hook_rule_triggerings(
  next_at INTEGER CHECK(next_at BETWEEN 0 AND 9007199254740991),
  lease_until INTEGER CHECK(lease_until BETWEEN 0 AND 9007199254740991),
  error TEXT CHECK(error IS NULL OR length(error)<=4000),
+ recorded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(recorded_bytes>=0 AND recorded_bytes<=1048576),
  created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
  updated_at INTEGER NOT NULL CHECK(updated_at BETWEEN 0 AND 9007199254740991),
  finished_at INTEGER CHECK(finished_at BETWEEN 0 AND 9007199254740991),
@@ -78,6 +79,7 @@ CREATE TABLE IF NOT EXISTS hook_rule_steps(
  finished_at INTEGER CHECK(finished_at BETWEEN 0 AND 9007199254740991),
  PRIMARY KEY(triggering_id,position)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS hook_rule_steps_latest ON hook_rule_steps(triggering_id,node_id,position DESC) WHERE status='completed';
 CREATE TABLE IF NOT EXISTS hook_rule_values(
  rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
  name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 40),
@@ -115,6 +117,11 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
 const DELIVERY_PATIENCE: i64 = 10 * 60_000;
 /// Triggerings waiting at once, per rule.
 pub(crate) const MAX_WAITING: i64 = 20;
+pub(crate) const MAX_PENDING: i64 = 20;
+pub(crate) const MAX_RECORDED_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_CURSOR_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_RULE_VALUES_BYTES: usize = 1024 * 1024;
+const ERROR_RESERVE: usize = 64 * 1024;
 /// Attempts of an action the service confirmed it did not perform.
 const MAX_ATTEMPTS: u32 = 5;
 /// How long a member's triggering waits for a membership check before failing.
@@ -270,12 +277,18 @@ impl Db<'_> {
             t.cursor.clone()
         };
         let pending = (!terminal).then_some(t.pending.as_ref()).flatten();
+        let cursor = serde_json::to_string(&cursor)?;
+        if !terminal && cursor.len() > MAX_CURSOR_BYTES {
+            return Err(Error::bad(
+                "This triggering's control state exceeds 512 KiB.",
+            ));
+        }
         self.0
             .prepare_cached("UPDATE hook_rule_triggerings SET status=?2,cursor=?3,pending=?4,in_flight=?5,actions=?6,tool_calls=?7,counted_at=?8,verify=?9,verify_since=?10,next_at=?11,error=?12,updated_at=?13,finished_at=?14,lease_until=CASE WHEN ?2='running' THEN ?13+?15 ELSE NULL END WHERE id=?1")?
             .execute(params![
                 t.id,
                 status,
-                serde_json::to_string(&cursor)?,
+                cursor,
                 pending.map(serde_json::to_string).transpose()?,
                 !terminal && t.in_flight,
                 t.actions,
@@ -318,6 +331,23 @@ impl Db<'_> {
         Ok(values)
     }
 
+    fn completed_step_values(&self, triggering: &str) -> Result<Map<String, Json>> {
+        let mut values = Map::new();
+        let mut statement = self.0.prepare_cached(
+            "SELECT r.node_id,r.result FROM hook_rule_steps r WHERE r.triggering_id=?1 \
+             AND r.status='completed' AND r.result IS NOT NULL AND r.position=( \
+                 SELECT max(n.position) FROM hook_rule_steps n WHERE n.triggering_id=r.triggering_id \
+                 AND n.node_id=r.node_id AND n.status='completed')",
+        )?;
+        for row in statement.query_map([triggering], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (node, value) = row?;
+            values.insert(node, serde_json::from_str(&value)?);
+        }
+        Ok(values)
+    }
+
     fn record_step(
         &self,
         triggering: &str,
@@ -336,6 +366,42 @@ impl Db<'_> {
             RuleNode::Action { label, action, .. } => (label.clone(), action_kind(action)),
             _ => (String::new(), "block"),
         };
+        let input = input.map(Json::to_string);
+        let result = result.map(Json::to_string);
+        let error = error.map(|error| error.chars().take(4000).collect::<String>());
+        let previous = self.0.query_row(
+            "SELECT coalesce(length(CAST(input AS BLOB)),0),128+length(CAST(node_id AS BLOB)) \
+             +length(CAST(label AS BLOB))+length(CAST(kind AS BLOB)) \
+             +coalesce(length(CAST(input AS BLOB)),0)+coalesce(length(CAST(result AS BLOB)),0) \
+             +coalesce(length(CAST(error AS BLOB)),0) FROM hook_rule_steps WHERE triggering_id=?1 AND position=?2",
+            params![triggering, position], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        ).optional()?;
+        let input_bytes = previous.map_or_else(
+            || input.as_ref().map_or(0, String::len),
+            |(bytes, _)| bytes as usize,
+        );
+        let bytes = 128
+            + node.id().len()
+            + label.len()
+            + kind.len()
+            + input_bytes
+            + result.as_ref().map_or(0, String::len)
+            + error.as_ref().map_or(0, String::len);
+        let updated = self.0.execute(
+            "UPDATE hook_rule_triggerings SET recorded_bytes=recorded_bytes-?2+?3 \
+             WHERE id=?1 AND recorded_bytes-?2+?3<=?4",
+            params![
+                triggering,
+                previous.map_or(0, |(_, bytes)| bytes),
+                bytes as i64,
+                (MAX_RECORDED_BYTES - ERROR_RESERVE) as i64
+            ],
+        )?;
+        if updated == 0 {
+            return Err(Error::bad(
+                "This triggering exceeded its 1 MiB recorded-data budget. The last action is not retried.",
+            ));
+        }
         let at = now();
         let finished = matches!(status, "completed" | "failed").then_some(at);
         self.0
@@ -347,9 +413,9 @@ impl Db<'_> {
                 label,
                 kind,
                 status,
-                input.map(Json::to_string),
-                result.map(Json::to_string),
-                error.map(|error| error.chars().take(4000).collect::<String>()),
+                input,
+                result,
+                error,
                 attempts,
                 at,
                 finished,
@@ -494,6 +560,100 @@ fn eligible_listener(db: &Db<'_>, rule: &str) -> Result<Option<(RuleRow, Version
 
 /// Turns queued hook events into triggerings, then acknowledges them. An event no
 /// rule may receive is dropped, so a quiet queue never blocks later events.
+enum Delivery {
+    Deferred,
+    Handled(bool),
+}
+
+async fn deliver_hook(
+    s: &Arc<Service>,
+    event: &crate::plugins::hooks::HookEvent,
+    fields: &[String],
+    row: RuleRow,
+    version: VersionRow,
+) -> Result<Delivery> {
+    let key = (event.id.clone(), row.id.clone());
+    if s.rules.delivery_waiting(&key) {
+        return Ok(if now() - event.created_at < DELIVERY_PATIENCE {
+            Delivery::Deferred
+        } else {
+            Delivery::Handled(false)
+        });
+    }
+    let agent = version.definition.execution_agent_id.to_string();
+    // Cairn never delivers an event whose payload designates a resource
+    // outside the execution agent's hook grant. A resolution that failed for
+    // another reason is tried again for a while.
+    let delivery = crate::plugins::grant_authorization::authorize_hook_delivery(
+        s,
+        &agent,
+        &event.instance_id,
+        &event.name,
+        &event.payload,
+    )
+    .await;
+    match delivery {
+        Ok(()) => {}
+        Err(error)
+            if !matches!(error.status, 400 | 403 | 404)
+                && now() - event.created_at < DELIVERY_PATIENCE =>
+        {
+            s.rules.defer_delivery(key);
+            return Ok(Delivery::Deferred);
+        }
+        Err(_) => {
+            s.rules.clear_delivery(&key);
+            return Ok(Delivery::Handled(false));
+        }
+    }
+    s.rules.clear_delivery(&key);
+    let record = json!({
+        "id": event.id,
+        "hook": event.name,
+        "instanceId": event.instance_id,
+        "payload": event.payload,
+        "receivedAt": event.created_at,
+        "payloadFields": fields,
+    });
+    let (rule, number, event_id) = (row.id.clone(), version.version, event.id.clone());
+    let inserted = s
+    .store
+    .transaction(move |db| {
+        let pending: i64 = db.0.query_row(
+            "SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=? AND status IN ('running','waiting','retrying')",
+            [&rule], |row| row.get(0),
+        )?;
+        if pending >= MAX_PENDING { return Ok(None) }
+        let recorded = record.to_string();
+        let recorded_bytes = recorded.len() + 256;
+        if recorded_bytes > MAX_RECORDED_BYTES - ERROR_RESERVE {
+            return Err(Error::bad("The event exceeds the recorded-data budget."));
+        }
+        let received = db.0.execute(
+            "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id) VALUES(?1,?2)",
+            params![rule, event_id],
+        )?;
+        if received == 0 {
+            return Ok(Some(false));
+        }
+        let cursor = serde_json::to_string(&Cursor::default())?;
+        let at = now();
+        let insert_sql = "INSERT OR IGNORE INTO hook_rule_triggerings( \
+            id,rule_id,version,event_id,event,status,cursor,pending,in_flight, \
+            actions,tool_calls,counted_at,verify,verify_since,next_at,lease_until, \
+            error,created_at,updated_at,finished_at,recorded_bytes) \
+            VALUES(?1,?2,?3,?4,?5,'running',?6,NULL,0,0,0,NULL,0,NULL,NULL,NULL,NULL,?7,?7,NULL,?8)";
+        Ok(Some(db.0.prepare_cached(insert_sql)?
+            .execute(params![id(), rule, number, event_id, recorded, cursor, at, recorded_bytes as i64])?
+            > 0))
+    })
+    .await?;
+    Ok(match inserted {
+        Some(created) => Delivery::Handled(created),
+        None => Delivery::Deferred,
+    })
+}
+
 async fn intake_instance(s: &Arc<Service>, instance: String) -> Result<usize> {
     let mut created = 0;
     let Some(connection) = s.store.plugin_instance(&instance).await? else {
@@ -511,22 +671,26 @@ async fn intake_instance(s: &Arc<Service>, instance: String) -> Result<usize> {
     for event in events {
         let (instance, hook, event_id) = (instance.clone(), event.name.clone(), event.id.clone());
         let listeners = s
-                .store
-                .read(move |db| {
-                    let mut listeners = Vec::new();
-                    let rules = db.0.prepare_cached("SELECT DISTINCT rule_id FROM hook_rule_uses u WHERE kind='hook' AND instance_id=?1 AND name=?2 AND NOT EXISTS(SELECT 1 FROM hook_rule_receipts r WHERE r.rule_id=u.rule_id AND r.event_id=?3)")?
-                        .query_map(params![instance, hook, event_id], |row| row.get::<_, String>(0))?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
-                    for rule in rules {
-                        match eligible_listener(db, &rule) {
-                            Ok(Some(listener)) => listeners.push(listener),
-                            Ok(None) => {}
-                            Err(error) => tracing::warn!(rule = %rule, error = %error, "Rule listener is unavailable"),
-                        }
+            .store
+            .read(move |db| {
+                let mut listeners = Vec::new();
+                let listeners_sql = "SELECT DISTINCT rule_id FROM hook_rule_uses u \
+                    WHERE kind='hook' AND instance_id=?1 AND name=?2 \
+                    AND NOT EXISTS(SELECT 1 FROM hook_rule_receipts r \
+                        WHERE r.rule_id=u.rule_id AND r.event_id=?3)";
+                let rules = db.0.prepare_cached(listeners_sql)?
+                    .query_map(params![instance, hook, event_id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for rule in rules {
+                    match eligible_listener(db, &rule) {
+                        Ok(Some(listener)) => listeners.push(listener),
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(rule = %rule, error = %error, "Rule listener is unavailable"),
                     }
-                    Ok(listeners)
-                })
-                .await?;
+                }
+                Ok(listeners)
+            })
+            .await?;
         let fields = package
             .manifest
             .hook(&event.name)
@@ -534,76 +698,15 @@ async fn intake_instance(s: &Arc<Service>, instance: String) -> Result<usize> {
             .and_then(Json::as_object)
             .map(|fields| fields.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        let queued = event.clone();
-        let mut deliveries = stream::iter(listeners).map(|(row, version)| {
-                let event = queued.clone();
-                let fields = fields.clone();
-                async move {
-                let key = (event.id.clone(), row.id.clone());
-                if s.rules.delivery_waiting(&key) {
-                    return Ok((now() - event.created_at < DELIVERY_PATIENCE, false));
-                }
-                let agent = version.definition.execution_agent_id.to_string();
-                // Cairn never delivers an event whose payload designates a resource
-                // outside the execution agent's hook grant. A resolution that failed for
-                // another reason is tried again for a while.
-                let delivery = crate::plugins::grant_authorization::authorize_hook_delivery(
-                    s,
-                    &agent,
-                    &event.instance_id,
-                    &event.name,
-                    &event.payload,
-                )
-                .await;
-                match delivery {
-                    Ok(()) => {}
-                    Err(error)
-                        if !matches!(error.status, 400 | 403 | 404)
-                            && now() - event.created_at < DELIVERY_PATIENCE =>
-                    {
-                        s.rules.defer_delivery(key);
-                        return Ok((true, false));
-                    }
-                    Err(_) => {
-                        s.rules.clear_delivery(&key);
-                        return Ok((false, false));
-                    }
-                }
-                s.rules.clear_delivery(&key);
-                let record = json!({
-                    "id": event.id,
-                    "hook": event.name,
-                    "instanceId": event.instance_id,
-                    "payload": event.payload,
-                    "receivedAt": event.created_at,
-                    "payloadFields": fields,
-                });
-                let (rule, number, event_id) = (row.id.clone(), version.version, event.id.clone());
-                let inserted = s
-                    .store
-                    .transaction(move |db| {
-                        let received = db.0.execute(
-                            "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id) VALUES(?1,?2)",
-                            params![rule, event_id],
-                        )?;
-                        if received == 0 {
-                            return Ok(false);
-                        }
-                        let cursor = serde_json::to_string(&Cursor::default())?;
-                        let at = now();
-                        Ok(db.0.prepare_cached("INSERT OR IGNORE INTO hook_rule_triggerings(id,rule_id,version,event_id,event,status,cursor,pending,in_flight,actions,tool_calls,counted_at,verify,verify_since,next_at,lease_until,error,created_at,updated_at,finished_at) VALUES(?1,?2,?3,?4,?5,'running',?6,NULL,0,0,0,NULL,1,NULL,NULL,NULL,NULL,?7,?7,NULL)")?
-                            .execute(params![id(), rule, number, event_id, record.to_string(), cursor, at])?
-                            > 0)
-                    })
-                    .await?;
-                    Ok::<_, Error>((false, inserted))
-                }
-            }).buffer_unordered(PARALLEL);
+        let mut deliveries = stream::iter(listeners)
+            .map(|(row, version)| deliver_hook(s, &event, &fields, row, version))
+            .buffer_unordered(PARALLEL);
         let mut deferred = false;
         while let Some(delivery) = deliveries.next().await {
-            let (waiting, inserted) = delivery?;
-            deferred |= waiting;
-            created += usize::from(inserted);
+            match delivery? {
+                Delivery::Deferred => deferred = true,
+                Delivery::Handled(inserted) => created += usize::from(inserted),
+            }
         }
         if deferred {
             continue;
@@ -745,8 +848,12 @@ async fn sweep(s: &Service) -> Result<()> {
                     stop_rule(db, &rule, "The rule state could not be loaded.")?;
                 }
             }
-            for rule in retained { db.prune_hook_triggerings(&rule)?; }
-            if !maintenance { return Ok(()) }
+            for rule in retained {
+                db.prune_hook_triggerings(&rule)?;
+            }
+            if !maintenance {
+                return Ok(());
+            }
             // Delivery receipts outlive quiet triggerings while another listener is
             // deferred. Counted receipts also meter the hour independently of history.
             db.0.execute(
@@ -890,9 +997,10 @@ async fn load(s: &Service, id: &str) -> Result<Option<Loaded>> {
     let id = id.to_owned();
     s.store
         .read(move |db| {
-            let Some(triggering) = db.hook_triggering(&id)? else {
+            let Some(mut triggering) = db.hook_triggering(&id)? else {
                 return Ok(None);
             };
+            triggering.cursor.steps = db.completed_step_values(&id)?;
             let Some(row) = db.hook_rule(&triggering.rule_id)? else {
                 return Ok(None);
             };
@@ -956,6 +1064,7 @@ fn exhaust(db: &Db<'_>, row: &RuleRow, reason: &str) -> Result<()> {
         crate::notifications::enqueue_rule_alert(
             db,
             &row.creator_account_id,
+            &row.id,
             "A rule reached its hourly limit",
             &format!("{name} is suspended. Resume it from its page when you are ready."),
         )?;
@@ -1297,6 +1406,12 @@ fn plan(
         )),
     };
     match input {
+        Ok(input)
+            if serde_json::to_vec(&input)
+                .map_or(true, |bytes| bytes.len() > evaluate::MAX_BYTES) =>
+        {
+            Plan::Fail(format!("{}: the action input exceeds 256 KiB.", node.id()))
+        }
         Ok(input) => Plan::Act(Box::new(Acting {
             node: node.clone(),
             input,
@@ -1398,6 +1513,7 @@ fn refuse(db: &Db<'_>, t: &Triggering, error: &str) -> Result<Step> {
 }
 
 async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
+    let resumed = Instant::now();
     let Some(Loaded {
         mut triggering,
         row,
@@ -1460,10 +1576,13 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
     // A member's triggering acts only on a recently verified membership, and checks it
     // again after each wait. The cursor stays where it is until it does.
     if !row.creator_owner {
-        let verified = s
-            .missions
-            .verify_membership(s, std::time::Duration::from_secs(60))
-            .await;
+        let verified = if triggering.verify {
+            s.missions.verify_membership_since(s, resumed).await
+        } else {
+            s.missions
+                .verify_membership(s, std::time::Duration::from_secs(60))
+                .await
+        };
         if verified.is_err() {
             let since = *triggering.verify_since.get_or_insert_with(now);
             if now() - since > MEMBERSHIP_PATIENCE {
@@ -1475,14 +1594,6 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                 s.store
                     .transaction(move |db| {
                         if guard(db, &triggering)? {
-                            return Ok(());
-                        }
-                        if waiting_count(db, &triggering.rule_id, &triggering.id)? >= MAX_WAITING {
-                            refuse(
-                                db,
-                                &triggering,
-                                "This rule already has 20 triggerings waiting.",
-                            )?;
                             return Ok(());
                         }
                         db.save_hook_triggering(&triggering, "waiting", Some(at), Some(note))
@@ -1712,6 +1823,13 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                     stored.actions += 1;
                     if !count(db, &mut stored, &row, &version)? {
                         return refuse(db, &triggering, "The rule reached its hourly limit of triggerings.");
+                    }
+                    let state_bytes: i64 = db.0.query_row(
+                        "SELECT coalesce(sum(length(CAST(value AS BLOB))),0) FROM hook_rule_values WHERE rule_id=?1 AND name<>?2",
+                        params![row.id, name], |row| row.get(0),
+                    )?;
+                    if state_bytes as usize + input.to_string().len() > MAX_RULE_VALUES_BYTES {
+                        return refuse(db, &triggering, "This rule's remembered values exceed 1 MiB.");
                     }
                     db.0.prepare_cached(
                         "INSERT INTO hook_rule_values VALUES(?1,?2,?3,?4) \

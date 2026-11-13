@@ -48,3 +48,30 @@ it('shows private notifications, focuses the matching chat and dismisses answere
   handlers.push({ data: { json: () => ({ chatId: '../settings', questionId }) }, waitUntil })
   expect(showNotification).toHaveBeenCalledTimes(1)
 })
+
+it('delivers rule budget alerts without a fabricated chat target', async () => {
+  const handlers: Record<string, (event: any) => void> = {}
+  const showNotification = vi.fn().mockResolvedValue(undefined)
+  runInNewContext(await readFile('apps/web/public/sw.js', 'utf8'), {
+    addEventListener: (type: string, callback: (event: any) => void) => { handlers[type] = callback },
+    registration: { showNotification },
+  })
+  const installationId = '00000000-0000-4000-8000-000000000001'
+  const ruleId = '00000000-0000-4000-8000-000000000002'
+  const alertId = '00000000-0000-4000-8000-000000000003'
+  let delivered: Promise<unknown> | undefined
+  handlers.push({
+    data: {
+      json: () => ({
+        installationId,
+        ruleId,
+        alertId,
+        title: 'Rule limit',
+        body: 'Resume when ready',
+      }),
+    },
+    waitUntil: (value: Promise<unknown>) => { delivered = value },
+  })
+  await delivered
+  expect(showNotification).toHaveBeenCalledWith('Rule limit', expect.objectContaining({ data: { url: `/installations/${installationId}/chats?rule=${ruleId}` } }))
+})

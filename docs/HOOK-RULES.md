@@ -124,7 +124,8 @@ Actions:
   Any other error ends the triggering with its message.
 - `storeValue` with the rule scope keeps up to 64 KiB.
 - `wait` resumes the next steps later; a rule keeps at most 20 triggerings waiting,
-  including retries and waits for membership verification.
+  including retries. Admission keeps at most 20 active triggerings per rule; later
+  events remain queued, so a membership outage does not fail them early.
 - Conversation actions and conditions about conversation keys come with conversation
   keys; until then they fail the triggering with a message saying so.
 
@@ -273,3 +274,12 @@ Until Cairn records who writes each conversation entry, no conversation meets th
 conditions: `cairn_installation` writes no rule and installs no template. It never grants a right, never lifts
 an emergency pause or exhausted budget, never touches another account's rule and never
 reduces a grant a rule of a current account uses.
+
+
+The catalog also publishes fixed data limits: a triggering records at most 1 MiB
+of event and step data (with room reserved for failure details), its persisted
+control state is at most 512 KiB, and a rule's remembered values total at most
+1 MiB. Combined tool input is at most 256 KiB. Exceeding a limit stops the
+triggering; an action whose result could not be recorded is never retried.
+Results live in the step records and are loaded by node identifier when execution
+resumes, rather than copied into every persisted cursor.

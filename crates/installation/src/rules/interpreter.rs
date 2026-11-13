@@ -1,6 +1,7 @@
 //! The tree interpreter. It walks a pinned rule version between actions, evaluating
 //! conditions and loops, and stops at each action so that the engine can persist its
-//! position before any effect. Its whole state is the serializable [`Cursor`].
+//! position before any effect. [`Cursor`] persists control flow; the engine hydrates
+//! prior action results from step records.
 use super::evaluate::Evaluator;
 use cairn_contracts::{RuleCondition, RuleNode, RuleOperator, RuleValue};
 use serde::{Deserialize, Serialize};
@@ -38,11 +39,13 @@ pub(crate) struct Frame {
     pub iteration: Option<Iteration>,
 }
 
-/// Where a triggering stands, with the results of its actions.
+/// Where a triggering stands, plus a transient cache of prior action results.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Cursor {
     pub frames: Vec<Frame>,
+    /// Hydrated from the latest completed step records; never duplicated in a checkpoint.
+    #[serde(skip)]
     pub steps: Map<String, Json>,
     /// Blocks and iterations run so far.
     pub count: u32,
@@ -212,6 +215,15 @@ fn number(value: &Json) -> Option<f64> {
 }
 
 fn equal(left: &Json, right: &Json) -> bool {
+    if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
+        return left == right;
+    }
+    if let (Some(left), Some(right)) = (left.as_u64(), right.as_u64()) {
+        return left == right;
+    }
+    if (left.is_i64() || left.is_u64()) && (right.is_i64() || right.is_u64()) {
+        return false;
+    }
     match (number(left), number(right)) {
         (Some(left), Some(right)) => left == right,
         _ => left == right,
@@ -381,6 +393,17 @@ mod tests {
             cursor.advance(&steps, &stranger).unwrap().unwrap().id(),
             "refuse"
         );
+    }
+
+    #[test]
+    fn integer_comparisons_and_membership_do_not_round_large_ids() {
+        let left = json!(1234567890123456789_i64);
+        let right = json!(1234567890123456788_i64);
+        assert!(!equal(&left, &right));
+        assert!(!compare(&left, RuleOperator::In, &json!([1234567890123456788_u64])).unwrap());
+        assert!(equal(&json!(u64::MAX), &json!(u64::MAX)));
+        assert!(!equal(&json!(u64::MAX), &json!(-1)));
+        assert!(equal(&json!(3), &json!(3.0)));
     }
 
     #[test]

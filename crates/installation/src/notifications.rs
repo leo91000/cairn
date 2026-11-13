@@ -53,6 +53,7 @@ pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
                 alert_id: text(alert, "id").to_owned(),
                 title: text(alert, "title").chars().take(120).collect(),
                 body: text(alert, "body").chars().take(300).collect(),
+                rule_id: None,
             },
             members: None,
             question_recipients: None,
@@ -64,6 +65,7 @@ pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
 pub(crate) fn enqueue_rule_alert(
     db: &Db<'_>,
     account: &str,
+    rule: &str,
     title: &str,
     body: &str,
 ) -> Result<()> {
@@ -77,6 +79,7 @@ pub(crate) fn enqueue_rule_alert(
                 alert_id: id,
                 title: title.chars().take(120).collect(),
                 body: body.chars().take(300).collect(),
+                rule_id: Some(rule.to_owned()),
             },
             members: Some(vec![account.to_owned()]),
             question_recipients: None,

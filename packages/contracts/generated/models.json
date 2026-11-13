@@ -13208,10 +13208,42 @@
           "minimum": 0,
           "type": "integer"
         },
+        "maxCursorBytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "maxNodes": {
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "maxPending": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxRecordedBytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxRuleValuesBytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "maxSteps": {
           "description": "Blocks and iterations one triggering may run, waits excluded.",
