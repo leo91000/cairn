@@ -469,6 +469,20 @@ impl Fixture {
         self.until(id, finished).await
     }
 
+    /// A session exists before the restart fixture's first turn saves its work.
+    async fn until_restart_ready(&self, id: &str) -> Value {
+        let marker = self.run_directory(id).join("codex/fixture-restart.json");
+        self.until(id, |run| {
+            let ready = std::fs::read(&marker)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+
+            run["sessionId"] == "fixture-chat"
+                && ready.is_some_and(|saved| saved["cwd"] == run["workspace"])
+        })
+        .await
+    }
+
     /// Returns the active execution count reported by the live worker process.
     async fn worker_active_runs(&self) -> Option<u64> {
         let response = self
@@ -1632,9 +1646,7 @@ async fn abrupt_restart_fences_previous_process_and_resumes_workspace() {
     let mut fixture = Fixture::new().await;
     let run = fixture.enqueue("fixture:restart").await;
     let id = text(&run, "id");
-    let running = fixture
-        .until(id, |r| r["sessionId"] == "fixture-chat")
-        .await;
+    let running = fixture.until_restart_ready(id).await;
     fixture.stop(true).await;
     fixture.start().await;
     let completed = fixture.until_finished(id).await;
@@ -7896,9 +7908,7 @@ async fn unlimited_runs_cancel_and_resume_without_creating_a_deadline() {
     let run = fixture.enqueue("fixture:restart").await;
     let id = text(&run, "id");
     assert_eq!(run["snapshot"]["agent"]["timeoutMinutes"], 0);
-    fixture
-        .until(id, |r| r["sessionId"] == "fixture-chat")
-        .await;
+    fixture.until_restart_ready(id).await;
     assert_eq!(s.store.run(id).await.unwrap()["status"], RunStatus::Running);
     assert_eq!(
         fixture.checkpoint(id).await.get("remainingMs"),

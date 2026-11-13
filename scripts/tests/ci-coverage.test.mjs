@@ -16,6 +16,17 @@ const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.
 const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
+  it('runs the native controller preflight in the full workspace graph with the same installation test selection', () => {
+    const steps = quality.jobs.backend.steps
+    const preflight = steps.find(step => step.name === 'Qualify native controller concurrency before building every test binary')
+    const suite = steps.find(step => step.name === 'Run backend tests across binaries with isolated credentials')
+
+    expect(preflight.run).toBe('node scripts/test-backend.mjs --nextest --workspace --lib -E \'package(=cairn-installation) & (test(native::service::tests::) | test(nodes::files::tests::))\' --no-capture')
+    expect(preflight.if).toBe(suite.if)
+    expect(preflight['continue-on-error']).toBeUndefined()
+    expect(steps.indexOf(preflight)).toBeLessThan(steps.indexOf(suite))
+  })
+
   it('keeps both post-suite measurements in the workspace test graph with exact case selection', () => {
     for (const [name, selection] of [
       ['Measure the bounded bootstrap observer without filesystem work', 'native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture'],
