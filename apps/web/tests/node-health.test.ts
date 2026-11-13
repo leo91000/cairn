@@ -51,12 +51,9 @@ function node(overrides: Partial<ExecutionNode> = {}): ExecutionNode {
     lastSeen: 0,
     createdAt: 0,
     storage: {
-      cacheMiB: 102400,
       memoryCacheMiB: 256,
       reserveMiB: 10240,
       reservePercent: 5,
-      backupSeconds: 60,
-      maxDirtySeconds: 300,
     },
     occupiedSlots: 1,
     availableSlots: 3,

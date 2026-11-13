@@ -8,8 +8,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.GetNodeRuntimeSettingsInput
 import build.cairn.contracts.ReleaseExclusiveInput
+import build.cairn.contracts.getNodeRuntimeSettings
 import build.cairn.contracts.releaseNodeReservation
+import build.cairn.contracts.saveNodeRuntimeSettings
 import java.util.Date
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
@@ -48,7 +51,7 @@ fun NodesScreen(
     // Never persist enrollment secrets in saved instance state.
     var enrollment by remember { mutableStateOf<NodeEnrollment?>(null) }
     // Machines known when the code was created, to recognise the newly connected one.
-    var recovery by remember { mutableStateOf<NodeSyncSettings?>(null) }
+    var recovery by remember { mutableStateOf<NodeRuntimeSettings?>(null) }
     var editing by remember { mutableStateOf<ExecutionNode?>(null) }
     var revoking by remember { mutableStateOf<ExecutionNode?>(null) }
     // The last step of adding a machine: who may use it. Opened once, right after enrollment.
@@ -405,19 +408,22 @@ fun NodesScreen(
                 )
             }
         TextButton(onClick = { advanced = !advanced }) {
-            Text(
-                if (advanced) "Masquer les réglages avancés"
-                else "Avancé : synchronisation et délais"
-            )
+            Text(if (advanced) "Masquer les réglages avancés" else "Avancé : délais des machines")
         }
         if (advanced)
             Panel {
                 Text(
-                    "Fréquence de synchronisation S3 des disques et délais avant mise en pause. Les valeurs par défaut conviennent à la plupart des installations.",
+                    "Délais avant mise en pause après une déconnexion et avant l’arrêt. Les valeurs par défaut conviennent à la plupart des installations.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                TextButton(onClick = { vm.perform { recovery = api.get("/nodes/settings") } }) {
-                    Text("Configurer la synchronisation")
+                TextButton(
+                    onClick = {
+                        vm.perform {
+                            recovery = api.getNodeRuntimeSettings(GetNodeRuntimeSettingsInput())
+                        }
+                    }
+                ) {
+                    Text("Configurer les délais")
                 }
             }
     }
@@ -528,13 +534,9 @@ fun NodesScreen(
             }
         }
     recovery?.let { settings ->
-        RecoveryEditor(settings, state, { recovery = null }) { value ->
+        RuntimeSettingsEditor(settings, state, { recovery = null }) { value ->
             vm.perform {
-                api.request(
-                    "PUT",
-                    "/nodes/settings",
-                    wireJson.encodeToJsonElement(value.copy(s3Configured = null)),
-                )
+                api.saveNodeRuntimeSettings(value)
                 recovery = null
             }
         }
@@ -1014,52 +1016,29 @@ internal fun mib(gib: String) =
     gib.replace(',', '.').toDoubleOrNull()?.let { Math.round(it * 1024) }
 
 @Composable
-private fun RecoveryEditor(
-    settings: NodeSyncSettings,
+private fun RuntimeSettingsEditor(
+    settings: NodeRuntimeSettings,
     state: Workspace,
     dismiss: () -> Unit,
-    save: (NodeSyncSettings) -> Unit,
+    save: (NodeRuntimeSettings) -> Unit,
 ) {
-    var interval by remember { mutableStateOf(settings.intervalSeconds.toString()) }
     var disconnect by remember { mutableStateOf(settings.disconnectTimeoutSeconds.toString()) }
     var shutdown by remember { mutableStateOf(settings.shutdownTimeoutSeconds.toString()) }
-    var wait by remember { mutableStateOf(settings.maxCapacityWaitSeconds.toString()) }
-    var budget by remember { mutableStateOf(gib(settings.budgetMiB)) }
-    val s3 = settings.s3Configured != false
     Editor(
-        "Synchronisation S3",
+        "Délais des machines",
         state.busy,
         state.error,
         close = dismiss,
-        valid =
-            disconnect.toLongOrNull() in 10L..300L &&
-                shutdown.toLongOrNull() in 30L..300L &&
-                wait.toLongOrNull() in 0L..3600L &&
-                interval.toLongOrNull() in 5L..3600L &&
-                mib(budget) in 128L..1048576L,
+        valid = disconnect.toLongOrNull() in 10L..300L && shutdown.toLongOrNull() in 30L..300L,
         save = {
-            save(
-                NodeSyncSettings(
-                    interval.toLong(),
-                    mib(budget)!!,
-                    disconnect.toLong(),
-                    shutdown.toLong(),
-                    wait.toLong(),
-                )
-            )
+            save(NodeRuntimeSettings(disconnect.toInt(), shutdown.toInt()))
         },
     ) {
         Text(
-            "Les blocs modifiés sont envoyés en arrière-plan après une capture cohérente. La dernière synchronisation est visible dans chaque conversation."
+            "Les fichiers de travail restent sur leur node. Ces délais encadrent la déconnexion et l’arrêt de l’exécution."
         )
-        if (!s3)
-            Text(
-                "Configurez S3 sur le serveur pour synchroniser les disques.",
-                style = MaterialTheme.typography.bodySmall,
-            )
         Panel {
-            Text("Fréquence et délais", style = MaterialTheme.typography.titleSmall)
-            Field("Intervalle (secondes)", interval, { interval = it }, enabled = !state.busy)
+            Text("Délais", style = MaterialTheme.typography.titleSmall)
             Field(
                 "Suspension après déconnexion (secondes)",
                 disconnect,
@@ -1072,20 +1051,7 @@ private fun RecoveryEditor(
                 { shutdown = it },
                 enabled = !state.busy,
             )
-            Field(
-                "Attente de capacité maximale (secondes)",
-                wait,
-                { wait = it },
-                enabled = !state.busy,
-            )
-            Field(
-                "Budget du cache de publication (Gio)",
-                budget,
-                { budget = it },
-                enabled = !state.busy,
-            )
         }
-        Text("Une capture peut dépasser l’intervalle. Le cache de publication utilise ce budget.")
     }
 }
 
@@ -1120,12 +1086,9 @@ private fun NodeStorageEditor(
     save: (NodeStoragePolicy) -> Unit,
 ) {
     val policy = node.storage
-    var cache by remember { mutableStateOf(policy.cacheMiB.toString()) }
     var memoryCache by remember { mutableStateOf(policy.memoryCacheMiB.toString()) }
     var reserve by remember { mutableStateOf(policy.reserveMiB.toString()) }
     var percent by remember { mutableStateOf(policy.reservePercent.toString()) }
-    var interval by remember { mutableStateOf(policy.backupSeconds.toString()) }
-    var dirty by remember { mutableStateOf(policy.maxDirtySeconds.toString()) }
     Editor(
         "Stockage · ${node.name}",
         state.busy,
@@ -1133,40 +1096,25 @@ private fun NodeStorageEditor(
         close = dismiss,
         valid =
             memoryCache.toLongOrNull() in 4L..4096L &&
-                cache.toLongOrNull() in 0L..16777216L &&
                 reserve.toLongOrNull() in 64L..16777216L &&
-                percent.toIntOrNull() in 1..50 &&
-                interval.toLongOrNull() in 5L..3600L &&
-                dirty.toLongOrNull() in (interval.toLongOrNull() ?: 5L)..86400L,
+                percent.toIntOrNull() in 1..50,
         save = {
             save(
                 NodeStoragePolicy(
-                    cacheMiB = cache.toLong(),
                     reserveMiB = reserve.toLong(),
                     reservePercent = percent.toLong(),
-                    backupSeconds = interval.toLong(),
-                    maxDirtySeconds = dirty.toLong(),
                     memoryCacheMiB = memoryCache.toLong(),
                 )
             )
         },
     ) {
-        Text(
-            "Les fichiers sont sauvegardés sur S3 et chargés à la demande. Libérer le cache ne ferme pas les conversations."
-        )
+        Text("Les fichiers de travail restent sur cette node.")
         Panel {
             Text("Disque local", style = MaterialTheme.typography.titleSmall)
             Field(
                 "Cache mémoire partagé (Mio)",
                 memoryCache,
                 { memoryCache = it },
-                enabled = !state.busy,
-                keyboardOptions = InputKeyboards.Number,
-            )
-            Field(
-                "Cache propre (Mio)",
-                cache,
-                { cache = it },
                 enabled = !state.busy,
                 keyboardOptions = InputKeyboards.Number,
             )
@@ -1185,28 +1133,7 @@ private fun NodeStorageEditor(
                 keyboardOptions = InputKeyboards.Number,
             )
             Text(
-                "La plus grande réserve s’applique. Le travail non synchronisé reste local.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        Panel {
-            Text("Synchronisation", style = MaterialTheme.typography.titleSmall)
-            Field(
-                "Synchroniser toutes les (secondes)",
-                interval,
-                { interval = it },
-                enabled = !state.busy,
-                keyboardOptions = InputKeyboards.Number,
-            )
-            Field(
-                "Avertir du retard après (secondes)",
-                dirty,
-                { dirty = it },
-                enabled = !state.busy,
-                keyboardOptions = InputKeyboards.Number,
-            )
-            Text(
-                "Signale le retard sans suspendre le travail. Les protections d’intégrité et d’espace libre restent actives.",
+                "La plus grande réserve s’applique. Les fichiers de travail restent sur cette node.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }

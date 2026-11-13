@@ -133,7 +133,6 @@ mod tests {
         round_trip::<InstallationSettings>(&corpus["settings"]);
         round_trip::<InstallationOverview>(&corpus["overviews"]);
         round_trip::<ListAuditOutput>(&corpus["audits"]);
-        round_trip::<StorageSettings>(&corpus["storageViews"]);
         for value in corpus["marks"].as_array().unwrap() {
             assert!(mark(value));
         }
@@ -144,23 +143,6 @@ mod tests {
             assert!(
                 serde_json::from_value::<SetOutcomeAsideInput>(value.clone()).is_err(),
                 "{value}"
-            );
-        }
-        for value in corpus["storageInputs"].as_array().unwrap() {
-            let input: SaveStorageSettingsInput = serde_json::from_value(value.clone()).unwrap();
-            assert!(!format!("{input:?}").contains("fixture-secret"));
-        }
-        let invalid = corpus["invalidStorageInputs"].as_array().unwrap();
-        // Bucket names and HTTPS endpoints are also server invariants.
-        for value in [&invalid[0], &invalid[3]] {
-            assert!(serde_json::from_value::<SaveStorageSettingsInput>(value.clone()).is_err());
-        }
-        for value in corpus["storageViews"].as_array().unwrap() {
-            let keys = value.as_object().unwrap().keys().collect::<Vec<_>>();
-            assert!(
-                !keys
-                    .iter()
-                    .any(|key| key.contains("ccess") || key.contains("ecret"))
             );
         }
     }

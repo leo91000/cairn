@@ -350,7 +350,7 @@ impl Pool {
         let disk = budget::disk_bytes(&self.state)?;
         let (total, free) = crate::storage::policy::space(&self.state)?;
         let policy = match std::fs::read(self.state.join("storage-policy.json")) {
-            Ok(bytes) => serde_json::from_slice::<crate::storage::policy::Policy>(&bytes)?,
+            Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 crate::storage::policy::Policy::default()
             }
@@ -753,7 +753,7 @@ impl Pool {
             return Ok(());
         }
         let policy = match tokio::fs::read(self.state.join("storage-policy.json")).await {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 crate::storage::policy::Policy::default()
             }

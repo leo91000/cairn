@@ -20,12 +20,9 @@ function open() {
   revision.value = props.node.revision
   const saved = props.node.storage
   policy.value = {
-    cacheMiB: saved?.cacheMiB ?? 102400,
     memoryCacheMiB: saved?.memoryCacheMiB ?? 256,
     reserveMiB: saved?.reserveMiB ?? 10240,
     reservePercent: saved?.reservePercent ?? 5,
-    backupSeconds: saved?.backupSeconds ?? 60,
-    maxDirtySeconds: saved?.maxDirtySeconds ?? 300,
   }
 }
 
@@ -55,19 +52,13 @@ async function save() {
     @close="policy = null"
   >
     <form class="storage-form" @submit.prevent="save">
-      <p>Files are saved to S3 and loaded when needed. Conversations remain active when their local cache is freed.</p>
+      <p>Working files remain local to this node.</p>
       <fieldset>
         <legend>Local disk</legend><label>Shared memory cache (MiB)<input
           v-model.number="policy.memoryCacheMiB"
           type="number"
           min="4"
           max="4096"
-          required
-        ></label><label>Clean disk cache budget (MiB)<input
-          v-model.number="policy.cacheMiB"
-          type="number"
-          min="0"
-          max="16777216"
           required
         ></label>
         <label>Minimum free disk (MiB)<input
@@ -84,28 +75,12 @@ async function save() {
           max="50"
           required
         ></label>
-        <p>The larger free-space reserve applies. Unsaved work stays local; executions pause before the reserve is exhausted.</p>
-      </fieldset><fieldset>
-        <legend>Synchronization</legend><label>Synchronization target (seconds)<input
-          v-model.number="policy.backupSeconds"
-          type="number"
-          min="5"
-          max="3600"
-          required
-        ></label>
-        <label>Synchronization warning after (seconds)<input
-          v-model.number="policy.maxDirtySeconds"
-          type="number"
-          :min="policy.backupSeconds"
-          max="86400"
-          required
-        ></label>
-        <p>Old unsaved work is synchronized first on resume. Overdue synchronization is reported while work continues; integrity and free-space protections still apply.</p>
+        <p>The larger free-space reserve applies. Working files stay on this node; executions wait when there is no room to grow.</p>
       </fieldset><p v-if="error" role="alert" class="text-coral">
         {{ error }}
       </p>
       <UiButton type="submit" :disabled="busy">
-        {{ busy ? 'Checking storage…' : 'Save storage settings' }}
+        {{ busy ? 'Saving…' : 'Save storage settings' }}
       </UiButton>
     </form>
   </Modal>

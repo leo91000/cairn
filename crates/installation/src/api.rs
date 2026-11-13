@@ -699,9 +699,6 @@ async fn settings_routes(
         ("PUT", ["settings", "task-storage"]) => ("save_task_storage_limits", input.body.clone()),
         ("GET", ["overview"]) => ("get_installation_overview", json!({})),
         ("GET", ["audit"]) => ("list_audit", json!({})),
-        ("GET", ["settings", "storage"]) => ("get_storage_settings", json!({})),
-        ("PUT", ["settings", "storage"]) => ("save_storage_settings", input.body.clone()),
-        ("POST", ["settings", "storage", "check"]) => ("check_storage", json!({})),
         ("POST", ["reads"]) => ("mark_read", input.body.clone()),
         ("POST", ["dismissals"]) => ("set_outcome_aside", input.body.clone()),
         ("GET", ["settings", "conversations"]) => {

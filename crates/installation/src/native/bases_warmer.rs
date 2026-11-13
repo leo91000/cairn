@@ -169,7 +169,7 @@ impl Warmer {
                 handle.block_on(async {
                     let policy =
                         match tokio::fs::read(worker.state.join("storage-policy.json")).await {
-                            Ok(bytes) => serde_json::from_slice(&bytes)?,
+                            Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
                             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                                 crate::storage::policy::Policy::default()
                             }

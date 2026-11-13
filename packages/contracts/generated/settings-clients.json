@@ -1,5 +1,19 @@
 [
   {
+    "input": "GetNodeRuntimeSettingsInput",
+    "method": "GET",
+    "name": "getNodeRuntimeSettings",
+    "output": "NodeRuntimeSettings",
+    "path": "/nodes/settings"
+  },
+  {
+    "input": "NodeRuntimeSettings",
+    "method": "PUT",
+    "name": "saveNodeRuntimeSettings",
+    "output": "NodeRuntimeSettings",
+    "path": "/nodes/settings"
+  },
+  {
     "input": "GetChatPlanSettingsInput",
     "method": "GET",
     "name": "getChatPlanSettings",
@@ -82,26 +96,5 @@
     "name": "listAudit",
     "output": "ListAuditOutput",
     "path": "/audit"
-  },
-  {
-    "input": "GetStorageSettingsInput",
-    "method": "GET",
-    "name": "getStorageSettings",
-    "output": "StorageSettings",
-    "path": "/settings/storage"
-  },
-  {
-    "input": "SaveStorageSettingsInput",
-    "method": "PUT",
-    "name": "saveStorageSettings",
-    "output": "StorageSettings",
-    "path": "/settings/storage"
-  },
-  {
-    "input": "CheckStorageInput",
-    "method": "POST",
-    "name": "checkStorage",
-    "output": "StorageCheck",
-    "path": "/settings/storage/check"
   }
 ]

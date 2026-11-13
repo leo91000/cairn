@@ -166,24 +166,26 @@ async fn legacy_disk_objects_survive_local_reference_purge_on_original_storage()
     )
     .await
     .unwrap();
-    let response = fixture
-        .app
-        .client
-        .put(format!("{}/settings/storage", fixture.base))
-        .header("cookie", &fixture.cookie)
-        .header("origin", &fixture.app.url)
-        .header("x-csrf-token", fixture.session["csrf"].as_str().unwrap())
-        .json(&json!({
-            "bucket": "cairn-external",
-            "endpoint": std::env::var("CAIRN_INSTALLER_TEST_EXTERNAL_ENDPOINT").unwrap(),
-            "region": "us-east-1",
-            "accessKeyId": "external-fixture",
-            "secretAccessKey": "external-fixture-secret"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    // Only this disposable fixture's private legacy configuration changes.
+    // Original locations keep their credentials; no public settings API remains.
+    let external = json!({
+        "bucket": "cairn-external",
+        "endpoint": std::env::var("CAIRN_INSTALLER_TEST_EXTERNAL_ENDPOINT").unwrap(),
+        "region": "us-east-1",
+        "accessKeyId": "external-fixture",
+        "secretAccessKey": "external-fixture-secret",
+        "previous": [integrated.clone()]
+    });
+    cairn_installation::skills::atomic_write(
+        &service.config.data_dir.join("storage-s3.json"),
+        &serde_json::to_vec(&external).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        Storage::configured(service).unwrap().bucket,
+        "cairn-external"
+    );
 
     *bytes.lock().unwrap() = vec![42u8; 4096];
     let second = publication::capture(service, &service.store.run(&run_id).await.unwrap())

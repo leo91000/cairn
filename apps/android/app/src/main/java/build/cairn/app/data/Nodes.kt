@@ -123,15 +123,7 @@ fun NodeAlert.localized(): Pair<String, String> =
 /** Reply to a revocation. */
 typealias NodeBackup = build.cairn.boundary.NodeBackup
 
-@Serializable
-data class NodeSyncSettings(
-    val intervalSeconds: Long = 60,
-    val budgetMiB: Long = 102400,
-    val disconnectTimeoutSeconds: Long = 60,
-    val shutdownTimeoutSeconds: Long = 300,
-    val maxCapacityWaitSeconds: Long = 3600,
-    val s3Configured: Boolean? = null,
-)
+typealias NodeRuntimeSettings = build.cairn.contracts.NodeRuntimeSettings
 
 fun formatMiB(value: Long): String {
     if (value < 1024) return "$value Mio"

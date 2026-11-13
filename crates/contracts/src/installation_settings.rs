@@ -1,5 +1,4 @@
-//! Installation settings, storage, audit and overview views. Storage views are
-//! redacted: S3 credentials are accepted on write and never returned.
+//! Installation settings, task storage limits, audit and overview views.
 use crate::*;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -70,63 +69,6 @@ pub struct InstallationSettings {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
-pub struct GetStorageSettingsInput {}
-
-/// The default S3 storage for new disks, without its credentials.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StorageSettings {
-    pub configured: bool,
-    pub integrated: bool,
-    pub environment_managed: bool,
-    pub bucket: String,
-    pub endpoint: String,
-    pub region: String,
-}
-
-/// Credentials are written to the installation's private storage file only.
-#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SaveStorageSettingsInput {
-    #[schemars(length(min = 1, max = 63), pattern("^[a-z0-9.-]+$"))]
-    pub bucket: String,
-    #[schemars(length(min = 9, max = 2048), pattern("^https://"))]
-    pub endpoint: String,
-    #[schemars(length(min = 1, max = 100))]
-    pub region: String,
-    #[schemars(length(min = 1, max = 256))]
-    pub access_key_id: String,
-    #[schemars(length(min = 1, max = 256))]
-    pub secret_access_key: String,
-    /// Required for Cloudflare R2: public domains and bucket locks are disabled.
-    #[serde(default)]
-    pub private_bucket_confirmed: bool,
-}
-
-impl std::fmt::Debug for SaveStorageSettingsInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SaveStorageSettingsInput")
-            .field("bucket", &self.bucket)
-            .field("endpoint", &self.endpoint)
-            .field("region", &self.region)
-            .field("private_bucket_confirmed", &self.private_bucket_confirmed)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-pub struct CheckStorageInput {}
-
-/// A completed write, read and deletion of a probe object. Failures are errors.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StorageCheck {
-    pub ok: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
 pub struct ListAuditInput {}
 
 /// One recorded installation change; `detail` is the JSON recorded with it.
@@ -164,3 +106,39 @@ pub struct InstallationOverview {
     pub missions: u32,
     pub concurrency: u32,
 }
+
+/// Installation-wide runtime deadlines. Working disks are local to their node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct NodeRuntimeSettings {
+    #[ts(type = "number")]
+    #[schemars(range(min = 10, max = 300))]
+    pub disconnect_timeout_seconds: u64,
+    #[ts(type = "number")]
+    #[schemars(range(min = 30, max = 300))]
+    pub shutdown_timeout_seconds: u64,
+}
+
+impl Default for NodeRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            disconnect_timeout_seconds: 60,
+            shutdown_timeout_seconds: 300,
+        }
+    }
+}
+
+impl NodeRuntimeSettings {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(10..=300).contains(&self.disconnect_timeout_seconds)
+            || !(30..=300).contains(&self.shutdown_timeout_seconds)
+        {
+            return Err("Invalid node runtime deadlines.");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct GetNodeRuntimeSettingsInput {}

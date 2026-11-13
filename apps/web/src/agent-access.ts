@@ -320,12 +320,9 @@ function currentRunner(): ExecutionNode {
     staleDisks: { count: 0, diskMiB: 0 },
     diskAccounting: null,
     storage: {
-      cacheMiB: 102400,
       memoryCacheMiB: 256,
       reserveMiB: 10240,
       reservePercent: 5,
-      backupSeconds: 60,
-      maxDirtySeconds: 300,
     },
 
     id: LOCAL_NODE_ID,

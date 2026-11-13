@@ -1269,17 +1269,16 @@ fn main() {
     export::<CodingAgentPreferences>(root, &mut generator, Contract::Serialize);
     export::<NativeConfigurationSnapshot>(root, &mut generator, Contract::Serialize);
     export::<InstallationSettings>(root, &mut generator, Contract::Serialize);
+    export::<GetNodeRuntimeSettingsInput>(root, &mut generator, Contract::Deserialize);
+    export::<NodeRuntimeSettings>(root, &mut generator, Contract::Serialize);
     export::<GetInstallationOverviewInput>(root, &mut generator, Contract::Deserialize);
     export::<InstallationOverview>(root, &mut generator, Contract::Serialize);
     export::<ListAuditInput>(root, &mut generator, Contract::Deserialize);
     export::<AuditEntry>(root, &mut generator, Contract::Serialize);
     export::<ListAuditOutput>(root, &mut generator, Contract::Serialize);
-    export::<GetStorageSettingsInput>(root, &mut generator, Contract::Deserialize);
-    export::<StorageSettings>(root, &mut generator, Contract::Serialize);
-    export::<SaveStorageSettingsInput>(root, &mut generator, Contract::Deserialize);
-    export::<CheckStorageInput>(root, &mut generator, Contract::Deserialize);
-    export::<StorageCheck>(root, &mut generator, Contract::Serialize);
     let settings_clients = serde_json::json!([
+        { "name": "getNodeRuntimeSettings", "input": "GetNodeRuntimeSettingsInput", "output": "NodeRuntimeSettings", "method": "GET", "path": "/nodes/settings" },
+        { "name": "saveNodeRuntimeSettings", "input": "NodeRuntimeSettings", "output": "NodeRuntimeSettings", "method": "PUT", "path": "/nodes/settings" },
         { "name": "getChatPlanSettings", "input": "GetChatPlanSettingsInput", "output": "ChatPlanSettings", "method": "GET", "path": "/settings/chat-plan" },
         { "name": "saveChatPlanSettings", "input": "ChatPlanSettings", "output": "ChatPlanSettings", "method": "PUT", "path": "/settings/chat-plan" },
         { "name": "getTaskStorageLimits", "input": "GetTaskStorageLimitsInput", "output": "TaskStorageLimits", "method": "GET", "path": "/settings/task-storage" },
@@ -1291,10 +1290,7 @@ fn main() {
         { "name": "setOutcomeAside", "input": "SetOutcomeAsideInput", "output": "SetOutcomeAsideOutput", "method": "POST", "path": "/dismissals" },
         { "name": "getInstallationSettings", "input": "GetInstallationSettingsInput", "output": "InstallationSettings", "method": "GET", "path": "/settings" },
         { "name": "getInstallationOverview", "input": "GetInstallationOverviewInput", "output": "InstallationOverview", "method": "GET", "path": "/overview" },
-        { "name": "listAudit", "input": "ListAuditInput", "output": "ListAuditOutput", "method": "GET", "path": "/audit" },
-        { "name": "getStorageSettings", "input": "GetStorageSettingsInput", "output": "StorageSettings", "method": "GET", "path": "/settings/storage" },
-        { "name": "saveStorageSettings", "input": "SaveStorageSettingsInput", "output": "StorageSettings", "method": "PUT", "path": "/settings/storage" },
-        { "name": "checkStorage", "input": "CheckStorageInput", "output": "StorageCheck", "method": "POST", "path": "/settings/storage/check" }
+        { "name": "listAudit", "input": "ListAuditInput", "output": "ListAuditOutput", "method": "GET", "path": "/audit" }
     ]);
     fs::write(
         root.join("settings-clients.json"),

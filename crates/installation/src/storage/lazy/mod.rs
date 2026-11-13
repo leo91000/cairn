@@ -510,7 +510,7 @@ impl LazyDisk {
         // changes made while an earlier block was being reconstructed.
         let policy = std::fs::read(state.join("storage-policy.json"))
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<super::policy::Policy>(&bytes).ok())
+            .and_then(|bytes| super::policy::from_persisted(&bytes).ok())
             .unwrap_or_default();
         let (total, free) = super::policy::space(&self.directory)?;
         let reserve = policy.reserve(total);

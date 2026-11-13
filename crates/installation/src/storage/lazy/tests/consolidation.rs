@@ -491,7 +491,12 @@ fn consolidation_rechecks_a_reserve_increase_before_admitting_the_next_block() {
             reserve_percent: 1,
             ..Default::default()
         };
-        std::fs::write(raised_path, serde_json::to_vec(&raised).unwrap()).unwrap();
+        // An older controller file must still apply its current local reserve.
+        let mut legacy_policy = serde_json::to_value(&raised).unwrap();
+        legacy_policy["cacheMiB"] = serde_json::json!(20480);
+        legacy_policy["backupSeconds"] = serde_json::json!(30);
+        legacy_policy["maxDirtySeconds"] = serde_json::json!(90);
+        std::fs::write(raised_path, serde_json::to_vec(&legacy_policy).unwrap()).unwrap();
     }));
     assert_eq!(
         disk.consolidate().unwrap_err().kind(),
