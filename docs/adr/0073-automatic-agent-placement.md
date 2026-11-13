@@ -1,3 +1,5 @@
+> Statut : Mise à jour par [ADR-0083](0083-local-conversation-disks-without-s3.md) : le placement automatique ne change jamais la node d’un environnement existant. Un changement de node explicite, y compris entre backends, fait expirer son environnement de travail.
+
 > Update 2026-11-07: [ADR-0082](0082-move-vm-disks-between-execution-backends.md) permits explicit cross-backend node moves. VM-created disks are mounted directly by authorized native controllers; only native-created disks need physical conversion before VM execution. Automatic placement and priorities remain as defined in ADR-0073.
 
 # Automatic placement with per-agent node priorities

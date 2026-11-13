@@ -6,6 +6,7 @@ mod arguments;
 mod form;
 mod integrations;
 mod resources;
+mod rule_templates;
 mod settings;
 mod setup;
 mod sources;
@@ -18,6 +19,10 @@ pub use integrations::{
     RunFile, SkillSource, home_path, render,
 };
 pub use resources::{Hook, ResourceField, ResourceType};
+pub use rule_templates::{
+    MAX_RULE_TEMPLATES, MAX_TEMPLATE_PARAMETERS, MAX_TEMPLATE_RULES, Placeholder, RuleTemplate,
+    RuleTemplateParameter, RuleTemplateParameterKind, placeholder,
+};
 pub use settings::validate_settings_schema;
 pub use setup::{CopyValue, Effort, Preset, Risk, Setup, Step, StepKind, Task};
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
@@ -336,6 +341,10 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(transform = crate::client_default::<Vec<ResourceType>>)]
     pub resources: Vec<ResourceType>,
+    /// Ready-made sets of hook rules people install with their own parameters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<RuleTemplate>>)]
+    pub rule_templates: Vec<RuleTemplate>,
     /// Added to the prompt of runs whose agent is granted on an enabled instance.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     #[schemars(transform = crate::client_default::<String>)]
@@ -530,6 +539,7 @@ impl Manifest {
         self.validate_agent_interface()?;
         self.validate_integrations()?;
         self.validate_resources()?;
+        self.validate_rule_templates()?;
         self.validate_setup()
     }
 

@@ -1,4 +1,4 @@
-> Statut : La mention des disques paired est obsolète : ce layout non déployé est supprimé. L’agrandissement natif reste applicable.
+> Statut : La mention des disques paired est obsolète : ce layout non déployé est supprimé. L’agrandissement natif reste applicable ; [ADR-0083](0083-local-conversation-disks-without-s3.md) retire la récupération des caches inactifs sous pression : une admission sans espace attend.
 
 # Automatic bounded native disk growth
 

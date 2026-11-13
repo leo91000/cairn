@@ -87,7 +87,14 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
             operation @ ("storage-status" | "published" | "publication-fence"),
         ] => disk_storage(&broker, request, run, operation).await,
         ["disks", run, "restore"] => disk_restore(&broker, request, run).await,
-        ["disks", run, action] => disk_action(&broker, request, run, action).await,
+        ["disks", run, action] => {
+            let (run, action) = ((*run).to_owned(), (*action).to_owned());
+            // A disconnected manager must not release deletion ownership while
+            // filesystem work or its durable acknowledgement is still executing.
+            tokio::spawn(async move { disk_action(&broker, request, &run, &action).await })
+                .await
+                .map_err(Error::internal)?
+        }
         _ => run_route(broker, request, &segments).await,
     }
 }
@@ -107,6 +114,7 @@ async fn health(broker: &Broker) -> Result<Response> {
         "backend": Backend::Firecracker,
         "runtimeId": runtime_id,
         "nodeProtocol": NODE_PROTOCOL,
+        "diskRetirementProtocol": crate::storage::retirement::PROTOCOL,
         "directStorageProtocol": 1,
         "sharedResources": broker.pool.budget().await.is_some(),
         "exclusiveReservations": true,
@@ -376,8 +384,31 @@ async fn disk_action(
     }
     uuid(run)?;
     let bytes = body(request, 4096, "Invalid workspace request.").await?;
-    let _: serde::de::IgnoredAny = serde_json::from_slice(&bytes)?;
-    broker.pool.evict_conversation(run).await?;
+    let value: Value = serde_json::from_slice(&bytes)?;
+    let retirement = if action == "delete" {
+        crate::storage::retirement::Retirement::begin(&broker.state, run, &value).await?
+    } else {
+        None
+    };
+    if let Some(retirement) = &retirement
+        && retirement.completed().await?
+    {
+        let active = broker.active.lock().await;
+        if retirement
+            .attempts()
+            .iter()
+            .any(|id| active.contains_key(id))
+        {
+            return Err(Error::conflict("A retired attempt is still active."));
+        }
+        erase_attempt_content(broker, run, false, retirement.attempts(), true).await?;
+        return json_response(json!({ "deleted": true, "retirementId": retirement.id() }));
+    }
+    if retirement.is_some() {
+        broker.pool.retire_conversation(run).await?;
+    } else {
+        broker.pool.evict_conversation(run).await?;
+    }
     let active = broker.active.lock().await;
     if active.values().any(|a| a.plan.run_id() == run) {
         return Err(Error::conflict("The workspace still has an active agent."));
@@ -395,7 +426,14 @@ async fn disk_action(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    erase_attempt_content(broker, run).await?;
+    erase_attempt_content(
+        broker,
+        run,
+        retirement.is_none(),
+        retirement.as_ref().map_or(&[], |value| value.attempts()),
+        false,
+    )
+    .await?;
     // Preserve the lock inode: an overlapping boot must contend on it.
     let mut leftovers = tokio::fs::read_dir(&directory).await?;
     while let Some(entry) = leftovers.next_entry().await? {
@@ -404,7 +442,13 @@ async fn disk_action(
         }
         remove_entry(&entry.path(), entry.file_type().await?.is_dir()).await?;
     }
-    json_response(json!({ "deleted": true }))
+    if let Some(retirement) = &retirement {
+        retirement.commit(directory).await?;
+    }
+    json_response(json!({
+        "deleted": true,
+        "retirementId": retirement.as_ref().map(crate::storage::retirement::Retirement::id),
+    }))
 }
 
 /// Removes older copies set aside when a recovery point replaced this disk and

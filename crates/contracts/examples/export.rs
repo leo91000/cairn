@@ -630,10 +630,16 @@ fn main() {
     export::<ListHookRuleTriggeringsInput>(root, &mut generator, Contract::Deserialize);
     export::<ListHookRuleTriggeringsOutput>(root, &mut generator, Contract::Serialize);
     export::<HookRuleTriggeringInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListHookRuleTemplatesInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListHookRuleTemplatesOutput>(root, &mut generator, Contract::Serialize);
+    export::<InstallHookRuleTemplateInput>(root, &mut generator, Contract::Deserialize);
+    export::<InstallHookRuleTemplateOutput>(root, &mut generator, Contract::Serialize);
     fs::write(root.join("rule-clients.json"), serde_json::to_string_pretty(&serde_json::json!([
         { "name": "listHookRules", "input": "ListHookRulesInput", "output": "ListHookRulesOutput", "method": "GET", "path": "/hook-rules", "query": ["agentId", "instanceId"], "optionalQuery": ["agentId", "instanceId"] },
         { "name": "getHookRuleCatalog", "input": "GetHookRuleCatalogInput", "output": "HookRuleCatalog", "method": "GET", "path": "/hook-rules/catalog", "query": ["agentId"], "optionalQuery": ["agentId"] },
         { "name": "validateHookRule", "input": "ValidateHookRuleInput", "output": "ValidateHookRuleOutput", "method": "POST", "path": "/hook-rules/validate" },
+        { "name": "listHookRuleTemplates", "input": "ListHookRuleTemplatesInput", "output": "ListHookRuleTemplatesOutput", "method": "GET", "path": "/hook-rules/templates", "query": ["instanceId"], "optionalQuery": ["instanceId"] },
+        { "name": "installHookRuleTemplate", "input": "InstallHookRuleTemplateInput", "output": "InstallHookRuleTemplateOutput", "method": "POST", "path": "/hook-rules/templates/install" },
         { "name": "getHookRule", "input": "HookRuleInput", "output": "HookRule", "method": "GET", "path": "/hook-rules/{ruleId}" },
         { "name": "listHookRuleVersions", "input": "HookRuleInput", "output": "ListHookRuleVersionsOutput", "method": "GET", "path": "/hook-rules/{ruleId}/versions" },
         { "name": "listHookRuleTriggerings", "input": "ListHookRuleTriggeringsInput", "output": "ListHookRuleTriggeringsOutput", "method": "GET", "path": "/hook-rules/{ruleId}/triggerings", "query": ["cursor"], "optionalQuery": ["cursor"] },

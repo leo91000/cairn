@@ -81,7 +81,7 @@ fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit 
                     if (value.environmentExpired)
                         "Migration vers $target. Le prochain message crée un environnement vide. L’historique et les livrables restent disponibles."
                     else
-                        "Migration vers $target. L’exécution est arrêtée pendant la sauvegarde et le transfert. Vous pouvez quitter cet écran."
+                        "Migration vers $target. L’environnement précédent a expiré. Le prochain environnement attend sa destination. Vous pouvez quitter cet écran."
                 )
             else -> {
                 Text(
@@ -90,7 +90,7 @@ fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit 
                     else if (value.optional)
                         "Vous pouvez choisir explicitement $target pour cette conversation. Son environnement actuel est conservé jusqu’à votre confirmation."
                     else
-                        "L’agent utilise maintenant $target. Migrez cette conversation pour garder son historique et ses fichiers."
+                        "L’agent utilise maintenant $target. Changez cette conversation pour continuer avec son historique dans un environnement vide."
                 )
                 if (value.reason != null) Text(value.reason)
                 else if (value.nodes.isEmpty())
@@ -125,11 +125,9 @@ fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit 
             title = "Migrer cette conversation ?",
             description =
                 if (value.environmentExpired)
-                    "Les anciens fichiers de travail ont été supprimés après inactivité. Confirmez $target pour un nouvel environnement vide. Le fil, l’historique, les pièces jointes et les livrables sont conservés. Le prochain message ouvre une nouvelle session du moteur avec le contexte de la conversation. Les outils et dépendances devront être réinstallés. Le node choisi est épinglé pour le nouvel environnement. Vous pouvez modifier ce choix dans les préférences du fil."
-                else if (value.conversion)
-                    "Un disque créé en natif nécessite une conversion unique vers $target. Le chat attend le prochain message ; une mission reprend automatiquement avec son historique dans une nouvelle session. L’original est conservé en cas d’échec. Les outils système dépendent de la destination."
+                    "L’environnement précédent a expiré. Confirmez $target pour un environnement vide. L’historique, les pièces jointes et les artefacts sont conservés. La première admission attend la capacité sur la node choisie tant qu’elle reste autorisée."
                 else
-                    "Le même disque et la même session du moteur sont réutilisés vers $target sans copie des fichiers. Les commandes s’arrêtent ; les outils système dépendent de la destination. L’original est conservé en cas d’échec.",
+                    "Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Le tour en cours s’arrête et les questions ouvertes sont closes. Le prochain environnement démarre sur la node choisie avec une nouvelle session et l’historique ; il y attend la capacité tant qu’elle reste autorisée. Les messages en file, les attentes planifiées et les missions actives y reprennent ; sinon, la conversation attend le prochain message.",
             busy = busy,
             error = error,
             dismiss = { confirm = false },
@@ -144,6 +142,7 @@ fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit 
                             put("nodeId", destination)
                             put("backend", value.toBackend)
                             put("confirm", true)
+                            if (!value.environmentExpired) put("discardWorkingFiles", true)
                         },
                     )
                     state = value.copy(pending = true)

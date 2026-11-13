@@ -49,22 +49,28 @@ fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
         .into_iter()
         .map(|name| {
             // Compare retained columns across both placement23 and Plan26 migrations.
-            let projection =
-                if matches!(name.as_str(), "chat_messages" | "chat_questions" | "nodes") {
-                    db.prepare(&format!("PRAGMA table_info({name})"))
-                        .unwrap()
-                        .query_map([], |row| row.get::<_, String>(1))
-                        .unwrap()
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                        .unwrap()
-                        .into_iter()
-                        .filter(|column| column != "plan" && column != "exclusive_reservation")
-                        .map(|column| format!("\"{column}\""))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                } else {
-                    "*".to_owned()
-                };
+            let projection = if matches!(
+                name.as_str(),
+                "chat_messages" | "chat_questions" | "nodes" | "direct_journal_acknowledgements"
+            ) {
+                db.prepare(&format!("PRAGMA table_info({name})"))
+                    .unwrap()
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|column| {
+                        column != "plan"
+                            && column != "exclusive_reservation"
+                            && column != "detached"
+                    })
+                    .map(|column| format!("\"{column}\""))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            } else {
+                "*".to_owned()
+            };
             let filter = if name == "kv" {
                 " WHERE key!='agent-access-rollout'"
             } else {

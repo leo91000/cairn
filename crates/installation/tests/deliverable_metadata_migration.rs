@@ -53,6 +53,7 @@ fn snapshot(db: &Connection) -> Snapshot {
             let added_column = match name.as_str() {
                 "chat_messages" | "chat_questions" => Some("plan"),
                 "nodes" => Some("vm_disks"),
+                "direct_journal_acknowledgements" => Some("detached"),
                 _ => None,
             };
             let columns = columns
@@ -132,7 +133,7 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        32
+        33
     );
     let after = snapshot(&db);
     let after_schema = schema(&db);
@@ -147,7 +148,10 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
                 "Retained node schema must remain unchanged"
             );
         } else if kind != "table"
-            || !matches!(name.as_str(), "kv" | "chat_messages" | "chat_questions")
+            || !matches!(
+                name.as_str(),
+                "kv" | "chat_messages" | "chat_questions" | "direct_journal_acknowledgements"
+            )
         {
             assert_eq!(
                 after_schema.get(&(kind, name)),

@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "creationId": {
+      "description": "A random UUID: retrying returns the same rules.",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "enabled": {
+      "default": true,
+      "description": "The new rules trigger at once unless they start disabled.",
+      "type": "boolean"
+    },
+    "instanceId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "parameters": {
+      "additionalProperties": true,
+      "description": "Values by parameter name: an agent identifier, `{resourceType, id}`, a list of\nthem, a text, a number or a boolean. Omitted optional parameters take their default.",
+      "type": "object",
+      "x-cairn-json-object": true
+    },
+    "template": {
+      "maxLength": 40,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "instanceId",
+    "template",
+    "parameters"
+  ],
+  "title": "InstallHookRuleTemplateInput",
+  "type": "object"
+}

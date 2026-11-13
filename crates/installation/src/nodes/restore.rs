@@ -1,4 +1,4 @@
-//! A destination mounts the current published disk through an authorized grant.
+//! A node mounts its conversation's current published disk through an authorized grant.
 use crate::{
     error::{Error, Result},
     http::App,
@@ -11,85 +11,32 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rusqlite::OptionalExtension;
-use serde::Serialize;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
-
-/// What a destination controller needs to mount a published disk on demand.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RestoreRequest<'a> {
-    manifest: Value,
-    master: &'a str,
-    grant: String,
-    backup_id: &'a Value,
-    policy: crate::storage::policy::Policy,
-}
 
 fn ready() -> Value {
     json!({ "ready": true })
 }
 
-/// Only an explicit move changes execution backend; the disk format stays independent.
-pub(crate) fn for_destination(mut manifest: Value, node: &Value) -> Result<Value> {
-    let native_node = crate::native::policy::node_native(node);
-    let native_disk = manifest["kind"] == "native-ext4-v1";
-    if native_disk && !native_node {
+/// Same-node storage qualification still exercises generic S3 restoration. Node
+/// changes and backend migrations never call this path or reuse a published disk.
+pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
+    let _operation = s.node_backup_operation.lock(text(run, "id")).await;
+    if super::owner_node(run) != node {
         return Err(Error::conflict(
-            "An environment created natively must be converted before a VM can run it.",
+            "Restoration cannot change the environment's node.",
         ));
     }
-    if native_node && !native_disk {
-        if node["capabilities"]["vmDisks"] != true {
-            return Err(Error::conflict("Destination cannot mount VM disks."));
-        }
-        let provenance = manifest["runtime"]["vmRuntimeId"]
-            .as_str()
-            .map(str::to_owned)
-            .or_else(|| manifest["runtime"]["runtimeId"].as_str().map(str::to_owned));
-        manifest["runtime"] = json!({ "backend": "native", "storage": crate::native::block::STORAGE, "os": "linux", "arch": "x86_64", "runtimeId": node["runtimeId"], "disk": "vm", "vmRuntimeId": provenance });
-    } else if !native_node && manifest["runtime"]["disk"] == "vm" {
-        manifest["runtime"] = json!({ "runtimeId": node["runtimeId"] });
-    }
-    Ok(manifest)
-}
-
-pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
-    start_authorized(
-        s,
-        run,
-        node,
-        backup,
-        crate::authorization::Authorization::default(),
-    )
-    .await
-}
-
-pub(crate) async fn start_authorized(
-    s: &Service,
-    run: &Value,
-    node: &str,
-    backup: &Value,
-    authorize: crate::authorization::Authorization,
-) -> Result<()> {
-    let _operation = s.node_backup_operation.lock(text(run, "id")).await;
-    authorize.recheck().await?;
     let record = s.node_boundary(node).await?;
-    let manifest = for_destination(super::publication::manifest(s, backup).await?, &record)?;
-    let policy = crate::storage::policy::for_node(&record["storage"])?;
-    let grant =
-        super::disk_grants::issue_authorized(s, run, node, backup, authorize.clone()).await?;
-    let request = RestoreRequest {
-        manifest,
-        // The local controller needs the internal origin. For a remote node,
-        // the outbound transport replaces it with its authenticated origin.
-        master: &s.config.public_url,
-        grant,
-        backup_id: &backup["id"],
-        policy,
-    };
+    let manifest = super::publication::manifest(s, backup).await?;
+    let native_disk = crate::native::block::mounts_block(&manifest);
+    if native_disk != crate::native::policy::node_native(&record) {
+        return Err(Error::conflict(
+            "Restoration cannot change the environment's backend.",
+        ));
+    }
+    let grant = super::disk_grants::issue(s, run, node, backup).await?;
     let secret = super::runner_secret(s).await?;
-    authorize.recheck().await?;
     let response = s
         .http
         .post(format!(
@@ -98,15 +45,20 @@ pub(crate) async fn start_authorized(
             text(run, "id")
         ))
         .bearer_auth(secret)
-        .json(&request)
+        .json(&json!({
+            "manifest": manifest,
+            "master": s.config.public_url,
+            "grant": grant,
+            "backupId": backup["id"],
+            "policy": crate::storage::policy::for_node(&record["storage"])?
+        }))
         .timeout(Duration::from_secs(120))
         .send()
         .await
-        .map_err(|_| Error::unavailable("VM restore connection interrupted."))?;
-    authorize.recheck().await?;
+        .map_err(|_| Error::unavailable("Disk restore connection interrupted."))?;
     if !response.status().is_success() {
         return Err(Error::unavailable(
-            "Destination could not restore this VM runtime and disk.",
+            "The node could not restore this environment's disk.",
         ));
     }
     Ok(())
@@ -352,30 +304,4 @@ pub(crate) async fn restore_journal(state: &Path, run: &str, value: Value) -> Re
     tokio::fs::remove_file(directory.join("restore.pending")).await?;
     tokio::fs::File::open(&directory).await?.sync_all().await?;
     Ok(ready())
-}
-
-#[cfg(test)]
-mod backend_move_tests {
-    use super::*;
-
-    #[test]
-    fn vm_disk_round_trip_keeps_blocks_and_uses_current_controller_runtime() {
-        let disk = json!({ "version": 2, "size": 128 * 1024 * 1024, "blocks": [{ "hash": "retained" }], "runtime": { "runtimeId": "original-vm-image" } });
-        let native = json!({ "capabilities": { "backend": "native", "vmDisks": true }, "runtimeId": "current-native-tools" });
-        let mounted = for_destination(disk.clone(), &native).unwrap();
-        assert_eq!(mounted["blocks"], disk["blocks"]);
-        assert_eq!(mounted["runtime"]["vmRuntimeId"], "original-vm-image");
-        assert_eq!(mounted["runtime"]["disk"], "vm");
-        let vm = json!({ "capabilities": { "backend": "firecracker" }, "runtimeId": "current-vm-image" });
-        let returned = for_destination(mounted, &vm).unwrap();
-        assert_eq!(returned["blocks"], disk["blocks"]);
-        assert_eq!(
-            returned["runtime"],
-            json!({ "runtimeId": "current-vm-image" })
-        );
-        let unavailable = json!({ "capabilities": { "backend": "native" } });
-        assert!(for_destination(disk, &unavailable).is_err());
-        let native_born = json!({ "kind": "native-ext4-v1", "runtime": { "backend": "native" } });
-        assert!(for_destination(native_born, &vm).is_err());
-    }
 }

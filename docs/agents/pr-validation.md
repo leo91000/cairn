@@ -74,8 +74,11 @@ preserves the native adapter, supported-release resume and rollback checks.
 The backend job retains its complete test workload, measurements, namespace
 qualification and doctests within its existing 30-minute budget. Backend-only
 and diagnostic dispatches skip this job; they do not resolve engine releases.
-The post-suite bootstrap/terminal measurements and namespace test compilation keep
-`--workspace --lib`, retaining the dependency features used by the workspace suite.
+The native controller preflight, post-suite bootstrap/terminal measurements and
+namespace test compilation keep `--workspace --lib`, retaining the dependency
+features used by the workspace suite. The preflight keeps its installation package
+filter and native service/files test filters, so it executes the same cases before
+building every test binary.
 Package-only selection changes Cargo's unified dependency graph and rebuilds the
 installation test library. Exact case filters and the namespace executable check
 still select the intended installation tests.
@@ -110,11 +113,11 @@ The threshold follows an observed 22.49 GiB completed-run allocation plus
 headroom, not a measured peak bound. An insufficient runner fails before
 compilation with its capacity recorded, instead of losing logs to ENOSPC.
 
-For a focused physical backend-migration check, dispatch `ci.yaml` with
+For a focused confirmed backend-change check, dispatch `ci.yaml` with
 `backend-only=true` and `backend-qualification=backend-migration`. The optional
 case runs in a separate 30-minute disposable job after the normal backend job
-succeeds. The new job checks out the same commit and uses the regular isolated
-loopback-S3 launcher to build and run exactly the selected case; it shares no
+succeeds. The new job checks out the same commit and uses the isolated backend launcher
+to run the VM/native confirmation and expiration regression; it shares no
 compiled artifacts with the backend job. The default is `none`; this selected
 case does not replace native-runtime or other affected specialist
 qualifications.

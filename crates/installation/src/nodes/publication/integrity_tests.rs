@@ -17,6 +17,7 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
         let run = id();
         let publication = id();
         let object = id();
+        let replacement_publication = id();
         let chat = json!({ "id": id(), "runId": run });
         let fail_fence = Arc::new(AtomicBool::new(true));
         let state = root.path().join("node");
@@ -25,8 +26,17 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
             move |request: Request| {
                 let (fail_fence, state) = (fail_fence.clone(), state.clone());
                 async move {
+                    if request.uri().path() == "/health" {
+                        return Json(json!({ "diskRetirementProtocol":2 })).into_response();
+                    }
                     if request.uri().path().ends_with("/delete") {
-                        return Json(json!({ "deleted": true })).into_response();
+                        let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                        let input: Value = serde_json::from_slice(&body).unwrap();
+                        return Json(json!({
+                            "deleted": true,
+                            "retirementId": input["retirementId"],
+                        }))
+                        .into_response();
                     }
                     assert!(request.uri().path().ends_with("/publication-fence"));
                     if fail_fence.load(Ordering::Relaxed) {
@@ -65,11 +75,39 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
             Ok(())
         }).await.unwrap();
 
+        if !permanently_deleted {
+            s.expire_environment(
+                &run,
+                crate::environment_expiration::Expiration::new(
+                    cairn_contracts::EnvironmentExpirationCause::Inactivity,
+                ),
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        }
         let retire = || async {
             if permanently_deleted {
-                crate::conversation_deletion::purge(&s, chat.clone()).await
-            } else {
-                crate::conversation_deletion::expire_environment(&s, chat.clone()).await
+                return crate::conversation_deletion::purge(&s, chat.clone()).await;
+            }
+            // Each attempt is due immediately; the retry delay is not under test.
+            s.store
+                .transaction(|db| {
+                    for mut retirement in db.list("environment-retirements")? {
+                        retirement["retryAfter"] = Value::Null;
+                        db.put("environment-retirements", &retirement)?;
+                    }
+                    Ok(())
+                })
+                .await?;
+            s.retire_environments().await?;
+            match s.store.list("environment-retirements").await?.first() {
+                Some(retirement) => Err(crate::error::Error::unavailable(
+                    retirement["error"]
+                        .as_str()
+                        .unwrap_or("Retirement pending."),
+                )),
+                None => Ok(()),
             }
         };
         // Even a successful disk DELETE does not prove that a detached ACK has
@@ -96,6 +134,27 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
             .await
             .unwrap();
 
+        if !permanently_deleted {
+            let run_id = run.clone();
+            assert!(
+                !s.store
+                    .read(move |db| crate::environment_expiration::admission_blocked(db, &run_id))
+                    .await
+                    .unwrap()
+            );
+            let next = json!({ "id": replacement_publication, "runId": run, "nodeId": id() });
+            s.store
+                .transaction(move |db| {
+                    db.0.execute(
+                        "INSERT INTO shared_publications VALUES(?1,?2)",
+                        rusqlite::params![text(&next, "id"), text(&next, "runId")],
+                    )?;
+                    super::super::journal_acknowledgements::begin(db, &next)
+                })
+                .await
+                .unwrap();
+        }
+
         fail_fence.store(false, Ordering::Relaxed);
         retire().await.unwrap();
         let fences: Value = serde_json::from_slice(
@@ -109,14 +168,14 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
                 .contains(&json!(publication))
         );
         s.store
-            .read(|db| {
+            .read(move |db| {
                 assert_eq!(
                     db.0.query_row(
                         "SELECT count(*) FROM direct_journal_acknowledgements",
                         [],
                         |r| r.get::<_, i64>(0)
                     )?,
-                    0
+                    i64::from(!permanently_deleted)
                 );
                 assert_eq!(
                     db.0.query_row("SELECT count(*) FROM shared_references", [], |r| r
@@ -145,6 +204,13 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
             s.store.run(&run).await.unwrap()["environmentState"],
             "expired"
         );
+        // Old cleanup did not consume the replacement's live acknowledgement.
+        assert_eq!(s.store.read({ let replacement = replacement_publication.clone(); move |db| {
+            Ok(db.0.query_row("SELECT count(*) FROM direct_journal_acknowledgements WHERE publication=?1 AND detached=0", [replacement], |row|row.get::<_,i64>(0))?)
+        }}).await.unwrap(), 1);
+        super::super::journal_acknowledgements::settle(&s, &replacement_publication)
+            .await
+            .unwrap();
         // The old controller has disappeared. A fresh placement can recover and
         // admit a new ACK inventory without contacting that retired controller.
         super::super::journal_acknowledgements::recover(&s, &run)
@@ -179,7 +245,15 @@ async fn permanently_revoked_identity_cannot_pin_a_retired_environment() {
         db.0.execute("INSERT INTO direct_journal_acknowledgements(publication,run_id,node_id,retired) VALUES(?1,?2,?3,1)", rusqlite::params![publication, saved_run, node])?;
         Ok(())
     }).await.unwrap();
-    expire_environment(&s, &run).await.unwrap();
+    let old_run = run.clone();
+    let retired = s
+        .store
+        .transaction(move |db| detach_environment_in(db, &old_run))
+        .await
+        .unwrap();
+    retire_detached_environment(&s, &run, &retired, &root.path().join("retired"))
+        .await
+        .unwrap();
     s.store
         .read(|db| {
             assert_eq!(

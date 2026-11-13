@@ -31,6 +31,7 @@ pub(super) async fn execute(
     cancel: CancellationToken,
 ) -> Result<()> {
     let run_id = text(&run, "id").to_owned();
+    let admission_revision = run["environmentAdmissionRevision"].clone();
     let saved = RunCheckpoint::load(&s.store, &run_id).await?;
     let existing = saved.is_some();
     let state = saved
@@ -55,7 +56,15 @@ pub(super) async fn execute(
     )
     .await;
     if let Err(error) = result {
-        record_failure(s, &checkpoint, &cancel, &error, &sensitive.snapshot()).await?;
+        record_failure_for_revision(
+            s,
+            &checkpoint,
+            &cancel,
+            &error,
+            &sensitive.snapshot(),
+            Some(admission_revision),
+        )
+        .await?;
     }
     let fenced = fence(s, &checkpoint).await?;
     stop_heartbeat.cancel();
@@ -101,7 +110,7 @@ async fn await_fixture_retirement(s: &Service, run_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Keeps the checkpoint, node lease and pending moves current while the run executes.
+/// Keeps the checkpoint and node lease current while the run executes.
 async fn heartbeat(s: Arc<Service>, checkpoint: Arc<Checkpoint>, stop: CancellationToken) {
     let mut timer = tokio::time::interval(Duration::from_secs(5));
     loop {
@@ -112,9 +121,8 @@ async fn heartbeat(s: Arc<Service>, checkpoint: Arc<Checkpoint>, stop: Cancellat
                 if let Some(attempt) = checkpoint.snapshot().await.runner_id() {
                     let _ = crate::nodes::placement::renew_preparation(&s, run_id, attempt).await;
                 }
-                // Both fail routinely once the run is stopping, moving or revoked;
-                // the next beat retries and execution notices the revocation itself.
-                let _ = crate::nodes::moves::pause_pending(&s, run_id).await;
+                // This fails routinely once the run is stopping or revoked; the
+                // next beat retries and execution notices the revocation itself.
                 let _ = crate::nodes::placement::renew_local(&s, run_id).await;
                 let _ = checkpoint.refresh_pause(&s).await;
                 if let Err(error) = checkpoint.persist().await {
@@ -211,12 +219,24 @@ pub(super) async fn record_failure_fixture(
     record_failure(s, checkpoint, cancel, error, sensitive).await
 }
 
+#[cfg(test)]
 async fn record_failure(
     s: &Service,
     checkpoint: &Checkpoint,
     cancel: &CancellationToken,
     error: &Error,
     sensitive: &[String],
+) -> Result<()> {
+    record_failure_for_revision(s, checkpoint, cancel, error, sensitive, None).await
+}
+
+async fn record_failure_for_revision(
+    s: &Service,
+    checkpoint: &Checkpoint,
+    cancel: &CancellationToken,
+    error: &Error,
+    sensitive: &[String],
+    admission_revision: Option<Value>,
 ) -> Result<()> {
     let run_id = checkpoint.id.as_str();
     reconcile(s, checkpoint, cancel).await?;
@@ -270,7 +290,10 @@ async fn record_failure(
                 .ok_or_else(|| Error::not_found("Run not found"))?;
             let cancelled = cancel.is_cancelled() || run.state.cancel_requested_at.is_some();
             let expired = matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)));
-            if capacity && !cancelled && !expired && !shutdown.is_cancelled() {
+            let selection_replaced = admission_revision.as_ref().is_some_and(|revision| run.boundary["environmentAdmissionRevision"] != *revision)
+                && run.boundary["environmentState"] == "expired"
+                && !crate::environment_expiration::pending(db, &id)?;
+            if (capacity || selection_replaced) && !cancelled && !expired && !shutdown.is_cancelled() {
                 let mut restored_retry = None;
                 if saved.start_rejected == Some(true)
                     && let Some(mut paid) = saved.pending_paid_admission.take()
@@ -307,7 +330,8 @@ async fn record_failure(
                         ..Default::default()
                     },
                 )?;
-                return Ok(true);
+                let detail = if selection_replaced { "The destination or backend changed during preparation. Retrying its first admission.".to_owned() } else { capacity_detail };
+                return Ok(Some(detail));
             }
             let recover_controller = can_recover_controller(
                 saved,
@@ -350,12 +374,12 @@ async fn record_failure(
             };
             db.change_run(&id, patch)?;
             db.event(&id, &kind, message, None)?;
-            Ok(false)
+            Ok(None)
         })
         .await?;
-    if capacity_wait {
+    if let Some(detail) = capacity_wait {
         let run = s.store.run_state(run_id).await?;
-        super::schedule::report_capacity_wait(s, &run, &capacity_detail).await?;
+        super::schedule::report_capacity_wait(s, &run, &detail).await?;
     }
     Ok(())
 }
@@ -370,8 +394,7 @@ fn can_recover_controller(
     let mode_change = run.placement.native_mode_interruption.is_some();
     let may_retry = mode_change
         || saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
-        || saved.has_controller_recovery_reservation()
-        || run.placement.move_request.is_some();
+        || saved.has_controller_recovery_reservation();
     unavailable
         && saved.managed()
         && !saved.completed()
@@ -491,20 +514,6 @@ async fn release(
                         "Execution attempt changed before release settlement.",
                     ));
                 }
-                let run = db
-                    .run_record(&id)?
-                    .ok_or_else(|| Error::not_found("Run not found"))?;
-                if current.as_ref().is_some_and(|saved| {
-                    super::schedule::explicit_idle_move(
-                        &run.state,
-                        run.placement.move_request.as_ref(),
-                        saved,
-                    )
-                }) {
-                    // The owner requested a disk transfer after this settlement.
-                    // Preserve its queued recovery and reservation for the scheduler.
-                    return Ok(());
-                }
                 // Cancellation accepted during fencing wins in this same commit.
                 super::schedule::finish_recovery(db, &id, current.as_ref()).map(|_| ())
             })
@@ -518,7 +527,6 @@ async fn release(
         s.store.audit("account.release_failed", detail).await?;
     }
     s.mcps.revoke_run(s, run_id).await?;
-    requeue_pending_move(s, checkpoint, fenced).await?;
     if fenced && saved.managed() {
         let run = s.store.run_record(run_id).await?;
         let native = saved
@@ -551,68 +559,6 @@ async fn release(
     Ok(())
 }
 
-/// A move requested during execution relaunches the run on its new node.
-async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint, fenced: bool) -> Result<()> {
-    let run_id = checkpoint.id.as_str();
-    let run = s.store.run_record(run_id).await?;
-    let pending_move = run.placement.move_request.is_some();
-    let transferred_reservation = run.placement.move_reservation.is_some();
-    if (!pending_move && !transferred_reservation) || run.state.cancel_requested_at.is_some() {
-        return Ok(());
-    }
-    let saved = checkpoint.snapshot().await;
-    if saved.managed() && saved.completed() && saved.terminal_code.is_none() {
-        // A shutdown-interrupted observation is still pending, not a failed
-        // finalization and not permission to replay on the destination.
-        return Ok(());
-    }
-    let mut expected_fenced = saved.clone();
-    if fenced {
-        expected_fenced.process = None;
-    }
-    if super::schedule::explicit_idle_move(&run.state, run.placement.move_request.as_ref(), &saved)
-    {
-        // A new request after terminal settlement owns the reservation now.
-        // Let scheduler recovery transfer the disk without replaying the turn.
-        return Ok(());
-    }
-    if saved.managed() && saved.completed() && saved.terminal_code() == Some(0) {
-        if fenced && run.state.status != RunStatus::Waiting {
-            crate::nodes::moves::abort_terminal_recovery(s, run_id, Some(&expected_fenced)).await?;
-        }
-        return Ok(());
-    }
-    let terminal_failure = saved.output_error().is_some()
-        || saved.finalization_error().is_some()
-        || saved.settled().is_some_and(|settled| {
-            matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
-        });
-    if terminal_failure {
-        if fenced {
-            crate::nodes::moves::abort_terminal_recovery(s, run_id, Some(&expected_fenced)).await?;
-        }
-        return Ok(());
-    }
-    if !pending_move {
-        // A transferred reservation alone is not a request to replay this turn.
-        return Ok(());
-    }
-    checkpoint
-        .update(|c| {
-            // Retain the old attempt's evidence until recovery charges admission.
-            c.settled = Some(None);
-        })
-        .await?;
-    let patch = crate::runs::RunChanges {
-        status: Some(RunStatus::Queued),
-        recovery_pending: Some(true),
-        finished_at: Some(None),
-        ..Default::default()
-    };
-    s.store.change_run(run_id, patch).await?;
-    Ok(())
-}
-
 async fn clear_credentials(s: &Service, run_id: &str) {
     for provider in Provider::ALL {
         if let Err(error) = provider.driver().recover(s, run_id).await {
@@ -629,270 +575,53 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attempt_fixture::StoreAttemptFixture;
 
-    async fn release_fixture() -> (tempfile::TempDir, Arc<Service>) {
+    #[tokio::test]
+    async fn a_superseded_preparation_error_retries_the_current_choice_unless_stopped() {
         let root = tempfile::tempdir().unwrap();
-        let service = Service::new(crate::config::Config {
-            data_dir: root.path().join("data"),
-            home: root.path().join("home"),
-            workspace_roots: vec![root.path().into()],
-            public_url: "http://localhost:4310".into(),
-            host: "127.0.0.1".into(),
-            port: 0,
-            codex_bin: "codex".into(),
-            claude_bin: "claude".into(),
-            opencode_bin: "opencode".into(),
-            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
-            concurrency: 1,
-            logger: false,
-            worker_enabled: false,
-            runner_url: String::new(),
-        })
+        let service = Service::new(
+            serde_json::from_value(json!({
+                "dataDir": root.path().join("data"), "home": root.path().join("home"),
+                "workspaceRoots": [root.path()], "publicUrl": "http://localhost:4310",
+                "host": "127.0.0.1", "port": 0, "codexBin": "unused", "concurrency": 1, "runnerUrl": "", "workerEnabled": false, "logger": false,
+            }))
+            .unwrap(),
+        )
         .await
         .unwrap();
-        (root, service)
-    }
-
-    #[tokio::test]
-    async fn release_cleans_transferred_reservations_only_after_terminal_fencing() {
-        let (_root, service) = release_fixture().await;
-        for (failed, fenced) in [(true, false), (true, true), (false, true)] {
+        for stopped in [false, true] {
             let id = crate::config::id();
-            let destination = crate::config::id();
-            let unrelated = crate::config::id();
-            let record = json!({
-                "id": id,
-                "taskId": id,
-                "status": "queued",
-                "moveRequest": null,
-                "nodeState": "resuming",
-            });
-            service
-                .store
-                .transaction(move |db| db.add_run_fixture(&record, None).map(|_| ()))
-                .await
-                .unwrap();
-            for reservation in [&destination, &unrelated] {
-                service
-                    .store
-                    .put_attempt_fixture(json!({
-                        "id": reservation,
-                        "runId": id,
-                        "nodeId": crate::nodes::LOCAL_NODE_ID,
-                        "released": false,
-                    }))
-                    .await
-                    .unwrap();
+            let owner = id.clone();
+            service.store.transaction(move |db| {
+                db.add_run_fixture(&json!({ "id": owner, "taskId": owner, "status": "running", "createdAt": now(), "environmentState": "expired", "environmentAdmissionRevision": "new-selection" }), None)?;
+                Ok(())
+            }).await.unwrap();
+            let checkpoint = Checkpoint::new(
+                service.store.clone(),
+                id.clone(),
+                RunCheckpoint::fresh(Some(60_000)),
+            );
+            checkpoint.persist().await.unwrap();
+            let cancel = CancellationToken::new();
+            if stopped {
+                cancel.cancel();
             }
-            service
-                .store
-                .update_run_placement(
-                    &id,
-                    crate::nodes::run_placement::PlacementChanges {
-                        move_reservation: Some(Some(destination.clone())),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            let mut saved = RunCheckpoint::fresh(None);
-            if failed {
-                saved.settled = Some(Some(Settled::failure(
-                    RunStatus::Failed,
-                    "Access was removed before preparation.",
-                )));
-            }
-            saved.store(&service.store, &id).await.unwrap();
-            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
-            release(&service, &checkpoint, None, fenced).await.unwrap();
-
-            let should_release = failed && fenced;
-            let run = service.store.run(&id).await.unwrap();
-            assert_eq!(
-                run["status"],
-                if should_release { "failed" } else { "queued" }
-            );
-            assert!(
-                run["moveRequest"].is_null(),
-                "cleanup must not invent a move request"
-            );
-            assert!(!service.store.run_state(&id).await.unwrap().recovery_pending);
-            assert_eq!(
-                service
-                    .store
-                    .attempt_fixture(&destination)
-                    .await
-                    .unwrap()
-                    .unwrap()["released"],
-                should_release
-            );
-            assert_eq!(run["moveReservation"].is_null(), should_release);
-            assert_eq!(run["nodeState"].is_null(), should_release);
-            assert_eq!(
-                service
-                    .store
-                    .attempt_fixture(&unrelated)
-                    .await
-                    .unwrap()
-                    .unwrap()["released"],
-                false
-            );
-        }
-        service.shutdown.cancel();
-    }
-
-    #[tokio::test]
-    async fn pending_move_does_not_requeue_completed_failed_finalization() {
-        let (_root, service) = release_fixture().await;
-        let id = crate::config::id();
-        let run = json!({
-            "id": id,
-            "taskId": id,
-            "status": "failed",
-            "moveRequest": {
-                "nodeId": "destination",
-                "reservation": "pending-destination",
-                "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
-            },
-        });
-        service
-            .store
-            .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
-            .await
-            .unwrap();
-        let saved = RunCheckpoint::from_value(json!({
-            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
-            "completed": true, "terminalCode": 70, "remainingMs": null,
-        }))
-        .unwrap();
-        saved.store(&service.store, &id).await.unwrap();
-        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
-        release(&service, &checkpoint, None, true).await.unwrap();
-        let current = checkpoint.snapshot().await;
-        assert!(current.completed());
-        assert_eq!(current.terminal_code(), Some(70));
-        assert_eq!(
-            service.store.run_state(&id).await.unwrap().status,
-            RunStatus::Failed
-        );
-        assert!(service.store.run(&id).await.unwrap()["moveRequest"].is_null());
-
-        service
-            .store
-            .change_run(
-                &id,
-                crate::runs::RunChanges {
-                    status: Some(RunStatus::Queued),
-                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                        move_request: Some(Some(
-                            serde_json::from_value(json!({
-                                "nodeId": "destination", "reservation": "pending-destination",
-                                "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
-                            }))
-                            .unwrap(),
-                        )),
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                },
+            record_failure_for_revision(
+                &service,
+                &checkpoint,
+                &cancel,
+                &Error::forbidden("The calling execution ended or changed."),
+                &[],
+                Some(json!("old-selection")),
             )
             .await
             .unwrap();
-        let pending = RunCheckpoint::from_value(json!({
-            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
-            "completed": true, "remainingMs": null,
-        }))
-        .unwrap();
-        pending.store(&service.store, &id).await.unwrap();
-        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), pending);
-        release(&service, &checkpoint, None, true).await.unwrap();
-        let current = checkpoint.snapshot().await;
-        assert!(current.completed() && current.terminal_code.is_none());
-        assert!(service.store.run(&id).await.unwrap()["moveRequest"].is_object());
-
-        for status in [RunStatus::Succeeded, RunStatus::Waiting] {
-            service
-                .store
-                .change_run(
-                    &id,
-                    crate::runs::RunChanges {
-                        status: Some(status),
-                        wakeup: Some((status == RunStatus::Waiting).then(|| {
-                            serde_json::from_value(json!({
-                                "id": "wake", "messageId": null, "reason": "Waiting", "seconds": 60,
-                                "createdAt": now(), "wakeAt": now() + 60_000,
-                            }))
-                            .unwrap()
-                        })),
-                        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                            move_request: Some(Some(
-                                serde_json::from_value(json!({
-                                    "nodeId": "destination", "reservation": "pending-destination",
-                                    "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
-                                }))
-                                .unwrap(),
-                            )),
-                            ..Default::default()
-                        })),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            let saved = RunCheckpoint::from_value(json!({
-                "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
-                "completed": true, "terminalCode": 0, "remainingMs": null,
-            }))
-            .unwrap();
-            saved.store(&service.store, &id).await.unwrap();
-            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
-            release(&service, &checkpoint, None, true).await.unwrap();
-            let current = checkpoint.snapshot().await;
-            assert!(current.completed());
-            assert_eq!(current.terminal_code(), Some(0));
             let run = service.store.run(&id).await.unwrap();
-            assert_eq!(run["status"], status);
-            assert_eq!(run["moveRequest"].is_object(), status == RunStatus::Waiting);
-            if status == RunStatus::Waiting {
-                assert_eq!(run["wakeup"]["id"], "wake");
-            }
+            assert_eq!(run["status"], if stopped { "cancelled" } else { "queued" });
+            assert_eq!(run["environmentAdmissionRevision"], "new-selection");
+            assert_eq!(run["environmentState"], "expired");
+            assert!(checkpoint.snapshot().await.remaining_ms.flatten().unwrap() > 0);
         }
-        service
-            .store
-            .change_run(
-                &id,
-                crate::runs::RunChanges {
-                    status: Some(RunStatus::Queued),
-                    recovery_pending: Some(true),
-                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                        move_request: Some(None),
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let saved = RunCheckpoint {
-            remaining_ms: Some(None),
-            settled: Some(Some(Settled::failure(
-                RunStatus::Failed,
-                "previous failure",
-            ))),
-            ..Default::default()
-        };
-        saved.store(&service.store, &id).await.unwrap();
-        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
-        service.worker.cancel(&service, &id).await.unwrap();
-        release(&service, &checkpoint, None, true).await.unwrap();
-        let state = service.store.run_state(&id).await.unwrap();
-        assert_eq!(
-            state.status,
-            RunStatus::Cancelled,
-            "accepted cancellation wins over pre-fence settlement"
-        );
-        assert!(!state.recovery_pending);
         service.shutdown.cancel();
     }
 
@@ -1584,241 +1313,6 @@ mod tests {
                         .await
                         .unwrap()
                 );
-            }
-        }
-        service.shutdown.cancel();
-    }
-
-    #[tokio::test]
-    async fn completed_worker_release_keeps_explicit_idle_move_and_reservation() {
-        use crate::{agent_fixture::StoreAgentFixture, node_fixture::StoreNodeFixture};
-        for status in [
-            RunStatus::Succeeded,
-            RunStatus::Failed,
-            RunStatus::Cancelled,
-        ] {
-            let root = tempfile::tempdir().unwrap();
-            let service = Service::new(crate::config::Config {
-                data_dir: root.path().join("data"),
-                home: root.path().join("home"),
-                workspace_roots: vec![root.path().into()],
-                public_url: "http://localhost:4310".into(),
-                host: "127.0.0.1".into(),
-                port: 0,
-                codex_bin: "codex".into(),
-                claude_bin: "claude".into(),
-                opencode_bin: "opencode".into(),
-                opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
-                concurrency: 1,
-                logger: false,
-                worker_enabled: false,
-                runner_url: String::new(),
-            })
-            .await
-            .unwrap();
-            let (id, agent, source, destination, attempt) = (
-                crate::config::id(),
-                crate::config::id(),
-                crate::config::id(),
-                crate::config::id(),
-                crate::config::id(),
-            );
-            for node in [&source, &destination] {
-                service.store.put_node_fixture(json!({
-                "id": node, "accepting": true, "executionReady": true, "runtimeId": "development",
-                "lastSeen": now(), "capabilities": { "backend": if node == &source { "native" } else { "firecracker" }, "kvm": node == &destination, "vmDisks": true },
-                "limits": { "cpu": 2, "memoryMiB": 1024, "diskMiB": 1024 },
-            })).await.unwrap();
-            }
-            let profile = service.store.put_agent_fixture(json!({
-            "id": agent, "provider": "codex", "access": { "backend": "auto", "nodes": [source, destination] }
-        })).await.unwrap();
-            let record = json!({
-                "id": id, "taskId": id, "status": status, "trigger": "chat", "executionBackend": "native",
-                "sessionId": if status == RunStatus::Succeeded { json!("retained-session") } else { Value::Null }, "summary": "committed answer", "isolated": true,
-                "nodeId": source, "resources": { "cpu": 1, "memoryMiB": 512, "diskMiB": 128 },
-                "snapshot": { "agent": profile }, "nativeProvenanceUnknown": true,
-            });
-            service
-                .store
-                .transaction(move |db| db.add_run_fixture(&record, None).map(|_| ()))
-                .await
-                .unwrap();
-            let saved = RunCheckpoint::from_value(json!({
-            "prepared": { "backend": "native", "diskFormat": "vm", "isolated": true }, "nodeId": source,
-            "runnerId": attempt, "completed": true, "terminalCode": if status == RunStatus::Succeeded { 0 } else { 70 }, "remainingMs": null,
-            "settled": if status == RunStatus::Succeeded { Value::Null } else { json!({ "status": status, "summary": "stopped work", "error": null, "finishedAt": now() }) },
-        }))
-        .unwrap();
-            saved.store(&service.store, &id).await.unwrap();
-            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
-            crate::nodes::moves::request_authorized(
-                &service,
-                &service.store.run(&id).await.unwrap(),
-                &json!({"nodeId": destination}),
-                crate::nodes::moves::Authorization::default()
-                    .with_origin(crate::native::policy::Origin::Human("fixture-owner".into())),
-            )
-            .await
-            .unwrap();
-            let pending = service.store.run(&id).await.unwrap();
-            assert_eq!(pending["moveRequest"]["idle"], true);
-            let reservation = pending["moveRequest"]["reservation"]
-                .as_str()
-                .unwrap()
-                .to_owned();
-            release(&service, &checkpoint, None, true).await.unwrap();
-            let after = service.store.run(&id).await.unwrap();
-            assert_eq!(after["moveRequest"]["reservation"], reservation);
-            assert_eq!(after["status"], RunStatus::Queued);
-            assert_eq!(after["recoveryPending"], true);
-            assert!(
-                !service
-                    .store
-                    .attempt(&reservation)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .released
-            );
-            service.shutdown.cancel();
-        }
-    }
-
-    #[tokio::test]
-    async fn pending_move_does_not_requeue_completed_failed_finalization_reconciliation() {
-        let root = tempfile::tempdir().unwrap();
-        let service = Service::new(crate::config::Config {
-            data_dir: root.path().join("data"),
-            home: root.path().join("home"),
-            workspace_roots: vec![root.path().into()],
-            public_url: "http://localhost:4310".into(),
-            host: "127.0.0.1".into(),
-            port: 0,
-            codex_bin: "codex".into(),
-            claude_bin: "claude".into(),
-            opencode_bin: "opencode".into(),
-            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
-            concurrency: 1,
-            logger: false,
-            worker_enabled: false,
-            runner_url: String::new(),
-        })
-        .await
-        .unwrap();
-        let id = crate::config::id();
-        let run = json!({
-            "id": id,
-            "taskId": id,
-            "status": "failed",
-            "moveRequest": {
-                "nodeId": "destination",
-                "reservation": "pending-destination",
-                "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
-            },
-        });
-        service
-            .store
-            .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
-            .await
-            .unwrap();
-        let saved = RunCheckpoint::from_value(json!({
-            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
-            "completed": true, "terminalCode": 70, "remainingMs": null,
-        }))
-        .unwrap();
-        saved.store(&service.store, &id).await.unwrap();
-        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
-        release(&service, &checkpoint, None, true).await.unwrap();
-        let current = checkpoint.snapshot().await;
-        assert!(current.completed());
-        assert_eq!(current.terminal_code(), Some(70));
-        assert_eq!(
-            service.store.run_state(&id).await.unwrap().status,
-            RunStatus::Failed
-        );
-        assert!(service.store.run(&id).await.unwrap()["moveRequest"].is_null());
-
-        service
-            .store
-            .change_run(
-                &id,
-                crate::runs::RunChanges {
-                    status: Some(RunStatus::Queued),
-                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                        move_request: Some(Some(
-                            serde_json::from_value(json!({
-                                "nodeId": "destination",
-                                "reservation": "pending-destination",
-                                "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
-                            }))
-                            .unwrap(),
-                        )),
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let pending = RunCheckpoint::from_value(json!({
-            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
-            "completed": true, "remainingMs": null,
-        }))
-        .unwrap();
-        pending.store(&service.store, &id).await.unwrap();
-        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), pending);
-        release(&service, &checkpoint, None, true).await.unwrap();
-        let current = checkpoint.snapshot().await;
-        assert!(current.completed() && current.terminal_code.is_none());
-        assert!(service.store.run(&id).await.unwrap()["moveRequest"].is_object());
-
-        for status in [RunStatus::Succeeded, RunStatus::Waiting] {
-            service
-                .store
-                .change_run(
-                    &id,
-                    crate::runs::RunChanges {
-                        status: Some(status),
-                        wakeup: Some((status == RunStatus::Waiting).then(|| {
-                            serde_json::from_value(json!({
-                                "id": "wake", "messageId": null, "reason": "Waiting", "seconds": 60,
-                                "createdAt": now(), "wakeAt": now() + 60_000,
-                            }))
-                            .unwrap()
-                        })),
-                        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                            move_request: Some(Some(
-                                serde_json::from_value(json!({
-                                    "nodeId": "destination",
-                                    "reservation": "pending-destination",
-                                    "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
-                                }))
-                                .unwrap(),
-                            )),
-                            ..Default::default()
-                        })),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            let saved = RunCheckpoint::from_value(json!({
-                "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
-                "completed": true, "terminalCode": 0, "remainingMs": null,
-            }))
-            .unwrap();
-            saved.store(&service.store, &id).await.unwrap();
-            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
-            release(&service, &checkpoint, None, true).await.unwrap();
-            let current = checkpoint.snapshot().await;
-            assert!(current.completed());
-            assert_eq!(current.terminal_code(), Some(0));
-            let run = service.store.run(&id).await.unwrap();
-            assert_eq!(run["status"], status);
-            assert_eq!(run["moveRequest"].is_object(), status == RunStatus::Waiting);
-            if status == RunStatus::Waiting {
-                assert_eq!(run["wakeup"]["id"], "wake");
             }
         }
         service.shutdown.cancel();

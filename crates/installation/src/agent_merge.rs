@@ -149,7 +149,6 @@ pub(crate) fn merge(
     if runs.iter().any(|run| {
         crate::run_status::RunStatus::of(run).is_some_and(crate::run_status::RunStatus::is_active)
             || run["recoveryPending"] == true
-            || crate::backend_migration::pending(run)
             || executing.iter().any(|id| run["id"] == *id)
     }) {
         return Err(Error::conflict(

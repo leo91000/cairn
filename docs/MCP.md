@@ -330,7 +330,9 @@ Hook rules ([guide](HOOK-RULES.md)) use the same definitions as HTTP and
 `replace_hook_rule`, `set_hook_rule_enabled`, `set_hook_rule_emergency_pause`,
 `lift_hook_rule_budget`, `duplicate_hook_rule` and `delete_hook_rule` use manage. A rule
 created through the public MCP belongs to the owner who authorized the client; scopes
-alone give it no native authority.
+alone give it no native authority. Plugin rule templates are listed with
+`list_hook_rule_templates` (read) and installed with `install_hook_rule_template`
+(manage), which creates ordinary rules for the same owner, all or none.
 
 `get_installation_settings`, `get_installation_overview`, `list_audit` and
 `get_storage_settings` use the read scope; storage views never contain credentials.
@@ -435,18 +437,30 @@ beyond the initial five-minute code expiry; deleting the grant removes them.
 Wrong client or PKCE attempts cannot revoke another client's grant.
 
 Conversation backend migration is available on both public MCP and
-`cairn_installation`: `get_chat_backend_migration` previews the other backend for an automatic profile or the newly configured
-backend for a fixed profile; `migrate_chat_backend` requires management access,
-exactly one of `chatId` or `runId`, plus `nodeId`, `backend` and `confirm: true`.
-VM-created disks move directly, retaining files and the engine session. Native-born
-disks convert once before VM execution; missions continue automatically with their
-history in a fresh session. `requiredTags` and bounded `waitSeconds` match
-`move_to_node`. It returns immediately while the
-owned migration task runs. Poll the preview for `pending`, `required` and `error`.
-An explicit owner may adopt the existing conversation into their native grant;
-installation agents retain their bounded parent grant. Web and Android expose the
-same confirmed operation from execution-node details. See
-[the movement decision](adr/0082-move-vm-disks-between-execution-backends.md).
+`cairn_installation`: `get_chat_backend_migration` previews the other backend for
+an automatic profile or the newly configured backend for a fixed profile. It
+returns a warning while a working environment exists. `migrate_chat_backend`
+requires management access, exactly one of `chatId` or `runId`, plus `nodeId`,
+`backend`, `confirm: true` and `discardWorkingFiles: true`. The last confirmation
+is unnecessary for an already expired environment. A confirmed migration expires
+the environment, with no disk reuse, transfer or conversion. History, attachments
+and artifacts remain. An explicit owner may adopt the conversation into their
+native grant; installation agents retain their bounded parent grant.
+
+`move_to_node` on HTTP, public MCP, `cairn_installation` and the agent workspace
+uses the same expiration and requires `discardWorkingFiles: true` while files
+remain. The workspace contract omits `runId`. A refusal includes the warning and
+asks for that distinct confirmation. `revoke_node` also requires it, and expires
+every environment on the revoked node; `releasePlacements` still controls pins
+and preferences. The destination's first admission waits for capacity while it
+remains authorized and non-revoked, otherwise automatic placement chooses it.
+A new explicit choice replaces a pending destination without another loss warning.
+Messages and scheduled/conditional waits keep their continuations. An active
+mission, or an agent moving its own conversation, continues automatically in a
+fresh environment with the expiration warning; other chats wait for a message.
+Automatic capacity relocation and recovery on another node are removed: existing
+environments wait for their current node or a confirmed change. See
+[environment expiration](CONVERSATION-RETENTION.md) and ADR-0083 (local conversation disks).
 
 Native nodes can report `exclusiveReservations: true` after a runtime update.
 Both public management MCP and `cairn_installation` expose the same native node

@@ -28,17 +28,17 @@ pub(crate) const NODE_OPERATIONS: &[NodeOperation] = &[
     NodeOperation {
         name: "move_to_node",
         scope: "run",
-        description: "Start a move to an authorized node, preserving backend, capacity waits and fencing. Returns an operation id; poll get_node_move_operation in separate tool calls. Failure preserves the current environment.",
+        description: "Change the conversation to an authorized node, including one of the other execution backend. The working environment expires: its working files are lost; the conversation history, attachments and artifacts are kept. Requires discardWorkingFiles: true; a request without it is refused with that warning. The running turn stops and open questions close; queued messages, scheduled waits and an active mission continue on the destination, where the new environment waits for capacity while the node stays authorized. Returns an operation id; poll get_node_move_operation in separate tool calls. Validation failure leaves the current environment unchanged; once expired, files cannot be recovered.",
     },
     NodeOperation {
         name: "get_node_move_operation",
         scope: "run",
-        description: "Read this caller's pending move or its final result. Poll in separate tool calls; waiting for capacity does not extend the code worker deadline.",
+        description: "Read this caller's node change or its final result. Poll in separate tool calls.",
     },
     NodeOperation {
         name: "cancel_node_move_operation",
         scope: "run",
-        description: "Cancel this caller's capacity wait before admission, then poll its result. An admitted move keeps its durable fencing and recovery protocol.",
+        description: "Cancel this caller's node change before it is admitted, then poll its result. An admitted change has already expired the working environment.",
     },
     NodeOperation {
         name: "release_node_reservation",
@@ -78,7 +78,7 @@ pub(crate) const NODE_OPERATIONS: &[NodeOperation] = &[
     NodeOperation {
         name: "revoke_node",
         scope: "manage",
-        description: "Revoke the node identity and its live grants, optionally releasing pinned/preferred placements.",
+        description: "Revoke the node identity and its live grants, optionally releasing pinned/preferred placements. Every working environment on the node expires: its working files are lost; history, attachments and artifacts are kept. Requires discardWorkingFiles: true; a request without it is refused with that warning.",
     },
 ];
 
@@ -228,6 +228,12 @@ impl NodeOperation {
                 let input: MoveToNodeInput = decode(input)?;
                 input.validate().map_err(Error::bad)?;
                 let run = s.store.run(&input.run_id.to_string()).await?;
+                if run["environmentState"] != "expired" {
+                    crate::environment_expiration::require_discard(
+                        input.discard_working_files,
+                        crate::environment_expiration::WARNING,
+                    )?;
+                }
                 let authorization = nodes::moves::Authorization::new(|_| Ok(()), public_credential)
                     .with_management_authorization(authorize);
                 if let Some(audience) = audience {
@@ -342,7 +348,10 @@ impl NodeOperation {
                 nodes::revoke_live(
                     s,
                     &input.node_id.to_string(),
-                    json!({"releasePlacements": input.release_placements}),
+                    json!({
+                        "releasePlacements": input.release_placements,
+                        "discardWorkingFiles": input.discard_working_files,
+                    }),
                     authorize,
                 )
                 .await

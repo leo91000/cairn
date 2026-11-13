@@ -42,6 +42,8 @@ data class PluginManifest(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val resources: List<PluginResourceType> = listOf(),
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val ruleTemplates: List<PluginRuleTemplate> = listOf(),
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val runCredentials: PluginRunCredentials? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val secretPatterns: List<String> = listOf(),

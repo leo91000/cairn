@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0083](0083-local-conversation-disks-without-s3.md) : les disques ne sont plus transférés vers un stockage distant.
+
 # Transferts directs de stockage confiés aux nodes
 
 Date : 28 octobre 2026. Statut : accepté par le propriétaire après le cadrage `grill-with-docs`.

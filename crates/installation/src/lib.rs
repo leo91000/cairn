@@ -28,6 +28,7 @@ pub mod conversation_deletion;
 pub mod conversation_lifecycle;
 pub mod delegation;
 pub mod direct;
+pub mod environment_expiration;
 pub mod error;
 pub mod execution;
 pub mod file_lock;

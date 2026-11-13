@@ -1,5 +1,4 @@
 use common::McpFixture;
-use common::MissionFixture;
 use common::StoreAgentFixture;
 use common::attempt_fixture::*;
 use common::node_fixture::*;
@@ -26,7 +25,7 @@ use cairn_installation::{
     microvm::wire,
     nodes::{
         LOCAL_NODE_ID, alerts, checkpoint, disk_grants, executor, files, moves, placement,
-        publication, relay, restore, shared_blocks, snapshots, workspace,
+        publication, relay, shared_blocks, snapshots, workspace,
     },
     object_storage::Storage,
     recovery,
@@ -568,7 +567,11 @@ async fn enrollment_is_single_use_and_revocation_removes_node_access() {
     assert_eq!(status, StatusCode::OK);
     let node = identity["nodeId"].as_str().unwrap();
     let (status, _) = owner
-        .send("POST", &format!("/api/nodes/{node}/revoke"), json!({}))
+        .send(
+            "POST",
+            &format!("/api/nodes/{node}/revoke"),
+            json!({ "discardWorkingFiles": true }),
+        )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -799,7 +802,11 @@ async fn direct_node_channel_accepts_private_proxy_hosts_and_keeps_credentials_r
         let node = identity["nodeId"].as_str().unwrap();
         assert_eq!(
             owner
-                .send("POST", &format!("/api/nodes/{node}/revoke"), json!({}))
+                .send(
+                    "POST",
+                    &format!("/api/nodes/{node}/revoke"),
+                    json!({ "discardWorkingFiles": true })
+                )
                 .await
                 .0,
             StatusCode::OK
@@ -1148,7 +1155,11 @@ async fn revocation_clears_agent_preferences(wildcard: bool) {
     assert_eq!(owner.send("PUT", &main, grant).await.0, StatusCode::OK);
     let before = owner.service.agent_snapshot(MAIN_AGENT_ID).await.unwrap()["revision"].clone();
     let (status, _) = owner
-        .send("POST", &format!("/api/nodes/{node}/revoke"), json!({}))
+        .send(
+            "POST",
+            &format!("/api/nodes/{node}/revoke"),
+            json!({ "discardWorkingFiles": true }),
+        )
         .await;
     assert_eq!(status, StatusCode::OK);
     let (_, agents) = owner.get("/api/agents").await;
@@ -1272,7 +1283,11 @@ async fn revoking_a_replaced_node_can_release_its_conversation_placements() {
 
     // A plain revocation keeps explicit placements: the owner chose to wait for that machine.
     let (status, value) = owner
-        .send("POST", &format!("/api/nodes/{plain}/revoke"), json!({}))
+        .send(
+            "POST",
+            &format!("/api/nodes/{plain}/revoke"),
+            json!({ "discardWorkingFiles": true }),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{value}");
     assert_eq!(value["releasedPlacements"], 0);
@@ -1287,7 +1302,11 @@ async fn revoking_a_replaced_node_can_release_its_conversation_placements() {
     );
 
     let (status, value) = owner
-        .send("POST", &path, json!({ "releasePlacements": true }))
+        .send(
+            "POST",
+            &path,
+            json!({ "releasePlacements": true, "discardWorkingFiles": true }),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{value}");
     assert_eq!(value["node"]["revoked"], true);
@@ -1912,6 +1931,92 @@ async fn remote_disk_restores_use_the_nodes_direct_manager_origin() {
 }
 
 #[tokio::test]
+async fn same_node_restore_preserves_native_vm_layout_without_permitting_backend_changes() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let controller = Router::new().route(
+        "/disks/{id}/restore",
+        axum::routing::post({
+            let calls = calls.clone();
+            move |Json(body): Json<Value>| {
+                let calls = calls.clone();
+                async move {
+                    assert_eq!(body["manifest"]["runtime"]["backend"], "native");
+                    assert_eq!(body["manifest"]["runtime"]["disk"], "vm");
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({ "ready": true }))
+                }
+            }
+        }),
+    );
+    let (runner, server) = common::serve_locally(controller).await;
+    let owner = Owner::with_runner(common::HOST.into(), runner).await;
+    let run = json!({ "id": id(), "nodeId": LOCAL_NODE_ID });
+    let mut node = json!({ "id": LOCAL_NODE_ID, "capabilities": { "backend": "native" } });
+    owner
+        .service
+        .store
+        .put_node_fixture(node.clone())
+        .await
+        .unwrap();
+    let mut manifest = json!({
+        "version": 1, "size": snapshots::BLOCK, "blockSize": snapshots::BLOCK,
+        "blocks": [{ "offset": 0, "size": snapshots::BLOCK, "hash": null }],
+        "runtime": { "backend": "native", "disk": "vm", "storage": "ublk-rootless-v1", "os": "linux", "arch": "x86_64" }
+    });
+    let point_id = id();
+    let mut point = json!({
+        "id": point_id, "runId": run["id"], "nodeId": LOCAL_NODE_ID,
+        "destination": "s3", "blockFormat": "shared-v1",
+        "manifest": owner.encrypt_manifest(&point_id, &manifest)
+    });
+    cairn_installation::nodes::restore::start(&owner.service, &run, LOCAL_NODE_ID, &point)
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    node["capabilities"]["backend"] = "firecracker".into();
+    owner
+        .service
+        .store
+        .put_node_fixture(node.clone())
+        .await
+        .unwrap();
+    let error =
+        cairn_installation::nodes::restore::start(&owner.service, &run, LOCAL_NODE_ID, &point)
+            .await
+            .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("cannot change the environment's backend")
+    );
+
+    node["capabilities"]["backend"] = "native".into();
+    owner.service.store.put_node_fixture(node).await.unwrap();
+    manifest["runtime"]["backend"] = "firecracker".into();
+    point["manifest"] = owner.encrypt_manifest(&point_id, &manifest);
+    let error =
+        cairn_installation::nodes::restore::start(&owner.service, &run, LOCAL_NODE_ID, &point)
+            .await
+            .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("cannot change the environment's backend")
+    );
+    let error = cairn_installation::nodes::restore::start(&owner.service, &run, &id(), &point)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("cannot change the environment's node")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
 async fn outbound_transport_streams_only_to_the_authenticated_node() {
     let owner = Owner::new().await;
     let identity = owner
@@ -2432,38 +2537,6 @@ async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
 }
 
 #[tokio::test]
-async fn current_components_resume_a_backend_converted_environment_after_an_application_update() {
-    let owner = Owner::new().await;
-    let (node, agent, run) = (id(), id(), id());
-    owner
-        .put_node_fixture(schedulable_node(&node, &limits(4, 8192, 65536)))
-        .await;
-    owner.grant_nodes(&agent, json!([node])).await;
-    owner
-        .add_run_fixture(&run_record(&run, RunStatus::Running))
-        .await;
-    owner
-        .set_checkpoint(
-            &run,
-            json!({
-                "nodeId": node,
-                "runtimeId": "previous-release",
-                "workspaceInitialized": true,
-            }),
-        )
-        .await;
-    let mut record = agent_run(&run, &agent);
-    record["isolated"] = true.into();
-    // A successful live backend conversion records this runtime on the run too.
-    record["requiredRuntime"] = "previous-release".into();
-    let placement = placement::reserve(&owner.service, &record, &id())
-        .await
-        .unwrap();
-    assert_eq!(placement["nodeId"], node);
-    assert_eq!(placement["runtimeId"], "development");
-}
-
-#[tokio::test]
 async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants() {
     let owner = Owner::new().await;
     let (node, agent) = (id(), id());
@@ -2503,128 +2576,7 @@ async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants(
 }
 
 #[tokio::test]
-async fn queued_capacity_moves_preserve_the_source_and_unfinished_mission_waits() {
-    for saved_wait in [false, true] {
-        let owner = Owner::new().await;
-        let (run, agent, source, destination) = (id(), id(), id(), id());
-        for (node, cpu) in [(&source, 1), (&destination, 12)] {
-            let mut record = schedulable_node(node, &limits(cpu, 32768, 131072));
-            if node == &source {
-                record["pressure"] = "memory".into();
-            }
-            owner.put_node_fixture(record).await;
-        }
-        owner
-            .grant_nodes(&agent, json!([source, destination]))
-            .await;
-        let mut record = run_record(&run, RunStatus::Queued);
-        record["snapshot"] = json!({ "agent": { "id": agent } });
-        record["resources"] = limits(4, 12288, 65536);
-        record["nodeId"] = source.clone().into();
-        if saved_wait {
-            record["trigger"] = "manual".into();
-            record["wakeup"] =
-                serde_json::to_value(common::run_fixture::complete_wakeup_fixture(&json!({
-                    "id": "wait", "seconds": 3600, "wakeAt": now() + 3_600_000,
-                })))
-                .unwrap();
-        }
-        owner.add_run_fixture(&record).await;
-        owner
-            .set_checkpoint(
-                &run,
-                json!({ "nodeId": source, "runtimeId": "development", "completed": false }),
-            )
-            .await;
-        assert!(placement::is_no_capacity(
-            &placement::check(&owner.service, &record).await.unwrap_err()
-        ));
-        assert!(
-            moves::queue_capacity_move(&owner.service, &record)
-                .await
-                .unwrap()
-        );
-        let pending = owner.run(&run).await;
-        assert_eq!(
-            pending["nodeId"], source,
-            "source stays authoritative until transfer completes"
-        );
-        assert_eq!(pending["moveRequest"]["nodeId"], destination);
-        assert_eq!(
-            pending["moveRequest"]["automatic"], false,
-            "capture the latest source disk, never use a stale backup"
-        );
-        assert!(pending["moveRequest"]["backupId"].is_null());
-        assert_eq!(pending["recoveryPending"], true);
-        assert_eq!(pending["wakeup"], record["wakeup"]);
-        let reservation = pending["moveRequest"]["reservation"].as_str().unwrap();
-        assert_eq!(
-            owner.stored("node-attempts", reservation).await.unwrap()["released"],
-            false
-        );
-        assert!(
-            !moves::queue_capacity_move(&owner.service, &pending)
-                .await
-                .unwrap()
-        );
-        let mut cancelled = pending;
-        cancelled["cancelRequestedAt"] = now().into();
-        assert!(moves::advance(&owner.service, &cancelled).await.unwrap());
-    }
-}
-
-#[tokio::test]
-async fn capacity_moves_keep_pinned_unauthorized_and_running_conversations_in_place() {
-    let owner = Owner::new().await;
-    let (run, agent, source, destination) = (id(), id(), id(), id());
-    owner
-        .put_node_fixture(schedulable_node(&source, &limits(1, 32768, 131072)))
-        .await;
-    owner
-        .put_node_fixture(schedulable_node(&destination, &limits(12, 32768, 131072)))
-        .await;
-    owner.grant_nodes(&agent, json!([source])).await;
-    let mut record = run_record(&run, RunStatus::Queued);
-    record["snapshot"] = json!({ "agent": { "id": agent } });
-    record["resources"] = limits(4, 12288, 65536);
-    owner.add_run_fixture(&record).await;
-    owner
-        .set_checkpoint(&run, json!({ "nodeId": source }))
-        .await;
-    assert!(
-        !moves::queue_capacity_move(&owner.service, &record)
-            .await
-            .unwrap()
-    );
-    owner
-        .grant_nodes(&agent, json!([source, destination]))
-        .await;
-    record["pinnedNodeId"] = source.clone().into();
-    assert!(
-        !moves::queue_capacity_move(&owner.service, &record)
-            .await
-            .unwrap()
-    );
-    record["pinnedNodeId"] = Value::Null;
-    record["status"] = RunStatus::Running.into();
-    assert!(
-        !moves::queue_capacity_move(&owner.service, &record)
-            .await
-            .unwrap()
-    );
-    assert!(
-        owner
-            .service
-            .store
-            .attempts_fixture()
-            .await
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destination() {
+async fn retained_s3_disks_charge_local_cache_and_keep_their_node() {
     let owner = Owner::new().await;
     let (node, agent, run, attempt) = (id(), id(), id(), id());
     owner
@@ -2654,102 +2606,15 @@ async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destinat
         .await
         .unwrap();
     placement::release(&owner.service, &retry).await.unwrap();
-    let pending = id();
-    owner
-        .put_attempt_fixture(json!({
-            "id": pending,
-            "nodeId": node,
-            "runId": run,
-            "role": "destination",
-            "released": false,
-        }))
-        .await;
-    let cancelled = json!({
-        "id": run,
-        "cancelRequestedAt": now(),
-        "moveRequest": { "reservation": pending },
-    });
-    assert!(moves::advance(&owner.service, &cancelled).await.unwrap());
-    assert_eq!(
-        owner.stored("node-attempts", &pending).await.unwrap()["released"],
-        true
-    );
-}
-
-#[tokio::test]
-async fn cancellation_during_failed_transfer_keeps_the_store_writable() {
-    for idle in [false, true] {
-        let owner = Owner::new().await;
-        let (run, destination) = (id(), id());
-        let mut record = run_record(&run, RunStatus::Queued);
-        record["nodeId"] = LOCAL_NODE_ID.into();
-        record["nodeState"] = "restoring".into();
-        record["recoveryPending"] = true.into();
-        owner.add_run_fixture(&record).await;
-        owner
-            .put_attempt_fixture(json!({
-                "id": destination,
-                "runId": run,
-                "nodeId": LOCAL_NODE_ID,
-                "role": "destination",
-                "released": false,
-            }))
-            .await;
-        owner
-            .service
-            .store
-            .update_run_boundary_fixture(
-                &run,
-                json!({
-                    "moveRequest": {
-                        "reservation": destination,
-                        "nodeId": LOCAL_NODE_ID,
-                        "resources": limits(1, 512, 128),
-                        "backupId": id(),
-                        "idle": idle,
-                    },
-                    "moveReservation": destination,
-                }),
-            )
-            .await
-            .unwrap();
-        let transferring = owner.run(&run).await;
-        // Stop arrives after advance reads its input, before transfer fails on
-        // the missing recovery point. The transaction must use the latest Stop.
-        owner
-            .service
-            .store
-            .update_run_boundary_fixture(&run, json!({ "cancelRequestedAt": now() }))
-            .await
-            .unwrap();
-
-        assert!(!moves::advance(&owner.service, &transferring).await.unwrap());
-
-        let cancelled = owner.run(&run).await;
-        assert_eq!(cancelled["status"], RunStatus::Cancelled);
-        assert_eq!(cancelled["recoveryPending"], false);
-        assert_eq!(cancelled["nodeId"], LOCAL_NODE_ID);
-        for field in ["nodeState", "moveRequest", "moveReservation"] {
-            assert!(cancelled[field].is_null(), "{field}: {}", cancelled[field]);
-        }
-        assert!(cancelled["movementError"].is_string());
-        assert_eq!(
-            owner.stored("node-attempts", &destination).await.unwrap()["released"],
-            true
-        );
-        let next = id();
-        owner
-            .add_run_fixture(&run_record(&next, RunStatus::Queued))
-            .await;
-        assert_eq!(owner.run(&next).await["id"], next);
-    }
 }
 
 #[tokio::test]
 async fn explicit_resource_requests_are_rejected_before_moving() {
     let owner = Owner::new().await;
     let run = json!({ "id": id(), "resources": limits(2, 4096, 32768) });
-    let error = moves::request(&owner.service, &run, &limits(2, 4096, 128))
+    let mut request = limits(2, 4096, 128);
+    request["discardWorkingFiles"] = true.into();
+    let error = moves::request(&owner.service, &run, &request)
         .await
         .unwrap_err();
     assert_eq!(error.status, 400);
@@ -3637,7 +3502,7 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
         .update_run_boundary_fixture(&run, json!({ "backup": { "id": point } }))
         .await
         .unwrap();
-    let selected = moves::latest(&owner.service, &run)
+    let selected = publication::latest(&owner.service, &run)
         .await
         .unwrap()
         .expect("published metadata remains eligible");
@@ -4139,7 +4004,10 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     damaged["manifest"] = json!({ "corrupt": true });
     owner.put("node-backups", damaged).await;
     assert!(
-        moves::latest(&owner.service, &run).await.unwrap().is_none(),
+        publication::latest(&owner.service, &run)
+            .await
+            .unwrap()
+            .is_none(),
         "No rollback to a previous publication after the current manifest is damaged"
     );
     publication::purge(&owner.service, &run).await.unwrap();
@@ -4324,1145 +4192,6 @@ async fn legacy_disks_keep_their_size_and_resource_requests_do_not_reserve_capac
     ));
 }
 
-/// Contents written to the source disk that every move must carry.
-const MOVED_CONTENTS: &[u8] = b"complete environment, untracked files and native session";
-
-/// Flags that make the fixture controllers fail or cancel a movement.
-#[derive(Clone)]
-struct MoveFaults {
-    failed: Arc<AtomicBool>,
-    cancel_during_capture: Arc<AtomicBool>,
-}
-
-/// A node controller that captures, publishes and restores the disk of `run`.
-fn movement_controller(
-    state: PathBuf,
-    run: String,
-    faults: MoveFaults,
-    service: Arc<Service>,
-    allow_attempt_capture: bool,
-) -> Router {
-    Router::new().fallback(axum::routing::any(move |request: Request<Body>| {
-        let (state, run, faults, service) =
-            (state.clone(), run.clone(), faults.clone(), service.clone());
-        async move {
-            assert_eq!(
-                request.headers()["authorization"],
-                "Bearer controller-fixture"
-            );
-            let route = request.uri().path().to_owned();
-            if request.method() == "DELETE" && route.ends_with("/direct-reader") {
-                let parts = route.split('/').collect::<Vec<_>>();
-                snapshots::close_direct_reader(&state.join("snapshots").join(parts[2]))
-                    .await
-                    .unwrap();
-                return Json(json!({ "closed": true })).into_response();
-            }
-            if request.method() == "DELETE" {
-                return Json(json!({ "ok": true })).into_response();
-            }
-            if route.ends_with("/storage-status") {
-                let volume = runtime::load(&state.join("disks").join(&run))
-                    .await
-                    .unwrap();
-                return Json(volume.status().unwrap()).into_response();
-            }
-            if route.ends_with("/snapshot") {
-                let disk_route = format!("/disks/{run}/snapshot");
-                if route != disk_route {
-                    assert!(
-                        allow_attempt_capture,
-                        "Idle movement must capture by disk, without destination attempt history"
-                    );
-                    let checkpoint = service
-                        .store
-                        .checkpoint_boundary(&run)
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    assert_eq!(
-                        route,
-                        format!("/runs/{}/snapshot", text(&checkpoint, "runnerId")),
-                        "Active capture must name the current fenced attempt"
-                    );
-                }
-                let body = to_bytes(request.into_body(), 1024).await.unwrap();
-                let value: Value = serde_json::from_slice(&body).unwrap();
-                let consistency = if route == disk_route {
-                    assert_eq!(
-                        value["consistency"], "filesystem",
-                        "Movement retains coherent capture"
-                    );
-                    cairn_installation::storage::checkpoint::Consistency::Filesystem
-                } else {
-                    serde_json::from_value(
-                        value
-                            .get("consistency")
-                            .cloned()
-                            .unwrap_or(json!("filesystem")),
-                    )
-                    .unwrap()
-                };
-                if faults.cancel_during_capture.load(Ordering::SeqCst) {
-                    service
-                        .store
-                        .change_run(
-                            &run,
-                            cairn_installation::runs::RunChanges {
-                                cancel_requested_at: Some(Some(now())),
-                                status: Some(RunStatus::Cancelled),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .unwrap();
-                }
-                if faults.failed.load(Ordering::SeqCst) {
-                    return StatusCode::PRECONDITION_FAILED.into_response();
-                }
-                let snapshot = checkpoint::capture(
-                    &state,
-                    &run,
-                    None,
-                    Arc::new(tokio::sync::Mutex::new(())),
-                    CancellationToken::new(),
-                    &run,
-                    consistency,
-                )
-                .await
-                .unwrap();
-                return Json(snapshot).into_response();
-            }
-            if route.ends_with("/published") {
-                let body = to_bytes(request.into_body(), 1_000_000).await.unwrap();
-                let value: Value = serde_json::from_slice(&body).unwrap();
-                let volume = runtime::load(&state.join("disks").join(&run))
-                    .await
-                    .unwrap();
-                volume
-                    .disk
-                    .commit_published(
-                        value["generation"].as_i64().unwrap(),
-                        value["backupId"].as_str().unwrap(),
-                    )
-                    .unwrap();
-                return Json(json!({ "committed": true })).into_response();
-            }
-            if route.ends_with("/restore") {
-                let body = to_bytes(request.into_body(), 1_000_000).await.unwrap();
-                let value = serde_json::from_slice(&body).unwrap();
-                let restored = restore::controller(&state, &run, value).await.unwrap();
-                return Json(restored).into_response();
-            }
-            if route.starts_with("/snapshots/") {
-                let parts = route.split('/').collect::<Vec<_>>();
-                let directory = state.join("snapshots").join(parts[2]);
-                if parts[3] == "direct-reader" {
-                    let body = to_bytes(request.into_body(), 4096).await.unwrap();
-                    return snapshots::direct_reader(&directory, &body)
-                        .await
-                        .unwrap()
-                        .into_response();
-                }
-                if request.method() == "POST" && parts[3] == "direct-upload" {
-                    let body = to_bytes(request.into_body(), 131_072).await.unwrap();
-                    return match snapshots::upload_direct(&directory, &body).await {
-                        Ok(receipt) => Json(receipt).into_response(),
-                        Err(error) => error.into_response(),
-                    };
-                }
-                if request.method() == "DELETE" {
-                    tokio::fs::remove_dir_all(directory).await.unwrap();
-                    return Json(json!({ "ok": true })).into_response();
-                }
-                if request.method() == "POST" && matches!(parts[3], "blocks" | "publication") {
-                    let body = to_bytes(request.into_body(), 4096).await.unwrap();
-                    let value: Value = serde_json::from_slice(&body).unwrap();
-                    let hashes = serde_json::from_value(value["hashes"].clone()).unwrap();
-                    let (length, body) = if parts[3] == "publication" {
-                        snapshots::served_publication(&directory, hashes)
-                            .await
-                            .unwrap()
-                    } else {
-                        snapshots::served_batch(&directory, hashes).await.unwrap()
-                    };
-                    return ([("content-length", length.to_string())], body).into_response();
-                }
-                return snapshots::served(&directory, parts[3])
-                    .await
-                    .unwrap()
-                    .into_response();
-            }
-            panic!("Idle movement must not launch a provider: {route}");
-        }
-    }))
-}
-
-/// Creates the lazily restored disk that the source node holds for `record`.
-async fn seed_source_disk(owner: &Owner, state: &Path, record: &Value, node: &str, master: &str) {
-    let run = record["id"].as_str().unwrap();
-    let disk = state.join("disks").join(run);
-    std::fs::create_dir_all(&disk).unwrap();
-    std::fs::write(disk.join("runtime.json"), br#"{"runtimeId":"fixture"}"#).unwrap();
-    let grant = disk_grants::new_disk(&owner.service, record, node)
-        .await
-        .unwrap();
-    let context = json!({ "master": master, "grant": grant, "policy": small_reserve() });
-    let remote = Arc::new(
-        RemoteSource::new(
-            &context,
-            tokio::runtime::Handle::current(),
-            CancellationToken::default(),
-        )
-        .unwrap(),
-    );
-    let manifest = json!({
-        "version": 1,
-        "size": 4096,
-        "blockSize": 4_194_304,
-        "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
-    });
-    let journal = LazyDisk::create(&disk.join("lazy"), &manifest, remote).unwrap();
-    journal.set_context(&context).unwrap();
-    journal.write_at(0, MOVED_CONTENTS).unwrap();
-    journal.sync().unwrap();
-}
-
-/// Requests a move of `run` to `target` and lets it settle.
-async fn move_to(owner: &Owner, run: &str, _resources: &Value, target: &str) {
-    let args = json!({ "nodeId": target });
-    let (status, body) = owner
-        .send("POST", &format!("/api/nodes/placement/{run}/move"), args)
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    owner.service.worker.tick(&owner.service).await.unwrap();
-}
-
-/// Prepares the runtime of `node`, enrolls it, and connects its fixture
-/// controller to the master at `master` through an outbound relay.
-async fn connect_node(
-    owner: &Owner,
-    record: &Value,
-    node: &str,
-    master: std::net::SocketAddr,
-    faults: &MoveFaults,
-    stop: &CancellationToken,
-    seed: bool,
-) -> [tokio::task::JoinHandle<()>; 2] {
-    let run = record["id"].as_str().unwrap();
-    let state = owner.root().join(node);
-    let image = state.join("images/development");
-    std::fs::create_dir_all(&image).unwrap();
-    std::fs::write(image.join("root.ext4"), b"fixture runtime").unwrap();
-    std::fs::write(image.join("vmlinux"), b"fixture kernel").unwrap();
-    if seed {
-        seed_source_disk(owner, &state, record, node, &format!("http://{master}/")).await;
-    }
-    let token = auth::token();
-    let mut enrolled = schedulable_node(node, &limits(2, 1024, 1024));
-    enrolled["revoked"] = false.into();
-    enrolled["runtimeId"] = "development".into();
-    enrolled["storage"] = json!(small_reserve());
-    owner.put_node_fixture(enrolled).await;
-    owner.authorize_node(node, &token).await;
-    let (controller, controller_address) = common::bind().await;
-    let app = movement_controller(
-        state,
-        run.to_owned(),
-        faults.clone(),
-        owner.service.clone(),
-        false,
-    );
-    let controller_task = common::serve(controller, app);
-    let stop = stop.clone();
-    let relay_task = tokio::spawn(async move {
-        relay::run(
-            format!("http://{master}").parse().unwrap(),
-            token,
-            format!("http://{controller_address}"),
-            "controller-fixture".into(),
-            stop,
-        )
-        .await
-        .unwrap();
-    });
-    [controller_task, relay_task]
-}
-
-struct ReleaseRaceGate {
-    entered: tokio::sync::Notify,
-    proceed: tokio::sync::Semaphore,
-    starts: std::sync::atomic::AtomicUsize,
-    deletes: std::sync::atomic::AtomicUsize,
-    allow_attempt_capture: bool,
-}
-
-/// Controller fixture for a real worker, with its final fencing call held open.
-async fn connect_running_source(
-    owner: &Owner,
-    record: &Value,
-    node: &str,
-    master: std::net::SocketAddr,
-    faults: &MoveFaults,
-    stop: &CancellationToken,
-    gate: Arc<ReleaseRaceGate>,
-) -> [tokio::task::JoinHandle<()>; 2] {
-    use axum::routing::{any, get, post};
-    let run = text(record, "id");
-    let state = owner.root().join(node);
-    let image = state.join("images/development");
-    std::fs::create_dir_all(&image).unwrap();
-    std::fs::write(image.join("root.ext4"), b"fixture runtime").unwrap();
-    std::fs::write(image.join("vmlinux"), b"fixture kernel").unwrap();
-    if node == text(record, "nodeId") {
-        seed_source_disk(owner, &state, record, node, &format!("http://{master}/")).await;
-    }
-    let token = auth::token();
-    let mut enrolled = schedulable_node(node, &limits(2, 8192, 32768));
-    enrolled["revoked"] = false.into();
-    enrolled["runtimeId"] = "development".into();
-    enrolled["storage"] = json!(small_reserve());
-    owner.put_node_fixture(enrolled).await;
-    owner.authorize_node(node, &token).await;
-    let (controller, address) = common::bind().await;
-    let starting = gate.clone();
-    let stopping = gate.clone();
-    let app = movement_controller(
-        state,
-        run.to_owned(),
-        faults.clone(),
-        owner.service.clone(),
-        gate.allow_attempt_capture,
-    )
-        .route("/prepare/{attempt}", post(|| async { Json(json!({})) }))
-        .route("/runs/{attempt}/logs", get(|| async {
-            let output = "{\"type\":\"thread.started\",\"thread_id\":\"retained-session\"}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"the committed answer\"}}\n{\"type\":\"turn.completed\",\"usage\":{}}\n";
-            let frame = json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) });
-            Body::from(format!("{frame}\n"))
-        }))
-        .route("/runs/{attempt}/wait", post(|| async { Json(json!({ "StatusCode": 0 })) }))
-        .route("/runs/{attempt}/administrative-pause", get(|| async { Json(json!({ "administrativePausedMs": 0 })) }))
-        .route("/runs/{attempt}/lease", post(|| async { Json(json!({})) }))
-        .route("/runs/{attempt}", any(move |request: Request<Body>| {
-            let (starting, stopping) = (starting.clone(), stopping.clone());
-            async move {
-                if request.method() == "POST" {
-                    starting.starts.fetch_add(1, Ordering::SeqCst);
-                } else if request.method() == "DELETE"
-                    && stopping.deletes.fetch_add(1, Ordering::SeqCst) == 0
-                {
-                    stopping.entered.notify_one();
-                    stopping.proceed.acquire().await.unwrap().forget();
-                }
-                Json(json!({}))
-            }
-        }));
-    let controller_task = common::serve(controller, app);
-    // Use the manager's real node transport with a synthetic node poller. This
-    // avoids staging a workspace in the host's node data directory.
-    let stop = stop.clone();
-    let transport = owner.service.node_transport.clone();
-    let node = node.to_owned();
-    let relay_task = tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        loop {
-            let command = tokio::select! {
-                () = stop.cancelled() => break,
-                command = transport.poll(&node) => command.unwrap(),
-            };
-            if command.is_null() {
-                continue;
-            }
-            let (transport, node, client) = (transport.clone(), node.clone(), client.clone());
-            tokio::spawn(async move {
-                let path = text(&command, "path");
-                let id = &command["id"];
-                if path.starts_with("/prepare/") {
-                    let _ = transport
-                        .reply(
-                            &node,
-                            json!({ "id": id, "sequence": 0,
-                        "status": 200, "length": 2, "contentType": "application/json",
-                        "data": STANDARD.encode(b"{}"), "done": true }),
-                        )
-                        .await;
-                    return;
-                }
-                let method =
-                    reqwest::Method::from_bytes(text(&command, "method").as_bytes()).unwrap();
-                let body = STANDARD.decode(text(&command, "body")).unwrap();
-                let mut response = client
-                    .request(method, format!("http://{address}{path}"))
-                    .bearer_auth("controller-fixture")
-                    .body(body)
-                    .send()
-                    .await
-                    .unwrap();
-                let status = response.status().as_u16();
-                let kind = response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or("application/octet-stream")
-                    .to_owned();
-                if transport
-                    .reply(
-                        &node,
-                        json!({ "id": id, "sequence": 0, "status": status,
-                    "length": response.content_length(), "contentType": kind, "done": false }),
-                    )
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                let mut sequence = 1;
-                while let Ok(Some(bytes)) = response.chunk().await {
-                    for chunk in bytes.chunks(65_536) {
-                        if transport
-                            .reply(
-                                &node,
-                                json!({ "id": id, "sequence": sequence,
-                            "data": STANDARD.encode(chunk), "done": false }),
-                            )
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                        sequence += 1;
-                    }
-                }
-                let _ = transport
-                    .reply(
-                        &node,
-                        json!({ "id": id, "sequence": sequence, "done": true }),
-                    )
-                    .await;
-            });
-        }
-    });
-    [controller_task, relay_task]
-}
-
-/// The idle run settled on `target` with its session and disk contents.
-async fn assert_moved_with_its_disk(owner: &Owner, run: &str, target: &str) {
-    let settled = owner.run(run).await;
-    assert_eq!(settled["status"], RunStatus::Succeeded);
-    assert_eq!(settled["nodeId"], *target, "{settled}");
-    assert_eq!(settled["recoveryPending"], false);
-    assert_eq!(settled["sessionId"], "retained-session");
-    let directory = owner.root().join(target).join("disks").join(run);
-    let volume = runtime::load(&directory).await.unwrap();
-    let bytes = tokio::task::spawn_blocking(move || {
-        let mut bytes = vec![0; MOVED_CONTENTS.len()];
-        volume.read_at(0, &mut bytes).unwrap();
-        bytes
-    })
-    .await
-    .unwrap();
-    assert_eq!(bytes, MOVED_CONTENTS);
-    assert!(
-        owner
-            .service
-            .store
-            .attempts()
-            .await
-            .unwrap()
-            .iter()
-            .all(|attempt| attempt.released)
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
-async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_stay_idle() {
-    let (listener, address) = common::bind().await;
-    let owner = Owner::at(address.to_string()).await;
-    let (run, agent, source, destination, attempt) = (id(), id(), id(), id(), id());
-    let resources = limits(1, 512, 128);
-    owner
-        .grant_nodes(&agent, json!([source, destination]))
-        .await;
-    let mut record = run_record(&run, RunStatus::Succeeded);
-    record["isolated"] = true.into();
-    record["sessionId"] = "retained-session".into();
-    record["summary"] = "the committed answer".into();
-    record["nodeId"] = source.clone().into();
-    record["resources"] = resources.clone();
-    record["snapshot"] = json!({ "agent": { "id": agent } });
-    owner.add_run_fixture(&record).await;
-    owner
-        .set_checkpoint(
-            &run,
-            json!({
-                "nodeId": source,
-                "runnerId": attempt,
-                "completed": true,
-                "terminalCode": 0,
-                "remainingMs": null,
-                "prepared": { "backend": "firecracker", "isolated": true },
-            }),
-        )
-        .await;
-    let stop = CancellationToken::new();
-    let faults = MoveFaults {
-        failed: Arc::new(AtomicBool::new(false)),
-        cancel_during_capture: Arc::new(AtomicBool::new(false)),
-    };
-    let mut tasks = Vec::new();
-    for node in [&source, &destination] {
-        let seed = node == &source;
-        tasks.extend(connect_node(&owner, &record, node, address, &faults, &stop, seed).await);
-    }
-    tasks.push(owner.serve(listener));
-    for target in [&destination, &source] {
-        let args = json!({ "nodeId": target });
-        let (status, body) = owner
-            .send("POST", &format!("/api/nodes/placement/{run}/move"), args)
-            .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let pending = owner.run(&run).await;
-        assert_eq!(pending["status"], RunStatus::Queued);
-        assert_eq!(pending["moveRequest"]["idle"], true);
-        owner.service.worker.tick(&owner.service).await.unwrap();
-        assert_moved_with_its_disk(&owner, &run, target).await;
-        let finished = owner.run(&run).await;
-        assert_eq!(finished["summary"], "the committed answer");
-        let checkpoint = owner
-            .service
-            .store
-            .checkpoint_boundary(&run)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(checkpoint["runnerId"], attempt);
-        assert_eq!(checkpoint["terminalCode"], 0);
-        assert_eq!(checkpoint["completed"], true);
-    }
-    faults.failed.store(true, Ordering::SeqCst);
-    move_to(&owner, &run, &resources, &destination).await;
-    let settled = owner.run(&run).await;
-    assert_eq!(settled["status"], RunStatus::Succeeded);
-    assert_eq!(settled["recoveryPending"], false);
-    assert_eq!(
-        settled["movementError"],
-        "Unable to capture a coherent VM snapshot."
-    );
-    assert_eq!(settled["nodeId"], source);
-    assert_eq!(settled["summary"], "the committed answer");
-    assert_eq!(settled["sessionId"], "retained-session");
-    let checkpoint = owner
-        .service
-        .store
-        .checkpoint_boundary(&run)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(checkpoint["runnerId"], attempt);
-    assert_eq!(checkpoint["terminalCode"], 0);
-    assert!(
-        owner
-            .service
-            .store
-            .attempts()
-            .await
-            .unwrap()
-            .iter()
-            .all(|attempt| attempt.released)
-    );
-    faults.cancel_during_capture.store(true, Ordering::SeqCst);
-    move_to(&owner, &run, &resources, &destination).await;
-    let cancelled = owner.run(&run).await;
-    assert_eq!(cancelled["status"], RunStatus::Cancelled);
-    assert_eq!(cancelled["recoveryPending"], false);
-    stop.cancel();
-    for task in tasks {
-        task.abort();
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
-async fn idle_move_requested_before_old_worker_release_transfers_without_replay() {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    let (listener, address) = common::bind().await;
-    let owner = Owner::at(address.to_string()).await;
-    let (agent, source, destination) = (id(), id(), id());
-    owner
-        .grant_nodes(&agent, json!([source, destination]))
-        .await;
-    let task = owner.service.task_fixture(json!({
-        "name": "Idle move race", "prompt": "Complete once", "worktree": false, "agentId": agent,
-    }), None).await.unwrap();
-    let run = owner
-        .service
-        .enqueue(text(&task, "id"), "manual", None)
-        .await
-        .unwrap();
-    let run_id = text(&run, "id").to_owned();
-    owner
-        .service
-        .store
-        .update_run_placement(
-            &run_id,
-            cairn_installation::nodes::run_placement::PlacementChanges {
-                node_id: Some(Some(source.clone())),
-                target_node_id: Some(Some(source.clone())),
-                resources: Some(Some(serde_json::from_value(limits(1, 512, 128)).unwrap())),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let record = owner.run(&run_id).await;
-    let stop = CancellationToken::new();
-    let faults = MoveFaults {
-        failed: Arc::new(AtomicBool::new(false)),
-        cancel_during_capture: Arc::new(AtomicBool::new(false)),
-    };
-    let gate = Arc::new(ReleaseRaceGate {
-        entered: tokio::sync::Notify::new(),
-        proceed: tokio::sync::Semaphore::new(0),
-        starts: std::sync::atomic::AtomicUsize::new(0),
-        deletes: std::sync::atomic::AtomicUsize::new(0),
-        allow_attempt_capture: false,
-    });
-    let mut tasks = connect_running_source(
-        &owner,
-        &record,
-        &source,
-        address,
-        &faults,
-        &stop,
-        gate.clone(),
-    )
-    .await
-    .into_iter()
-    .collect::<Vec<_>>();
-    tasks.push(owner.serve(listener));
-    let home = owner.service.config.home.join(".codex");
-    tokio::fs::create_dir_all(&home).await.unwrap();
-    tokio::fs::write(home.join("auth.json"), "{}")
-        .await
-        .unwrap();
-    let mut config = owner.service.config.clone();
-    config.worker_enabled = true;
-    config.port = 0;
-    let config_file = owner.root().join("race-worker.json");
-    tokio::fs::write(&config_file, serde_json::to_vec(&config).unwrap())
-        .await
-        .unwrap();
-    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
-        .parent()
-        .unwrap()
-        .join("examples/worker_fixture");
-    let mut worker = tokio::process::Command::new(binary)
-        .arg("serve")
-        .env("CAIRN_CONFIG", config_file)
-        .env_remove("CAIRN_TOOLKIT_DIR")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let mut output = BufReader::new(worker.stdout.take().unwrap()).lines();
-    let listening = tokio::time::timeout(Duration::from_secs(10), output.next_line())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(listening.starts_with("Listening on"), "{listening}");
-    tokio::time::timeout(Duration::from_secs(30), gate.entered.notified())
-        .await
-        .expect("old worker must reach fencing");
-    let succeeded = owner.run(&run_id).await;
-    assert_eq!(succeeded["status"], RunStatus::Succeeded, "{succeeded}");
-    assert_eq!(succeeded["sessionId"], "retained-session");
-    assert_eq!(succeeded["summary"], "the committed answer");
-    let attempt = owner
-        .service
-        .store
-        .checkpoint_boundary(&run_id)
-        .await
-        .unwrap()
-        .unwrap()["runnerId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    tasks.extend(
-        connect_node(
-            &owner,
-            &record,
-            &destination,
-            address,
-            &faults,
-            &stop,
-            false,
-        )
-        .await,
-    );
-    let (status, body) = owner
-        .send(
-            "POST",
-            &format!("/api/nodes/placement/{run_id}/move"),
-            json!({ "nodeId": destination }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let pending = owner.run(&run_id).await;
-    assert_eq!(pending["moveRequest"]["idle"], true);
-    let reservation = text(&pending["moveRequest"], "reservation").to_owned();
-    owner
-        .service
-        .worker
-        .deployment_lease(&owner.service, "test-idle-move".into(), false)
-        .await
-        .unwrap();
-    let plan = owner
-        .service
-        .config
-        .data_dir
-        .join("runner-plans")
-        .join(format!("{attempt}.json"));
-    assert!(
-        plan.exists(),
-        "the old worker must still own its runner plan"
-    );
-    gate.proceed.add_permits(1);
-    // Plan removal is the last step of release; fencing alone releases the old
-    // placement earlier and would not establish the interleaving under test.
-    common::eventually(
-        Duration::from_secs(15),
-        Duration::from_millis(20),
-        async || (!plan.exists()).then_some(()),
-    )
-    .await;
-    let retained = owner.run(&run_id).await;
-    assert_eq!(
-        retained["moveRequest"]["reservation"], reservation,
-        "{retained}"
-    );
-    assert!(
-        !owner
-            .service
-            .store
-            .attempt(&reservation)
-            .await
-            .unwrap()
-            .unwrap()
-            .released
-    );
-    worker.kill().await.unwrap();
-    owner
-        .service
-        .worker
-        .deployment_lease(&owner.service, "test-idle-move".into(), true)
-        .await
-        .unwrap();
-    owner.service.worker.tick(&owner.service).await.unwrap();
-    assert_moved_with_its_disk(&owner, &run_id, &destination).await;
-    let finished = owner.run(&run_id).await;
-    assert_eq!(finished["summary"], "the committed answer");
-    assert_eq!(
-        owner
-            .service
-            .store
-            .checkpoint_boundary(&run_id)
-            .await
-            .unwrap()
-            .unwrap()["runnerId"],
-        attempt
-    );
-    assert_eq!(
-        gate.starts.load(Ordering::SeqCst),
-        1,
-        "the finished turn must not launch again"
-    );
-    stop.cancel();
-    for task in tasks {
-        task.abort();
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
-async fn paid_active_move_recovers_after_transfer_at_controller_ceiling() {
-    use tokio::io::AsyncBufReadExt;
-    for mode in ["failure", "cancel", "success"] {
-        let (listener, address) = common::bind().await;
-        let owner = Owner::at(address.to_string()).await;
-        let (agent, source, destination, attempt) = (id(), id(), id(), id());
-        owner
-            .grant_nodes(&agent, json!([source, destination]))
-            .await;
-        let task = owner.service.task_fixture(json!({
-            "name": "Paid move", "prompt": "Resume once", "worktree": false, "agentId": agent,
-        }), None).await.unwrap();
-        let run = owner
-            .service
-            .enqueue(text(&task, "id"), "manual", None)
-            .await
-            .unwrap();
-        let run = text(&run, "id").to_owned();
-        owner
-            .service
-            .store
-            .change_run(
-                &run,
-                cairn_installation::runs::RunChanges {
-                    status: Some(RunStatus::Running),
-                    session_id: Some(Some("retained-session".into())),
-                    boundary: Some(json!({ "isolated": true })),
-                    placement: Some(Box::new(
-                        cairn_installation::nodes::run_placement::PlacementChanges {
-                            node_id: Some(Some(source.clone())),
-                            target_node_id: Some(Some(source.clone())),
-                            resources: Some(Some(
-                                serde_json::from_value(limits(1, 512, 128)).unwrap(),
-                            )),
-                            ..Default::default()
-                        },
-                    )),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let record = owner.run(&run).await;
-        let run_dir = owner.service.config.data_dir.join("runs").join(&run);
-        let workspace = run_dir.join("workspace");
-        let output = run_dir.join("output");
-        tokio::fs::create_dir_all(&workspace).await.unwrap();
-        tokio::fs::create_dir_all(&output).await.unwrap();
-        owner
-            .set_checkpoint(
-                &run,
-                json!({
-                    "nodeId": source, "runnerId": attempt, "runtimeId": "development",
-                    "prepared": { "backend": "firecracker", "isolated": true,
-                        "projectRoot": workspace, "cwd": workspace, "output": output.join("result.md"),
-                        "workspaces": [], "mounts": [], "skills": [] },
-                    "completed": false, "terminalCode": 75, "remainingMs": null,
-                    "controllerRecoveries": 4, "controllerRecoveryReservation": attempt,
-                }),
-            )
-            .await;
-        let stop = CancellationToken::new();
-        let faults = MoveFaults {
-            failed: Arc::new(AtomicBool::new(mode == "failure")),
-            cancel_during_capture: Arc::new(AtomicBool::new(mode == "cancel")),
-        };
-        let mut tasks = Vec::new();
-        tasks.extend(connect_node(&owner, &record, &source, address, &faults, &stop, true).await);
-        let gate = Arc::new(ReleaseRaceGate {
-            entered: tokio::sync::Notify::new(),
-            proceed: tokio::sync::Semaphore::new(1),
-            starts: AtomicUsize::new(0),
-            deletes: AtomicUsize::new(0),
-            allow_attempt_capture: true,
-        });
-        tasks.extend(
-            connect_running_source(
-                &owner,
-                &record,
-                &destination,
-                address,
-                &faults,
-                &stop,
-                gate.clone(),
-            )
-            .await,
-        );
-        tasks.push(owner.serve(listener));
-        let home = owner.service.config.home.join(".codex");
-        tokio::fs::create_dir_all(&home).await.unwrap();
-        tokio::fs::write(home.join("auth.json"), "{}")
-            .await
-            .unwrap();
-        let (status, body) = owner
-            .send(
-                "POST",
-                &format!("/api/nodes/placement/{run}/move"),
-                json!({ "nodeId": destination }),
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        owner
-            .service
-            .store
-            .change_run(
-                &run,
-                cairn_installation::runs::RunChanges {
-                    status: Some(RunStatus::Queued),
-                    recovery_pending: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        owner.service.worker.tick(&owner.service).await.unwrap();
-        let transferred = owner.run(&run).await;
-        if mode != "success" {
-            assert_eq!(transferred["nodeId"], source, "{transferred}");
-            if mode == "cancel" {
-                assert_eq!(transferred["status"], RunStatus::Cancelled, "{transferred}");
-            } else {
-                assert!(transferred["movementError"].is_string(), "{transferred}");
-            }
-            let checkpoint = owner
-                .service
-                .store
-                .checkpoint_boundary(&run)
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(checkpoint["moveRecoveryReservation"].is_null());
-            assert_eq!(checkpoint["controllerRecoveries"], 4);
-            stop.cancel();
-            for task in tasks {
-                task.abort();
-            }
-            continue;
-        }
-        assert_eq!(transferred["nodeId"], destination, "{transferred}");
-        assert!(transferred["moveRequest"].is_null());
-        assert_eq!(transferred["recoveryPending"], true);
-        let mut config = owner.service.config.clone();
-        config.worker_enabled = true;
-        config.port = 0;
-        let config_file = owner.root().join("paid-move-worker.json");
-        tokio::fs::write(&config_file, serde_json::to_vec(&config).unwrap())
-            .await
-            .unwrap();
-        let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
-            .parent()
-            .unwrap()
-            .join("examples/worker_fixture");
-        let mut worker = tokio::process::Command::new(binary)
-            .arg("serve")
-            .env("CAIRN_CONFIG", config_file)
-            .env_remove("CAIRN_TOOLKIT_DIR")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let mut lines = BufReader::new(worker.stdout.take().unwrap()).lines();
-        let listening = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(listening.starts_with("Listening on"), "{listening}");
-
-        // Re-admission prepares the remote workspace before starting the controller.
-        // Give preparation its own bound before waiting for the controller's result.
-        common::eventually(
-            Duration::from_secs(60),
-            Duration::from_millis(20),
-            async || {
-                let current = owner.run(&run).await;
-                (gate.starts.load(Ordering::SeqCst) > 0
-                    || current["status"] == RunStatus::Succeeded
-                    || current["status"] == RunStatus::Failed)
-                    .then_some(())
-            },
-        )
-        .await;
-
-        let resumed = common::eventually(
-            Duration::from_secs(20),
-            Duration::from_millis(20),
-            async || {
-                let current = owner.run(&run).await;
-                (current["status"] == RunStatus::Succeeded
-                    || current["status"] == RunStatus::Failed)
-                    .then_some(current)
-            },
-        )
-        .await;
-        assert_eq!(
-            resumed["status"],
-            RunStatus::Succeeded,
-            "{resumed}; starts={}; checkpoint={}",
-            gate.starts.load(Ordering::SeqCst),
-            owner
-                .service
-                .store
-                .checkpoint_boundary(&run)
-                .await
-                .unwrap()
-                .unwrap()
-        );
-        assert_eq!(gate.starts.load(Ordering::SeqCst), 1);
-        let checkpoint = owner
-            .service
-            .store
-            .checkpoint_boundary(&run)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(checkpoint["controllerRecoveries"], 4);
-        assert!(checkpoint["moveRecoveryReservation"].is_null());
-        worker.kill().await.unwrap();
-        stop.cancel();
-        for task in tasks {
-            task.abort();
-        }
-    }
-}
-
-#[tokio::test]
-async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution() {
-    let (listener, address) = common::bind().await;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let counter = calls.clone();
-    let app = Router::new().fallback(axum::routing::delete(move || {
-        let counter = counter.clone();
-        async move {
-            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::NO_CONTENT
-            }
-        }
-    }));
-    let owner = Owner::with_runner(common::HOST.into(), format!("http://{address}")).await;
-    let server = common::serve(listener, app);
-    let run = id();
-    let mut record = run_record(&run, RunStatus::Running);
-    record["moveRequest"] = json!({
-        "requestedAt": now() - 3000, "nodeId": LOCAL_NODE_ID, "reservation": id(),
-        "resources": limits(1, 128, 128),
-    });
-    owner.add_run_fixture(&record).await;
-    owner
-        .set_checkpoint(&run, json!({ "runnerId": id() }))
-        .await;
-    assert!(moves::pause_pending(&owner.service, &run).await.is_err());
-    moves::pause_pending(&owner.service, &run).await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-    owner
-        .service
-        .store
-        .update_run_boundary_fixture(&run, json!({ "moveRequest": null }))
-        .await
-        .unwrap();
-    moves::pause_pending(&owner.service, &run).await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-    server.abort();
-}
-
-#[tokio::test]
-#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
-async fn queued_capacity_transfer_carries_unpublished_writes_and_keeps_the_source_after_failure() {
-    let (listener, address) = common::bind().await;
-    let owner = Owner::at(address.to_string()).await;
-    let (run, agent, source, destination, attempt) = (id(), id(), id(), id(), id());
-    owner
-        .grant_nodes(&agent, json!([source, destination]))
-        .await;
-    let mut record = run_record(&run, RunStatus::Queued);
-    record["isolated"] = true.into();
-    record["sessionId"] = "retained-session".into();
-    record["nodeId"] = source.clone().into();
-    record["resources"] = limits(2, 512, 128);
-    record["snapshot"] = json!({ "agent": { "id": agent } });
-    owner.add_run_fixture(&record).await;
-    owner
-        .set_checkpoint(
-            &run,
-            json!({
-                "nodeId": source,
-                "runnerId": attempt,
-                "runtimeId": "development",
-                "prepared": { "backend": "firecracker", "isolated": true },
-            }),
-        )
-        .await;
-    let stop = CancellationToken::new();
-    let faults = MoveFaults {
-        failed: Arc::new(AtomicBool::new(true)),
-        cancel_during_capture: Arc::new(AtomicBool::new(false)),
-    };
-    let mut tasks = Vec::new();
-    for node in [&source, &destination] {
-        tasks.extend(
-            connect_node(
-                &owner,
-                &record,
-                node,
-                address,
-                &faults,
-                &stop,
-                node == &source,
-            )
-            .await,
-        );
-    }
-    tasks.push(owner.serve(listener));
-    let mut source_node = owner.stored("nodes", &source).await.unwrap();
-    source_node["slots"] = 1.into();
-    owner.put_node_fixture(source_node).await;
-    let mut busy = agent_run(&id(), &agent);
-    busy["pinnedNodeId"] = source.clone().into();
-    busy["resources"] = limits(1, 128, 128);
-    placement::reserve(&owner.service, &busy, &id())
-        .await
-        .unwrap();
-    for fail in [true, false] {
-        faults.failed.store(fail, Ordering::SeqCst);
-        let current = owner.run(&run).await;
-        assert!(
-            moves::queue_capacity_move(&owner.service, &current)
-                .await
-                .unwrap()
-        );
-        assert!(
-            !moves::advance(&owner.service, &owner.run(&run).await)
-                .await
-                .unwrap()
-        );
-        let current = owner.run(&run).await;
-        assert_eq!(
-            current["nodeId"],
-            if fail {
-                source.as_str()
-            } else {
-                destination.as_str()
-            }
-        );
-        assert_eq!(current["status"], RunStatus::Queued);
-        if fail {
-            assert!(current["movementError"].is_string());
-            assert!(current["moveRequest"].is_null());
-        } else {
-            assert!(current["movementError"].is_null());
-            assert_eq!(current["sessionId"], "retained-session");
-        }
-        let node = if fail { &source } else { &destination };
-        let directory = owner.root().join(node).join("disks").join(&run);
-        let volume = runtime::load(&directory).await.unwrap();
-        let bytes = tokio::task::spawn_blocking(move || {
-            let mut bytes = vec![0; MOVED_CONTENTS.len()];
-            volume.read_at(0, &mut bytes).unwrap();
-            bytes
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            bytes, MOVED_CONTENTS,
-            "all previously unpublished data preserved on {node}"
-        );
-    }
-    assert!(owner.root().join(&source).join("disks").join(&run).exists());
-    stop.cancel();
-    for task in tasks {
-        task.abort();
-    }
-}
-
 #[tokio::test]
 async fn new_disks_use_the_default_size_within_shared_headroom_and_retained_disks_keep_their_size()
 {
@@ -5579,83 +4308,6 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
 }
 
 #[tokio::test]
-async fn mission_wait_and_node_move_exclude_each_other_without_leaking_destination_capacity() {
-    for ordering in ["wait-first", "move-first", "concurrent"] {
-        let owner = Owner::new().await;
-        let (node, run_id) = (id(), id());
-        let mut destination = schedulable_node(&node, &limits(2, 4096, 65536));
-        destination["slots"] = 1.into();
-        owner.put_node_fixture(destination).await;
-        owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
-        let mut record = run_record(&run_id, RunStatus::Running);
-        record["trigger"] = "manual".into();
-        record["snapshot"] = agent_run(&run_id, MAIN_AGENT_ID)["snapshot"].clone();
-        owner.add_run_fixture(&record).await;
-        let token = "synthetic-mission-move-wait";
-        owner
-            .service
-            .store
-            .transaction({
-                let grant: cairn_installation::mcps::record::RunGrant = serde_json::from_value(
-                    json!({ "runId": run_id, "messageId": null, "servers": {}, "installation": false, "workspace": true }),
-                )
-                .unwrap();
-                move |db| {
-                    db.save_mcp_run_grant(
-                        &cairn_installation::auth::hex_digest(token),
-                        &grant,
-                        None,
-                    )
-                }
-            })
-            .await
-            .unwrap();
-        let input = json!({
-            "conditions": [{ "type": "delay", "seconds": 3600 }], "reason": "Wait for CI",
-        });
-        let args = json!({ "nodeId": node });
-        let register_wait = || cairn_installation::waits::schedule(&owner.service, token, &input);
-        // Retain the pre-wait run snapshot: the movement transaction must check
-        // the current durable wait, not only its earlier request snapshot.
-        let register_move = || moves::request_by_agent(&owner.service, &record, &args);
-        let (wait, movement) = match ordering {
-            "wait-first" => (register_wait().await, register_move().await),
-            "move-first" => {
-                let movement = register_move().await;
-                (register_wait().await, movement)
-            }
-            _ => tokio::join!(register_wait(), register_move()),
-        };
-        assert_ne!(
-            wait.is_ok(),
-            movement.is_ok(),
-            "{ordering}: {wait:?} {movement:?}"
-        );
-        let current = owner.run(&run_id).await;
-        assert_ne!(
-            current["wakeup"].is_object(),
-            current["moveRequest"].is_object()
-        );
-        let attempts = owner.service.store.attempts_fixture().await.unwrap();
-        let reservations = attempts
-            .iter()
-            .filter(|attempt| attempt["released"] != true)
-            .count();
-        assert_eq!(
-            reservations,
-            usize::from(movement.is_ok()),
-            "{ordering}: {attempts:?}"
-        );
-        if let Err(error) = wait {
-            assert_eq!(error.status, 409);
-        }
-        if let Err(error) = movement {
-            assert_eq!(error.status, 409);
-        }
-    }
-}
-
-#[tokio::test]
 async fn agents_choose_nodes_and_legacy_resource_limits_are_not_exposed() {
     let owner = Owner::new().await;
     let (status, agent) = owner
@@ -5729,11 +4381,18 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
     let runner = Router::new().fallback(move |request: Request<Body>| {
         let recorded = recorded.clone();
         async move {
+            if request.uri().path() == "/health" {
+                return Json(json!({ "diskRetirementProtocol":2 }));
+            }
             recorded
                 .lock()
                 .unwrap()
                 .push(request.uri().path().to_owned());
-            Json(json!({}))
+            let bytes = axum::body::to_bytes(request.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            Json(json!({ "deleted": true, "retirementId": body["retirementId"] }))
         }
     });
     let (url, _runner) = common::serve_locally(runner).await;
@@ -7779,12 +6438,12 @@ async fn stalled_sync_does_not_block_other_conversations_and_same_disk_stays_fen
         .unwrap();
     let unrelated = tokio::time::timeout(
         Duration::from_millis(500),
-        moves::latest(&owner.service, &second),
+        publication::latest(&owner.service, &second),
     )
     .await;
     let same = tokio::time::timeout(
         Duration::from_millis(50),
-        moves::latest(&owner.service, &first),
+        publication::latest(&owner.service, &first),
     )
     .await;
     release.notify_one();
@@ -8200,486 +6859,6 @@ async fn recovered_quarantines_continue_past_an_unreachable_acknowledgement_node
 }
 
 #[tokio::test]
-async fn public_move_rechecks_its_run_grant_after_waiting_for_capacity() {
-    for revoke in [false, true] {
-        let owner = Owner::new().await;
-        let node = id();
-        let mut destination = schedulable_node(&node, &limits(2, 4096, 65536));
-        destination["slots"] = 1.into();
-        destination["tags"] = json!(["retained"]);
-        owner.put_node_fixture(destination).await;
-        owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
-        let mut blocking = run_record(&id(), RunStatus::Running);
-        blocking["taskId"] = id().into();
-        blocking["snapshot"] = agent_run(text(&blocking, "id"), MAIN_AGENT_ID)["snapshot"].clone();
-        owner.add_run_fixture(&blocking).await;
-        let attempt = id();
-        placement::reserve(&owner.service, &blocking, &attempt)
-            .await
-            .unwrap();
-        let run_id = id();
-        let mut run = run_record(&run_id, RunStatus::Running);
-        run["taskId"] = id().into();
-        run["snapshot"] = agent_run(&run_id, MAIN_AGENT_ID)["snapshot"].clone();
-        run["requiredTags"] = json!(["retained"]);
-        owner.add_run_fixture(&run).await;
-        // The run scope alone must authorize movement; manage is not required.
-        let token = common::relay_fixture::grant(&owner.service, &["run"]).await;
-        let request = common::request("POST","/mcp")
-            .header("authorization",format!("Bearer {token}"))
-            .body(Body::from(json!({
-                "jsonrpc":"2.0","id":1,"method":"tools/call",
-                "params":common::mcp_arguments("move_to_node",&json!({"runId":run_id,"nodeId":node,"waitSeconds":10}))
-            }).to_string())).unwrap();
-        let app = owner.app.clone();
-        let pending =
-            tokio::spawn(async move { common::read_json(common::send(&app, request).await).await });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if owner.run(&run_id).await["capacityWaitUntil"].is_number() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        if revoke {
-            owner
-                .service
-                .store
-                .delete(&format!("test-relay:{}", auth::digest(&token)))
-                .await
-                .unwrap();
-        }
-        placement::release(&owner.service, &attempt).await.unwrap();
-        let started = pending.await.unwrap();
-        let operation = node_tool_value(&started)["operation"].as_str().unwrap();
-        if revoke {
-            let (status, denied) = node_tool_call(
-                &owner,
-                "/mcp",
-                &token,
-                "get_node_move_operation",
-                json!({"operationId":operation}),
-            )
-            .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED, "{denied}");
-            assert!(denied["error"].is_string(), "{denied}");
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while owner.run(&run_id).await["capacityWaitUntil"].is_number() {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
-        } else {
-            let completed =
-                finish_tool_move(&owner, "/mcp", &token, operation, Duration::from_secs(5)).await;
-            assert_eq!(completed["state"], "completed", "{completed}");
-        }
-        let current = owner.run(&run_id).await;
-        assert!(current["capacityWaitUntil"].is_null());
-        let active = owner
-            .service
-            .store
-            .attempts_fixture()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|attempt| attempt["runId"] == run_id && attempt["released"] != true)
-            .count();
-        if revoke {
-            assert!(current["moveRequest"].is_null());
-            assert_eq!(active, 0);
-        } else {
-            assert_eq!(current["moveRequest"]["requiredTags"], json!(["retained"]));
-            assert_eq!(active, 1);
-        }
-    }
-}
-
-async fn node_tool_call(
-    owner: &Owner,
-    endpoint: &str,
-    token: &str,
-    name: &str,
-    args: Value,
-) -> (StatusCode, Value) {
-    owner
-        .call(
-            "POST",
-            endpoint,
-            json!({
-                "jsonrpc":"2.0", "id":1, "method":"tools/call",
-                "params":common::mcp_arguments(name, &args),
-            }),
-            Some(token),
-        )
-        .await
-}
-
-fn node_tool_value(response: &Value) -> &Value {
-    assert_ne!(response["result"]["isError"], true, "{response}");
-    &response["result"]["structuredContent"]["result"]
-}
-
-async fn finish_tool_move(
-    owner: &Owner,
-    endpoint: &str,
-    token: &str,
-    operation: &str,
-    timeout: Duration,
-) -> Value {
-    tokio::time::timeout(timeout, async {
-        loop {
-            let (status, response) = node_tool_call(
-                owner,
-                endpoint,
-                token,
-                "get_node_move_operation",
-                json!({"operationId":operation}),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{response}");
-            let result = node_tool_value(&response).clone();
-            if result["state"] != "running" {
-                break result;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .unwrap()
-}
-
-struct WaitingToolMove {
-    owner: Owner,
-    node: String,
-    run: String,
-    blocking: String,
-    token: String,
-    endpoint: &'static str,
-}
-
-impl WaitingToolMove {
-    async fn new(internal: bool) -> Self {
-        let owner = Owner::new().await;
-        let node = id();
-        let mut destination = schedulable_node(&node, &limits(2, 4096, 65536));
-        destination["slots"] = 1.into();
-        owner.put_node_fixture(destination).await;
-        owner.put("agents", json!({"id":MAIN_AGENT_ID,"provider":"codex","access":{"nodes":[node],"installation":true}})).await;
-        let agent = owner.service.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
-        let mut blocking = run_record(&id(), RunStatus::Running);
-        blocking["taskId"] = id().into();
-        blocking["snapshot"] = json!({"agent":agent});
-        owner.add_run_fixture(&blocking).await;
-        let attempt = id();
-        placement::reserve(&owner.service, &blocking, &attempt)
-            .await
-            .unwrap();
-        let run_id = id();
-        let mut run = run_record(&run_id, RunStatus::Running);
-        run["taskId"] = id().into();
-        run["snapshot"] = json!({"agent":agent});
-        owner.add_run_fixture(&run).await;
-        let token = if internal {
-            let configuration = owner
-                .service
-                .mcps
-                .run_configuration(&owner.service, &owner.run(&run_id).await)
-                .await
-                .unwrap();
-            configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        } else {
-            common::relay_fixture::grant(&owner.service, &["run"]).await
-        };
-        Self {
-            owner,
-            node,
-            run: run_id,
-            blocking: attempt,
-            token,
-            endpoint: if internal {
-                "/mcp-installation"
-            } else {
-                "/mcp"
-            },
-        }
-    }
-
-    async fn start(&self) -> String {
-        let (status, response) = node_tool_call(
-            &self.owner,
-            self.endpoint,
-            &self.token,
-            "move_to_node",
-            json!({"runId":self.run,"nodeId":self.node,"waitSeconds":60}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{response}");
-        node_tool_value(&response)["operation"]
-            .as_str()
-            .expect("tool moves return a continuation")
-            .to_owned()
-    }
-
-    async fn wait_for_marker(&self, present: bool) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while self.owner.run(&self.run).await["capacityWaitUntil"].is_number() != present {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    async fn peer_token(&self) -> String {
-        if self.endpoint == "/mcp" {
-            return common::relay_fixture::grant(&self.owner.service, &["run"]).await;
-        }
-        let mut peer = self.owner.run(&self.run).await;
-        peer["id"] = id().into();
-        peer["taskId"] = id().into();
-        self.owner.add_run_fixture(&peer).await;
-        let configuration = self
-            .owner
-            .service
-            .mcps
-            .run_configuration(&self.owner.service, &peer)
-            .await
-            .unwrap();
-        configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_move_completes_when_capacity_opens_after_the_code_worker_deadline() {
-    async fn scenario(internal: bool) {
-        let fixture = WaitingToolMove::new(internal).await;
-        let service = fixture.owner.service.clone();
-        let destination = fixture.node.clone();
-        let blocking = fixture.blocking.clone();
-        let began = tokio::time::Instant::now();
-        let release = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(40)).await;
-            // Admission requires a heartbeat within30s; keep the synthetic
-            // destination fresh when its occupied slot becomes free at40s.
-            let mut heartbeat = service
-                .store
-                .node_boundary(&destination)
-                .await
-                .unwrap()
-                .unwrap();
-            heartbeat["lastSeen"] = now().into();
-            service.store.put_node_fixture(heartbeat).await.unwrap();
-            placement::release(&service, &blocking).await.unwrap();
-        });
-        let operation = fixture.start().await;
-        assert!(began.elapsed() < Duration::from_secs(10));
-        let completed = finish_tool_move(
-            &fixture.owner,
-            fixture.endpoint,
-            &fixture.token,
-            &operation,
-            Duration::from_secs(60),
-        )
-        .await;
-        release.await.unwrap();
-        assert!(began.elapsed() >= Duration::from_secs(40));
-        assert_eq!(completed["state"], "completed", "{completed}");
-        assert_eq!(completed["result"]["nodeId"], fixture.node);
-        assert!(fixture.owner.run(&fixture.run).await["capacityWaitUntil"].is_null());
-        assert_eq!(
-            fixture.owner.run(&fixture.run).await["moveRequest"]["nodeId"],
-            fixture.node
-        );
-        let active = fixture
-            .owner
-            .service
-            .store
-            .attempts_fixture()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|attempt| attempt["runId"] == fixture.run && attempt["released"] != true)
-            .count();
-        assert_eq!(active, 1);
-    }
-    tokio::join!(scenario(false), scenario(true));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_move_cancellation_is_caller_private_and_clears_capacity_waits() {
-    for internal in [false, true] {
-        let fixture = WaitingToolMove::new(internal).await;
-        let operation = fixture.start().await;
-        fixture.wait_for_marker(true).await;
-        let peer = fixture.peer_token().await;
-        for name in ["get_node_move_operation", "cancel_node_move_operation"] {
-            let (_, denied) = node_tool_call(
-                &fixture.owner,
-                fixture.endpoint,
-                &peer,
-                name,
-                json!({"operationId":operation}),
-            )
-            .await;
-            assert_eq!(denied["result"]["isError"], true, "{denied}");
-            assert!(denied.to_string().contains("another caller"), "{denied}");
-        }
-        assert!(fixture.owner.run(&fixture.run).await["capacityWaitUntil"].is_number());
-        let (_, cancelled) = node_tool_call(
-            &fixture.owner,
-            fixture.endpoint,
-            &fixture.token,
-            "cancel_node_move_operation",
-            json!({"operationId":operation}),
-        )
-        .await;
-        node_tool_value(&cancelled);
-        let completed = finish_tool_move(
-            &fixture.owner,
-            fixture.endpoint,
-            &fixture.token,
-            &operation,
-            Duration::from_secs(5),
-        )
-        .await;
-        assert_eq!(completed["state"], "cancelled", "{completed}");
-        let run = fixture.owner.run(&fixture.run).await;
-        assert_eq!(run["status"], "running");
-        assert!(run["capacityWaitUntil"].is_null());
-        assert!(run["moveRequest"].is_null());
-        assert!(
-            !fixture
-                .owner
-                .service
-                .store
-                .attempts_fixture()
-                .await
-                .unwrap()
-                .iter()
-                .any(|attempt| attempt["runId"] == fixture.run && attempt["released"] != true)
-        );
-        placement::release(&fixture.owner.service, &fixture.blocking)
-            .await
-            .unwrap();
-        let next = fixture.start().await;
-        let completed = finish_tool_move(
-            &fixture.owner,
-            fixture.endpoint,
-            &fixture.token,
-            &next,
-            Duration::from_secs(5),
-        )
-        .await;
-        assert_eq!(completed["state"], "completed", "{completed}");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dropped_movement_wait_clears_its_marker_without_interrupting_the_source() {
-    let fixture = WaitingToolMove::new(false).await;
-    let args = json!({"nodeId":fixture.node,"waitSeconds":60});
-    let path = format!("/api/nodes/placement/{}/move", fixture.run);
-    let request = fixture
-        .owner
-        .session
-        .authorize(fixture.owner.request("POST", &path))
-        .header("content-type", "application/json")
-        .body(Body::from(args.to_string()))
-        .unwrap();
-    let app = fixture.owner.app.clone();
-    let waiting = tokio::spawn(async move { common::send(&app, request).await });
-    fixture.wait_for_marker(true).await;
-    waiting.abort();
-    assert!(waiting.await.unwrap_err().is_cancelled());
-    fixture.wait_for_marker(false).await;
-    let run = fixture.owner.run(&fixture.run).await;
-    assert_eq!(run["status"], "running");
-    assert!(run["moveRequest"].is_null());
-    assert!(
-        !fixture
-            .owner
-            .service
-            .store
-            .attempts_fixture()
-            .await
-            .unwrap()
-            .iter()
-            .any(|attempt| attempt["runId"] == fixture.run && attempt["released"] != true)
-    );
-    placement::release(&fixture.owner.service, &fixture.blocking)
-        .await
-        .unwrap();
-    let moved = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match moves::request(&fixture.owner.service, &run, &args).await {
-                Ok(value) => break value,
-                Err(error) if error.message == "A movement is already pending." => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => panic!("{error:?}"),
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(moved["status"], "moving");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_move_rechecks_installation_access_during_its_capacity_wait() {
-    let fixture = WaitingToolMove::new(true).await;
-    let operation = fixture.start().await;
-    fixture.wait_for_marker(true).await;
-    fixture
-        .owner
-        .put(
-            "agents",
-            json!({
-                "id": MAIN_AGENT_ID, "provider":"codex",
-                "access":{"nodes":[fixture.node],"installation":false},
-            }),
-        )
-        .await;
-    placement::release(&fixture.owner.service, &fixture.blocking)
-        .await
-        .unwrap();
-    fixture.wait_for_marker(false).await;
-    let (status, denied) = node_tool_call(
-        &fixture.owner,
-        fixture.endpoint,
-        &fixture.token,
-        "get_node_move_operation",
-        json!({"operationId":operation}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
-    let run = fixture.owner.run(&fixture.run).await;
-    assert!(run["moveRequest"].is_null());
-    assert!(
-        !fixture
-            .owner
-            .service
-            .store
-            .attempts_fixture()
-            .await
-            .unwrap()
-            .iter()
-            .any(|attempt| attempt["runId"] == fixture.run && attempt["released"] != true)
-    );
-}
-
-#[tokio::test]
 async fn private_move_inherits_tags_for_omitted_or_null_and_clears_for_an_empty_list() {
     for tags in [None, Some(Value::Null), Some(json!([]))] {
         let owner = Owner::new().await;
@@ -8693,7 +6872,7 @@ async fn private_move_inherits_tags_for_omitted_or_null_and_clears_for_an_empty_
         run["snapshot"] = agent_run(&run_id, MAIN_AGENT_ID)["snapshot"].clone();
         run["requiredTags"] = json!(["retained"]);
         owner.add_run_fixture(&run).await;
-        let mut input = json!({"nodeId":node});
+        let mut input = json!({"nodeId": node, "discardWorkingFiles": true});
         if let Some(tags) = tags {
             input["requiredTags"] = tags;
         }
@@ -8705,123 +6884,10 @@ async fn private_move_inherits_tags_for_omitted_or_null_and_clears_for_an_empty_
         let moved = moves::request_by_agent(&owner.service, &run, &input)
             .await
             .unwrap();
-        assert_eq!(moved["status"], "moving");
-        assert_eq!(
-            owner.run(&run_id).await["moveRequest"]["requiredTags"],
-            expected
-        );
-    }
-}
-
-#[tokio::test]
-async fn workspace_move_rechecks_grant_turn_and_live_permissions_after_capacity_wait() {
-    for change in ["none", "revoke", "turn", "permissions"] {
-        let owner = Owner::new().await;
-        let node = id();
-        let mut destination = schedulable_node(&node, &limits(2, 4096, 65536));
-        destination["slots"] = 1.into();
-        owner.put_node_fixture(destination).await;
-        owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
-        let mut agent = owner.stored("agents", MAIN_AGENT_ID).await.unwrap();
-        agent["access"]["installation"] = true.into();
-        owner.put("agents", agent.clone()).await;
-        let mut blocking = run_record(&id(), RunStatus::Running);
-        blocking["taskId"] = id().into();
-        blocking["snapshot"] = json!({"agent":agent});
-        owner.add_run_fixture(&blocking).await;
-        let attempt = id();
-        placement::reserve(&owner.service, &blocking, &attempt)
-            .await
-            .unwrap();
-        let run_id = id();
-        let mut run = run_record(&run_id, RunStatus::Running);
-        run["taskId"] = id().into();
-        run["trigger"] = "chat".into();
-        run["snapshot"] = json!({"agent":agent});
-        owner.add_run_fixture(&run).await;
-        owner
-            .save_conversation_boundary(json!({
-                "id": id(),
-                "runId": run_id,
-                "title": "Fixture",
-            }))
-            .await;
-        let configuration = owner
-            .service
-            .mcps
-            .run_configuration(&owner.service, &run)
-            .await
-            .unwrap();
-        let token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
-        let service = owner.service.clone();
-        let pending = tokio::spawn(async move {
-            cairn_installation::project_workspaces::rpc(
-                &service,
-                &token,
-                "tools/call",
-                &json!({
-                    "name":"move_to_node",
-                    "arguments":{"nodeId":node,"waitSeconds":10}
-                }),
-            )
-            .await
-            .unwrap()
-        });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if owner.run(&run_id).await["capacityWaitUntil"].is_number() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        match change {
-            "revoke" => owner
-                .service
-                .mcps
-                .revoke_run(&owner.service, &run_id)
-                .await
-                .unwrap(),
-            "turn" => {
-                owner
-                    .service
-                    .store
-                    .update_run_boundary_fixture(
-                        &run_id,
-                        json!({"chatExecution":{"messageId":id()}}),
-                    )
-                    .await
-                    .unwrap();
-            }
-            "permissions" => {
-                agent["access"]["installation"] = false.into();
-                owner.put("agents", agent).await;
-            }
-            _ => {}
-        }
-        placement::release(&owner.service, &attempt).await.unwrap();
-        let response = pending.await.unwrap();
-        let current = owner.run(&run_id).await;
-        assert!(current["capacityWaitUntil"].is_null());
-        let active = owner
-            .service
-            .store
-            .attempts_fixture()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|attempt| attempt["runId"] == run_id && attempt["released"] != true)
-            .count();
-        if change == "none" {
-            assert_ne!(response["isError"], true, "{response}");
-            assert!(current["moveRequest"].is_object());
-            assert_eq!(active, 1);
-        } else {
-            assert_eq!(response["isError"], true, "{change}: {response}");
-            assert!(current["moveRequest"].is_null());
-            assert_eq!(active, 0);
-        }
+        assert_eq!(moved["status"], "moved");
+        let changed = owner.run(&run_id).await;
+        assert_eq!(changed["requiredTags"], expected);
+        assert_eq!(changed["environmentExpirationCause"], "node-change");
+        assert!(changed["moveRequest"].is_null());
     }
 }

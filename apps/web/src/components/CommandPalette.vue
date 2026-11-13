@@ -7,6 +7,7 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
+  shallowRef,
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
@@ -312,9 +313,43 @@ const results = computed(() => {
   }
   return [...ranked, ask]
 })
+// Live work can move results between groups while a pointer is pressed. Keep
+// its target in place until the click has been delivered.
+const pressedResults = shallowRef<Command[]>()
+const displayedResults = computed(() => pressedResults.value ?? results.value)
+let pressedOption: Element | undefined
+let pressedPointerId: number | undefined
+
+function holdResults(event: PointerEvent) {
+  const option = event.target instanceof Element ? event.target.closest('[role="option"]') : null
+  if (event.button !== 0 || !event.isPrimary || !option)
+    return
+
+  pressedResults.value = displayedResults.value
+  pressedOption = option
+  pressedPointerId = event.pointerId
+}
+
+function releaseResults() {
+  pressedResults.value = undefined
+  pressedOption = undefined
+  pressedPointerId = undefined
+}
+
+function finishPointer(event: PointerEvent) {
+  if (event.pointerId !== pressedPointerId)
+    return
+
+  const releasedElement = document.elementFromPoint(event.clientX, event.clientY)
+  // Touch compatibility clicks may arrive after pointerup's next timer task.
+  // Keep an intended selection stable until click; a release away cancels it.
+  if (!releasedElement || !pressedOption?.contains(releasedElement))
+    releaseResults()
+}
+
 const grouped = computed(() => {
   const groups: Array<{ name: string, items: Array<{ command: Command, index: number }> }> = []
-  results.value.forEach((command, index) => {
+  displayedResults.value.forEach((command, index) => {
     const group = groups.find(item => item.name === command.group) ?? groups[groups.push({ name: command.group, items: [] }) - 1]
     group.items.push({ command, index })
   })
@@ -329,10 +364,20 @@ watch(active, async () => {
 const previous = document.activeElement as HTMLElement | null
 onBeforeUnmount(() => {
   // A modal dialog keeps the page inert until it closes.
+  window.removeEventListener('pointerup', finishPointer)
+  window.removeEventListener('click', releaseResults)
+  window.removeEventListener('contextmenu', releaseResults)
+  window.removeEventListener('pointercancel', releaseResults)
+  window.removeEventListener('blur', releaseResults)
   dialog.value?.close()
   previous?.focus()
 })
 onMounted(() => {
+  window.addEventListener('pointerup', finishPointer)
+  window.addEventListener('click', releaseResults)
+  window.addEventListener('contextmenu', releaseResults)
+  window.addEventListener('pointercancel', releaseResults)
+  window.addEventListener('blur', releaseResults)
   dialog.value?.showModal()
   input.value?.focus()
 })
@@ -343,7 +388,7 @@ function run(command: Command) {
 }
 
 function keydown(event: KeyboardEvent) {
-  const total = results.value.length
+  const total = displayedResults.value.length
   if (event.key === 'ArrowDown' || (event.ctrlKey && event.key === 'n')) {
     event.preventDefault()
     active.value = (active.value + 1) % total
@@ -354,7 +399,7 @@ function keydown(event: KeyboardEvent) {
   }
   else if (event.key === 'Enter' && !event.isComposing) {
     event.preventDefault()
-    const command = results.value[active.value]
+    const command = displayedResults.value[active.value]
     if (command)
       run(command)
   }
@@ -406,6 +451,7 @@ function cancel() {
         ref="list"
         class="min-h-0 flex-1 overflow-y-auto p-2 [scrollbar-width:thin]"
         role="listbox"
+        @pointerdown="holdResults"
       >
         <template v-for="group in grouped" :key="group.name">
           <p class="eyebrow px-3 pb-1.5 pt-2.5">

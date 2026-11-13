@@ -44,6 +44,7 @@ fn summary(chat: &Value) -> Result<Value> {
         "compaction",
         "environmentState",
         "environmentExpiredAt",
+        "environmentExpirationCause",
         "environmentError",
         "error",
         "lastActivityAt",

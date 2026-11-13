@@ -221,6 +221,21 @@ pub struct Run {
     pub execution_backend: Option<String>,
     #[serde(default)]
     #[ts(optional = nullable)]
+    #[schemars(with = "Option<String>", pattern("^(cleaning|expired)$"))]
+    pub environment_state: Option<crate::ConversationEnvironmentState>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    #[ts(optional = nullable)]
+    pub environment_expired_at: Option<i64>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(inactivity|node-change|node-revocation|storage-migration)$")
+    )]
+    pub environment_expiration_cause: Option<crate::EnvironmentExpirationCause>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub node_id: Option<String>,
     #[serde(default)]
     #[ts(optional = nullable)]

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("coverage", pathlib.Path(__file__).parents[1] / "log-coverage.py")
 coverage = importlib.util.module_from_spec(SPEC)
@@ -76,10 +77,37 @@ class CoverageTests(unittest.TestCase):
                 self.assertNotIn("private-secret", json.dumps(result))
 
     def test_nonzero_exit_and_silent_pipe_do_not_claim_eof_success(self):
-        for code, expected in (("import sys; sys.exit(3)", "source_exit"), ("import time; time.sleep(2)", "time_budget")):
-            result = coverage.read_page([sys.executable, "-c", code], "docker", START, END, None, time.monotonic() + .15, 512000)
+        # Source exit and read expiry are different seams. Observe the real
+        # nonzero exit before starting the short read clock; interpreter startup
+        # under concurrent test/build load must not select the timeout branch.
+        command = [sys.executable, "-c", "raise SystemExit(3)"]
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL) as child:
+            self.assertEqual(child.wait(timeout=2), 3)
+            with patch.object(coverage.subprocess, "Popen", return_value=child):
+                result = coverage.read_page(command, "docker", START, END, None, time.monotonic() + .15, 512000)
             self.assertFalse(result["ok"])
-            self.assertEqual(result["reason"], expected)
+            self.assertEqual(result["reason"], "source_exit")
+            self.assertEqual(result["exitCode"], 3)
+            self.assertTrue(result["eof"])
+
+        result = coverage.read_page([sys.executable, "-c", "import time; time.sleep(2)"],
+                                    "docker", START, END, None, time.monotonic() + .15, 512000)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "time_budget")
+        self.assertFalse(result["eof"])
+
+    def test_unadmitted_source_still_consumes_the_real_read_budget(self):
+        spawn = coverage.subprocess.Popen
+        def delayed_launch(*args, **kwargs):
+            time.sleep(.2)
+            return spawn(*args, **kwargs)
+        with patch.object(coverage.subprocess, "Popen", delayed_launch):
+            result = coverage.read_page([sys.executable, "-c", "raise SystemExit(3)"],
+                                        "docker", START, END, None, time.monotonic() + .15, 512000)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["eof"])
+        self.assertIsNone(result["exitCode"])
+        self.assertEqual(result["reason"], "time_budget")
 
     def test_journal_unit_and_kernel_decode_json_without_exporting_messages(self):
         data = json.dumps({"__REALTIME_TIMESTAMP": str(START // 1000), "__CURSOR": "s=fixture", "MESSAGE": "EXT4-fs error private"}).encode() + b"\n"

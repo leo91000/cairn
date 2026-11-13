@@ -629,7 +629,6 @@ fun NodesScreen(
         }
     }
     revoking?.let { node ->
-        val running = node.occupiedSlots > 0
         val native = node.capabilities.backend == NATIVE_BACKEND
         val command = uninstallCommand(node)
         Confirm(
@@ -638,10 +637,9 @@ fun NodesScreen(
                 append(
                     "Cette machine perd immédiatement son accès au master et les agents ne peuvent plus l’utiliser."
                 )
-                if (running)
-                    append(
-                        " Les conversations en cours se mettent en pause après le délai de déconnexion, puis reprennent depuis leur dernier point de reprise sur une autre machine autorisée qui a de la capacité. Celles fixées à cette machine, ou sans point de reprise, attendent."
-                    )
+                append(
+                    " Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Cela concerne toutes les conversations de cette node. Leurs environnements expirent. Le prochain message crée un environnement vide sur une node autorisée ; les missions actives reprennent automatiquement. Les conversations fixées à cette node attendent un changement de placement."
+                )
                 append(
                     "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :"
                 )
@@ -664,7 +662,11 @@ fun NodesScreen(
             },
         ) {
             vm.perform {
-                api.request("POST", "/nodes/${node.id}/revoke")
+                api.request(
+                    "POST",
+                    "/nodes/${node.id}/revoke",
+                    buildJsonObject { put("discardWorkingFiles", true) },
+                )
                 revoking = null
                 load()
             }
@@ -677,7 +679,10 @@ fun NodesScreen(
                     api.send(
                         "POST",
                         "/nodes/${previous.id}/revoke",
-                        buildJsonObject { put("releasePlacements", true) },
+                        buildJsonObject {
+                            put("releasePlacements", true)
+                            put("discardWorkingFiles", true)
+                        },
                     )
                 retiring = null
                 notify(
@@ -733,12 +738,11 @@ internal fun RetireNode(
                 "Agents autorisés sur l’ancienne node : ${agents.joinToString(", ")}. Pour les faire tourner sur la nouvelle, passez-les en ${if (nextNative) "exécution native" else "VM Firecracker"} sur leur fiche et autorisez-la."
             )
         Text(
-            "Les conversations fixées sur l’ancienne node ou qui la préfèrent reviennent au placement automatique. Les conversations gardent leur backend d’exécution : les existantes continuent sur d’autres nodes ${if (previousNative) "natives" else "VM"}."
+            "Les conversations fixées sur l’ancienne node ou qui la préfèrent reviennent au placement automatique. Les conversations gardent leur backend d’exécution : leurs prochains environnements démarrent sur d’autres nodes ${if (previousNative) "natives" else "VM"}."
         )
-        if (previous.occupiedSlots > 0)
-            Text(
-                "Les conversations en cours se mettent en pause après le délai de déconnexion, puis reprennent depuis leur dernier point de reprise sur une autre machine autorisée qui a de la capacité."
-            )
+        Text(
+            "Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Cela concerne toutes les conversations de l’ancienne node. Leurs environnements expirent. Le prochain message crée un environnement vide ; les missions actives reprennent automatiquement."
+        )
         Text("Puis désinstallez l’ancien runtime sur la machine :")
         Code(uninstallCommand(previous))
         CopyButton("Copier la commande", uninstallCommand(previous))

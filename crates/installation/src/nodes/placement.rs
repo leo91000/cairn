@@ -340,6 +340,8 @@ struct Snapshot {
     nodes: Vec<Value>,
     attempts: Vec<Attempt>,
     volumes: Vec<Value>,
+    /// Nodes that must first delete the disk of this run's expired environment.
+    retiring: Vec<String>,
 }
 
 impl Snapshot {
@@ -372,10 +374,15 @@ impl Snapshot {
                 .as_array()
                 .cloned()
                 .unwrap_or_default(),
-            checkpoint: super::db_checkpoint(db, text(run, "id"))?,
+            checkpoint: if run["environmentState"] == "expired" {
+                json!({})
+            } else {
+                super::db_checkpoint(db, text(run, "id"))?
+            },
             nodes,
             attempts: db.attempts()?,
             volumes: db.list("node-volumes")?,
+            retiring: crate::environment_expiration::retiring_nodes(db, text(run, "id"))?,
         })
     }
 
@@ -392,7 +399,9 @@ impl Snapshot {
         let mut best: Option<Candidate> = None;
         let mut full = Vec::new();
         for node in &self.nodes {
-            if !request.eligible(node, configured) {
+            if !request.eligible(node, configured)
+                || self.retiring.iter().any(|id| node["id"] == id.as_str())
+            {
                 continue;
             }
             let Some(resources) = request.resources_for(node) else {
@@ -441,20 +450,67 @@ fn shortage(full: &[String]) -> String {
     )
 }
 
+/// The destination of a node change binds only the first admission of the new
+/// environment, while it stays authorized and not revoked. Otherwise placement
+/// is automatic again.
+fn without_stale_target(db: &Db<'_>, run: &Value) -> Result<Option<Value>> {
+    let Some(target) = run["targetNodeId"].as_str() else {
+        return Ok(None);
+    };
+    let agent = db
+        .agent_snapshot(super::run_agent(run))?
+        .unwrap_or_default();
+    let node = db.node_boundary(target)?;
+    let authorized = node.as_ref().is_some_and(|node| {
+        node["revoked"] != true
+            && super::agent_allows(&agent, target)
+            && (!crate::native::policy::node_native(node)
+                || crate::native::policy::allows(db, run, node).unwrap_or(false))
+    });
+    if authorized {
+        return Ok(None);
+    }
+    db.update_run_placement(
+        text(run, "id"),
+        crate::nodes::run_placement::PlacementChanges {
+            target_node_id: Some(None),
+            ..Default::default()
+        },
+    )?;
+    let mut automatic = run.clone();
+    automatic["targetNodeId"] = Value::Null;
+    Ok(Some(automatic))
+}
+
 fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Result<Value> {
-    // Moves deliberately supply a prospective environment. Automatic admission
-    // reads the latest persisted run so stale callers cannot rebind its backend.
-    let persisted;
+    if crate::environment_expiration::admission_blocked(db, text(run, "id"))? {
+        return Err(Error::unavailable(
+            "Waiting for the previous environment to stop and release its local files.",
+        ));
+    }
+    // A fresh environment may have received another explicit destination/backend
+    // while preparation was waiting. Admission uses that latest writer decision.
+    let persisted = db.run(text(run, "id"))?;
+    if let Some(current) = &persisted {
+        crate::environment_expiration::require_admission_revision(
+            current,
+            &run["environmentAdmissionRevision"],
+        )?;
+    }
+    let awaiting_environment = persisted
+        .as_ref()
+        .is_some_and(|run| run["environmentState"] == "expired");
     let run = if run["placementTransition"] == true
-        || policy(&run["snapshot"]["agent"])["backend"] != "auto"
+        || (!awaiting_environment && policy(&run["snapshot"]["agent"])["backend"] != "auto")
     {
         run
     } else {
-        persisted = db
-            .run(text(run, "id"))?
-            .ok_or_else(|| Error::not_found("Conversation removed."))?;
-        &persisted
+        persisted
+            .as_ref()
+            .ok_or_else(|| Error::not_found("Conversation removed."))?
     };
+    let automatic = without_stale_target(db, run)?;
+    let run = automatic.as_ref().unwrap_or(run);
     let snapshot = Snapshot::load(db, run, configured)?;
     let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
     if !request.moving
@@ -510,7 +566,6 @@ pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Attempt]
         let state = &record.state;
         if record.boundary["isolated"] != true
             || state.cancel_requested_at.is_some()
-            || record.boundary["backendMigration"].is_object()
             || attempts
                 .iter()
                 .any(|attempt| attempt.run_id == state.id && super::is_active_attempt(attempt))
@@ -564,15 +619,23 @@ pub async fn check(s: &Service, run: &Value) -> Result<()> {
     let configured = !s.config.runner_url.is_empty();
     s.store
         .transaction(move |db| {
-            let snapshot = Snapshot::load(db, &run, configured)?;
-            let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint);
+            if let Some(current) = db.run(text(&run, "id"))? {
+                crate::environment_expiration::require_admission_revision(
+                    &current,
+                    &run["environmentAdmissionRevision"],
+                )?;
+            }
+            let automatic = without_stale_target(db, &run)?;
+            let run = automatic.as_ref().unwrap_or(&run);
+            let snapshot = Snapshot::load(db, run, configured)?;
+            let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
             if !request.moving && run["moveReservation"].is_string() {
                 return Ok(Ok(()));
             }
             match snapshot.select(&request, configured) {
                 Ok(_) => Ok(Ok(())),
                 Err(error) if is_no_capacity(&error) => {
-                    request_reclamation(db, &run, configured)?;
+                    request_reclamation(db, run, configured)?;
                     Ok(Err(error))
                 }
                 Err(error) => Err(error),
@@ -749,6 +812,69 @@ fn admit(
     Ok(serde_json::to_value(placement)?)
 }
 
+/// Transfer a preparation reservation to the published execution checkpoint.
+/// Capacity ownership is visible to revocation earlier; it is not an environment
+/// admission and cannot consume the replaceable first destination by itself.
+pub fn publish_admission(db: &Db<'_>, run: &str, attempt: &str, revision: &Value) -> Result<()> {
+    let current = db
+        .run(run)?
+        .ok_or_else(|| Error::not_found("Run not found"))?;
+    crate::environment_expiration::require_admission_revision(&current, revision)?;
+    crate::conversation_lifecycle::require_active_run(db, run)?;
+    if !current["cancelRequestedAt"].is_null() {
+        return Err(Error::conflict("Execution stopped before admission."));
+    }
+    let held = db
+        .attempt(attempt)?
+        .ok_or_else(|| Error::conflict("Admission reservation disappeared."))?;
+    let checkpoint = super::db_checkpoint(db, run)?;
+    if held.run_id != run
+        || held.released
+        || held.role != AttemptRole::Execution
+        || !held.disk_materialized
+        || checkpoint["runnerId"] != attempt
+        || checkpoint["nodeId"] != held.node_id
+    {
+        return Err(Error::conflict(
+            "Admission ownership changed before publication.",
+        ));
+    }
+    let node = db
+        .node_boundary(&held.node_id)?
+        .ok_or_else(|| Error::unavailable("Execution node removed."))?;
+    let agent = db
+        .agent_snapshot(super::run_agent(&current))?
+        .unwrap_or_default();
+    let tags_match = current["requiredTags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .all(|tag| super::node_tags(&node).any(|present| present == tag));
+    if node["revoked"] == true
+        || !super::agent_allows(&agent, &held.node_id)
+        || !tags_match
+        || crate::native::policy::node_native(&node)
+            && !crate::native::policy::allows(db, &current, &node)?
+    {
+        return Err(Error::unavailable(format!(
+            "{NO_CAPACITY}: the selected node is no longer authorized."
+        )));
+    }
+    db.update_run_placement(
+        run,
+        super::run_placement::PlacementChanges {
+            node_id: Some(Some(held.node_id)),
+            target_node_id: Some(None),
+            resources: Some(Some(held.resources)),
+            ..Default::default()
+        },
+    )?;
+    if current["environmentState"] == "expired" {
+        db.update_run_boundary(run, &json!({ "environmentState":null }))?;
+    }
+    Ok(())
+}
+
 pub async fn release(s: &Service, attempt: &str) -> Result<()> {
     let attempt = attempt.to_owned();
     s.store
@@ -788,6 +914,34 @@ pub(crate) async fn renew_preparation(s: &Service, run: &str, attempt: &str) -> 
             Ok(())
         })
         .await
+}
+
+/// A reservation without disk materialization or an execution lease cannot have
+/// reached a controller. Release it after worker loss unless a checkpoint owns it.
+pub(crate) fn release_unclaimed(db: &Db<'_>, run: Option<&str>) -> Result<()> {
+    for attempt in db.attempts()? {
+        if attempt.released
+            || attempt.role != AttemptRole::Execution
+            || attempt.disk_materialized
+            || attempt.lease_required
+            || run.is_some_and(|run| run != attempt.run_id)
+            || crate::environment_expiration::admission_blocked(db, &attempt.run_id)?
+        {
+            continue;
+        }
+        if run.is_none()
+            && db
+                .run(&attempt.run_id)?
+                .is_none_or(|owner| !owner["environmentExpiredAt"].is_number())
+        {
+            continue;
+        }
+        let checkpoint = crate::worker::checkpoint::RunCheckpoint::load_in(db, &attempt.run_id)?;
+        if checkpoint.as_ref().and_then(|saved| saved.runner_id()) != Some(attempt.id.as_str()) {
+            release_in(db, &attempt.id)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn release_in(db: &Db<'_>, attempt: &str) -> Result<()> {
@@ -918,11 +1072,18 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         record = db.update_run_placement(
             run,
             super::run_placement::PlacementChanges {
+                target_node_id: Some(None),
                 pinned_node_id: Some(selection.pinned_node_id.map(|id| id.to_string())),
                 preferred_node_id: Some(selection.preferred_node_id.map(|id| id.to_string())),
                 ..Default::default()
             },
         )?;
+        if record["environmentState"] == "expired" {
+            db.update_run_boundary(
+                run,
+                &json!({ "environmentAdmissionRevision": crate::config::id() }),
+            )?;
+        }
         db.audit(
             "node.placement.configured",
             &json!({

@@ -66,6 +66,7 @@ fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Resu
             ));
         }
     }
+    crate::rules::templates::check_manifest(&manifest).map_err(Error::bad)?;
     for program in &manifest.programs {
         if !program.installer.is_empty() && !source.modules.contains_key(&program.installer) {
             return Err(Error::bad(

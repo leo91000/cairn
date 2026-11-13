@@ -437,7 +437,7 @@ async fn migrating_an_expired_vm_requester_cannot_adopt_its_native_child() {
 }
 
 #[tokio::test]
-async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge() {
+async fn fresh_environment_cannot_reserve_materialize_or_read_after_a_back_edge() {
     use cairn_installation::nodes::disk_grants;
 
     for destination_backend in ["firecracker", "native"] {
@@ -458,7 +458,7 @@ async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge(
         let director = on_backend(&f, root(&f).await, "firecracker").await;
         let descendant = on_backend(&f, managed(&f, &source).await, "firecracker").await;
         assert_eq!(descendant.run["nativeParentRunId"], source.run["id"]);
-        let (origin, destination) = if destination_backend == "native" {
+        let (_origin, destination) = if destination_backend == "native" {
             (&vm, &f.node)
         } else {
             (&f.node, &vm)
@@ -474,32 +474,6 @@ async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge(
             "nativeProvenanceUnknown": false,
             "nativePluginGrants": [],
         });
-        let prepared = json!({
-            "id": id(),
-            "process": null,
-            "sourceReadReady": false,
-            "nodeId": destination["id"],
-            "runtimeId": destination["runtimeId"],
-            "snapshot": snapshot,
-            "grant": grant,
-            "convertedBackup": point["id"],
-        });
-        f.service
-            .store
-            .change_run(
-                text(&source.run, "id"),
-                cairn_installation::runs::RunChanges {
-                    status: Some(cairn_contracts::RunStatus::Succeeded),
-                    placement: Some(Box::new(PlacementChanges {
-                        node_id: Some(Some(text(origin, "id").to_owned())),
-                        ..Default::default()
-                    })),
-                    boundary: Some(json!({ "backendMigration": prepared })),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
         let mut candidate = f.service.store.run(text(&source.run, "id")).await.unwrap();
         candidate["snapshot"] = snapshot;
         for (field, value) in grant.as_object().unwrap() {
@@ -512,8 +486,38 @@ async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge(
         candidate["placementTransition"] = true.into();
         candidate["requiredRuntime"] = destination["runtimeId"].clone();
 
-        // Exercise the actual consumers using a retained converted point;
-        // no converter, controller or disk is started by these metadata calls.
+        let saved = candidate.clone();
+        f.service
+            .store
+            .transaction(move |db| {
+                db.change_run(
+                    text(&saved, "id"),
+                    cairn_installation::runs::RunChanges {
+                        snapshot: Some(serde_json::from_value(saved["snapshot"].clone())?),
+                        placement: Some(Box::new(PlacementChanges {
+                            node_id: Some(saved["nodeId"].as_str().map(str::to_owned)),
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    },
+                )?;
+                let mut lineage = json!({});
+                for key in [
+                    "nativePrincipals",
+                    "nativeAuthorityNodes",
+                    "nativeParentRunId",
+                    "nativeParentAccess",
+                    "nativeProvenanceUnknown",
+                    "nativePluginGrants",
+                ] {
+                    lineage[key] = saved[key].clone();
+                }
+                db.update_run_boundary(text(&saved, "id"), &lineage)
+            })
+            .await
+            .unwrap();
+        // Exercise admission, materialization and disk reads for a fresh environment.
+        // No controller or disk is started by these metadata calls.
         let held = id();
         placement::reserve(&f.service, &candidate, &held)
             .await
@@ -548,8 +552,9 @@ async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge(
                 .is_some()
         );
 
-        let response = send(&f, &descendant, &director, &id()).await;
-        assert_ne!(response["result"]["isError"], true, "{response}");
+        // Model a legacy/corrupted ancestry change after admission. Current
+        // directing operations correctly refuse to commit this back edge.
+        f.service.store.update_run_boundary_fixture(text(&director.run, "id"), json!({ "nativeParentRunId": descendant.run["id"], "nativeParentAccess": "installation" })).await.unwrap();
         let changed = f
             .service
             .store

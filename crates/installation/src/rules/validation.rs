@@ -104,63 +104,78 @@ pub(crate) struct Request<'a> {
     pub origin: &'a crate::native::policy::Origin,
 }
 
-pub(crate) fn check(db: &Db<'_>, request: &Request<'_>) -> Result<Checked> {
-    let mut checker = Checker {
-        problems: Vec::new(),
-        ids: BTreeSet::new(),
-        nodes: 0,
-    };
-    let definition = request.definition;
+/// What a definition must satisfy wherever it is saved: its name, size, limits, tree
+/// and formulas, for the payload schema of its trigger. Package admission checks rule
+/// templates with it; saving also checks the references.
+pub(crate) fn structure(
+    definition: &HookRuleDefinition,
+    payload: Option<&Value>,
+) -> Vec<HookRuleProblem> {
+    let mut checker = Checker::default();
+    checker.header(definition);
+    checker.tree(definition, payload);
+    checker.problems
+}
 
-    let name = definition.name.trim();
-    if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
-        checker.problem("/name", "Enter a name of 1 to 100 characters.");
-    }
-    if serde_json::to_vec(definition).map_or(true, |bytes| bytes.len() > MAX_DEFINITION) {
-        checker.problem(
-            "",
-            "A rule has at most 120 KB: shorten its texts or split it.",
-        );
-    }
-    if definition.description.chars().count() > 2000 {
-        checker.problem("/description", "A description has at most 2000 characters.");
-    }
-    let limits = definition.limits;
-    if !(1..=MAX_TRIGGERINGS_PER_HOUR).contains(&limits.triggerings_per_hour) {
-        checker.problem(
-            "/limits/triggeringsPerHour",
-            &format!("Allow 1 to {MAX_TRIGGERINGS_PER_HOUR} triggerings per hour."),
-        );
-    }
-    if !(1..=MAX_CONVERSATIONS_PER_HOUR).contains(&limits.conversations_per_hour) {
-        checker.problem(
-            "/limits/conversationsPerHour",
-            &format!(
-                "Allow 1 to {MAX_CONVERSATIONS_PER_HOUR} conversations started or steered per hour."
-            ),
-        );
-    }
-
-    let payload = trigger_payload(db, request, &mut checker)?;
-    let mut scope = Scope::default();
-    for name in RESERVED {
-        scope.names.insert((*name).to_owned());
-    }
-    if let Some(properties) = payload
-        .as_ref()
-        .and_then(|schema| schema["properties"].as_object())
-    {
-        for field in properties.keys() {
-            if identifier(field) && !RESERVED.contains(&field.as_str()) {
-                scope.names.insert(field.clone());
-            }
+impl Checker {
+    fn header(&mut self, definition: &HookRuleDefinition) {
+        let name = definition.name.trim();
+        if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+            self.problem("/name", "Enter a name of 1 to 100 characters.");
+        }
+        if serde_json::to_vec(definition).map_or(true, |bytes| bytes.len() > MAX_DEFINITION) {
+            self.problem(
+                "",
+                "A rule has at most 120 KB: shorten its texts or split it.",
+            );
+        }
+        if definition.description.chars().count() > 2000 {
+            self.problem("/description", "A description has at most 2000 characters.");
+        }
+        let limits = definition.limits;
+        if !(1..=MAX_TRIGGERINGS_PER_HOUR).contains(&limits.triggerings_per_hour) {
+            self.problem(
+                "/limits/triggeringsPerHour",
+                &format!("Allow 1 to {MAX_TRIGGERINGS_PER_HOUR} triggerings per hour."),
+            );
+        }
+        if !(1..=MAX_CONVERSATIONS_PER_HOUR).contains(&limits.conversations_per_hour) {
+            self.problem(
+                "/limits/conversationsPerHour",
+                &format!(
+                    "Allow 1 to {MAX_CONVERSATIONS_PER_HOUR} conversations started or steered per hour."
+                ),
+            );
         }
     }
 
-    if definition.steps.is_empty() {
-        checker.problem("/steps", "Add at least one step.");
+    fn tree(&mut self, definition: &HookRuleDefinition, payload: Option<&Value>) {
+        let mut scope = Scope::default();
+        for name in RESERVED {
+            scope.names.insert((*name).to_owned());
+        }
+        if let Some(properties) = payload.and_then(|schema| schema["properties"].as_object()) {
+            for field in properties.keys() {
+                if identifier(field) && !RESERVED.contains(&field.as_str()) {
+                    scope.names.insert(field.clone());
+                }
+            }
+        }
+
+        if definition.steps.is_empty() {
+            self.problem("/steps", "Add at least one step.");
+        }
+        self.nodes(&definition.steps, "/steps", &mut scope, 1, false);
     }
-    checker.nodes(&definition.steps, "/steps", &mut scope, 1, false);
+}
+
+pub(crate) fn check(db: &Db<'_>, request: &Request<'_>) -> Result<Checked> {
+    let mut checker = Checker::default();
+    let definition = request.definition;
+
+    checker.header(definition);
+    let payload = trigger_payload(db, request, &mut checker)?;
+    checker.tree(definition, payload.as_ref());
 
     let mut uses = BTreeSet::new();
     let agent = definition.execution_agent_id.to_string();
@@ -542,6 +557,7 @@ fn pointer(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
 }
 
+#[derive(Default)]
 struct Checker {
     problems: Vec<HookRuleProblem>,
     ids: BTreeSet<String>,

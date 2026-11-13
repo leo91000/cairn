@@ -53,16 +53,13 @@ Revoking it from there also returns conversations fixed
 to or preferring that node to automatic placement; a plain revocation keeps those
 explicit choices waiting. Switch each agent's backend on its page and allow the
 new node. Existing conversations show **Migrate this conversation…** in their
-execution-node details on web and Android. Confirm the destination to preserve
-the same conversation, history, private home, workspace and output. A VM-created
-disk reuses the same ext4 filesystem and engine session in both directions,
-without copying its files. A native-created disk needs one physical conversion
-before VM execution: chats wait for the next message; active missions continue
-automatically in a fresh session with their visible history. System packages and
-running processes do not follow. Only physical conversion needs temporary manager
-space, fakeroot and e2fsprogs. Failure retains the source and permits retry.
-Finally run the uninstall command shown for the previous runtime after the
-conversations you want to keep have migrated.
+execution-node details on web and Android. Confirming discards the working files:
+the environment expires and its first empty environment starts on the selected
+node. History, attachments and artifacts remain. The current turn stops, questions
+close, queued messages and waits keep their continuations, and active missions
+resume automatically. A chat otherwise waits for its next message. There is no
+disk transfer or physical conversion. Back up needed files before confirmation.
+Finally run the uninstall command shown for the previous runtime.
 
 The public Cairn MCP and the `cairn_installation` agent tool expose the same setup
 and retirement controls: `list_nodes`, `list_native_callers`,
@@ -72,14 +69,15 @@ configure or revoke a node. Agent installation grants are checked again in each
 mutation transaction. Enroll the other backend, wait for the returned `nodeId`,
 configure its native trust when applicable, and grant agents through `update_agent`.
 Only after the replacement is ready, revoke the old identity with
-`releasePlacements: true`. Plain revocation preserves existing placement choices.
-`get_chat_backend_migration` previews the saved/profile backend difference and
-authorized destinations. `migrate_chat_backend` accepts either `chatId` or `runId`, plus `nodeId`, the
-destination `backend` and `confirm: true`. VM disks use an ordinary fenced move;
-native-born disks return `status: "migrating"` while conversion runs.
-Poll the preview until `pending` is false and `required` is false. An `error` with
-`required: true` means the source remains and migration can be retried. These tools
-neither install nor uninstall a runtime on the host.
+`discardWorkingFiles: true` and `releasePlacements: true`. Plain revocation also
+requires the discard confirmation but preserves existing placement choices.
+Revocation expires every environment on the node; the next turn starts empty.
+`get_chat_backend_migration` previews the saved/profile backend difference,
+authorized destinations and the working-file loss warning. `migrate_chat_backend`
+accepts either `chatId` or `runId`, plus `nodeId`, the destination `backend`,
+`confirm: true` and, while the environment exists, `discardWorkingFiles: true`.
+For an already expired environment the discard confirmation and warning are
+unnecessary. These tools neither install nor uninstall a runtime on the host.
 
 ## Daily use
 
@@ -128,7 +126,7 @@ builds, containers and Compose. Published ports are private to that conversation
 network; GPU containers and privileged Docker features are unavailable. Images,
 build cache and named volumes follow the durable environment's native storage.
 On a VM-created disk, the native rootless store is separate from the VM's rootful
-Docker store. Both persist across moves; each backend sees its own images, cache
+Docker store. Both are lost when changing nodes; each backend sees its own images, cache
 and named volumes.
 Graphics tests must use headless/offscreen APIs. Cairn bundles the coding engines,
 including Codex's `codex-code-mode-host` companion beside its executable, Node.js
@@ -141,6 +139,20 @@ available to that engine. Do not assume the checkpoint exclusions detect secrets
 written into arbitrary project files.
 
 ## Storage and recovery
+
+Expiration retirement uses a durable `retirementId`, shared by all retries for
+that detached environment. The controller stores completion receipts in
+`state/disk-retirements/<run>/<retirementId>` outside the conversation disk and
+checks them under its storage lock before deletion. Receipts must survive disk
+recreation and controller restarts: delayed requests become no-ops. A manager
+requires the matching receipt acknowledgement before admitting a new environment
+of the same run on this node. Older controllers that ignore this identity must be
+upgraded before that readmission. Support is advertised as
+`diskRetirementProtocol: 2`; the manager checks it before issuing deletion as well
+as validating the identity in the acknowledgement. An unqualified deletion must
+explicitly declare permanent conversation deletion. A manager-owned run namespace
+is never erased as native node staging, and its marker is excluded from remote
+seeds.
 
 The native controller mounts ext4 directly on ublk, using the same local journal,
 scoped S3 block reads, encrypted immutable publications and cache as a VM. There
@@ -206,7 +218,7 @@ apply in addition to ordinary application dependencies.
 
 Revoke the node in Cairn first, then stop/disable `cairn-native-node.service` on its
 host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries and
-all retained local work; do this only after synchronization and recovery review.
+all retained local work; save any needed files before confirming revocation.
 First confirm with `findmnt` that no conversation disk is still mounted below
 `/var/lib/cairn-native` after a failed stop. If one remains, start
 `sudo systemctl start cairn-native-node` so its recovery releases the disks it owns,

@@ -214,6 +214,31 @@ async fn an_event_calls_the_tool_remembers_a_value_and_resumes_after_a_wait() {
     );
     assert_eq!(steps[3]["input"]["author"], "alice");
 
+    // Both agent surfaces expose the same history and details as the authenticated UI.
+    let reader = common::relay_fixture::grant(&f.s, &["read"]).await;
+    let completed = history(&f, OWNER, &rule).await;
+    for (path, bearer) in [
+        ("/mcp", reader.as_str()),
+        ("/mcp-installation", f.bearer.as_str()),
+    ] {
+        for (operation, input, expected) in [
+            (
+                "list_hook_rule_triggerings",
+                json!({ "ruleId": rule }),
+                &completed,
+            ),
+            (
+                "get_hook_rule_triggering",
+                json!({ "triggeringId": triggering["id"] }),
+                &detail,
+            ),
+        ] {
+            let response = f.mcp(path, bearer, operation, input).await;
+            assert_ne!(response["result"]["isError"], true, "{response}");
+            assert_eq!(&response["result"]["structuredContent"]["result"], expected);
+        }
+    }
+
     // An event read again after a stop, before its acknowledgement, is not triggered twice.
     emit(
         &f,
@@ -468,4 +493,80 @@ async fn members_triggerings_need_their_membership_and_hide_details_from_others(
     )
     .await;
     assert_eq!(detail(&f, MEMBER, triggering).await["status"], "stopped");
+}
+
+#[test]
+fn version_32_adds_the_engine_tables_and_reopens_without_changing_them() {
+    let root = tempfile::tempdir().unwrap();
+    drop(cairn_installation::store::Store::open(root.path()).unwrap());
+    let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
+    db.execute_batch(
+        "DROP TABLE hook_rule_steps;
+         DROP TABLE hook_rule_triggerings;
+         DROP TABLE hook_rule_values;
+         DROP TABLE hook_rule_quiet_hours;
+         PRAGMA user_version=32;",
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        drop(cairn_installation::store::Store::open(root.path()).unwrap());
+        assert_eq!(
+            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            33
+        );
+        for table in [
+            "hook_rule_triggerings",
+            "hook_rule_steps",
+            "hook_rule_values",
+            "hook_rule_quiet_hours",
+        ] {
+            assert_eq!(
+                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            db.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_service_retry_delay_longer_than_an_hour_is_respected() {
+    let f = granted().await;
+    let rule = rule(
+        &f,
+        OWNER,
+        steps(&json!([post(
+            "refused",
+            &f,
+            &json!({
+                "retry": { "type": "literal", "value": true },
+                "retryAfter": { "type": "literal", "value": 7200.125 },
+            })
+        )])),
+        60,
+    )
+    .await;
+    let before = cairn_installation::config::now();
+    emit(
+        &f,
+        "long-retry",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    let triggering = &listed["triggerings"][0];
+    assert_eq!(triggering["status"], "retrying", "{listed}");
+    assert!(triggering["resumesAt"].as_i64().unwrap() >= before + 7_200_125);
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
 }

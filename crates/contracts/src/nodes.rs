@@ -524,6 +524,9 @@ pub struct RevokeNodeInput {
     pub node_id: NodeId,
     #[serde(default)]
     pub release_placements: bool,
+    /// Confirms that the working files of the node's conversations are lost.
+    #[serde(default)]
+    pub discard_working_files: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

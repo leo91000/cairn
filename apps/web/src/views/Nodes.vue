@@ -296,7 +296,7 @@ function retire() {
   if (!pair)
     return
   return action(async () => {
-    const result = await revokeNode(api, { nodeId: pair.previous.id, releasePlacements: true })
+    const result = await revokeNode(api, { nodeId: pair.previous.id, releasePlacements: true, discardWorkingFiles: true })
     retiring.value = null
     const released = result.releasedPlacements ?? 0
     notify(released ? `${pair.previous.name} revoked; ${released} ${released === 1 ? 'conversation returns' : 'conversations return'} to automatic placement` : `${pair.previous.name} revoked`)
@@ -453,7 +453,7 @@ function revoke() {
   if (!node)
     return
   return action(async () => {
-    await revokeNode(api, { nodeId: node.id, releasePlacements: false })
+    await revokeNode(api, { nodeId: node.id, releasePlacements: false, discardWorkingFiles: true })
     // The revoked row leaves the list: once the panel is gone, the dialog returns focus to the list.
     if (openedId.value === node.id) {
       openedId.value = null
@@ -906,9 +906,8 @@ function revoke() {
     >
       <div class="node-form">
         <p>{{ revoking.name }} will immediately lose access to the master, and agents lose their permission to use it.</p>
-        <p v-if="revoking.occupiedSlots">
-          Conversations running there pause within the disconnection delay, then resume from their latest recovery point on another authorized machine when one has capacity. Conversations fixed to this machine, or without a recovery point, wait.
-        </p>
+        <p>This conversation's working files will be lost. Its history, attachments and artifacts are kept. This applies to every conversation on this node.</p>
+        <p>Their environments expire. The next message starts an empty environment on an authorized node; active missions resume automatically. Conversations fixed to this node wait until their placement changes.</p>
         <p>Files stored on the machine are not deleted. To uninstall it, run on the machine:</p>
         <code class="block break-all select-all">{{ uninstallCommands[nodeBackend(revoking)] }}</code>
         <p class="text-sm text-muted">
@@ -941,10 +940,9 @@ function revoke() {
             Open agents ›
           </RouterLink>
         </p>
-        <p>Conversations fixed to or preferring the previous node return to automatic placement. Conversations keep their execution backend: existing ones continue on other {{ backendNames[nodeBackend(retiring.previous)] }} nodes.</p>
-        <p v-if="retiring.previous.occupiedSlots">
-          Conversations running there pause within the disconnection delay, then resume from their latest recovery point on another authorized machine when one has capacity.
-        </p>
+        <p>Conversations fixed to or preferring the previous node return to automatic placement. Conversations keep their execution backend: their next environments start on other {{ backendNames[nodeBackend(retiring.previous)] }} nodes.</p>
+        <p>This conversation's working files will be lost. Its history, attachments and artifacts are kept. This applies to every conversation on the previous node.</p>
+        <p>Their environments expire. The next message starts an empty environment; active missions resume automatically.</p>
         <p>Then uninstall the previous runtime on the machine:</p>
         <code class="block break-all select-all" aria-label="Previous runtime uninstall command">{{ uninstallCommands[nodeBackend(retiring.previous)] }}</code>
         <p class="text-sm text-muted">

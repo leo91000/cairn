@@ -1,4 +1,7 @@
 //! Retryable conversation deletion and disk cleanup. No archival or data export.
+pub(crate) mod legacy_staging;
+pub(crate) mod retired;
+
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -48,10 +51,81 @@ async fn forget_deleted_disk(s: &Service, run: &str, node: &str) -> Result<()> {
         .await
 }
 
+fn local_retirement_key(s: &Service) -> String {
+    format!(
+        "local-retirement-protocol-v2:{}",
+        crate::auth::digest(&s.config.runner_url)
+    )
+}
+
+/// A verified upgrade fences the bundled controller's old unqualified mutations.
+/// Keep that proof while it is offline; remote conversations need not wait for it.
+pub(crate) async fn ensure_local_retirement_protocol(s: &Service) -> Result<()> {
+    if s.config.runner_url.is_empty()
+        || s.store.kv(&local_retirement_key(s)).await? == Some(json!(true))
+    {
+        return Ok(());
+    }
+    require_retirement_protocol(s, crate::nodes::LOCAL_NODE_ID).await
+}
+
+/// A legacy controller may execute an ignored body after the HTTP caller times
+/// out. Check support before sending a destructive request, and still verify ACKs.
+pub(crate) async fn require_retirement_protocol(s: &Service, node: &str) -> Result<()> {
+    let base = if node == crate::nodes::LOCAL_NODE_ID {
+        s.config.runner_url.clone()
+    } else {
+        crate::nodes::controller_url(s, node)
+    };
+    if base.is_empty() {
+        return Err(Error::unavailable("The execution node is unavailable."));
+    }
+    let response = s
+        .http
+        .get(format!("{base}/health"))
+        .bearer_auth(crate::execution::secret(&s.config.data_dir, "runner-secret").await?)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|_| {
+            Error::unavailable("The execution node's retirement protocol is unavailable.")
+        })?;
+    if !response.status().is_success() {
+        return Err(Error::unavailable(
+            "The execution node's retirement protocol is unavailable.",
+        ));
+    }
+    let health: Value = response.json().await.map_err(Error::internal)?;
+    let supported = health["diskRetirementProtocol"] == crate::storage::retirement::PROTOCOL;
+    if node == crate::nodes::LOCAL_NODE_ID {
+        s.store
+            .set(&local_retirement_key(s), json!(supported), None)
+            .await?;
+    }
+    if !supported {
+        return Err(Error::unavailable(
+            "Upgrade the execution node before admitting a fresh working environment.",
+        ));
+    }
+    Ok(())
+}
+
 async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -> Result<()> {
     if run.is_empty() {
         return Ok(());
     }
+    let isolated = s.store.run(run).await?["isolated"] == true;
+    disk_on(s, run, action, destination, isolated, None).await
+}
+
+async fn disk_on(
+    s: &Service,
+    run: &str,
+    action: &str,
+    destination: Option<&str>,
+    isolated: bool,
+    retirement: Option<(&str, &[String])>,
+) -> Result<()> {
     let base = match destination {
         Some(node) if node != crate::nodes::LOCAL_NODE_ID => format!(
             "{}/internal/execution/{node}",
@@ -61,7 +135,7 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
         None => crate::nodes::transport::url(s, run).await?,
     };
     if base.is_empty() {
-        if s.store.run(run).await?["isolated"] == true {
+        if isolated || retirement.is_some() {
             return Err(Error::unavailable("The VM node is unavailable."));
         }
         return Ok(());
@@ -71,11 +145,19 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
     let node = destination
         .or(checkpoint["nodeId"].as_str())
         .unwrap_or(crate::nodes::LOCAL_NODE_ID);
+    if retirement.is_some() {
+        require_retirement_protocol(s, node).await?;
+    }
+    let body = match retirement {
+        Some((id, attempts)) => json!({ "retirementId": id, "attempts": attempts }),
+        None if action == "delete" => json!({ "permanentlyDeleted": true }),
+        None => json!({}),
+    };
     let response = s
         .http
         .post(format!("{base}/disks/{run}/{action}"))
         .bearer_auth(&credential)
-        .json(&json!({}))
+        .json(&body)
         .timeout(std::time::Duration::from_secs(7200))
         .send()
         .await
@@ -86,6 +168,13 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
         ));
     }
     let value: Value = response.json().await.map_err(Error::internal)?;
+    if let Some((retirement, _)) = retirement
+        && (value["retirementId"].as_str() != Some(retirement) || value["deleted"] != true)
+    {
+        return Err(Error::unavailable(
+            "The node did not acknowledge durable disk retirement. Upgrade the node before reusing this conversation's disk.",
+        ));
+    }
     let deleted = action == "delete";
     if deleted {
         forget_deleted_disk(s, run, node).await?;
@@ -102,23 +191,43 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
 /// Frees an old disk left on a node: the whole disk of a conversation that now runs
 /// elsewhere, or only the older copies kept beside a conversation's current disk.
 pub async fn discard_stale_disk(s: &Service, run: &str, node: &str, whole: bool) -> Result<()> {
-    let action = if whole { "delete" } else { "prune" };
-    disk(s, run, action, Some(node)).await?;
-    if !whole {
-        let id = format!("{run}:{node}");
-        s.store
-            .transaction(move |db| {
-                if let Some(mut volume) = db.get("node-volumes", &id)?
-                    && let Some(active) = volume["activeDiskMiB"].as_u64()
-                {
-                    volume["diskMiB"] = active.into();
-                    db.put("node-volumes", &volume)?;
-                }
-                Ok(())
-            })
-            .await?;
+    if whole {
+        return s.retire_stale_disk(run, node).await;
     }
+    disk(s, run, "prune", Some(node)).await?;
+    let id = format!("{run}:{node}");
+    s.store
+        .transaction(move |db| {
+            if let Some(mut volume) = db.get("node-volumes", &id)?
+                && let Some(active) = volume["activeDiskMiB"].as_u64()
+            {
+                volume["diskMiB"] = active.into();
+                db.put("node-volumes", &volume)?;
+            }
+            Ok(())
+        })
+        .await?;
     Ok(())
+}
+
+/// A permanently revoked machine can never acknowledge local disk erasure: its disk
+/// references are released instead.
+async fn forget_revoked_disk(s: &Service, run: &str, node: &str) -> Result<bool> {
+    let revoked = node != crate::nodes::LOCAL_NODE_ID
+        && s.store
+            .node_boundary(node)
+            .await?
+            .is_some_and(|record| record["revoked"] == true);
+    if revoked {
+        forget_deleted_disk(s, run, node).await?;
+        tracing::info!(
+            run,
+            node,
+            remote_erasure_confirmed = false,
+            "Released retired disk references on a permanently revoked node"
+        );
+    }
+    Ok(revoked)
 }
 
 /// Irreversible conversation deletion must also release its published data when
@@ -131,43 +240,80 @@ async fn delete_disk_for_purge(s: &Service, run: &str, destination: Option<&str>
     let node = destination
         .or(checkpoint["nodeId"].as_str())
         .unwrap_or(crate::nodes::LOCAL_NODE_ID);
-    let revoked = node != crate::nodes::LOCAL_NODE_ID
-        && s.store
-            .node_boundary(node)
-            .await?
-            .is_some_and(|record| record["revoked"] == true);
-    if revoked {
-        forget_deleted_disk(s, run, node).await?;
-        tracing::info!(
-            run,
-            node,
-            remote_erasure_confirmed = false,
-            "Released deleted conversation references on a permanently revoked node"
-        );
+    if forget_revoked_disk(s, run, node).await? {
         return Ok(());
     }
     disk(s, run, "delete", destination).await
+}
+
+/// Deletes the disk an expired environment left on `node`, once its execution is fenced.
+pub(crate) async fn delete_retired_disk(
+    s: &Service,
+    run: &str,
+    node: &str,
+    isolated: bool,
+    retirement: &str,
+    attempts: &[String],
+) -> Result<()> {
+    if forget_revoked_disk(s, run, node).await? {
+        return Ok(());
+    }
+    let batches: Vec<&[String]> = if attempts.is_empty() {
+        vec![&[]]
+    } else {
+        attempts
+            .chunks(crate::storage::retirement::MAX_ATTEMPTS)
+            .collect()
+    };
+    for batch in batches {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            disk_on(
+                s,
+                run,
+                "delete",
+                Some(node),
+                isolated,
+                Some((retirement, batch)),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            Error::unavailable("The retired disk deletion will retry when its node responds.")
+        })??;
+    }
+    Ok(())
 }
 
 async fn delete_disks(s: &Service, run: &str) -> Result<()> {
     if run.is_empty() {
         return Ok(());
     }
-    let volumes = s
+    let run_id = run.to_owned();
+    let mut nodes = s
+        .store
+        .read(move |db| crate::environment_expiration::retiring_nodes(db, &run_id))
+        .await?;
+    for volume in s
         .store
         .list("node-volumes")
         .await?
         .into_iter()
         .filter(|v| v["runId"] == run)
-        .collect::<Vec<_>>();
-    if volumes.is_empty() {
+    {
+        let node = text(&volume, "nodeId").to_owned();
+        if !nodes.contains(&node) {
+            nodes.push(node);
+        }
+    }
+    if nodes.is_empty() {
         if s.store.run(run).await?["environmentState"] == "expired" {
             return Ok(());
         }
         return delete_disk_for_purge(s, run, None).await;
     }
-    for volume in volumes {
-        delete_disk_for_purge(s, run, Some(text(&volume, "nodeId"))).await?;
+    for node in nodes {
+        delete_disk_for_purge(s, run, Some(&node)).await?;
     }
     Ok(())
 }
@@ -205,9 +351,19 @@ async fn detach_worktrees(s: &Service, chat: &Value) -> Result<()> {
     } else {
         s.store.run(run_id).await?
     };
-    let root = s.config.data_dir.join("runs").join(run_id);
     let workspaces = array(&run["workspaces"]);
     let projects = crate::service::run_projects(&run);
+    detach_retired_worktrees(s, run_id, &workspaces, &projects).await
+}
+
+/// Detaches the worktrees an environment used, from the identities captured with it.
+pub(crate) async fn detach_retired_worktrees(
+    s: &Service,
+    run_id: &str,
+    workspaces: &[Value],
+    projects: &[Value],
+) -> Result<()> {
+    let root = s.config.data_dir.join("runs").join(run_id);
     for workspace in workspaces.iter().filter(|w| w["kind"] == "worktree") {
         let target = Path::new(text(workspace, "path"));
         if !target.is_dir() {
@@ -227,12 +383,26 @@ async fn detach_worktrees(s: &Service, chat: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Removes the manager's working files of a run.
+pub(crate) async fn remove_run_files(s: &Service, run: &str) -> Result<()> {
+    if run.is_empty() {
+        return Ok(());
+    }
+    remove(&s.config.data_dir.join("runs").join(run)).await
+}
+
 async fn files(s: &Service, chat: &Value) -> Result<()> {
     let run = text(chat, "runId");
     detach_worktrees(s, chat).await?;
-    if !run.is_empty() {
-        remove(&s.config.data_dir.join("runs").join(run)).await?;
+    let run_id = run.to_owned();
+    for (workspaces, projects) in s
+        .store
+        .read(move |db| crate::environment_expiration::detached_worktrees(db, &run_id))
+        .await?
+    {
+        detach_retired_worktrees(s, run, &workspaces, &projects).await?;
     }
+    remove_run_files(s, run).await?;
     s.attachments
         .purge(
             &s.store,
@@ -272,7 +442,17 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
             format!("{used_side_questions}\u{10ffff}")
         ],
     )?;
+    // Physical purge already fenced execution and deleted/forgot every disk.
+    // Retire admission that never reached checkpoint publication as well.
+    for attempt in db
+        .attempts()?
+        .into_iter()
+        .filter(|attempt| attempt.run_id == run && !attempt.released)
+    {
+        crate::nodes::placement::release_in(db, &attempt.id)?;
+    }
     db.delete_checkpoint(run)?;
+    crate::environment_expiration::forget_in(db, run)?;
     for key in [format!("turn-speed:{run}"), format!("chat-error:{cid}")]
         .into_iter()
         .chain(crate::chat_titles::keys(cid))
@@ -294,6 +474,7 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
 }
 
 pub async fn purge(s: &Service, chat: Value) -> Result<()> {
+    let _retirement = s.worker.retirement_cleanup.lock().await;
     let _previews = crate::artifacts::preview::JOBS
         .acquire()
         .await
@@ -305,77 +486,30 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
     }
     delete_disks(s, &run).await?;
     crate::nodes::publication::purge(s, &run).await?;
+    s.purge_retired_resources(&run).await?;
     files(s, &chat).await?;
     s.store.transaction(move |db| forget(db, &cid, &run)).await
-}
-
-/// Retires only the disposable environment. Messages, uploads, artifacts and
-/// public artifact URLs belong to the conversation and remain available.
-pub async fn expire_environment(s: &Service, chat: Value) -> Result<()> {
-    let cid = text(&chat, "id").to_owned();
-    let run = text(&chat, "runId").to_owned();
-    if !run.is_empty() {
-        s.accounts.recover_run(s, &s.store.run(&run).await?).await?;
-        delete_disks(s, &run).await?;
-        crate::nodes::publication::expire_environment(s, &run).await?;
-        detach_worktrees(s, &chat).await?;
-        remove(&s.config.data_dir.join("runs").join(&run)).await?;
-    }
-    s.store.transaction(move |db| {
-        if !run.is_empty() {
-            let boundary = json!({
-                "environmentState": "expired",
-                "environmentExpiredAt": chat["environmentExpiredAt"],
-                // Disk deletion already fenced the old environment. Recovery
-                // must not contact its retired node before fresh placement.
-                "isolated": false,
-                "backup": null,
-                "storage": null,
-                "requiredRuntimeId": null,
-                "requiredRuntime": null,
-                "runtimeId": null,
-                "workspaces": [],
-                "restoredAt": null,
-                "contextUsage": null,
-            });
-            db.change_run(&run, crate::runs::RunChanges {
-                session_id: Some(None),
-                resume_available: Some(false),
-                workspace: Some(None),
-                workspace_cleaned_at: Some(None),
-                recovery_pending: Some(false),
-                placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                    node_id: Some(None),
-                    target_node_id: Some(None),
-                    preferred_node_id: Some(None),
-                    pinned_node_id: Some(None),
-                    node_state: Some(None),
-                    movement_error: Some(None),
-                    ..Default::default()
-                })),
-                boundary: Some(boundary),
-                ..Default::default()
-            })?;
-            crate::worker::checkpoint::RunCheckpoint {
-                completed: Some(true),
-                ..Default::default()
-            }.store_in(db, &run)?;
-            db.event(&run, &cairn_contracts::EventKind::Status,
-                "Environment removed after inactivity. Conversation history, uploads and published artifacts are retained. The next message starts a fresh environment.", None)?;
-        }
-        if let Some(mut current) = db.conversation(&cid)? {
-            current.environment_state = Some(cairn_contracts::ConversationEnvironmentState::Expired);
-            current.environment_error = None;
-            current.environment_retry_after = None;
-            db.save_conversation(&current)?;
-        }
-        Ok(())
-    }).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn completed_purge_releases_admission_missing_from_the_checkpoint() {
+        use crate::{attempt_fixture::DbAttemptFixture, run_fixture::DbRunFixture};
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            db.add_run_fixture(&json!({ "id": "run", "taskId": "chat", "status": "succeeded", "createdAt": 0 }), None)?;
+            db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
+            db.put_attempt_fixture(&json!({ "id": "unpublished", "runId": "run", "diskMaterialized": true, "released": false }))?;
+            forget(db, "chat", "run")?;
+            assert!(db.run("run")?.is_none());
+            assert_eq!(db.attempt_fixture("unpublished")?.unwrap()["released"], true);
+            Ok(())
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn forgetting_retired_identities_does_not_decode_the_lifetime_ledger() {
@@ -449,5 +583,165 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[tokio::test]
+    async fn verified_bundled_controller_upgrade_does_not_block_remote_turns_when_offline() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let app = axum::Router::new().fallback(move || {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({ "diskRetirementProtocol":2 }))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::common::config(root.path());
+        config.runner_url = url;
+        let service = Service::new(config).await.unwrap();
+        ensure_local_retirement_protocol(&service).await.unwrap();
+        server.abort();
+        let _ = server.await;
+        ensure_local_retirement_protocol(&service).await.unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_controller_never_receives_a_destructive_retirement_request() {
+        for protocol in [Value::Null, json!(1)] {
+            let posts = Arc::new(AtomicUsize::new(0));
+            let observed = posts.clone();
+            let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+                let observed = observed.clone();
+                let protocol = protocol.clone();
+                async move {
+                    if request.method() == "POST" {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    }
+                    axum::Json(json!({ "deleted":true, "diskRetirementProtocol":protocol }))
+                }
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let root = tempfile::tempdir().unwrap();
+            let mut config = crate::common::config(root.path());
+            config.runner_url = url;
+            let service = Service::new(config).await.unwrap();
+            service
+                .store
+                .set(
+                    &format!(
+                        "local-retirement-protocol:{}",
+                        crate::auth::digest(&service.config.runner_url)
+                    ),
+                    json!(true),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(ensure_local_retirement_protocol(&service).await.is_err());
+            let error = delete_retired_disk(
+                &service,
+                &crate::config::id(),
+                crate::nodes::LOCAL_NODE_ID,
+                true,
+                &crate::config::id(),
+                &[],
+            )
+            .await
+            .unwrap_err();
+            assert!(error.message.contains("Upgrade"), "{}", error.message);
+            assert_eq!(posts.load(Ordering::SeqCst), 0);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn retired_disk_requires_the_exact_durable_acknowledgement() {
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let app = axum::Router::new()
+            .route(
+                "/health",
+                axum::routing::get(|| async { axum::Json(json!({ "diskRetirementProtocol":2 })) }),
+            )
+            .fallback(move |axum::Json(body): axum::Json<Value>| {
+                let (count, observed) = (count.clone(), observed.clone());
+                async move {
+                    observed.lock().await.push(body.clone());
+                    let reply = match count.fetch_add(1, Ordering::SeqCst) {
+                        0 => json!({ "deleted": true }),
+                        1 => json!({ "deleted": true, "retirementId": crate::config::id() }),
+                        2 => json!({ "deleted": false, "retirementId": body["retirementId"] }),
+                        _ => json!({ "deleted": true, "retirementId": body["retirementId"] }),
+                    };
+                    axum::Json(reply)
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::common::config(root.path());
+        config.runner_url = origin;
+        let service = Service::new(config).await.unwrap();
+        let run = crate::config::id();
+        let retirement = crate::config::id();
+        let node = crate::nodes::LOCAL_NODE_ID;
+        let volume = json!({ "id": format!("{run}:{node}"), "runId": run, "nodeId": node });
+        let volume_id = text(&volume, "id").to_owned();
+        service
+            .store
+            .write(move |db| db.put("node-volumes", &volume))
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            assert!(
+                delete_retired_disk(&service, &run, node, false, &retirement, &[])
+                    .await
+                    .is_err()
+            );
+            assert!(
+                service
+                    .store
+                    .get("node-volumes", &volume_id)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        delete_retired_disk(&service, &run, node, false, &retirement, &[])
+            .await
+            .unwrap();
+        assert!(
+            service
+                .store
+                .get("node-volumes", &volume_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            *requests.lock().await,
+            vec![json!({ "retirementId": retirement, "attempts": [] }); 4]
+        );
+        server.abort();
+        let _ = server.await;
     }
 }

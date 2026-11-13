@@ -1333,6 +1333,83 @@ Trusted host callers also have the synchronous `plugins::resources::resolve`
 wrapper. Resolve current ancestry before enforcing a grant; labels and retained
 picker results confer no authority.
 
+## Rule templates (ADR-0075, ticket H)
+
+`ruleTemplates` declares ready-made sets of [hook rules](HOOK-RULES.md#rule-templates)
+(« Bot conversationnel », « Support »). Installing one asks for its parameters, then
+creates ordinary rules owned by whoever installs it, with no link to the template: a
+plugin update never changes them.
+
+```json
+{
+  "ruleTemplates": [{
+    "name": "support",
+    "title": "Support",
+    "description": "Answers chosen people in one channel.",
+    "parameters": [
+      { "name": "agent", "title": "Agent", "kind": "agent", "required": true },
+      { "name": "channel", "title": "Channel", "kind": "resource", "resourceType": "channel", "required": true },
+      { "name": "people", "title": "People", "kind": "resources", "resourceType": "person", "required": true },
+      { "name": "greeting", "title": "Greeting", "kind": "text", "default": "Hello" }
+    ],
+    "rules": [{
+      "name": "Support replies",
+      "trigger": { "type": "plugin", "hook": "message" },
+      "executionAgentId": { "$parameter": "agent" },
+      "steps": [{
+        "type": "if",
+        "id": "known",
+        "condition": {
+          "type": "authorIn",
+          "author": { "type": "formula", "expression": "payload.author" },
+          "people": { "$parameter": "people" }
+        },
+        "then": [{
+          "type": "action",
+          "id": "post",
+          "action": {
+            "type": "callTool",
+            "tool": "chat_post",
+            "input": {
+              "channel": { "type": "literal", "value": { "$parameter": "channel", "field": "id" } },
+              "text": { "type": "literal", "value": { "$parameter": "greeting" } }
+            }
+          }
+        }]
+      }]
+    }]
+  }]
+}
+```
+
+Each rule is a hook rule definition without an instance: its plugin trigger and its
+`callTool` actions use the instance the template is installed from, so they must not
+name `instanceId`. `limits` may be omitted for the defaults. Any JSON value of a rule
+may be a placeholder `{"$parameter": name}`, replaced by the parameter's value, or
+`{"$parameter": name, "field": "id"}` for a resource parameter's identifier (a list of
+identifiers for `resources`). An omitted optional parameter without a default becomes
+`null`.
+
+| Kind | Value |
+| --- | --- |
+| `agent` | an agent identifier; the installer must have access to the agent |
+| `resource` | `{resourceType, id}` of the declared `resourceType` |
+| `resources` | a list of at most 200 of them |
+| `text` | a string of at most 16 KiB |
+| `number`, `boolean` | a JSON number or boolean |
+
+Only `text`, `number` and `boolean` parameters have a `default`. Admission refuses a
+manifest with more than 8 templates, 16 parameters or 10 rules per template; template
+names that are not unique slugs; parameter names that are not unique identifiers, or
+that no rule uses; placeholders naming undeclared parameters; resource parameters
+whose type the package does not declare; and rules that, with sample parameters (all
+given, or only the required ones), are not hook rule definitions, listen to a hook or
+call a tool the package does not declare, or name an instance. Installing checks each
+rule against the installation as `create_hook_rule` does.
+
+Templates are part of the manifest, so the approved package digest covers them: the
+owner approves them with the package, and changing one changes the digest.
+
 ## Agent contribution grants (ADR-0075, ticket C)
 
 `GET /api/agents/{agentId}/plugin-grants` returns the agent's revision, per-instance

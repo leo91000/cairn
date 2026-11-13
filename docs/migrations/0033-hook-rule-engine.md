@@ -1,6 +1,6 @@
-# 0032 — Hook rule engine
+# 0033 — Hook rule engine
 
-Version 31 upgrades to 32 automatically in `Store::open`, before the SQL actors start
+Version 32 upgrades to 33 automatically in `Store::open`, before the SQL actors start
 ([ADR-0075](../adr/0075-plugin-hooks-rules-and-scoped-grants.md), « Budget du moteur de
 règles »).
 
@@ -15,5 +15,5 @@ One immediate transaction creates four empty tables and advances `user_version`:
   rule and hour, kept a week.
 
 No triggering exists before; nothing is converted. A failure leaves the database at
-31. A successful upgrade has no downgrade path. Reopening an upgraded database changes
+32. A successful upgrade has no downgrade path. Reopening an upgraded database changes
 nothing.

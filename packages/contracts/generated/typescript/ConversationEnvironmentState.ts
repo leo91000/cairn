@@ -2,5 +2,7 @@
 
 /**
  * Retirement of a working environment leaves its conversation and files retained.
+ * `cleaning` is only reported by installations that still remove the old environment
+ * before accepting the next message.
  */
 export type ConversationEnvironmentState = 'cleaning' | 'expired'

@@ -76,6 +76,16 @@ pub(crate) const RULE_OPERATIONS: &[RuleOperation] = &[
         description: "Copy a rule for yourself, with access to every agent it uses. The copy starts disabled.",
     },
     RuleOperation {
+        name: "list_hook_rule_templates",
+        scope: "read",
+        description: "List the rule templates plugins declare, for the instances on which an agent the caller may use holds a grant: each with its parameters and its rules, which use the instance they are installed from.",
+    },
+    RuleOperation {
+        name: "install_hook_rule_template",
+        scope: "manage",
+        description: "Install a plugin's rule template from one of its instances: check the parameters, then create its rules, all or none, as ordinary rules owned by the installer, with no link to the template. creationId makes retries return the same rules. Each rule carries its warnings. Installation agents follow the limits of create_hook_rule.",
+    },
+    RuleOperation {
         name: "delete_hook_rule",
         scope: "manage",
         description: "Delete a rule and stop its triggerings in progress. Its creator or the installation owner does.",
@@ -136,6 +146,14 @@ impl RuleOperation {
             "duplicate_hook_rule" => (
                 schema_for::<DuplicateHookRuleInput>(Contract::Deserialize),
                 schema_for::<HookRule>(Contract::Serialize),
+            ),
+            "list_hook_rule_templates" => (
+                schema_for::<ListHookRuleTemplatesInput>(Contract::Deserialize),
+                schema_for::<ListHookRuleTemplatesOutput>(Contract::Serialize),
+            ),
+            "install_hook_rule_template" => (
+                schema_for::<InstallHookRuleTemplateInput>(Contract::Deserialize),
+                schema_for::<InstallHookRuleTemplateOutput>(Contract::Serialize),
             ),
             "delete_hook_rule" => (
                 schema_for::<HookRuleInput>(Contract::Deserialize),
@@ -216,6 +234,12 @@ impl RuleOperation {
             }
             "duplicate_hook_rule" => {
                 serde_json::to_value(duplicate(s, decode(input)?, actor).await?)?
+            }
+            "list_hook_rule_templates" => {
+                serde_json::to_value(list_templates(s, decode(input)?, actor).await?)?
+            }
+            "install_hook_rule_template" => {
+                serde_json::to_value(install_template(s, decode(input)?, actor).await?)?
             }
             "delete_hook_rule" => {
                 delete(s, decode(input)?, actor).await?;

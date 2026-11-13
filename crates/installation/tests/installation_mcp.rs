@@ -709,13 +709,26 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             )
             .await
             .unwrap();
+        let (_, refused) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "revoke_node",
+            json!({ "nodeId": previous }),
+        )
+        .await;
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+        assert!(
+            refused.to_string().contains("discardWorkingFiles: true"),
+            "{refused}"
+        );
         let (_, retired) = node_management_call(
             &app,
             endpoint,
             token,
             "revoke_node",
             json!({
-                "nodeId": previous, "releasePlacements": true,
+                "nodeId": previous, "releasePlacements": true, "discardWorkingFiles": true,
             }),
         )
         .await;
@@ -735,7 +748,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             endpoint,
             token,
             "revoke_node",
-            json!({ "nodeId": next }),
+            json!({ "nodeId": next, "discardWorkingFiles": true }),
         )
         .await;
         assert_eq!(result(&retired)["releasedPlacements"], 0);
@@ -1632,6 +1645,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "set_hook_rule_emergency_pause",
         "lift_hook_rule_budget",
         "duplicate_hook_rule",
+        "list_hook_rule_templates",
+        "install_hook_rule_template",
         "delete_hook_rule",
     ]);
     assert_eq!(installed_names, public_names);
@@ -3495,6 +3510,44 @@ async fn chat_file_tools_read_private_artifacts_and_attachments_in_bounded_chunk
     assert_eq!(result(&detail)["chat"]["environmentState"], "expired");
     let detail = public_call(&s, &["read"], "get_chat", json!({ "chatId": chat_id })).await;
     assert_eq!(result(&detail)["chat"]["environmentState"], "expired");
+    for cause in [
+        "inactivity",
+        "node-change",
+        "node-revocation",
+        "storage-migration",
+    ] {
+        s.store
+            .update_run_boundary_fixture(
+                text(&target, "id"),
+                json!({ "environmentExpirationCause": cause }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            s.chat_detail(chat_id).await.unwrap()["environmentExpirationCause"],
+            cause
+        );
+        for public in [false, true] {
+            let detail = if public {
+                public_call(&s, &["read"], "get_chat", json!({ "chatId": chat_id })).await
+            } else {
+                call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await
+            };
+            assert_eq!(result(&detail)["chat"]["environmentExpirationCause"], cause);
+            let list = if public {
+                public_call(&s, &["read"], "list_chats", json!({})).await
+            } else {
+                call(&s, &configuration, "list_chats", json!({})).await
+            };
+            let chat = result(&list)["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|chat| chat["id"] == chat_id)
+                .unwrap();
+            assert_eq!(chat["environmentExpirationCause"], cause);
+        }
+    }
     let listed = call(
         &s,
         &configuration,
@@ -4505,6 +4558,13 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
             Value::Null
         };
         s.store.save_conversation_boundary(current).await.unwrap();
+        s.store
+            .update_run_boundary_fixture(
+                &run,
+                json!({ "environmentState": if expired { json!("expired") } else { Value::Null } }),
+            )
+            .await
+            .unwrap();
         if expired {
             common::set_checkpoint(&s.store, &run, json!({ "completed": true })).await;
         }
@@ -4522,6 +4582,14 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
             .await;
             assert_eq!(result(&preview)["required"], true);
             assert_eq!(result(&preview)["environmentExpired"], expired);
+            if expired {
+                assert!(result(&preview)["warning"].is_null());
+            } else {
+                assert_eq!(
+                    result(&preview)["warning"],
+                    cairn_installation::environment_expiration::WARNING
+                );
+            }
             assert!(result(&preview)["nodes"].as_array().unwrap().is_empty());
             let (_, denied) = node_management_call(
                 &app,
@@ -9456,6 +9524,25 @@ async fn placement_capabilities_share_their_commands_scopes_and_live_installatio
         ("/mcp", owner_token.as_str()),
         ("/mcp-installation", agent_token),
     ] {
+        let (_, refused) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "move_to_node",
+            json!({ "runId": run["id"], "nodeId": cairn_installation::nodes::LOCAL_NODE_ID }),
+        )
+        .await;
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+        assert!(
+            refused
+                .to_string()
+                .contains(cairn_installation::environment_expiration::WARNING),
+            "{refused}"
+        );
+        assert!(
+            refused.to_string().contains("discardWorkingFiles: true"),
+            "{refused}"
+        );
         let (_, view) = node_management_call(
             &app,
             endpoint,

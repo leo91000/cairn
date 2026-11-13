@@ -16,6 +16,17 @@ const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.
 const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
+  it('runs the native controller preflight in the full workspace graph with the same installation test selection', () => {
+    const steps = quality.jobs.backend.steps
+    const preflight = steps.find(step => step.name === 'Qualify native controller concurrency before building every test binary')
+    const suite = steps.find(step => step.name === 'Run backend tests across binaries with isolated credentials')
+
+    expect(preflight.run).toBe('node scripts/test-backend.mjs --nextest --workspace --lib -E \'package(=cairn-installation) & (test(native::service::tests::) | test(nodes::files::tests::))\' --no-capture')
+    expect(preflight.if).toBe(suite.if)
+    expect(preflight['continue-on-error']).toBeUndefined()
+    expect(steps.indexOf(preflight)).toBeLessThan(steps.indexOf(suite))
+  })
+
   it('keeps both post-suite measurements in the workspace test graph with exact case selection', () => {
     for (const [name, selection] of [
       ['Measure the bounded bootstrap observer without filesystem work', 'native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture'],
@@ -38,6 +49,10 @@ describe('parallel CI coverage', () => {
     expect(nextestArtifact.sha256).toBe('32d1d8c0567b7a80bee2bad8bb09125c846da96bc009b2de11ec08557290c770')
     expect(installer['timeout-minutes']).toBeGreaterThan(0)
     expect(installer['timeout-minutes']).toBeLessThanOrEqual(3)
+    // eslint-disable-next-line no-template-curly-in-string -- exact step-scoped GitHub expression
+    expect(installer.env).toEqual({ GITHUB_TOKEN: '${{ github.token }}' })
+    expect(backend.env.GITHUB_TOKEN).toBeUndefined()
+    expect(backend.permissions.contents).toBe('read')
     expect(installer['continue-on-error']).toBeUndefined()
     expect(installer.if).toBeUndefined()
     expect(backend['timeout-minutes']).toBe(30)
@@ -126,10 +141,10 @@ describe('parallel CI coverage', () => {
     }
   })
 
-  it('runs the selected physical migration case in a separate bounded job after the backend suite', () => {
+  it('runs the selected confirmed backend-change case in a separate bounded job after the backend suite', () => {
     const input = quality.on.workflow_dispatch.inputs['backend-qualification']
     expect(input).toEqual({
-      description: 'Run physical backend migration in a separate job after the backend suite',
+      description: 'Run confirmed backend change regression in a separate job after the backend suite',
       type: 'choice',
       options: ['none', 'backend-migration'],
       default: 'none',
@@ -137,7 +152,7 @@ describe('parallel CI coverage', () => {
 
     const backend = quality.jobs.backend
     expect(backend['timeout-minutes']).toBe(30)
-    expect(backend.steps.some(step => step.name === 'Qualify physical backend migration from this commit')).toBe(false)
+    expect(backend.steps.some(step => step.name === 'Qualify confirmed backend changes from this commit')).toBe(false)
     expect(backend.steps.some(step => step.run?.includes('--nextest --test-threads'))).toBe(true)
     expect(backend.steps.some(step => step.name === 'Measure the bounded bootstrap observer without filesystem work')).toBe(true)
     expect(backend.steps.some(step => step.name === 'Qualify native backend namespace isolation with ordinary private bind mounts')).toBe(true)
@@ -220,11 +235,11 @@ describe('parallel CI coverage', () => {
     expect(selected.steps[3]['timeout-minutes']).toBe(10)
     expect(selected.env).toEqual({ CARGO_PROFILE_DEV_DEBUG: '0', CARGO_INCREMENTAL: '0' })
     expect(selected.steps.some(step => step.uses?.startsWith('actions/download-artifact@'))).toBe(false)
-    const step = selected.steps.find(step => step.name === 'Qualify physical backend migration from this commit')
+    const step = selected.steps.find(step => step.name === 'Qualify confirmed backend changes from this commit')
     expect(step).toBeDefined()
     expect(step.run).toContain('set -o pipefail')
-    expect(step.run).toContain('\'moto[server]==5.2.3\' awscli blake3==1.0.8')
-    expect(step.run).toContain('scripts/tests/node_s3_test.py --case backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure')
+    expect(step.run).not.toContain('moto[server]')
+    expect(step.run).toContain('pnpm test:backend -p cairn-installation --test native_nodes both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion -- --exact')
     expect(step.run).toContain('1 passed; 0 failed; 0 ignored;')
     expect(step.run).not.toContain('${{')
     expect(step.run).not.toContain('CAIRN_TEST_REUSED_BUILD')

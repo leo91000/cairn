@@ -1122,6 +1122,9 @@ pub async fn tick_groups(s: &Service, active: &HashSet<String>) -> Result<()> {
             }
             let mut changed = Vec::new();
             for owner in owners {
+                if crate::environment_expiration::pending(db, owner.run_id())? {
+                    continue;
+                }
                 let Some(w) = owner.wakeup.as_ref().filter(|w| {
                     matches!(w.condition, Some(WaitCondition::Group { .. }))
                         && w.progress.observation.is_none()
@@ -1154,7 +1157,9 @@ pub async fn tick_groups(s: &Service, active: &HashSet<String>) -> Result<()> {
                 let Some(mut owner) = expected.reload(db)? else {
                     return Ok(());
                 };
-                if owner.wakeup != expected.wakeup {
+                if owner.wakeup != expected.wakeup
+                    || crate::environment_expiration::pending(db, owner.run_id())?
+                {
                     return Ok(());
                 }
                 let Some(run) = db.run(owner.run_id())? else {
@@ -1182,6 +1187,11 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                 .into_iter()
                 .filter(|run| run["status"] == RunStatus::Waiting)
                 .filter_map(|run| {
+                    match crate::environment_expiration::pending(db, text(&run, "id")) {
+                        Ok(true) => return None,
+                        Err(error) => return Some(Err(error)),
+                        Ok(false) => {}
+                    }
                     let owner = match Owner::for_run(db, &run) {
                         Ok(owner) => owner,
                         Err(error) => return Some(Err(error)),
@@ -1205,6 +1215,9 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
         }
         s.store
             .transaction(move |db| {
+                if crate::environment_expiration::pending(db, &run_id)? {
+                    return Ok(());
+                }
                 let Some(run) = db.run(&run_id)? else {
                     return Ok(());
                 };

@@ -1,30 +1,25 @@
-//! Durable pause/copy/resume coordination. Never changes a destination before fencing.
+//! Confirmed node changes: the working environment expires and the next one starts
+//! on the destination. An existing environment never moves on its own.
 use super::NodeState;
 use crate::{
-    config::{id, now},
+    environment_expiration::{Expiration, WARNING},
     error::{Error, Result},
-    run_status::RunStatus,
+    native::policy::Origin,
     service::Service,
     store::Db,
     validation::text,
 };
-use cairn_contracts::EventKind;
+use cairn_contracts::{EnvironmentExpirationCause, EventKind};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use tokio_util::sync::CancellationToken;
 
-const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. VM-created disks keep their disk and engine session across VM/native nodes without copying files. A native-born disk converts once before VM execution: chats resume on the next message; missions continue automatically in a fresh session with their history. Running commands stop and system packages do not follow. Call list_nodes first to see ids, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. Optional waitSeconds respects the configured wait limit.";
+const MOVE_DESCRIPTION: &str = "Change this conversation to another authorized node, including a node of the other execution backend. The working environment expires: its files, unpushed changes, installed tools and engine session are deleted; the conversation history, attachments and artifacts are kept. Requires discardWorkingFiles: true. Your turn stops, then the conversation continues automatically on the destination in a fresh environment with a warning. Call list_nodes first to see ids, tags, shared budgets and free slots. The new environment waits for capacity on the destination while that node stays authorized.";
 const LIST_NODES_DESCRIPTION: &str = "List authorized execution nodes with their tags, shared CPU/RAM/disk budgets, slot availability and current resource pressure. Use a returned node id with move_to_node. Resources are shared automatically; agents do not request allocations.";
-/// A requested move waits this long for the conversation to settle before pausing it.
-const PAUSE_DELAY_MS: i64 = 2000;
-const MAX_WAIT_SECONDS: u64 = 3600;
 pub(crate) const CANCELLED_CAPACITY_WAIT: &str = "Movement capacity wait was cancelled.";
 
 pub fn tool() -> Value {
@@ -79,29 +74,6 @@ struct NodeSummary<'a> {
     exclusive_until: &'a Value,
 }
 
-/// A pending move, persisted in `run.moveRequest` until the destination resumes.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MoveRequest<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    backend: Option<&'a str>,
-    reservation: &'a str,
-    node_id: &'a Value,
-    resources: &'a Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    requested_at: Option<i64>,
-    /// Recovery from an unavailable node, rather than a requested move.
-    automatic: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    idle: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    idle_status: Option<RunStatus>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    required_tags: Option<&'a Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    backup_id: Option<&'a Value>,
-}
-
 async fn run_agent(s: &Service, run: &Value) -> Result<Value> {
     s.store
         .agent_snapshot(super::run_agent(run))
@@ -148,7 +120,7 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
     }))
 }
 
-/// Owner-initiated move from the web or Android conversation controls.
+/// Owner-initiated node change from the web or Android conversation controls.
 pub async fn request(s: &Service, run: &Value, args: &Value) -> Result<Value> {
     requested(s, run, args, false, Authorization::default()).await
 }
@@ -162,8 +134,7 @@ pub(crate) struct Authorization {
     management_authorization: Option<crate::authorization::Authorization>,
     cancellation: CancellationToken,
     admitted: Arc<AtomicBool>,
-    origin: Option<crate::native::policy::Origin>,
-    workspace_bearer: Option<String>,
+    origin: Option<Origin>,
 }
 
 impl Default for Authorization {
@@ -184,21 +155,7 @@ impl Authorization {
             cancellation: CancellationToken::new(),
             admitted: Arc::new(AtomicBool::new(false)),
             origin: None,
-            workspace_bearer: None,
         }
-    }
-
-    pub(crate) fn workspace_bearer(&self) -> Option<String> {
-        self.workspace_bearer.clone()
-    }
-
-    pub(crate) fn management_authorization(&self) -> Option<crate::authorization::Authorization> {
-        self.management_authorization.clone()
-    }
-
-    pub(crate) fn with_origin(mut self, origin: crate::native::policy::Origin) -> Self {
-        self.origin = Some(origin);
-        self
     }
 
     pub(crate) fn with_management_authorization(
@@ -210,11 +167,10 @@ impl Authorization {
     }
 
     pub(crate) fn workspace(bearer: &str, run: &Value) -> Self {
-        let retained_bearer = bearer.to_owned();
-        let bearer = retained_bearer.clone();
+        let bearer = bearer.to_owned();
         let run_id = text(run, "id").to_owned();
         let turn = crate::waits::execution_id(run).clone();
-        let mut authorization = Self::new(
+        Self::new(
             move |db| {
                 let current = crate::project_workspaces::authorize_in(db, &bearer)?;
                 if text(&current, "id") != run_id || *crate::waits::execution_id(&current) != turn {
@@ -225,9 +181,7 @@ impl Authorization {
                 Ok(())
             },
             None,
-        );
-        authorization.workspace_bearer = Some(retained_bearer);
-        authorization
+        )
     }
 
     pub(crate) fn check(&self, db: &Db<'_>) -> Result<()> {
@@ -277,109 +231,6 @@ impl Authorization {
     }
 }
 
-/// Keep one admission per conversation. Dropping an HTTP/workspace request must
-/// clear its wait and release only an unreferenced destination reservation.
-struct AdmissionGuard {
-    service: Service,
-    run: String,
-    reservation: String,
-    until: Option<i64>,
-    authorization: Authorization,
-    active: bool,
-}
-
-impl AdmissionGuard {
-    fn new(service: &Service, run: &str, authorization: &Authorization) -> Result<Self> {
-        service.node_move_operations.claim_wait(run)?;
-        Ok(Self {
-            service: service.clone(),
-            run: run.to_owned(),
-            reservation: id(),
-            until: None,
-            authorization: authorization.clone(),
-            active: true,
-        })
-    }
-
-    async fn finish(&mut self, succeeded: bool) -> Result<()> {
-        if !succeeded {
-            Self::cleanup(&self.service, &self.run, &self.reservation, self.until).await?;
-        }
-        self.service.node_move_operations.finish_wait(&self.run);
-        self.active = false;
-        Ok(())
-    }
-
-    async fn cleanup(
-        service: &Service,
-        run: &str,
-        reservation: &str,
-        until: Option<i64>,
-    ) -> Result<()> {
-        let (owner, allocation) = (run.to_owned(), reservation.to_owned());
-        // This writer queues behind any in-flight admission transaction. A
-        // committed move owns its reservation even if its reply was dropped.
-        let unclaimed = service
-            .store
-            .transaction(move |db| {
-                if let Some(state) = db.run_state(&owner)? {
-                    let placement = db.run_placement(&owner)?;
-                    if placement.move_reservation.as_deref() == Some(allocation.as_str())
-                        || placement
-                            .move_request
-                            .as_ref()
-                            .is_some_and(|request| request.reservation == allocation)
-                    {
-                        return Ok(false);
-                    }
-                    if until.is_some() && state.capacity_wait_until == until {
-                        db.change_run(
-                            &owner,
-                            crate::runs::RunChanges {
-                                capacity_wait_until: Some(None),
-                                ..Default::default()
-                            },
-                        )?;
-                    }
-                }
-                Ok(true)
-            })
-            .await?;
-        if unclaimed {
-            super::placement::release(service, reservation).await?;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for AdmissionGuard {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        self.authorization.cancel();
-        let (service, run, reservation, until) = (
-            self.service.clone(),
-            self.run.clone(),
-            self.reservation.clone(),
-            self.until,
-        );
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                if Self::cleanup(&service, &run, &reservation, until)
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!(
-                        "Interrupted move cleanup failed; destination ownership retained."
-                    );
-                }
-                service.node_move_operations.finish_wait(&run);
-            });
-        }
-    }
-}
-
 pub(crate) async fn request_authorized(
     s: &Service,
     run: &Value,
@@ -401,18 +252,11 @@ pub(crate) async fn request_by_agent_authorized(
     authorize: Authorization,
 ) -> Result<Value> {
     crate::validation::uuid(text(args, "nodeId"))?;
-    requested(s, run, args, true, authorize).await.map_err(|mut error| {
-        if super::placement::is_no_capacity(&error) {
-            error.message.push_str(" The current conversation keeps running. Retry move_to_node with waitSeconds or choose another node.");
-        }
-        error
-    })
+    requested(s, run, args, true, authorize).await
 }
 
 fn validate_destination(args: &Value) -> Result<()> {
-    if let Some(node) = args["nodeId"].as_str() {
-        crate::validation::uuid(node)?;
-    }
+    crate::validation::uuid(text(args, "nodeId"))?;
     let Some(tags) = args.get("requiredTags").filter(|tags| !tags.is_null()) else {
         return Ok(());
     };
@@ -429,6 +273,54 @@ fn validate_destination(args: &Value) -> Result<()> {
     Ok(())
 }
 
+/// The backend of the run's existing environment, once it has been placed.
+pub(crate) fn environment_backend<'a>(run: &'a Value, checkpoint: &'a Value) -> Option<&'a str> {
+    checkpoint["prepared"]["backend"].as_str().or_else(|| {
+        match run["snapshot"]["agent"]["access"]["backend"].as_str() {
+            Some(backend @ ("native" | "firecracker")) => Some(backend),
+            _ => None,
+        }
+    })
+}
+
+/// Checks, in the change's transaction, that `node` can host the next environment of
+/// `run`, whose snapshot already names the destination backend.
+pub(crate) fn require_destination(
+    db: &Db<'_>,
+    run: &Value,
+    node: &str,
+    required_tags: &Value,
+) -> Result<Value> {
+    let record = db
+        .node_boundary(node)?
+        .ok_or_else(|| Error::not_found("Destination node not found."))?;
+    let agent = db
+        .agent_snapshot(super::run_agent(run))?
+        .ok_or_else(|| Error::forbidden("Agent removed."))?;
+    let native = crate::native::policy::node_native(&record);
+    let backend = if native { "native" } else { "firecracker" };
+    let profile = &crate::service::policy(&agent)["backend"];
+    if record["revoked"] == true
+        || !super::agent_allows(&agent, node)
+        || !crate::native::policy::supports(&run["snapshot"]["agent"], backend)
+        || !(profile.is_null() || profile == "auto" || profile == backend)
+        || native && !crate::native::policy::allows(db, run, &record)?
+    {
+        return Err(Error::forbidden(
+            "Destination is not authorized for this conversation.",
+        ));
+    }
+    if required_tags
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tag| !super::node_tags(&record).any(|present| present == tag))
+    {
+        return Err(Error::conflict("Destination lacks required tags."));
+    }
+    Ok(record)
+}
+
 async fn requested(
     s: &Service,
     run: &Value,
@@ -436,25 +328,8 @@ async fn requested(
     by_agent: bool,
     authorize: Authorization,
 ) -> Result<Value> {
-    let mut guard = AdmissionGuard::new(s, text(run, "id"), &authorize)?;
-    let result = requested_inner(s, run, args, by_agent, authorize, &mut guard).await;
-    guard.finish(result.is_ok()).await?;
-    result
-}
-
-async fn requested_inner(
-    s: &Service,
-    run: &Value,
-    args: &Value,
-    by_agent: bool,
-    authorize: Authorization,
-    guard: &mut AdmissionGuard,
-) -> Result<Value> {
-    if run["environmentState"].is_string() {
-        return Err(Error::conflict(
-            "The working environment expired. Send a new message before moving it.",
-        ));
-    }
+    authorize.recheck(s).await?;
+    let expired = run["environmentState"] == "expired";
     if ["cpu", "memoryMiB", "diskMiB"]
         .iter()
         .any(|key| args.get(key).is_some())
@@ -463,548 +338,156 @@ async fn requested_inner(
             "Choose a node; resource requests are no longer supported.",
         ));
     }
-    let wait = args["waitSeconds"].as_u64().unwrap_or(0);
-    let max_wait = super::publication::settings(s).await?["maxCapacityWaitSeconds"]
-        .as_u64()
-        .unwrap_or(MAX_WAIT_SECONDS);
-    if wait > max_wait {
-        return Err(Error::bad("Capacity wait exceeds the configured maximum."));
-    }
     validate_destination(args)?;
-    let checkpoint = super::checkpoint(s, text(run, "id")).await?;
-    let destination = if let Some(node) = args["nodeId"].as_str() {
-        s.node_boundary(node).await?
-    } else {
-        Value::Null
-    };
-    let from = checkpoint["prepared"]["backend"].as_str();
-    let target = destination["capabilities"]["backend"].as_str();
-    let change = target.filter(|target| from.is_some_and(|from| from != *target));
-    if change == Some("firecracker") && !super::vm_disk(&checkpoint) {
-        return s
-            .convert_for_vm(run, args, authorize.clone(), by_agent)
-            .await;
+    if !expired {
+        crate::environment_expiration::require_discard(
+            args["discardWorkingFiles"] == true,
+            WARNING,
+        )?;
     }
-    if change == Some("native") {
+
+    let run_id = text(run, "id").to_owned();
+    let node = text(args, "nodeId").to_owned();
+    let checkpoint = super::checkpoint(s, &run_id).await?;
+    let current = checkpoint["nodeId"].as_str().or(run["nodeId"].as_str());
+    if !expired && current == Some(node.as_str()) {
+        return Err(Error::conflict(
+            "This conversation already runs on that node.",
+        ));
+    }
+    let destination = s.node_boundary(&node).await?;
+    let target = destination["capabilities"]["backend"]
+        .as_str()
+        .unwrap_or("firecracker")
+        .to_owned();
+    let crossing = environment_backend(run, if expired { &Value::Null } else { &checkpoint })
+        .is_some_and(|from| from != target);
+    if crossing && target == "native" {
         crate::native::policy::refresh(s).await?;
     }
     let source = if by_agent {
-        None
+        Origin::Stored(run.clone())
     } else {
-        Some(
-            authorize
-                .origin
-                .clone()
-                .unwrap_or_else(crate::native::policy::origin),
-        )
+        authorize
+            .origin
+            .clone()
+            .unwrap_or_else(crate::native::policy::origin)
     };
-    let mut proposed = run.clone();
-    if let Some(source) = &source {
-        let (record, source, crossing) = (run.clone(), source.clone(), change.is_some());
-        let grant = s
-            .store
-            .read(move |db| {
-                if crossing {
-                    let agent = db
-                        .agent_snapshot(super::run_agent(&record))?
-                        .unwrap_or_default();
-                    crate::backend_migration::migration_grant(db, &record, &agent, &source)
-                } else {
-                    crate::native::policy::run_grant(db, &record, &source)
-                }
-            })
-            .await?;
-        crate::native::policy::apply(&mut proposed, &grant);
-    }
-    let run = &proposed;
-    let run_id = text(run, "id");
-    if run["moveRequest"].is_object() {
-        return Err(Error::conflict("A movement is already pending."));
-    }
-    let deadline = now() + wait as i64 * 1000;
-    // A finished conversation with a VM session moves without being resumed.
-    let stopped_crossing = change.is_some()
-        && matches!(
-            RunStatus::of(run),
-            Some(RunStatus::Failed | RunStatus::Cancelled)
-        );
-    let retained_environment = checkpoint["workspaceInitialized"] == true
-        && checkpoint["prepared"]["projectRoot"].is_string();
-    let idle = ((run["status"] == RunStatus::Succeeded
-        && (run["sessionId"].is_string() || retained_environment))
-        || stopped_crossing)
-        && matches!(
-            checkpoint["prepared"]["backend"].as_str(),
-            Some("firecracker" | "native")
-        );
-    let reservation = guard.reservation.clone();
-    guard.until = Some(deadline);
-    let mut selecting = run.clone();
-    selecting["placementTransition"] = true.into();
-    if let Some(to) = change {
-        selecting["snapshot"]["agent"]["access"]["backend"] = to.into();
-        selecting["pinnedNodeId"] = Value::Null;
-        selecting["preferredNodeId"] = Value::Null;
-    }
-    selecting["targetNodeId"] = args["nodeId"].clone();
-    selecting["requiredTags"] = args
+    let continue_turn = by_agent || matches!(&source, Origin::Run(id) if *id == run_id);
+    let supplied_tags = args
         .get("requiredTags")
         .filter(|tags| !tags.is_null())
-        .unwrap_or(&run["requiredTags"])
-        .clone();
-    let selected = wait_for_capacity(
-        s,
-        run_id,
-        &selecting,
-        &reservation,
-        idle,
-        deadline,
-        authorize.clone(),
-    )
-    .await?;
-    let move_request = serde_json::to_value(MoveRequest {
-        backend: change,
-        reservation: &reservation,
-        node_id: &selected["nodeId"],
-        resources: &selected["resources"],
-        requested_at: Some(now()),
-        automatic: false,
-        idle: Some(idle),
-        idle_status: idle.then(|| RunStatus::of(run).unwrap()),
-        required_tags: Some(&selecting["requiredTags"]),
-        backup_id: None,
-    })?;
-    let expected = if idle {
-        RunStatus::of(run).unwrap()
-    } else {
-        RunStatus::Running
+        .cloned();
+    let expiration = Expiration {
+        cause: EnvironmentExpirationCause::NodeChange,
+        destination: Some(node.clone()),
+        continue_turn,
     };
-    record_request(
-        s,
-        run_id,
-        move_request,
-        idle,
-        expected,
-        source,
-        authorize.clone(),
-    )
-    .await?;
-    authorize.admitted.store(true, Ordering::Release);
-    let destination = destination_name(s, selected["nodeId"].as_str()).await?;
-    // The owner sees in the conversation that the agent moved itself, and what it asked for.
-    let message = if by_agent {
-        format!("The agent is moving to {destination}. Running commands are interrupted.")
-    } else {
-        format!("Moving the conversation to {destination}. Running commands are interrupted.")
-    };
-    s.store
-        .event(run_id, &EventKind::Status, &message, None)
-        .await?;
-    Ok(json!({
-        "status": "moving",
-        "nodeId": selected["nodeId"],
-    }))
-}
-
-async fn set_capacity_wait(s: &Service, run_id: &str, until: Option<i64>) -> Result<()> {
-    s.store
-        .change_run(
-            run_id,
+    let (owner, chosen) = (run_id.clone(), node.clone());
+    let check = authorize.clone();
+    let prepare = move |db: &Db<'_>| {
+        check.check(db)?;
+        crate::conversation_lifecycle::require_active_run(db, &owner)?;
+        let mut current = db
+            .run(&owner)?
+            .ok_or_else(|| Error::not_found("Conversation removed."))?;
+        if (current["environmentState"] == "expired") != expired {
+            return Err(Error::conflict(
+                "The working environment changed. Review the node change again.",
+            ));
+        }
+        let required_tags = supplied_tags
+            .as_ref()
+            .unwrap_or(&current["requiredTags"])
+            .clone();
+        let grant = if crossing {
+            let mut agent = db
+                .agent_snapshot(super::run_agent(&current))?
+                .ok_or_else(|| Error::forbidden("Agent removed."))?;
+            agent["access"]["backend"] = target.clone().into();
+            current = crate::backend_migration::prospective(db, &current, &agent, &source)?;
+            let mut grant = json!({});
+            crate::native::policy::apply(&mut grant, &current);
+            Some(grant)
+        } else if by_agent {
+            None
+        } else {
+            Some(crate::native::policy::run_grant(db, &current, &source)?)
+        };
+        if let Some(grant) = &grant {
+            crate::native::policy::apply(&mut current, grant);
+        }
+        if crossing {
+            current["snapshot"]["agent"]["access"]["backend"] = target.clone().into();
+        }
+        let record = require_destination(db, &current, &chosen, &required_tags)?;
+        if let Some(grant) = &grant {
+            if let Some(mut chat) = crate::chats::chat_for_run(db, &owner)? {
+                crate::native::policy::apply(&mut chat, grant);
+                db.save_conversation_boundary(&chat)?;
+            }
+            db.update_run_boundary(&owner, grant)?;
+        }
+        db.change_run(
+            &owner,
             crate::runs::RunChanges {
-                capacity_wait_until: Some(until),
-                ..Default::default()
-            },
-        )
-        .await?;
-    Ok(())
-}
-
-/// Reserves destination capacity, retrying until `deadline` while no node has room.
-async fn wait_for_capacity(
-    s: &Service,
-    run_id: &str,
-    selecting: &Value,
-    reservation: &str,
-    idle: bool,
-    deadline: i64,
-    authorize: Authorization,
-) -> Result<Value> {
-    loop {
-        let current = s.store.run(run_id).await?;
-        let stopped = idle && current["status"] == selecting["status"];
-        let active = (current["cancelRequestedAt"].is_null()
-            || stopped && current["status"] == RunStatus::Cancelled)
-            && (current["status"] == RunStatus::Running || stopped);
-        if !active {
-            set_capacity_wait(s, run_id, None).await?;
-            return Err(Error::conflict("Conversation is no longer active."));
-        }
-        match super::placement::reserve_authorized(s, selecting, reservation, authorize.clone())
-            .await
-        {
-            Ok(value) => return Ok(value),
-            Err(error) if error.is_unavailable() && now() < deadline => {
-                set_capacity_wait(s, run_id, Some(deadline)).await?;
-                let stopping = tokio::select! {
-                    () = s.shutdown.cancelled() => true,
-                    () = authorize.cancellation.cancelled() => {
-                        return Err(Error::conflict(CANCELLED_CAPACITY_WAIT));
-                    },
-                    () = tokio::time::sleep(Duration::from_secs(1)) => false,
-                };
-                if stopping {
-                    set_capacity_wait(s, run_id, None).await?;
-                    return Err(Error::unavailable("Master is stopping."));
-                }
-            }
-            Err(error) => {
-                set_capacity_wait(s, run_id, None).await?;
-                return Err(error);
-            }
-        }
-    }
-}
-
-/// Records the move unless the conversation changed while capacity was reserved.
-async fn record_request(
-    s: &Service,
-    run_id: &str,
-    move_request: Value,
-    idle: bool,
-    expected: RunStatus,
-    source: Option<crate::native::policy::Origin>,
-    authorize: Authorization,
-) -> Result<()> {
-    authorize.recheck(s).await?;
-    let owner = run_id.to_owned();
-    s.store
-        .transaction(move |db| {
-            authorize.check(db)?;
-            let current = db
-                .run(&owner)?
-                .ok_or_else(|| Error::not_found("Conversation removed."))?;
-            if source.is_none()
-                && expected == RunStatus::Queued
-                && source_mode_unconfirmed(db, &owner)?
-            {
-                return Err(Error::unavailable(
-                    "Waiting for the node's privilege mode to be confirmed.",
-                ));
-            }
-            // Explicit movement would bypass a mission wait. Internal relocation
-            // of an unfinished queued turn must still be able to restore capacity.
-            if expected != RunStatus::Queued
-                && current["trigger"] != "chat"
-                && current["wakeup"].is_object()
-            {
-                return Err(Error::conflict(
-                    "Finish the mission wait before requesting a node move.",
-                ));
-            }
-            if current["environmentState"].is_string()
-                || current["moveRequest"].is_object()
-                || !current["cancelRequestedAt"].is_null()
-                    && !(idle && expected == RunStatus::Cancelled)
-                || current["status"] != expected
-                || (expected == RunStatus::Queued && current["pinnedNodeId"].is_string())
-            {
-                return Err(Error::conflict(
-                    "Conversation changed while reserving capacity.",
-                ));
-            }
-            if let Some(source) = source {
-                if move_request["backend"].is_string() {
-                    let agent = db
-                        .agent_snapshot(super::run_agent(&current))?
-                        .unwrap_or_default();
-                    let grant =
-                        crate::backend_migration::migration_grant(db, &current, &agent, &source)?;
-                    if let Some(mut chat) = crate::chats::chat_for_run(db, &owner)? {
-                        crate::native::policy::apply(&mut chat, &grant);
-                        db.save_conversation_boundary(&chat)?;
-                    }
-                    db.update_run_boundary(&owner, &grant)?;
-                } else {
-                    crate::native::policy::authorize_run_in(db, &owner, &source)?;
-                }
-            }
-            let mut directed = db.run(&owner)?.unwrap_or_default();
-            if let Some(to) = move_request["backend"].as_str() {
-                directed["snapshot"]["agent"]["access"]["backend"] = to.into();
-            }
-            let destination = text(&move_request, "nodeId");
-            let agent = db
-                .agent_snapshot(super::run_agent(&directed))?
-                .unwrap_or_default();
-            let node = db.node_boundary(destination)?.unwrap_or_default();
-            if !super::agent_allows(&agent, destination)
-                || node["revoked"] == true
-                || crate::native::policy::node_native(&node)
-                    && !crate::native::policy::allows(db, &directed, &node)?
-            {
-                return Err(Error::forbidden("Destination authorization changed."));
-            }
-            let mut patch = crate::runs::RunChanges {
-                capacity_wait_until: Some(None),
-                placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                    movement_error: Some(None),
-                    move_request: Some(serde_json::from_value(serde_json::json!(move_request))?),
-                    node_state: Some(serde_json::from_value(serde_json::json!(
-                        NodeState::Pausing
-                    ))?),
+                snapshot: crossing
+                    .then(|| serde_json::from_value(current["snapshot"].clone()))
+                    .transpose()?,
+                placement: Some(Box::new(super::run_placement::PlacementChanges {
+                    target_node_id: expired.then(|| Some(chosen.clone())),
+                    pinned_node_id: expired.then_some(None),
+                    preferred_node_id: expired.then_some(None),
+                    required_tags: Some(serde_json::from_value(required_tags.clone())?),
+                    execution_backend: crossing.then(|| Some(target.clone())),
                     ..Default::default()
                 })),
                 ..Default::default()
-            };
-            if idle || expected == RunStatus::Queued {
-                if idle {
-                    patch.cancel_requested_at = Some(None);
-                }
-                patch.status = Some(RunStatus::Queued);
-                patch.recovery_pending = Some(true);
-            }
-            db.change_run(&owner, patch)?;
-            Ok(())
-        })
-        .await
-}
-
-async fn node_name(s: &Service, node: &str) -> Result<String> {
-    Ok(s.store
-        .node_boundary(node)
-        .await?
-        .and_then(|n| n["name"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| "another node".into()))
-}
-
-async fn destination_name(s: &Service, node: Option<&str>) -> Result<String> {
-    match node {
-        Some(super::LOCAL_NODE_ID) | None => Ok("the master runner".to_owned()),
-        Some(node) => node_name(s, node).await,
+            },
+        )?;
+        if expired {
+            db.update_run_boundary(
+                &owner,
+                &json!({ "environmentAdmissionRevision": crate::config::id() }),
+            )?;
+        }
+        let name = record["name"].as_str().unwrap_or("another node");
+        // The owner sees in the conversation that the agent moved itself.
+        let message = if continue_turn {
+            format!("The agent changed this conversation's node to {name}.")
+        } else {
+            format!("Changing this conversation's node to {name}.")
+        };
+        db.event(&owner, &EventKind::Status, &message, None)?;
+        db.audit(
+            "node.move.requested",
+            &json!({ "runId": owner, "nodeId": chosen, "crossing": crossing }),
+        )
+    };
+    if expired {
+        s.store.transaction(move |db| prepare(db)).await?;
+        s.worker.notify();
+    } else {
+        s.expire_environment(&run_id, expiration, prepare).await?;
     }
-}
-
-/// Retried by the worker heartbeat until the active execution exits.
-pub async fn pause_pending(s: &Service, run_id: &str) -> Result<()> {
-    let run = s.store.run(run_id).await?;
-    let movement = &run["moveRequest"];
-    let due = movement.is_object()
-        && movement["idle"] != true
-        && movement["requestedAt"]
-            .as_i64()
-            .is_some_and(|at| now() - at >= PAUSE_DELAY_MS);
-    if due {
-        stop(s, &run).await?;
-    }
-    Ok(())
-}
-
-async fn stop(s: &Service, run: &Value) -> Result<()> {
-    let checkpoint = super::checkpoint(s, text(run, "id")).await?;
-    let attempt = text(&checkpoint, "runnerId");
-    crate::validation::uuid(attempt)?;
-    let response = s
-        .http
-        .delete(format!(
-            "{}/runs/{attempt}",
-            super::transport::url(s, text(run, "id")).await?
-        ))
-        .bearer_auth(super::runner_secret(s).await?)
-        .timeout(Duration::from_secs(20))
-        .send()
-        .await
-        .map_err(|_| Error::unavailable("Waiting for source node to pause."))?;
-    if !response.status().is_success() {
-        return Err(Error::unavailable("Waiting for source VM to stop."));
-    }
-    Ok(())
-}
-
-/// Whether a conversation without a pending move needs to leave its node.
-enum Recovery {
-    /// Its node is available, or it has none.
-    NotNeeded,
-    /// It cannot move yet; the owner was alerted.
-    Waiting,
-    /// A move to the reserved node, to record in `run.moveRequest`.
-    Planned(Value),
+    authorize.mark_admitted();
+    Ok(json!({
+        "status": "moved",
+        "nodeId": node,
+    }))
 }
 
 const WAITING_TITLE: &str = "Conversation waiting for its node";
 
-fn source_mode_unconfirmed(db: &Db<'_>, run: &str) -> Result<bool> {
-    let checkpoint = super::db_checkpoint(db, run)?;
-    let Some(source) = checkpoint["nodeId"].as_str() else {
-        return Ok(false);
-    };
-    let node = db.node_boundary(source)?.unwrap_or_default();
-    Ok(super::native_mode::unconfirmed(&node))
-}
-
-/// Plans a lossless move of queued work when its retained node has no room.
-pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
-    if super::publication::requested(run) {
-        s.node_publication_notify.notify_one();
-        return Ok(false);
-    }
-    if run["status"] != RunStatus::Queued
-        || run["pinnedNodeId"].is_string()
-        || run["moveRequest"].is_object()
-        || !run["cancelRequestedAt"].is_null()
-    {
-        return Ok(false);
-    }
-    let run_id = text(run, "id");
-    let checkpoint = super::checkpoint(s, run_id).await?;
-    let Some(source) = checkpoint["nodeId"].as_str() else {
-        return Ok(false);
-    };
-    let owner = run_id.to_owned();
-    if s.store
-        .read(move |db| source_mode_unconfirmed(db, &owner))
-        .await?
-    {
-        return Ok(false);
-    }
-    // A normal resume still prefers the intact local disk. Only a capacity
-    // shortage starts a full, fenced transfer; unavailable nodes use recovery.
-    match super::placement::check(s, run).await {
-        Err(error) if super::placement::is_no_capacity(&error) => {}
-        _ => return Ok(false),
-    }
-    let mut selecting = run.clone();
-    selecting["placementTransition"] = true.into();
-    let reservation = id();
-    let selected = match super::placement::reserve(s, &selecting, &reservation).await {
-        Ok(selected) => selected,
-        Err(error) if super::placement::is_no_capacity(&error) => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    if selected["nodeId"] == source {
-        super::placement::release(s, &reservation).await?;
-        return Ok(false);
-    }
-    let movement = serde_json::to_value(MoveRequest {
-        backend: None,
-        reservation: &reservation,
-        node_id: &selected["nodeId"],
-        resources: &selected["resources"],
-        requested_at: None,
-        // Healthy source: capture all current writes after fencing, rather than
-        // restoring an older published recovery point.
-        automatic: false,
-        idle: None,
-        idle_status: None,
-        required_tags: None,
-        backup_id: None,
-    })?;
-    if let Err(error) = record_request(
-        s,
-        run_id,
-        movement,
-        false,
-        RunStatus::Queued,
-        None,
-        Authorization::default(),
-    )
-    .await
-    {
-        super::placement::release(s, &reservation).await?;
-        return Err(error);
-    }
-    s.store.event(
-        run_id, &EventKind::Status,
-        "The current node has no capacity. Saving the full environment before resuming on another authorized node.",
-        None,
-    ).await?;
-    Ok(true)
-}
-
-async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
-    let run_id = text(current, "id");
-    let checkpoint = super::checkpoint(s, run_id).await?;
-    let source = text(&checkpoint, "nodeId");
-    if source.is_empty() {
-        return Ok(Recovery::NotNeeded);
-    }
-    if source == super::LOCAL_NODE_ID {
-        // A stale local record only delays recovery until the next attempt.
-        let _ = super::refresh_local(s).await;
-    }
-    let node = s.node_boundary(source).await?;
-    if super::native_mode::unconfirmed(&node) {
-        return Ok(Recovery::Waiting);
-    }
-    let agent = s.agent_snapshot(super::run_agent(current)).await?;
-    let available = super::seen_within(&node, super::HEARTBEAT_TIMEOUT_MS)
-        && node["revoked"] != true
-        && node["executionReady"] == true
-        && super::agent_allows(&agent, source);
-    if available {
-        return Ok(Recovery::NotNeeded);
-    }
-    if current["pinnedNodeId"].is_string() {
-        let body = "This conversation is fixed to a node that is unavailable. It resumes when that node returns.";
-        super::alerts::raise(s, run_id, "waiting", WAITING_TITLE, body).await?;
-        return Ok(Recovery::Waiting);
-    }
-    let Some(backup) = latest(s, run_id).await? else {
-        let patch = crate::runs::RunChanges {
-            account_wait_reason: Some(Some(
-                "Original node unavailable; no usable recovery point exists.".into(),
-            )),
-            placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-                node_state: Some(serde_json::from_value(serde_json::json!(
-                    NodeState::WaitingForNode
-                ))?),
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
-        s.store.change_run(run_id, patch).await?;
-        let body = "The node running this conversation is unavailable and no recovery point can resume it elsewhere. It resumes when the node returns.";
-        super::alerts::raise(s, run_id, "waiting", WAITING_TITLE, body).await?;
-        return Ok(Recovery::Waiting);
-    };
-    let mut selecting = current.clone();
-    selecting["placementTransition"] = true.into();
-    let reservation = id();
-    let Ok(selected) = super::placement::reserve(s, &selecting, &reservation).await else {
-        let body = "The node running this conversation is unavailable and no other authorized node can resume it yet.";
-        super::alerts::raise(
-            s,
-            run_id,
-            "waiting",
-            "Conversation waiting for a node",
-            body,
-        )
-        .await?;
-        return Ok(Recovery::Waiting);
-    };
-    let movement = serde_json::to_value(MoveRequest {
-        backend: None,
-        reservation: &reservation,
-        node_id: &selected["nodeId"],
-        resources: &selected["resources"],
-        requested_at: None,
-        automatic: true,
-        idle: None,
-        idle_status: None,
-        required_tags: None,
-        backup_id: Some(&backup["id"]),
-    })?;
-    Ok(Recovery::Planned(movement))
-}
-
-/// Advances a conversation's pending move, or starts recovery from an unavailable node.
-/// Returns whether the conversation may keep executing where it is.
-pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
+/// Whether an existing environment can resume on its node now. It never moves
+/// elsewhere: an unavailable node, or a node its agent lost, keeps it waiting.
+pub async fn node_ready(s: &Service, run: &Value) -> Result<bool> {
     let checkpoint =
         crate::worker::checkpoint::RunCheckpoint::load(&s.store, text(run, "id")).await?;
-    advance_for_attempt(s, run, checkpoint.as_ref()).await
+    node_ready_for_attempt(s, run, checkpoint.as_ref()).await
 }
 
-pub(crate) async fn advance_for_attempt(
+pub(crate) async fn node_ready_for_attempt(
     s: &Service,
     run: &Value,
     expected_attempt: Option<&crate::worker::checkpoint::RunCheckpoint>,
@@ -1018,427 +501,103 @@ pub(crate) async fn advance_for_attempt(
         ));
     }
     if !run["cancelRequestedAt"].is_null() {
-        release_destination(s, run).await?;
         return Ok(true);
     }
     // Keep the authoritative journal on its source until every coalesced final
     // publication is acknowledged. Same-node work may continue in the meantime.
     if super::publication::requested(run) {
         s.node_publication_notify.notify_one();
-        return Ok(!run["moveRequest"].is_object());
+        return Ok(true);
     }
-    let mut current = run.clone();
-    if !current["moveRequest"].is_object() {
-        match plan_recovery(s, &current).await? {
-            Recovery::NotNeeded => return Ok(true),
-            Recovery::Waiting => return Ok(false),
-            Recovery::Planned(movement) => {
-                let owner = run_id.to_owned();
-                let expected = expected_attempt.cloned();
-                let pending = movement.clone();
-                let accepted = s
-                    .store
-                    .transaction(move |db| {
-                        let checkpoint =
-                            crate::worker::checkpoint::RunCheckpoint::load_in(db, &owner)?;
-                        if !crate::recovery::same_execution(checkpoint.as_ref(), expected.as_ref())
-                            || source_mode_unconfirmed(db, &owner)?
-                            || db
-                                .run(&owner)?
-                                .is_none_or(|run| run["moveRequest"].is_object())
-                        {
-                            return Ok(false);
-                        }
-                        db.update_run_placement(
-                            &owner,
-                            crate::nodes::run_placement::PlacementChanges {
-                                move_request: Some(serde_json::from_value(serde_json::json!(
-                                    pending
-                                ))?),
-                                ..Default::default()
-                            },
-                        )?;
-                        Ok(true)
-                    })
-                    .await;
-                match accepted {
-                    Ok(true) => current["moveRequest"] = movement,
-                    rejected => {
-                        super::placement::release(s, text(&movement, "reservation")).await?;
-                        rejected?;
-                        return Ok(false);
-                    }
-                }
-            }
-        }
+    let checkpoint = super::checkpoint(s, run_id).await?;
+    let source = text(&checkpoint, "nodeId");
+    if source.is_empty() {
+        return Ok(true);
     }
-    crate::recovery::fence_attempt(s, &current, expected_attempt).await?;
-    let current_checkpoint =
-        crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id).await?;
-    let mut expected_fenced = expected_attempt.cloned();
-    if let Some(saved) = &mut expected_fenced {
-        saved.process = None;
+    if source == super::LOCAL_NODE_ID {
+        // A stale local record only delays recovery until the next attempt.
+        let _ = super::refresh_local(s).await;
     }
-    if !crate::recovery::same_execution(current_checkpoint.as_ref(), expected_fenced.as_ref()) {
-        return Err(Error::conflict(
-            "Execution attempt changed during recovery.",
-        ));
+    let node = s.node_boundary(source).await?;
+    if super::native_mode::unconfirmed(&node) {
+        return Ok(false);
     }
-    if current["moveRequest"]["backend"].is_string() {
-        let owner = run_id.to_owned();
-        let expected = current["moveRequest"].clone();
-        s.store
-            .transaction(move |db| {
-                let run = db
-                    .run(&owner)?
-                    .ok_or_else(|| Error::not_found("Conversation removed."))?;
-                if run["moveRequest"] != expected {
-                    return Err(Error::conflict("Movement changed while fencing."));
-                }
-                let mut request: super::run_placement::MoveRequest =
-                    serde_json::from_value(expected)?;
-                request.source_read_ready = Some(true);
-                db.update_run_placement(
-                    &owner,
-                    super::run_placement::PlacementChanges {
-                        move_request: Some(Some(request)),
-                        ..Default::default()
-                    },
-                )
-            })
-            .await?;
-        current = s.store.run(run_id).await?;
+    let agent = s.agent_snapshot(super::run_agent(run)).await?;
+    let authorized = super::agent_allows(&agent, source);
+    let available = super::seen_within(&node, super::HEARTBEAT_TIMEOUT_MS)
+        && node["revoked"] != true
+        && node["executionReady"] == true;
+    if available && authorized {
+        return Ok(true);
     }
-    match transfer(s, &current).await {
-        Ok(backup) => resume_at_destination(s, &current, &backup, expected_fenced.as_ref()).await?,
-        Err(error) => fail_transfer(s, &current, &error).await?,
+    if run["nodeState"] != "waiting-for-node" {
+        let patch = crate::runs::RunChanges {
+            placement: Some(Box::new(super::run_placement::PlacementChanges {
+                node_state: Some(serde_json::from_value(serde_json::json!(
+                    NodeState::WaitingForNode
+                ))?),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        s.store.change_run(run_id, patch).await?;
     }
+    let body = if authorized {
+        "The node holding this conversation's working environment is unavailable. It resumes when that node returns, or after a confirmed node change."
+    } else {
+        "This conversation's agent no longer has access to the node holding its working environment. It stays stopped until that access returns, or after a confirmed node change."
+    };
+    super::alerts::raise(s, run_id, "waiting", WAITING_TITLE, body).await?;
     Ok(false)
 }
 
-/// Publishes the source disk if needed and mounts it on the destination.
-async fn transfer(s: &Service, current: &Value) -> Result<Value> {
-    let run_id = text(current, "id");
-    let movement = &current["moveRequest"];
-    let backup = if let Some(id) = movement["backupId"].as_str() {
-        s.get("node-backups", id).await?
-    } else {
-        s.store
-            .update_run_placement(
-                run_id,
-                crate::nodes::run_placement::PlacementChanges {
-                    node_state: Some(serde_json::from_value(serde_json::json!(
-                        NodeState::Saving
-                    ))?),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        let point = super::publication::capture(s, current).await?;
-        s.get("node-backups", text(&point, "id")).await?
-    };
-    s.store
-        .update_run_placement(
-            run_id,
-            crate::nodes::run_placement::PlacementChanges {
-                node_state: Some(serde_json::from_value(serde_json::json!(
-                    NodeState::Restoring
-                ))?),
-                ..Default::default()
-            },
-        )
-        .await?;
-    super::placement::materialize(s, text(movement, "reservation")).await?;
-    let source = super::checkpoint(s, run_id).await?;
-    if source["nodeId"] != movement["nodeId"] || movement["automatic"] == true {
-        let mut destination = current.clone();
-        if let Some(to) = movement["backend"].as_str() {
-            destination["snapshot"]["agent"]["access"]["backend"] = to.into();
-        }
-        super::restore::start(s, &destination, text(movement, "nodeId"), &backup).await?;
-    }
-    Ok(backup)
-}
-
-async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()> {
-    let run_id = text(current, "id");
-    release_destination(s, current).await?;
-    let idle = current["moveRequest"]["idle"] == true;
-    let node_state = (!idle).then_some(NodeState::WaitingForNode);
-    let mut patch = crate::runs::RunChanges {
-        recovery_pending: Some(!idle),
-        placement: Some(Box::new(super::run_placement::PlacementChanges {
-            move_request: Some(None),
-            move_reservation: Some(None),
-            node_state: Some(serde_json::from_value(serde_json::to_value(node_state)?)?),
-            movement_error: Some(Some(error.message.clone())),
-            ..Default::default()
-        })),
-        ..Default::default()
-    };
-    if idle {
-        patch.status = Some(
-            current["moveRequest"]["idleStatus"]
-                .as_str()
-                .and_then(RunStatus::parse)
-                .unwrap_or(RunStatus::Succeeded),
-        );
-    }
-    let owner = run_id.to_owned();
-    s.store
-        .transaction(move |db| {
-            let current = db
-                .run(&owner)?
-                .ok_or_else(|| Error::not_found("Conversation removed."))?;
-            let cancelled = !current["cancelRequestedAt"].is_null();
-            if cancelled {
-                patch.status = Some(RunStatus::Cancelled);
-                patch.recovery_pending = Some(false);
-                patch.placement.as_mut().unwrap().node_state = Some(None);
-            }
-            db.change_run(&owner, patch)?;
-            // A run waiting for an automatic retry shows the stop in its conversation.
-            if cancelled && current["retry"]["nextAttemptAt"].is_number() {
-                db.event(
-                    &owner,
-                    &EventKind::Status,
-                    RunStatus::Cancelled.as_str(),
-                    None,
-                )?;
-            }
-            Ok(())
-        })
-        .await?;
-    s.store
-        .event(
-            run_id,
-            &EventKind::Status,
-            "Environment transfer failed. The original disk is retained.",
-            None,
-        )
-        .await?;
-    if !idle {
-        super::alerts::raise(
-            s,
-            run_id,
-            "move-failed",
-            "Conversation move failed",
-            &format!("{} The original disk is retained.", error.message),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-/// Points the checkpoint at the destination and queues the conversation to resume there.
-async fn resume_at_destination(
-    s: &Service,
-    current: &Value,
-    backup: &Value,
-    expected: Option<&crate::worker::checkpoint::RunCheckpoint>,
-) -> Result<()> {
-    let run_id = text(current, "id").to_owned();
-    let movement = &current["moveRequest"];
-    let idle = movement["idle"] == true;
-    let automatic = movement["automatic"] == true;
-    let destination = text(movement, "nodeId").to_owned();
-    let required_tags = movement
-        .get("requiredTags")
-        .unwrap_or(&current["requiredTags"]);
-    if idle {
-        super::placement::release(s, text(movement, "reservation")).await?;
-    }
-    let node = movement["nodeId"].clone();
-    let captured_at = backup["capturedAt"].clone();
-    let node_state = (!idle).then_some(NodeState::Resuming);
-    let reservation = if idle {
-        Value::Null
-    } else {
-        movement["reservation"].clone()
-    };
-    let status = if idle {
-        movement["idleStatus"]
-            .as_str()
-            .and_then(RunStatus::parse)
-            .unwrap_or(RunStatus::Succeeded)
-    } else {
-        RunStatus::Queued
-    };
-    let mut patch = crate::runs::RunChanges {
-        account_wait_reason: Some(None),
-        session_id: Some(serde_json::from_value(backup["sessionId"].clone())?),
-        recovery_pending: Some(!idle),
-        status: Some(status),
-        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
-            movement_error: Some(None),
-            node_id: Some(serde_json::from_value(serde_json::json!(node))?),
-            node_state: Some(serde_json::from_value(serde_json::json!(node_state))?),
-            resources: Some(serde_json::from_value(serde_json::json!(
-                movement["resources"]
-            ))?),
-            required_tags: Some(serde_json::from_value(serde_json::json!(required_tags))?),
-            move_request: Some(None),
-            move_reservation: Some(serde_json::from_value(serde_json::json!(reservation))?),
-            ..Default::default()
-        })),
-        boundary: Some(
-            serde_json::json!({"storage": { "mode": super::ON_DEMAND },"restoredAt": captured_at}),
-        ),
-        ..Default::default()
-    };
-    let owner = run_id.clone();
-    let expected = expected.cloned();
-    let movement = movement.clone();
-    s.store
-        .transaction(move |db| {
-            let mut checkpoint = db
-                .checkpoint_boundary(&owner)?
-                .ok_or_else(|| Error::conflict("Missing resume checkpoint."))?;
-            let current = db
-                .run(&owner)?
-                .ok_or_else(|| Error::not_found("Conversation removed."))?;
-            if !current["cancelRequestedAt"].is_null() {
-                return Err(Error::conflict("Conversation cancelled during restore."));
-            }
-            let saved = crate::worker::checkpoint::RunCheckpoint::load_in(db, &owner)?;
-            if !crate::recovery::same_execution(saved.as_ref(), expected.as_ref())
-                || current["moveRequest"] != movement
-            {
-                return Err(Error::conflict("Execution or movement changed during restore."));
-            }
-            if !idle
-                && let Some(saved) = saved.as_ref()
-                && saved.has_controller_recovery_reservation()
-                && let Some(attempt) = saved.runner_id()
-            {
-                checkpoint["moveRecoveryReservation"] = attempt.into();
-            }
-            if let Some(to) = movement["backend"].as_str() {
-                let node_record = db.node_boundary(text(&movement, "nodeId"))?.unwrap_or_default();
-                let mut prospective = current.clone();
-                prospective["snapshot"]["agent"]["access"]["backend"] = to.into();
-                if crate::native::policy::node_native(&node_record) && !crate::native::policy::allows(db, &prospective, &node_record)? { return Err(Error::forbidden("Destination authority changed.")); }
-                checkpoint["prepared"]["diskFormat"] = "vm".into();
-                checkpoint["prepared"]["backend"] = to.into();
-                checkpoint["runtimeId"] = node_record["runtimeId"].clone();
-                patch.snapshot = Some(serde_json::from_value(prospective["snapshot"].clone())?);
-                let placement = patch.placement.as_mut().unwrap();
-                placement.execution_backend = Some(Some(to.to_owned()));
-                placement.pinned_node_id = Some(None);
-                placement.preferred_node_id = Some(None);
-                let boundary = patch.boundary.as_mut().unwrap();
-                boundary["requiredRuntime"] = Value::Null;
-            }
-            checkpoint["nodeId"] = node;
-            checkpoint["process"] = Value::Null;
-            checkpoint["settled"] = Value::Null;
-            db.save_checkpoint_boundary(&owner, &checkpoint)?;
-            db.change_run(&owner, patch)?;
-            db.event(
-                &owner, &EventKind::Status,
-                "Restoring conversation from a dated recovery point; newer chat remains visible. Verify external effects before repeating actions.",
-                Some(&json!({ "capturedAt": captured_at })),
-            )?;
-            Ok(())
-        })
-        .await?;
-    if automatic {
-        let name = node_name(s, &destination).await?;
-        super::alerts::raise(
-            s,
-            &run_id,
-            "resumed",
-            "Conversation resumed on another node",
-            &format!("Its node became unavailable, so it resumed on {name} from its latest recovery point. Recent file changes may be missing."),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
-    let _operation = s.node_backup_operation.lock(run).await;
-    let current = s.store.run(run).await?;
-    let Some(head) = current["backup"]["id"].as_str() else {
-        return Ok(None);
-    };
-    let point = s.store.get("node-backups", head).await?.filter(|point| {
-        point["runId"] == run && point["sessionId"].is_string() && super::publication::in_s3(point)
-    });
-    // Publication already verified every immutable dependency. Demand reads
-    // verify blocks again, so movement need only validate the current manifest.
-    match point {
-        Some(point) if super::publication::manifest(s, &point).await.is_ok() => Ok(Some(point)),
-        _ => Ok(None),
-    }
-}
-
-async fn release_destination(s: &Service, run: &Value) -> Result<()> {
-    for reservation in [
-        run["moveRequest"]["reservation"].as_str(),
-        run["moveReservation"].as_str(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        super::placement::release(s, reservation).await?;
-    }
-    Ok(())
-}
-
-/// A terminal recovery cannot resume the interrupted turn on a destination.
-/// Release only the pending destination reservation, retaining the source and
-/// its checkpoint until fencing and finalization have been resolved.
-pub(crate) async fn abort_terminal_recovery(
-    s: &Service,
-    run_id: &str,
-    expected_attempt: Option<&crate::worker::checkpoint::RunCheckpoint>,
-) -> Result<()> {
-    let id = run_id.to_owned();
-    let expected = expected_attempt.cloned();
-    s.store
-        .transaction(move |db| {
-            let checkpoint = crate::worker::checkpoint::RunCheckpoint::load_in(db, &id)?;
-            if !crate::recovery::same_execution(checkpoint.as_ref(), expected.as_ref()) {
-                return Err(Error::conflict(
-                    "Execution attempt changed during recovery.",
-                ));
-            }
-            release_terminal_destination_in(db, &id)
-        })
-        .await
-}
-
-/// Only unclaimed destination reservations are released; retained disks and the
-/// source execution stay owned by their existing fencing/storage lifecycle.
-pub(crate) fn release_terminal_destination_in(db: &crate::store::Db<'_>, id: &str) -> Result<()> {
-    let placement = db.run_placement(id)?;
-    if placement.move_request.is_none() && placement.move_reservation.is_none() {
-        return Ok(());
-    }
-    for reservation in [
-        placement
-            .move_request
-            .as_ref()
-            .map(|movement| movement.reservation.as_str()),
-        placement.move_reservation.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        super::placement::release_in(db, reservation)?;
-    }
-    db.update_run_placement(
-        id,
-        super::run_placement::PlacementChanges {
-            move_request: Some(None),
-            move_reservation: Some(None),
-            node_state: Some(None),
-            movement_error: Some(Some(
-                "Movement stopped because the execution will not resume automatically.".into(),
-            )),
-            ..Default::default()
-        },
+/// Moves and conversions of an earlier version cannot finish: the environment stays
+/// on its source and the destination's capacity is returned.
+pub(crate) fn abandon_legacy_moves(db: &Db<'_>) -> Result<()> {
+    let runs = db.json_rows(
+        "SELECT data FROM run_views AS runs
+         WHERE placement_move_request IS NOT NULL OR placement_move_reservation IS NOT NULL",
+        [],
     )?;
+    for run in runs {
+        let id = text(&run, "id");
+        let placement = db.run_placement(id)?;
+        for reservation in [
+            placement
+                .move_request
+                .as_ref()
+                .map(|movement| movement.reservation.clone()),
+            placement.move_reservation.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            super::placement::release_in(db, &reservation)?;
+        }
+        let mut changes = crate::runs::RunChanges {
+            placement: Some(Box::new(super::run_placement::PlacementChanges {
+                move_request: Some(None),
+                move_reservation: Some(None),
+                node_state: Some(None),
+                movement_error: Some(Some(
+                    "This move was stopped by an update. Changing node now discards the working files; confirm a new node change to continue elsewhere.".into(),
+                )),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        // An idle move had queued the stopped conversation only to transfer it.
+        if let Some(movement) = placement.move_request.as_ref()
+            && movement.idle == Some(true)
+        {
+            changes.status = Some(
+                movement
+                    .idle_status
+                    .unwrap_or(crate::run_status::RunStatus::Succeeded),
+            );
+            changes.recovery_pending = Some(false);
+        }
+        db.change_run(id, changes)?;
+    }
     Ok(())
 }

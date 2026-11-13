@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0008](0008-current-disk-publication-without-archives.md) pour les points de restauration ; la durabilité locale et la publication asynchrone restent applicables.
+> Statut : Remplacée par [ADR-0008](0008-current-disk-publication-without-archives.md) pour les points de restauration et par [ADR-0083](0083-local-conversation-disks-without-s3.md) pour la sauvegarde distante ; la durabilité locale des écritures reste applicable.
 
 # Disque local et sauvegarde incrémentale asynchrone
 

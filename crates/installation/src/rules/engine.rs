@@ -81,20 +81,20 @@ CREATE TABLE IF NOT EXISTS hook_rule_quiet_hours(
 ) WITHOUT ROWID;
 ";
 
-/// Version 31 to 32. No triggering exists before.
+/// Version 32 to 33. No triggering exists before.
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if (32..=crate::store::DATABASE_VERSION).contains(&version) {
+    if (33..=crate::store::DATABASE_VERSION).contains(&version) {
         return Ok(());
     }
-    if version != 31 {
+    if version != 32 {
         return Err(Error::bad(
             "Unexpected installation database version during upgrade.",
         ));
     }
     tx.execute_batch(SCHEMA)?;
-    tx.pragma_update(None, "user_version", 32)?;
+    tx.pragma_update(None, "user_version", 33)?;
     tx.commit()?;
     Ok(())
 }
@@ -1118,7 +1118,21 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                             return Ok(Step::Done);
                         }
                         let backoff = 2f64.powi(attempts as i32).min(3600.0);
-                        let delay = (seconds.max(backoff).min(3600.0) * 1000.0) as i64;
+                        let at = now();
+                        let delay = (seconds.max(backoff) * 1000.0).ceil();
+                        if !delay.is_finite() || delay > (9_007_199_254_740_991_i64 - at) as f64 {
+                            let error = "The service's retry delay cannot be represented.";
+                            let failed = StepRecord {
+                                status: "failed",
+                                input: None,
+                                result: Some(&result),
+                                error: Some(error),
+                            };
+                            db.record_step(&prepared.id, position, &node, attempts, failed)?;
+                            db.save_hook_triggering(&prepared, "failed", None, Some(error))?;
+                            return Ok(Step::Done);
+                        }
+                        let resumes_at = at + delay as i64;
                         let retrying = StepRecord {
                             status: "retrying",
                             input: None,
@@ -1126,7 +1140,7 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                             error: None,
                         };
                         db.record_step(&prepared.id, position, &node, attempts, retrying)?;
-                        db.save_hook_triggering(&prepared, "retrying", Some(now() + delay), None)?;
+                        db.save_hook_triggering(&prepared, "retrying", Some(resumes_at), None)?;
                         return Ok(Step::Done);
                     }
                     if serde_json::to_vec(&result)

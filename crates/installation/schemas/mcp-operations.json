@@ -160,7 +160,7 @@
   },
   {
     "name": "get_chat_backend_migration",
-    "description": "Preview and track an explicit backend move or native-born disk conversion. Select chatId or runId. Reports whether conversion is needed, pending work, failure/retry details and authorized destinations; expired environments require no retained disk.",
+    "description": "Preview an explicit backend change without changing anything. Select chatId or runId. Reports authorized destinations, failure details and, while the working environment exists, the warning that the change discards its working files (history, attachments and artifacts are kept). pending is true while the change waits for the previous execution to stop. An expired environment has no working files to lose.",
     "scope": "read",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -193,7 +193,7 @@
   },
   {
     "name": "migrate_chat_backend",
-    "description": "Explicitly change a conversation or mission backend on an authorized node. Select chatId or runId and confirm. VM-created disks reuse the same disk and engine session across VM/native nodes without copying files. A native-created disk converts once before VM execution; a chat resumes on the next message and a mission continues automatically in a fresh session with its visible history. Running commands stop and system packages do not follow. Failed conversion retains the source. Poll get_chat_backend_migration. Native provenance, administrator approvals and live management grants remain enforced. An expired environment selects its new backend without reading deleted files; the next message creates an empty environment.",
+    "description": "Explicitly change a conversation or mission backend on an authorized node. Select chatId or runId and confirm. VM and native execution never share a node: with an existing working environment this is a node change, which also requires discardWorkingFiles: true. The environment expires: its working files, unpushed changes and installed tools are lost; the conversation history, attachments and artifacts are kept. The running turn stops; a chat waits for its next message (queued messages and scheduled waits start on the destination) and an active mission resumes there automatically. The first new environment waits for capacity on the destination while it stays authorized. Native provenance, administrator approvals and live management grants remain enforced. An expired environment selects its new backend without discardWorkingFiles; the next message creates an empty environment.",
     "scope": "manage",
     "destructive": true,
     "inputSchema": {
@@ -219,14 +219,12 @@
           "type": "boolean",
           "const": true
         },
+        "discardWorkingFiles": {
+          "type": "boolean"
+        },
         "runId": {
           "type": "string",
           "format": "uuid"
-        },
-        "waitSeconds": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 3600
         },
         "requiredTags": {
           "type": [

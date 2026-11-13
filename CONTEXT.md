@@ -5,16 +5,10 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 ## Language
 
 **Placement automatique** :
-Le choix d’un node autorisé et disponible pour une nouvelle conversation, qu’il exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf déplacement explicite vers une node de l’autre type.
-
-**Bascule d’environnement** :
-Le passage explicite d’une conversation entre VM et exécution native, en conservant ses fichiers et son historique. Elle ne change pas les priorités de placement de l’agent.
-
-**Conversion d’environnement** :
-La préparation nécessaire pour qu’un environnement créé en natif puisse reprendre dans une VM. La conversation conserve son historique et ses fichiers, avec une nouvelle session du moteur.
+Le choix d’une node autorisée et disponible pour un nouvel environnement de travail, qu’elle exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf migration explicite de son mode d’exécution. Il ne change jamais la node d’un environnement existant : seul un changement de node confirmé fait repartir ailleurs une conversation dont l’environnement existe encore.
 
 **Priorité de nodes d’un agent** :
-L’ordre de préférence propre à un agent pour placer ses nouvelles conversations. Un node prioritaire indisponible laisse la place au suivant, puis aux autres nodes autorisés. Une préférence ne donne aucun droit d’accès.
+L’ordre de préférence propre à un agent pour placer ses nouveaux environnements de travail. Une node prioritaire indisponible laisse la place à la suivante, puis aux autres nodes autorisées. Une préférence ne donne aucun droit d’accès.
 
 **Beacon** :
 Le service hébergé par Cairn qui fournit l’interface web et mobile, les comptes Cairn et l’accès à toutes les installations d’un compte. Il ne conserve pas le travail des agents.
@@ -93,7 +87,8 @@ _Avoid_ : agent (qui désigne l’agent chargé du travail, et non la machine)
 Travail d’un agent effectué par le système de la node, avec ses pilotes et les ressources partagées avec son propriétaire. Il exige des agents sélectionnés et des personnes explicitement autorisées, avec une frontière d’isolation plus faible qu’une VM.
 
 **Migration du mode d’exécution d’une conversation** :
-Déplacement explicite d’un environnement durable entre VM Firecracker et Linux natif, en conservant le même fil, ses fichiers et son historique. Un disque créé en VM est réutilisé avec sa session du moteur ; un disque créé en natif nécessite une première conversion, puis suit le même parcours. Cette conversion nécessite une nouvelle session à partir de l’historique : une conversation attend le prochain message, une mission active reprend automatiquement si elle reste autorisée et n’a pas été arrêtée. Les dépendances système peuvent nécessiter une réinstallation. L’autorisation explicite du propriétaire permet d’adopter le travail existant avec ses droits natifs ; une délégation reste bornée par ses droits actuels.
+Choix explicite du mode d’exécution d’une conversation entre VM Firecracker et Linux natif, qui ne s’exécutent jamais sur la même node. Si son environnement de travail existe encore, c’est un changement de node : cet environnement expire, et la conversation conserve son fil, son historique, ses pièces jointes et ses artefacts. S’il a déjà expiré, la migration choisit seulement le backend et la node du prochain environnement, sans avertissement. L’autorisation explicite du propriétaire permet de poursuivre la conversation avec des droits natifs ; une délégation reste bornée par ses droits actuels.
+_Avoid_ : bascule d’environnement, conversion d’environnement
 
 **Capacité d’une node** :
 Possibilité de travail vérifiée sur une node, distincte de la seule présence du matériel et de sa disponibilité au moment de la demande. Une capacité ne donne aucun droit supplémentaire à l’agent.
@@ -108,27 +103,15 @@ Pour le disque natif compatible, le manager protège aussi la capacité accordé
 **Limite de stockage par tâche** :
 Plafond d’agrandissement d’un environnement de travail, commun aux conversations et aux exécutions de mission d’une installation, fixé par son propriétaire. Une baisse conserve les capacités déjà accordées ; un agent ne peut pas relever cette limite.
 
-**Déplacement d’une conversation** :
-Changement de node d’exécution d’une même conversation, avec une pause puis une reprise de sa session et de son environnement de travail. Il ne conserve pas les processus en cours ni leur mémoire.
+**Changement de node d’une conversation** :
+Passage sur une autre node d’exécution d’une conversation dont l’environnement de travail existe encore, confirmé explicitement par la personne, le client MCP ou l’agent qui le demande. Son environnement de travail expire : elle conserve son historique, ses pièces jointes et ses artefacts, pas ses fichiers de travail.
+_Avoid_ : déplacement (qui laisse croire que les fichiers suivent)
 
 **Environnement de travail d’une conversation** :
-Ensemble des fichiers, outils installés et données conservés pour le travail d’une conversation. Il comprend les modifications non publiées des projets et les données nécessaires à leur reprise, au-delà du seul historique des messages.
+Ensemble des fichiers, outils installés et données conservés pour le travail d’une conversation. Il comprend les modifications non poussées des projets et les données nécessaires à leur reprise, au-delà du seul historique des messages. Il n’existe que sur la node d’exécution de la conversation.
 
-**Reprise à la demande** :
-Remise en activité d’une conversation dont l’environnement de travail devient accessible progressivement, au fil des besoins de l’agent. Elle permet de reprendre le travail avant que l’ensemble de cet environnement soit disponible sur la node d’exécution.
-
-**Travail non synchronisé** :
-Part du travail d’une conversation encore conservée uniquement sur sa node d’exécution. Sa récupération dépend de la conservation de cette node jusqu’à la fin de la synchronisation.
-
-**État publié** :
-Dernier état cohérent de l’environnement d’une conversation disponible à distance pour sa reprise sur une autre node. Il ne constitue pas un historique permettant de revenir à des versions antérieures.
-
-**Synchronisation d’une conversation** :
-Mise à disposition à distance de son environnement de travail courant. Elle progresse en arrière-plan ; son retard indique le travail encore exposé à la perte de la node d’origine.
-
-**Transfert direct de stockage** :
-Échange des données d’un environnement de travail entre sa node d’exécution et le stockage distant, sans transit des contenus par le manager. Le manager conserve la coordination et les autorisations de la synchronisation.
-_Avoid_ : connexion directe, qui désigne le transport entre l’interface et l’installation
+**Expiration de l’environnement** :
+Suppression de l’environnement de travail d’une conversation, après inactivité, lors d’un changement de node, de la révocation de sa node ou d’une migration du stockage. La conversation conserve son historique, ses pièces jointes et ses artefacts ; son prochain tour démarre un environnement vide.
 
 **Conversation à la corbeille** :
 Une conversation supprimée par l’utilisateur, masquée pendant l’effacement définitif de ses données associées. Les nouvelles suppressions sont irréversibles immédiatement ; seules les conversations déjà à la corbeille avant ce changement conservent leur délai de récupération initial.

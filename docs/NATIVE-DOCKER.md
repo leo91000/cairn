@@ -121,16 +121,12 @@ containers, network connections or process memory. Disk usage counts against the
 existing conversation filesystem and shared node disk budget; image pulls and
 build caches can exhaust them. Use ordinary Docker image/build/volume cleanup.
 
-Native-to-VM migration currently refuses a nonempty rootless Docker store and
-retains the source environment. The VM's rootful daemon cannot consume this
-metadata, and the existing file converter does not preserve its ownership,
-hardlinks, whiteouts and extended attributes. Export needed images (`docker save`)
-and volume contents into the workspace before clearing Docker state with
-`docker cairn-reset --confirm-delete-state`. This command permanently deletes
-all conversation Docker images, containers, caches and volumes after confirmed
-daemon shutdown; ordinary workspace/home/output files remain. Native
-conversations without Docker keep their existing conversion path. VM Docker state
-is not imported into the rootless daemon during VM-to-native conversion.
+Changing node, including native ↔ VM migration, expires the entire working
+environment after explicit loss confirmation. Rootless Docker images, containers,
+caches and volumes do not follow. Save needed data outside the working environment
+before confirming; history, attachments and published artifacts remain available.
+`docker cairn-reset --confirm-delete-state` separately deletes conversation Docker
+state after confirmed shutdown while retaining ordinary workspace/home/output files.
 
 The native runtime records `storage: ublk-rootless-v1` before mounting or
 reconciling file owners. Older controllers require `storage: ublk` and refuse the

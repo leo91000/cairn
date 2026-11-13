@@ -469,6 +469,20 @@ impl Fixture {
         self.until(id, finished).await
     }
 
+    /// A session exists before the restart fixture's first turn saves its work.
+    async fn until_restart_ready(&self, id: &str) -> Value {
+        let marker = self.run_directory(id).join("codex/fixture-restart.json");
+        self.until(id, |run| {
+            let ready = std::fs::read(&marker)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+
+            run["sessionId"] == "fixture-chat"
+                && ready.is_some_and(|saved| saved["cwd"] == run["workspace"])
+        })
+        .await
+    }
+
     /// Returns the active execution count reported by the live worker process.
     async fn worker_active_runs(&self) -> Option<u64> {
         let response = self
@@ -1632,9 +1646,7 @@ async fn abrupt_restart_fences_previous_process_and_resumes_workspace() {
     let mut fixture = Fixture::new().await;
     let run = fixture.enqueue("fixture:restart").await;
     let id = text(&run, "id");
-    let running = fixture
-        .until(id, |r| r["sessionId"] == "fixture-chat")
-        .await;
+    let running = fixture.until_restart_ready(id).await;
     fixture.stop(true).await;
     fixture.start().await;
     let completed = fixture.until_finished(id).await;
@@ -1692,6 +1704,99 @@ async fn automatic_shared_process_turns_do_not_acquire_a_managed_node_owner() {
     assert_eq!(second["sessionId"], first["sessionId"]);
     assert_eq!(second["workspace"], first["workspace"]);
     fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn a_fresh_chat_turn_executes_while_its_old_manager_cleanup_keeps_failing() {
+    let mut fixture = Fixture::new().await;
+    let s = fixture.service.clone();
+    let chat = fixture.start_chat(message("Before expiration")).await;
+    let run = fixture.chat_run(&chat).await;
+    let first = fixture.until_finished(&run).await;
+    assert_eq!(first["status"], RunStatus::Succeeded, "{first}");
+    fixture.until_worker_quiescent().await;
+    fixture.stop(false).await;
+    let manager = s.config.data_dir.join("runs").join(&run);
+    tokio::fs::write(manager.join("old.txt"), b"old working files")
+        .await
+        .unwrap();
+    let (chat_id, run_id, invalid) = (chat.clone(), run.clone(), fixture.root.path().to_owned());
+    s.store
+        .transaction(move |db| {
+            let mut chat = db.conversation(&chat_id)?.unwrap();
+            let old = now() - 8 * 86_400_000;
+            chat.created_at = old;
+            chat.updated_at = old;
+            chat.last_activity_at = Some(old);
+            db.save_conversation(&chat)?;
+            db.change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    finished_at: Some(Some(old)),
+                    ..Default::default()
+                },
+            )?;
+            db.update_run_boundary(
+                &run_id,
+                &json!({ "workspaces":[{ "kind":"worktree", "path":invalid }] }),
+            )
+        })
+        .await
+        .unwrap();
+    s.save_conversation_retention(json!({ "inactivityDays":7 }))
+        .await
+        .unwrap();
+    s.cleanup_conversations().await.unwrap();
+    s.retire_environments().await.unwrap();
+    let pending = s.store.list("environment-retirements").await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["fenced"], true);
+    assert_eq!(pending[0]["local"], true);
+    assert_eq!(pending[0]["cleaned"], false);
+    assert!(pending[0]["error"].is_string());
+    s.chat_send(&chat, message("Fresh message while old cleanup fails"))
+        .await
+        .unwrap();
+    fixture.start().await;
+    let resumed = fixture
+        .until(&run, |run| {
+            run["status"] == RunStatus::Succeeded
+                && text(run, "summary").contains("Fresh message while old cleanup fails")
+        })
+        .await;
+    assert!(resumed["environmentExpiredAt"].is_number());
+    assert!(!manager.join("old.txt").exists());
+    assert_eq!(
+        s.store.list("environment-retirements").await.unwrap()[0]["cleaned"],
+        false
+    );
+    fixture.stop(false).await;
+    tokio::fs::write(manager.join("new.txt"), b"fresh working files")
+        .await
+        .unwrap();
+    s.store
+        .transaction(|db| {
+            for mut retired in db.list("environment-retirements")? {
+                retired["workspaces"] = json!([]);
+                retired["retryAfter"] = Value::Null;
+                db.put("environment-retirements", &retired)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    s.retire_environments().await.unwrap();
+    assert!(
+        s.store
+            .list("environment-retirements")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        tokio::fs::read(manager.join("new.txt")).await.unwrap(),
+        b"fresh working files"
+    );
 }
 
 #[tokio::test]
@@ -2217,6 +2322,7 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         return Json(json!({
             "status": "ok",
             "nodeProtocol": 2,
+            "diskRetirementProtocol": 2,
             "dataRoot": state.data,
             "sharedResources": true,
             "budget": { "slots": state.slots, "limits": { "cpu": 7, "memoryMiB": 15872, "diskMiB": 104857 } },
@@ -2232,6 +2338,13 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
             },
         }))
         .into_response();
+    }
+    if path.starts_with("/disks/") && path.ends_with("/delete") && request.method() == "POST" {
+        let bytes = axum::body::to_bytes(request.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        return Json(json!({ "deleted":true,"retirementId":body["retirementId"] })).into_response();
     }
     if path == "/node-budget" {
         return (StatusCode::CONFLICT, Json(json!({ "error": "Shared RAM budget is below current usage plus the controller reserve." }))).into_response();
@@ -2252,6 +2365,16 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         return StatusCode::NOT_FOUND.into_response();
     }
     let attempt = path.split('/').nth(2).unwrap();
+    if (path.ends_with("/logs") || path.ends_with("/wait"))
+        && !state
+            .plans
+            .lock()
+            .await
+            .iter()
+            .any(|plan| plan["id"] == attempt)
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if path.ends_with("/logs") {
         let plans = state.plans.lock().await;
         let plan = plans.iter().find(|plan| plan["id"] == attempt).unwrap();
@@ -3336,6 +3459,321 @@ async fn transferred_paid_move_launches_once_without_resetting_controller_count(
     assert_eq!(saved["controllerRecoveries"], 4);
     assert!(saved["moveRecoveryReservation"].is_null());
     assert_eq!(controller.plans.lock().await.len(), 1);
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_post_expiration_protocol_failure_releases_its_reservation_and_retries() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: AtomicBool::new(false),
+    });
+    let unavailable = Arc::new(AtomicBool::new(false));
+    let rejected = Arc::new(AtomicUsize::new(0));
+    let owner = Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let (fail, observed, target, store) = (
+        unavailable.clone(),
+        rejected.clone(),
+        owner.clone(),
+        fixture.service.store.clone(),
+    );
+    let app = Router::new()
+        .fallback(any(
+            move |state: State<Arc<Controller>>, request: Request| {
+                let (fail, observed, target, store) = (
+                    fail.clone(),
+                    observed.clone(),
+                    target.clone(),
+                    store.clone(),
+                );
+                async move {
+                    if request.uri().path() == "/health"
+                        && request.headers().contains_key("authorization")
+                        && fail.load(Ordering::SeqCst)
+                    {
+                        let run = target.lock().await.clone().unwrap();
+                        let reserved = store.attempts().await.unwrap().into_iter().any(|attempt| {
+                            attempt.run_id == run && !attempt.released && !attempt.disk_materialized
+                        });
+                        if reserved {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                    }
+                    serve_controller(state, request).await
+                }
+            },
+        ))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let s = fixture.service.clone();
+    let home = s.config.home.join(".codex");
+    tokio::fs::create_dir_all(&home).await.unwrap();
+    tokio::fs::write(home.join("auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket":"fixture-storage","endpoint":"https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    fixture.start().await;
+    let chat = fixture.start_chat(message("First healthy VM turn")).await;
+    let run = fixture.chat_run(&chat).await;
+    assert_eq!(
+        fixture.until_finished(&run).await["status"],
+        RunStatus::Succeeded
+    );
+    fixture.until_worker_quiescent().await;
+    fixture.stop(false).await;
+    // This is an ordinary turn of an already admitted fresh environment, rather
+    // than the first admission path which binds in resolve_backend.
+    let mut agent = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
+    agent["access"]["backend"] = "firecracker".into();
+    s.store.put_agent_fixture(agent.clone()).await.unwrap();
+    let run_id = run.clone();
+    s.store.transaction(move |db| {
+        let mut snapshot = db.run(&run_id)?.unwrap()["snapshot"].clone();
+        snapshot["agent"] = agent;
+        db.change_run(&run_id,cairn_installation::runs::RunChanges { snapshot:Some(serde_json::from_value(snapshot)?), ..Default::default() })?;
+        db.update_run_boundary(&run_id,&json!({ "environmentExpiredAt":1,"environmentExpirationCause":"node-change","environmentState":null }))
+    }).await.unwrap();
+    *owner.lock().await = Some(run.clone());
+    unavailable.store(true, Ordering::SeqCst);
+    s.chat_send(&chat, message("Retry after protocol health recovers"))
+        .await
+        .unwrap();
+    fixture.start().await;
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || (rejected.load(Ordering::SeqCst) > 0).then_some(()),
+    )
+    .await;
+    fixture
+        .until(&run, |run| run["status"] == RunStatus::Queued)
+        .await;
+    fixture.until_worker_quiescent().await;
+    assert!(
+        s.store
+            .attempts()
+            .await
+            .unwrap()
+            .iter()
+            .all(|attempt| attempt.run_id != run || attempt.released),
+        "a failed health check retained unbound capacity"
+    );
+    unavailable.store(false, Ordering::SeqCst);
+    s.store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                capacity_wait_until: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let resumed = fixture.until_finished(&run).await;
+    assert_eq!(resumed["status"], RunStatus::Succeeded, "{resumed}");
+    assert_eq!(controller.plans.lock().await.len(), 2);
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_first_expired_admission_failure_preserves_its_replaceable_destination() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: AtomicBool::new(false),
+    });
+    let unavailable = Arc::new(AtomicBool::new(false));
+    let rejected = Arc::new(AtomicUsize::new(0));
+    let owner = Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let (fail, observed, target, store) = (
+        unavailable.clone(),
+        rejected.clone(),
+        owner.clone(),
+        fixture.service.store.clone(),
+    );
+    let app = Router::new()
+        .fallback(any(
+            move |state: State<Arc<Controller>>, request: Request| {
+                let (fail, observed, target, store) = (
+                    fail.clone(),
+                    observed.clone(),
+                    target.clone(),
+                    store.clone(),
+                );
+                async move {
+                    if request.uri().path() == "/health"
+                        && request.headers().contains_key("authorization")
+                        && fail.load(Ordering::SeqCst)
+                    {
+                        let run = target.lock().await.clone().unwrap();
+                        let reserved = store.attempts().await.unwrap().into_iter().any(|attempt| {
+                            attempt.run_id == run && !attempt.released && !attempt.disk_materialized
+                        });
+                        if reserved {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                    }
+                    serve_controller(state, request).await
+                }
+            },
+        ))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let s = fixture.service.clone();
+    let home = s.config.home.join(".codex");
+    tokio::fs::create_dir_all(&home).await.unwrap();
+    tokio::fs::write(home.join("auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket":"fixture-storage","endpoint":"https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    fixture.start().await;
+    let chat = fixture.start_chat(message("First healthy VM turn")).await;
+    let run = fixture.chat_run(&chat).await;
+    assert_eq!(
+        fixture.until_finished(&run).await["status"],
+        RunStatus::Succeeded
+    );
+    fixture.until_worker_quiescent().await;
+    fixture.stop(false).await;
+    // Start a real first admission after inactivity expiration, with an imposed
+    // destination that must remain replaceable throughout preparation.
+    let mut agent = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
+    agent["access"]["backend"] = "firecracker".into();
+    s.store.put_agent_fixture(agent.clone()).await.unwrap();
+    let (run_id, chat_id) = (run.clone(), chat.clone());
+    s.store
+        .transaction(move |db| {
+            let mut snapshot = db.run(&run_id)?.unwrap()["snapshot"].clone();
+            snapshot["agent"] = agent;
+            let old = now() - 8 * 86_400_000;
+            db.change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    snapshot: Some(serde_json::from_value(snapshot)?),
+                    finished_at: Some(Some(old)),
+                    ..Default::default()
+                },
+            )?;
+            let mut retained = db.conversation(&chat_id)?.unwrap();
+            retained.created_at = old;
+            retained.updated_at = old;
+            retained.last_activity_at = Some(old);
+            db.save_conversation(&retained)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    s.save_conversation_retention(json!({ "inactivityDays":7 }))
+        .await
+        .unwrap();
+    s.cleanup_conversations().await.unwrap();
+    s.detach_stopped_environments().await.unwrap();
+    s.retire_environments().await.unwrap();
+    let expired = s.store.run(&run).await.unwrap();
+    assert_eq!(expired["environmentState"], "expired");
+    cairn_installation::nodes::moves::request(&s, &expired, &json!({ "nodeId":LOCAL_NODE_ID }))
+        .await
+        .unwrap();
+    assert_eq!(
+        s.store.run(&run).await.unwrap()["targetNodeId"],
+        LOCAL_NODE_ID
+    );
+    *owner.lock().await = Some(run.clone());
+    unavailable.store(true, Ordering::SeqCst);
+    s.chat_send(&chat, message("Retry after protocol health recovers"))
+        .await
+        .unwrap();
+    fixture.start().await;
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || (rejected.load(Ordering::SeqCst) > 0).then_some(()),
+    )
+    .await;
+    fixture
+        .until(&run, |run| run["status"] == RunStatus::Queued)
+        .await;
+    fixture.until_worker_quiescent().await;
+    assert!(
+        s.store
+            .attempts()
+            .await
+            .unwrap()
+            .iter()
+            .all(|attempt| attempt.run_id != run || attempt.released),
+        "a failed health check retained unbound capacity"
+    );
+    let pending = s.store.run(&run).await.unwrap();
+    assert_eq!(pending["environmentState"], "expired");
+    assert_eq!(pending["targetNodeId"], LOCAL_NODE_ID);
+    assert!(pending["nodeId"].is_null());
+    // Reconfiguration is still the expired branch: no second discard confirmation.
+    s.store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                capacity_wait_until: Some(Some(now() + 60_000)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    cairn_installation::nodes::moves::request(&s, &pending, &json!({ "nodeId":LOCAL_NODE_ID }))
+        .await
+        .unwrap();
+    unavailable.store(false, Ordering::SeqCst);
+    s.store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                capacity_wait_until: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let resumed = fixture.until_finished(&run).await;
+    assert_eq!(resumed["status"], RunStatus::Succeeded, "{resumed}");
+    assert_eq!(controller.plans.lock().await.len(), 2);
+    assert!(resumed["environmentState"].is_null());
+    assert!(resumed["targetNodeId"].is_null());
+    assert!(resumed["pinnedNodeId"].is_null());
+    assert_eq!(resumed["nodeId"], LOCAL_NODE_ID);
     fixture.stop(false).await;
     server.abort();
 }
@@ -7615,9 +8053,7 @@ async fn unlimited_runs_cancel_and_resume_without_creating_a_deadline() {
     let run = fixture.enqueue("fixture:restart").await;
     let id = text(&run, "id");
     assert_eq!(run["snapshot"]["agent"]["timeoutMinutes"], 0);
-    fixture
-        .until(id, |r| r["sessionId"] == "fixture-chat")
-        .await;
+    fixture.until_restart_ready(id).await;
     assert_eq!(s.store.run(id).await.unwrap()["status"], RunStatus::Running);
     assert_eq!(
         fixture.checkpoint(id).await.get("remainingMs"),

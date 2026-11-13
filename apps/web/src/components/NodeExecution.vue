@@ -111,8 +111,7 @@ const relevant = computed(() => (!!props.run.nodeId && props.run.nodeId !== LOCA
 watch(relevant, value => emit('relevance', value), { immediate: true })
 const destinations = computed(() => nodes.value.filter(candidate => candidate.id !== props.run.nodeId))
 const destinationOptions = computed(() => destinations.value.map(node => ({ value: node.id, label: `${node.name} · ${node.capabilities.backend === 'native' ? 'Native' : 'Firecracker VM'}` })))
-const nativeToVm = computed(() => props.run.executionBackend === 'native' && nodes.value.find(node => node.id === destination.value)?.capabilities.backend === 'firecracker')
-const canMove = computed(() => (!!props.run.sessionId || !!props.run.backup?.id || nativeToVm.value) && !busy.value && !!destination.value && destination.value !== props.run.nodeId && (['running', 'succeeded'].includes(props.run.status) || (nativeToVm.value && ['failed', 'cancelled'].includes(props.run.status))) && !props.run.nodeState)
+const canMove = computed(() => !busy.value && !!destination.value && destination.value !== props.run.nodeId)
 const changed = computed(() => mode.value !== savedPlacement.value.mode || (mode.value !== 'automatic' && selection.value !== savedPlacement.value.selection))
 const dirtyBytes = computed(() => props.run.storage?.dirtyBytes || 0)
 const localBytes = computed(() => props.run.storage?.localBytes)
@@ -259,7 +258,7 @@ function move() {
     await moveConversationToNode(api, {
       runId: props.run.id,
       nodeId: destination.value,
-      waitSeconds: 0,
+      discardWorkingFiles: props.run.environmentState !== 'expired',
     })
     moving.value = false
     saved.value = 'Move requested.'
@@ -555,8 +554,14 @@ onUnmounted(() => {
           placeholder="Select a node"
           :disabled="busy"
         />
-        <p class="m-0! mt-2!">
-          Reserves the destination, pauses the conversation and resumes it there. VM-created disks keep their files and engine session across VM and native nodes. An environment created natively needs a one-time conversion before a VM can run it: chats wait for the next message, missions resume automatically in a fresh session. Running commands stop; system packages do not follow. The disk cannot shrink.
+        <p v-if="run.environmentState !== 'expired'" class="m-0! mt-2!">
+          This conversation's working files will be lost. Its history, attachments and artifacts are kept.
+        </p>
+        <p v-if="run.environmentState === 'expired'">
+          The previous environment expired. Choose the node for its first admission.
+        </p>
+        <p v-else>
+          The current turn stops and open questions close. The next environment waits for capacity on this destination. Queued messages, scheduled waits and active missions continue there; otherwise the conversation waits for your next message.
         </p>
         <div class="mt-3 flex justify-end">
           <UiButton size="small" :disabled="!canMove" type="submit">

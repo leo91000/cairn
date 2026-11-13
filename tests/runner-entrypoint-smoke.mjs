@@ -152,7 +152,7 @@ export async function entrypointSmoke({
       await api(`/snapshots/${snapshot.id}/discard`, 'DELETE')
     const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
     assert.equal(status.dirtyBytes, 0, 'The fixture must publish its retained journal before deletion')
-    await api(`/disks/${runId}/delete`, 'POST', {})
+    await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true })
 
     process.stdout.write(`${JSON.stringify({ mode: 'retained-current-chat-entrypoint', status: 'passed' })}\n`)
   }

@@ -154,6 +154,10 @@ function visible() {
 }
 
 onMounted(async () => {
+  document.addEventListener('keydown', key)
+  document.addEventListener('visibilitychange', visible)
+  usableTimer = window.setInterval(visible, USABLE_REFRESH_MS)
+
   try {
     if (state.authenticated)
       await refresh()
@@ -162,10 +166,6 @@ onMounted(async () => {
     state.error = (e as Error).message
     state.ready = true
   }
-
-  document.addEventListener('keydown', key)
-  document.addEventListener('visibilitychange', visible)
-  usableTimer = window.setInterval(visible, USABLE_REFRESH_MS)
 })
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', key)

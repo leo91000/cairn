@@ -1251,7 +1251,7 @@ async fn cleanup_attempt_files(data: &Path, state: &Path, run: &str) -> Result<(
 pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>> {
     let lease = environment::lock(state, run, DISK_BUSY).await?;
     let directory = &lease.directory;
-    let _replacement = storage::runtime::replacement(directory).await?;
+    let replacement = storage::runtime::replacement(directory).await?;
     let mut grants = Vec::new();
     if !delete && directory.join("restore.pending").exists() {
         return Err(Error::conflict(
@@ -1276,6 +1276,10 @@ pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>
         }
         remove(&entry.path()).await?;
     }
+    // A durable retirement receipt must never precede the journal unlinks.
+    // Keep physical ownership through cache invalidation and directory sync.
+    drop(replacement);
+    tokio::fs::File::open(directory).await?.sync_all().await?;
     Ok(grants)
 }
 

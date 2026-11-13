@@ -26,6 +26,7 @@ async function executeSetup(fault = '', {
   throwingMarker = false,
   cancelMarkerFailure = false,
   aptStartupDelayMs = 0,
+  aptEntryDelayMs = 0,
   interruptSignal,
   interruptPhase = 'descendant',
 } = {}) {
@@ -45,6 +46,10 @@ const { constants } = require('node:os')
 const name = basename(process.argv[1])
 const args = process.argv.slice(2)
 const phase = name === 'sudo' ? 'entry' : args.includes('update') ? 'update' : 'install'
+if (phase !== 'entry' && ${aptEntryDelayMs} > 0) {
+  appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'apt-entry', pid: process.pid, uid: process.getuid() }) + '\\n')
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${aptEntryDelayMs})
+}
 appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase, pid: process.pid, uid: process.getuid(), args }) + '\\n')
 if (phase !== 'entry' && ${aptStartupDelayMs} > 0)
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${aptStartupDelayMs})
@@ -123,7 +128,8 @@ if (phase === fault) {
   let liveAtPublicExit
   child.on('exit', () => liveAtPublicExit = liveFixturePids())
   let signalSent = false
-  const signalTimer = interruptSignal
+  const interruptAtAdmission = interruptSignal && interruptPhase === 'apt-start'
+  const signalTimer = interruptSignal && !interruptAtAdmission
     ? setInterval(() => {
         if (!signalSent && readFileSync(history, 'utf8').includes(`"phase":"${interruptPhase}"`)) {
           signalSent = true
@@ -131,7 +137,13 @@ if (phase === fault) {
         }
       }, 10)
     : undefined
-  child.stdout.on('data', bytes => output += bytes)
+  child.stdout.on('data', (bytes) => {
+    output += bytes
+    // The short fallback deadline may expire before APT's fixture script runs.
+    // Its owned group is admitted and supervision stalls at this existing marker.
+    if (interruptAtAdmission && !signalSent && output.includes('phase=update event=apt-start'))
+      signalSent = child.kill(interruptSignal)
+  })
   child.stderr.on('data', bytes => output += bytes)
   if (closeOutput)
     child.stdout.destroy()
@@ -335,8 +347,18 @@ describe('native CI dependency setup', () => {
     expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
   })
 
-  it.each([['SIGINT', 130], ['SIGTERM', 143]])('retains owned cleanup if cancellation metadata fails (%s)', async (interruptSignal, code) => {
-    const result = await executeSetup('stalled-supervision', { interruptSignal, interruptPhase: 'update', cancelMarkerFailure: true })
+  it.each([
+    ['SIGINT', 130, 0],
+    ['SIGTERM', 143, 0],
+    ['SIGINT', 130, 250],
+    ['SIGTERM', 143, 250],
+  ])('retains owned cleanup if cancellation metadata fails (%s, exit %i, APT entry delay %i ms)', async (interruptSignal, code, aptEntryDelayMs) => {
+    const result = await executeSetup('stalled-supervision', {
+      interruptSignal,
+      interruptPhase: 'apt-start',
+      cancelMarkerFailure: true,
+      aptEntryDelayMs,
+    })
     expect(result.status).toBe(code)
     expect(result.signalSent).toBe(true)
     expect(result.harnessKilled).toBe(false)

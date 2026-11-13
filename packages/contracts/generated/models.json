@@ -1373,6 +1373,14 @@
             "null"
           ]
         },
+        "environmentExpirationCause": {
+          "default": null,
+          "pattern": "^(inactivity|node-change|node-revocation|storage-migration)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "environmentExpiredAt": {
           "default": null,
           "format": "int64",
@@ -5210,6 +5218,36 @@
       ],
       "type": "object"
     },
+    "HookRuleTemplate": {
+      "additionalProperties": false,
+      "description": "A rule template a plugin instance offers. Its rules use that instance.",
+      "properties": {
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "instanceName": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "pluginVersion": {
+          "type": "string"
+        },
+        "template": {
+          "$ref": "#/definitions/PluginRuleTemplate"
+        }
+      },
+      "required": [
+        "instanceId",
+        "instanceName",
+        "pluginId",
+        "pluginVersion",
+        "template"
+      ],
+      "type": "object"
+    },
     "HookRuleTrigger": {
       "description": "What a rule listens to.",
       "oneOf": [
@@ -5584,6 +5622,62 @@
         }
       ]
     },
+    "InstallHookRuleTemplateInput": {
+      "additionalProperties": false,
+      "properties": {
+        "creationId": {
+          "description": "A random UUID: retrying returns the same rules.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "description": "The new rules trigger at once unless they start disabled.",
+          "type": "boolean"
+        },
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "description": "Values by parameter name: an agent identifier, `{resourceType, id}`, a list of\nthem, a text, a number or a boolean. Omitted optional parameters take their default.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "template": {
+          "maxLength": 40,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceId",
+        "template",
+        "parameters",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "InstallHookRuleTemplateOutput": {
+      "additionalProperties": false,
+      "description": "Ordinary rules owned by whoever installed the template, with no link to it.",
+      "properties": {
+        "rules": {
+          "items": {
+            "$ref": "#/definitions/HookRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "rules"
+      ],
+      "type": "object"
+    },
     "InstallPluginPackageInput": {
       "additionalProperties": false,
       "properties": {
@@ -5954,6 +6048,35 @@
         "chats",
         "nextOffset",
         "hasMore"
+      ],
+      "type": "object"
+    },
+    "ListHookRuleTemplatesInput": {
+      "additionalProperties": false,
+      "properties": {
+        "instanceId": {
+          "description": "Only the templates of this instance.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ListHookRuleTemplatesOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "templates": {
+          "items": {
+            "$ref": "#/definitions/HookRuleTemplate"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "templates"
       ],
       "type": "object"
     },
@@ -7916,6 +8039,11 @@
     "MoveToNodeInput": {
       "additionalProperties": false,
       "properties": {
+        "discardWorkingFiles": {
+          "default": false,
+          "description": "Confirms that the conversation's working files are lost by the node change.",
+          "type": "boolean"
+        },
         "nodeId": {
           "format": "uuid",
           "type": "string"
@@ -7937,19 +8065,12 @@
           "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
           "format": "uuid",
           "type": "string"
-        },
-        "waitSeconds": {
-          "default": 0,
-          "format": "uint64",
-          "maximum": 3600,
-          "minimum": 0,
-          "type": "integer"
         }
       },
       "required": [
         "runId",
         "nodeId",
-        "waitSeconds"
+        "discardWorkingFiles"
       ],
       "type": "object"
     },
@@ -10256,6 +10377,14 @@
           },
           "type": "array"
         },
+        "ruleTemplates": {
+          "default": [],
+          "description": "Ready-made sets of hook rules people install with their own parameters.",
+          "items": {
+            "$ref": "#/definitions/PluginRuleTemplate"
+          },
+          "type": "array"
+        },
         "runCredentials": {
           "anyOf": [
             {
@@ -11030,6 +11159,79 @@
       "required": [
         "name",
         "description"
+      ],
+      "type": "object"
+    },
+    "PluginRuleTemplate": {
+      "additionalProperties": false,
+      "description": "A set of hook rules. Each rule is a hook rule definition without the instance: its\nplugin trigger and tool calls use the instance it is installed from. Any JSON value\nmay be `{\"$parameter\": name}`, or `{\"$parameter\": name, \"field\": \"id\"}` for the\nidentifiers of a resource parameter.",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parameters": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginRuleTemplateParameter"
+          },
+          "type": "array"
+        },
+        "rules": {
+          "items": true,
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "rules"
+      ],
+      "type": "object"
+    },
+    "PluginRuleTemplateParameter": {
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "description": "For `text`, `number` and `boolean` only."
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "kind": {
+          "pattern": "^(agent|resource|resources|text|number|boolean)$",
+          "type": "string"
+        },
+        "name": {
+          "description": "Referenced by `{\"$parameter\": name}` in the template's rules.",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resourceType": {
+          "description": "A resource type the manifest declares, for `resource` and `resources`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "kind"
       ],
       "type": "object"
     },
@@ -12597,6 +12799,11 @@
     "RevokeNodeInput": {
       "additionalProperties": false,
       "properties": {
+        "discardWorkingFiles": {
+          "default": false,
+          "description": "Confirms that the working files of the node's conversations are lost.",
+          "type": "boolean"
+        },
         "nodeId": {
           "format": "uuid",
           "type": "string"
@@ -12608,7 +12815,8 @@
       },
       "required": [
         "nodeId",
-        "releasePlacements"
+        "releasePlacements",
+        "discardWorkingFiles"
       ],
       "type": "object"
     },
@@ -13570,6 +13778,30 @@
             }
           ],
           "default": null
+        },
+        "environmentExpirationCause": {
+          "default": null,
+          "pattern": "^(inactivity|node-change|node-revocation|storage-migration)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "environmentExpiredAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "environmentState": {
+          "default": null,
+          "pattern": "^(cleaning|expired)$",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "error": {
           "default": null,

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import childProcess, { spawn } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -10,6 +10,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -42,6 +43,7 @@ function fixture(t, mode = 'success', periodicDelayMs = 0) {
     import fs from 'node:fs';
     const mode=${JSON.stringify(mode)};
     const hang=()=>{fs.writeFileSync(${JSON.stringify(path.join(root, 'hanging-uploader'))},JSON.stringify({pid:process.pid,start:fs.readFileSync('/proc/self/stat','utf8').split(') ')[1].split(' ')[19]}));process.on('SIGTERM',()=>{});setInterval(()=>{},1000)};
+    if(mode==='before-admission'){setInterval(()=>{},1000);await new Promise(()=>{})}
     if(mode==='hang'){hang()}
     else if(mode==='failure'){console.error(process.env.ACTIONS_RUNTIME_TOKEN);process.exit(7)}
     else if(mode==='no-receipt'){process.exit(0)}
@@ -127,7 +129,7 @@ function current(pid, read = readFileSync) {
     text = read(`/proc/${pid}/stat`, 'utf8')
   }
   catch (error) {
-    if (error.code === 'ENOENT')
+    if (error.code === 'ENOENT' || error.code === 'ESRCH')
       return undefined
     throw error
   }
@@ -217,9 +219,9 @@ it('reads a complete process identity even when its command contains parentheses
   assert.deepEqual(current(ownedProcess.pid, () => procStat()), activeProcess)
 })
 
-it('accepts only ENOENT as a missing process identity', () => {
+it.each(['ENOENT', 'ESRCH'])('accepts %s as a missing process identity', (code) => {
   assert.equal(current(ownedProcess.pid, () => {
-    throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+    throw Object.assign(new Error('gone'), { code })
   }), undefined)
   for (const code of ['EACCES', 'EPERM', 'EIO']) {
     const error = Object.assign(new Error('unreadable'), { code })
@@ -293,6 +295,24 @@ it('preserves individual fixture outcomes while always running cleanup', async (
 // one-second window even without contention. Exercise both publisher timings.
 it.each([0, 250])('commits source/clock/startup before the real child, checkpoints a never-exiting child, and keeps timeout nonzero (periodic upload delay %i ms)', async (periodicDelayMs, t) => {
   const f = fixture(t, 'success', periodicDelayMs)
+  const publish = f.options.publish
+  let sampledWorkload = false
+  f.options.publish = async (payload, options) => {
+    const result = await publish(payload, options)
+    if (payload.acquisition === 'periodic' && !sampledWorkload) {
+      // Rolling uploads begin before containment startup finishes. Hold the
+      // first return until the real workload is sampled, so later checkpoints
+      // exercise live processes even when all uploads finish quickly.
+      await vi.waitFor(() => {
+        const proof = readProof(path.join(f.output, 'latest.json'))
+        assert.ok(proof.samples.some(sample => sample.processCount >= 2))
+      }, { timeout: 2000, interval: 10 })
+      sampledWorkload = true
+    }
+
+    return result
+  }
+
   const marker = path.join(f.root, 'child.json')
   f.options.args = ['-e', `
     const fs=require('node:fs');
@@ -376,8 +396,8 @@ it('rechecks the API clock after a startup remote commit before launching the wo
   assert.equal(committed(f.sink).at(-1).proof.timedOut, true)
 })
 
-it('bounds each uploader by the actual remaining API budget', async (t) => {
-  const f = fixture(t, 'hang')
+it.each(['hang', 'before-admission'])('bounds each uploader by the actual remaining API budget (%s)', async (mode, t) => {
+  const f = fixture(t, mode)
   f.receipt.clock.startedAt = Date.now() - 28 * 60000 + 120
   f.env.CI_JOB_STARTED_AT = f.receipt.clock.startedAt / 1000
   const publish = artifactPublisher({
@@ -387,11 +407,54 @@ it('bounds each uploader by the actual remaining API budget', async (t) => {
     uploadMs: 5000,
     closeMs: 20,
   })
-  const started = Date.now()
-  await assert.rejects(publish({ clock: f.receipt.clock, acquisition: 'admitted-before-command' }), /failed|unknown/)
-  assert.ok(Date.now() - started < 500)
-  const pid = JSON.parse(readFileSync(path.join(f.root, 'hanging-uploader'), 'utf8'))
-  assert.ok(!isLive({ pid: pid.pid, startTicks: pid.start }))
+  const children = []
+  const realSpawn = childProcess.spawn
+  const spawnObserver = vi.spyOn(childProcess, 'spawn').mockImplementation((command, args, options) => {
+    const child = realSpawn(command, args, options)
+    if (command === process.execPath && args?.[0] === f.uploader) {
+      const observed = { child }
+      children.push(observed)
+      const initial = current(child.pid)
+      if (initial)
+        observed.identity = { pid: initial.pid, startTicks: initial.start }
+    }
+
+    return child
+  })
+  syncBuiltinESMExports()
+  const hasExited = child => child.exitCode !== null || child.signalCode !== null
+
+  await withCleanup(async () => {
+    const started = Date.now()
+    await assert.rejects(publish({ clock: f.receipt.clock, acquisition: 'admitted-before-command' }), /failed|unknown/)
+    assert.ok(Date.now() - started < 500)
+    assert.equal(children.length, 1)
+    const { child, identity } = children[0]
+    assert.ok(Number.isSafeInteger(child.pid) && child.pid > 0, 'Uploader process must be spawned')
+    assert.ok(identity, 'Initial uploader identity must be observed')
+    // A marker or Node exit event may still be absent after OS retirement.
+    // Check the pinned OS identity; unreadable process state remains a failure.
+    assert.ok(!isLive(identity), 'Spawned uploader must not remain live after publication returns')
+    const marker = path.join(f.root, 'hanging-uploader')
+    if (mode === 'before-admission')
+      assert.equal(existsSync(marker), false)
+    if (existsSync(marker)) {
+      const pid = JSON.parse(readFileSync(marker, 'utf8'))
+      assert.equal(pid.pid, child.pid)
+      assert.ok(!isLive({ pid: pid.pid, startTicks: pid.start }))
+    }
+  }, async () => {
+    spawnObserver.mockRestore()
+    syncBuiltinESMExports()
+    for (const { child, identity } of children) {
+      if (identity)
+        signalOwned(identity)
+      else if (!hasExited(child))
+        child.kill('SIGKILL')
+    }
+
+    await vi.waitFor(() => assert.ok(children.every(({ child }) => hasExited(child))), { timeout: 1000, interval: 10 })
+  })
 })
 
 for (const mode of ['hang', 'periodic-hang', 'finished-hang']) {
@@ -405,17 +468,21 @@ for (const mode of ['hang', 'periodic-hang', 'finished-hang']) {
       signal: signal.signal,
       args: mode === 'finished-hang' ? ['-e', 'process.exit(0)'] : f.options.args,
     })
-    const until = Date.now() + 1000
-    const marker = path.join(f.root, 'hanging-uploader')
-    while (!existsSync(marker) && Date.now() < until)
-      await delay(10)
-    assert.ok(existsSync(marker))
-    signal.abort()
-    assert.equal(await result, 130)
-    const pid = JSON.parse(readFileSync(marker, 'utf8'))
-    assert.ok(!isLive({ pid: pid.pid, startTicks: pid.start }))
-    const proof = readProof(path.join(f.output, 'latest.json'))
-    assert.equal(proof.samples.at(-1).processCount, 0)
+    await withCleanup(async () => {
+      const marker = path.join(f.root, 'hanging-uploader')
+      // The final publisher follows the startup upload, containment startup and
+      // command completion; one upload's bound cannot cover that whole path.
+      await vi.waitFor(() => assert.ok(existsSync(marker)), { timeout: 3000, interval: 10 })
+      signal.abort()
+      assert.equal(await result, 130)
+      const pid = JSON.parse(readFileSync(marker, 'utf8'))
+      assert.ok(!isLive({ pid: pid.pid, startTicks: pid.start }))
+      const proof = readProof(path.join(f.output, 'latest.json'))
+      assert.equal(proof.samples.at(-1).processCount, 0)
+    }, async () => {
+      signal.abort()
+      await result
+    })
   })
 }
 

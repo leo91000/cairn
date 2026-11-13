@@ -17,6 +17,7 @@ import { setTimeout } from 'node:timers/promises'
 import { blockDigest } from './block-digest.mjs'
 import { entrypointSmoke } from './runner-entrypoint-smoke.mjs'
 import { attemptOutput, inboxContains } from './runner-probe.mjs'
+import { retirementSmoke } from './runner-retirement-smoke.mjs'
 import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 import { udpSmoke } from './runner-udp-smoke.mjs'
 import { ublkDeviceArguments } from './ublk-devices.mjs'
@@ -56,14 +57,17 @@ async function main() {
     throw new Error(`${label} timed out after ${timeout}ms`)
   }
 
-  async function api(endpoint, method = 'GET', body) {
+  async function api(endpoint, method = 'GET', body, expectedStatus) {
     const response = await fetch(url + endpoint, {
       method,
       headers: { ...headers, 'content-type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(180000),
     })
-    assert.equal(response.ok, true, `${method} ${endpoint}: ${response.status}`)
+    if (expectedStatus === undefined)
+      assert.equal(response.ok, true, `${method} ${endpoint}: ${response.status}`)
+    else
+      assert.equal(response.status, expectedStatus, `${method} ${endpoint}`)
     return response
   }
 
@@ -583,6 +587,7 @@ console.log('probe.done');
           assert.equal(os.cpus().length,${Math.min(originalBudget.limits.cpu, 32)});
           const ceiling=${(originalBudget.limits.memoryMiB - 512) * 1024 ** 2};
           assert.ok(os.totalmem()<=ceiling,'guest leaves controller memory headroom');
+          require('node:fs').writeFileSync(${JSON.stringify(`${cwd}/old-environment`)},'old incarnation');
           console.log('slot.ready');setInterval(()=>{},1000);
         `],
         imports: [{ source: cwd, target: cwd }],
@@ -674,6 +679,15 @@ console.log('probe.done');
     })
     await api('/node-budget', 'POST', originalBudget)
     process.stdout.write(`${JSON.stringify({ mode: 'pool-capacity-cancel-refill', capacity: 5, status: 'passed' })}\n`)
+    await retirementSmoke({
+      root,
+      docker,
+      name,
+      api,
+      until,
+      reconnect,
+      attempt: held[0],
+    })
     await storageSmoke({
       root,
       docker,
