@@ -1238,14 +1238,15 @@ mod tests {
             serde_json::to_vec(&budget).unwrap(),
         )
         .unwrap();
-        // Invalid storage limits make each real background preparation fail
-        // deterministically before formatting a disk or starting a guest.
-        std::fs::write(state.join("storage-policy.json"), br#"{"reserveMiB":0}"#).unwrap();
-
         let pool = Pool::new(state, root.path().into(), CancellationToken::new(), 1)
             .await
             .unwrap();
         pool.initialize(cgroup).await.unwrap();
+        // Fail each real background preparation before formatting or guest boot.
+        // Keep policy valid so the failure reaches the asynchronous retry gate.
+        let environments = pool.state.join("environments");
+        std::fs::remove_dir(&environments).unwrap();
+        std::fs::write(&environments, b"blocked preparation directory").unwrap();
         let mut now = Instant::now();
         for seconds in [10, 20, 40, 80, 160, 3600] {
             pool.maintain_ready(now).await.unwrap();

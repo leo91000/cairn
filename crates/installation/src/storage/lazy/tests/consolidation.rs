@@ -425,7 +425,7 @@ fn consolidation_preserves_the_full_configured_node_reserve() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("disks/owned/lazy");
     let manifest = local_base(&directory, &[None]);
-    let disk = LazyDisk::create(&directory, &manifest, source()).unwrap();
+    let disk = LazyDisk::create(&directory, &manifest).unwrap();
     disk.write_at(0, b"durable").unwrap();
     disk.seal().unwrap();
     let (_, free) = super::super::super::policy::space(&directory).unwrap();
