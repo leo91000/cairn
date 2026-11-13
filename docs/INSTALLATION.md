@@ -11,7 +11,7 @@ single-use code lasts ten minutes and is passed by the launcher through a privat
 environment to `host.py`, never in a download URL. The copied shell command can
 still appear in shell history and sudo audit logs; its code is short-lived and
 single-use. The downloaded script executes only when complete, requires HTTPS,
-and verifies the embedded SHA-256 of `host.py` before installing it. No local password, domain, certificate, incoming port or S3 account
+and verifies the embedded SHA-256 of `host.py` before installing it. No local password, domain, certificate, incoming port
 is needed. The installation connects out using the existing claim and relay.
 
 Use a host with systemd. Install Docker Engine with its Compose plugin, Python 3 and curl first. Enable
@@ -22,16 +22,15 @@ of free disk for runtime images and recovery staging. Conversation disks need
 additional space. It does not install Docker or change virtualization settings.
 
 The root-owned directory `/var/lib/cairn-installation` holds the installation.
-Compose starts the manager, its local runner and Garage with restart policies and
+Compose starts the manager and its local runner with restart policies and
 rotated logs. No service publishes a host port; no container receives the Docker
-socket. Private identity and storage credentials must stay on this host. Do not
+socket. Private identity and agent credentials must stay on this host. Do not
 publish the directory or `docker compose config` output.
 
 The manager's origin, `http://manager:4310`, exists only on that private Compose
-network. At startup the manager records it in the data directory it shares with
-its local runner, which then reads conversation disks from exactly this origin.
-Every other controller keeps the HTTPS rule: remote nodes enroll, connect and
-read disks over HTTPS, HTTP being accepted only on loopback. A node added without
+network, which the manager and local runner use to communicate. Additional
+nodes enroll and connect to the manager over HTTPS; HTTP is accepted only on
+loopback. A node added without
 an address uses that loopback exception: its local gateway carries each connection
 to the manager, directly or through Beacon, encrypted to the manager's pinned node
 certificate, so this installation still publishes no port. See
@@ -45,8 +44,7 @@ connector serves that socket instead and forwards each request over its
 authenticated manager connection. The VM firewall, the published ports and the
 manager's network are unchanged. See [ADR-0035](adr/0035-vm-local-mcp-channel.md).
 
-Reruns retain the chosen immutable Cairn image, identity, Garage keys, storage
-settings and persistent data. Concurrent installers are refused. An incomplete or unsafe identity stops the
+Reruns retain the chosen immutable Cairn image, identity and persistent data. Concurrent installers are refused. An incomplete or unsafe identity stops the
 rerun with recovery instructions and is retained rather than overwritten. The one-use
 claim environment is cleared after success or failure; after startup the manager
 is recreated without it. A refused or expired code leaves Cairn running unclaimed.
@@ -62,44 +60,45 @@ sudo docker compose --project-directory /var/lib/cairn-installation \
 No installation is accessible before claiming. Refresh
 installations in the app after the command finishes.
 
-## Integrated storage and external S3
+## Local conversation disks
 
-Garage 2.3.0 is pinned by digest. Its
-[single-node mode](https://garagehq.deuxfleurs.fr/documentation/quick-start/)
-creates the bucket and credentials automatically, with one small storage process
-and no provisioning client. Data and metadata persist in the installation
-directory. Only this integrated configuration accepts `http://garage:3900` on the
-private Compose network; external storage uses HTTPS. S3 remains mandatory for
-every disk under ADR-0009. Garage has no object versioning; collection deletes
-exact object keys directly. External versioned providers retain the existing
-version and delete-marker cleanup.
+A conversation's working environment stays on its execution node. It has no
+remote copy: restarting on the same node reopens its local disk; changing node,
+including between VM and native execution, requires explicit confirmation and
+starts an empty environment. Losing a node loses its working files. Conversation
+history, uploaded attachments, published artifacts and public artifact links stay
+on the manager and are retained when an environment expires.
 
-In **Settings → Conversation storage**, the owner supplies an external HTTPS
-endpoint, bucket, region and credentials. Use a dedicated private bucket without
-active lifecycle rules or Object Lock, allowing object read/write/delete.
-Validation and a write/read/delete probe run before saving. Credentials stay in
-the private manager configuration and are never returned to the browser.
+Back up the manager data and each node's disks with their services stopped. Push
+commits and save working files before changing nodes. See
+[conversation storage operations](CONVERSATION-STORAGE-OPERATIONS.md) for disk
+capacity, retention and recovery.
 
-Cloudflare R2 uses `auto` as its region. Its
-[S3 interface](https://developers.cloudflare.com/r2/api/s3/api/) cannot report
-public domains, bucket locks or ACLs. For R2 endpoints the owner must confirm in
-the form that `r2.dev` and public custom domains are disabled and bucket locks
-are absent in the Cloudflare dashboard. Lifecycle rules and object access are
-still checked. Other providers retain the existing privacy and Object Lock
-checks. R2 uses its own encryption at rest; Cairn does not send unsupported SSE-S3
-headers or version-list operations.
+New installations have no Garage service and need no bucket or S3 credentials.
+Updating an older installation expires environments that depend on S3, without
+copying their files back. The [migration and release note](migrations/0033-local-conversation-disks.md)
+describe this loss: push commits and
+save files to keep before updating. The update does not erase old
+`data/storage-s3.json`, `garage.env`, `garage.toml`, Garage data, external buckets
+or environment values. Rerunning the installer preserves those files' contents.
+The update supervisor and installer reruns retain any existing Garage service
+and its saved configuration; this also lets a stopped legacy service start again.
+The installer repairs ownership of an existing legacy storage configuration left
+by an interrupted installation. If that installation has no saved `compose.json`,
+restore its previous Compose configuration from backup or recover it with the
+matching legacy installer before rerunning. This also applies when only its old
+image was saved before interruption: the installer refuses to start an unknown
+old image without its storage service. New local installations record their layout
+in the initial configuration, so an interruption before writing Compose remains
+recoverable without legacy storage.
+Once rollback is no
+longer needed, the operator can stop and remove that service and its data,
+credentials and bucket. Do not remove unrelated Docker services or volumes.
 
-The external target becomes the default for new disks. Existing disks keep using
-their original storage and its retained credentials. This does not migrate disk
-data; keep Garage and its directory while disks still use it. Local S3 does not
-protect against losing the machine. Back up the entire installation, including
-Garage, with the services stopped. Never discard volumes containing needed data.
-
-Nonempty `STORAGE_S3_*` overrides remain authoritative;
-remove them before editing the default in the app. For an environment-managed R2
-endpoint, set `STORAGE_S3_PRIVATE_BUCKET_CONFIRMED=true` only after checking in the
-Cloudflare dashboard that public domains and bucket locks are disabled. This
-explicit server confirmation replaces the form confirmation; `false` refuses R2.
+Rollback requires a consistent manager database backup taken by the operator
+before the update and the matching bucket. Automatic updates create no backup;
+starting an older binary alone does not restore lost working files. Only their
+last published generation can be recovered from that backup and bucket.
 
 ## Automatic approved updates
 
@@ -115,7 +114,7 @@ can still update.
 The supervisor pulls and verifies the approved image, then takes the persisted
 deployment lease to pause new work. It stops the manager gracefully to checkpoint
 active conversations, then stops the local runner. It replaces both images
-together, preserving Compose settings, Garage, identity, agent credentials,
+together, preserving Compose settings, identity, agent credentials,
 workspaces and runner state. Compose checks both containers; the manager's health
 must report the downloaded image's runtime identity before the image is committed
 and the lease released.
@@ -131,7 +130,8 @@ Version-11 manager databases support the automatic
 Direct-storage releases continue with the preserving
 [version 13 metadata upgrade](migrations/0013-direct-node-storage.md).
 Retain a consistent database/WAL backup before upgrading; automatic updates create
-no backups. Preserve installation identity, node state and object storage. Other
+no backups. Preserve installation identity and node state; retain legacy object storage
+while a rollback remains possible. Other
 schema transitions require their own documented compatibility path; an unsupported
 version is not an instruction to reinstall or erase data.
 
@@ -163,16 +163,17 @@ sudo docker compose --project-directory /var/lib/cairn-installation \
 
 For a disposable test, build the current binaries and web output, then run
 `bash tests/installation-installer-container.sh`. It uses the real beacon
-service, manager, Postgres and Garage. All Docker lifecycle commands (pull,
+service, manager and Postgres. All Docker lifecycle commands (pull,
 startup, recreation and container health execution) are simulated by an adapter
 that starts the manager binary as a fixture process. The generated configuration
 is independently parsed by real `docker compose config`, including healthchecks,
 claim substitution, dependencies and uid 1000. Loopback HTTP download transport
 is adapted only in the fixture; the production script requires HTTPS. Inert
 devices and command adapters exercise prerequisite and checksum failures.
-Claim, relay, deployment leases, runtime health and S3 write/read/delete checks are real. The fixture also verifies an approved update and repair/retry of a wrong-runtime candidate, preserving relay identity and S3 configuration. A disk published to Garage
-continues publishing, reading remotely and purging there after relayed settings
-select external HTTPS S3. No VM boots; this is not runtime/KVM coverage. Containers, network and data are cleaned up on exit.
+Claim, relay, deployment leases and runtime health checks are real. The fixture
+also verifies an approved update and repair/retry of a wrong-runtime candidate,
+preserving relay identity. No VM boots; this is not runtime/KVM coverage.
+Containers, network and data are cleaned up on exit.
 `CAIRN_BEACON_TEST_DATABASE_URL=… python3 tests/installation_update_containers.py`
 also replaces real manager and readiness-runner containers using locally built
 fixture images, including interrupted recovery with `restart: unless-stopped`.

@@ -8,7 +8,7 @@ Creating an authorized stable release tag starts production preparation and
 deployment automatically. Routine releases require no additional approval click;
 failed recovery preparation or validation prevents deployment.
 
-For the beacon installation flow (one machine, integrated S3, no
+For the beacon installation flow (one machine, local conversation disks, no
 incoming ports), see [One-command installation](INSTALLATION.md).
 
 ## Additional execution nodes
@@ -39,7 +39,7 @@ manager’s usual node installer through that origin
   command is its SHA-256 pin, so neither Beacon nor anyone on the way can
   impersonate the manager.
 
-Requests keep their enrollment code, node token or disk grant, checked by the
+Requests keep their enrollment code or node token, checked by the
 manager; only node routes are served to these connections. Firecracker
 containers reach the gateway through its socket under
 `/var/lib/cairn-gateway/socket`. The installation and Beacon must both support
@@ -87,8 +87,9 @@ the host. Without an address argument, a usable configured manager origin is
 the default, including for unclaimed installations; a Docker-only
 origin requires the explicit address. The address is saved in the node’s
 protected identity and supervisor configuration. The node uses this
-authenticated connection address for disk preparation and restoration, even if
-the manager’s internal origin is loopback. The manager’s optional `PUBLIC_URL`
+authenticated connection for enrollment, execution control and agent MCP
+requests. Conversation working disks stay on the node; the manager does not
+transfer or restore them. The manager’s optional `PUBLIC_URL`
 provides the default for enrollment and manager-local calls; it need
 not be the browser’s origin. Installers require `CAIRN_NODE_IMAGE` to pin the
 manager’s approved image digest. Without it, use the matching `cairn node-enroll`
@@ -98,8 +99,8 @@ configuration together while its service is stopped; no credential is displayed
 by the app.
 
 The node channel accepts the Host preserved by a private TLS proxy independently
-of `PUBLIC_URL`. Enrollment still needs its single-use code; node traffic and
-disk reads still require their own bearer credentials and grants. Browser Origin
+of `PUBLIC_URL`. Enrollment still needs its single-use code; node traffic
+still requires its bearer credentials. Browser Origin
 checks remain active, and other routes retain their Host checks. The proxy must
 serve only the node channel, not an installation browser interface.
 
@@ -379,7 +380,7 @@ Other Codex and MCP requests retain
 their 20-second deadline. Closing the session or canceling the conversation
 interrupts this wait immediately. Slow and failed RPC calls log the method,
 elapsed time and deadline, without request parameters or response contents.
-This does not change disk validation, synchronization or VM suspension deadlines.
+This does not change disk validation or VM suspension deadlines.
 
 ### Local Intel qualification
 

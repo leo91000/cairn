@@ -33,11 +33,11 @@ one-second query timeout; HTTP probes read the cached result without querying
 Postgres. Database loss is reported within six seconds, and recovery at the next
 successful sample. It is unavailable until the first sample succeeds.
 
-Reserve capacity for Coolify/Traefik, the beacon process, Postgres and Garage
+Reserve capacity for Coolify/Traefik, the beacon process and Postgres
 before assigning VM budgets. The beacon Compose caps each of beacon and
 Postgres at 1 GiB and one CPU. These are initial limits, not measured production
 capacity guarantees. The installer currently caps its manager at 4 GiB and its
-runner at 20 GiB; Garage, Docker caches, guest disks and host services also use
+runner at 20 GiB; Docker caches, guest disks and host services also use
 resources. Those defaults can exceed a small server's RAM. Before starting agent
 work, adjust `/var/lib/cairn-installation/compose.json` budgets and installation
 node capacity to the actual spare memory/CPU; keep that reserve when increasing
@@ -354,9 +354,12 @@ readiness verification and are independent of the removed backup encryption key.
 
 Sign in at `https://cairn.build`, choose **Add an installation**, then run its
 complete one-command installer on this same host within ten minutes. It creates
-`/var/lib/cairn-installation` with fresh manager, runner and Garage data and starts
+`/var/lib/cairn-installation` with fresh manager and runner data and starts
 `cairn-installation-update.timer`. No installation service publishes a host port;
-manager/runner/Garage communicate over their private Compose network.
+the manager and runner communicate over their private Compose network.
+Conversation working disks remain local to their execution node. See
+[local conversation disks](INSTALLATION.md#local-conversation-disks) before
+upgrading an older installation that used S3.
 
 The host **and its containers** must resolve and reach `https://cairn.build:443`
 via the server's public address and TLS proxy, even though beacon is on the
