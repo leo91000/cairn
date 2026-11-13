@@ -80,6 +80,11 @@ impl LazyDisk {
         *self.consolidation_hook.lock().unwrap() = Some(hook);
     }
 
+    #[cfg(test)]
+    pub(crate) fn on_consolidation_block_admitted(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.consolidation_admission_hook.lock().unwrap() = Some(hook);
+    }
+
     /// Fold every sealed generation into a new local base, then retire its
     /// journal segments and the block files no base references. Each block
     /// file and its directory are durable before the base names it. A crash
@@ -113,7 +118,6 @@ impl LazyDisk {
             Self::identity(&self.directory),
             "reconstruct_blocks",
         );
-        let reserve = self.consolidation_reserve()?;
         let (base, manifest) = {
             let _publication = self.publication.read().map_err(failure)?;
             let base = self.base.lock().map_err(failure)?.clone();
@@ -125,7 +129,7 @@ impl LazyDisk {
                 .into_iter()
                 .collect();
             let manifest = self.rebuild(generation, &base, changed, |hash, bytes| {
-                self.persist_block(hash, bytes, reserve)
+                self.persist_block(hash, bytes, true)
             })?;
             (base, manifest)
         };
@@ -304,7 +308,7 @@ impl LazyDisk {
         };
         // Persisting reconstructed blocks is optional for a remote publication.
         let manifest = self.rebuild(generation, &manifest, changed, |hash, bytes| {
-            let _ = self.persist_block(hash, bytes, None);
+            let _ = self.persist_block(hash, bytes, false);
             Ok(())
         })?;
         self.db

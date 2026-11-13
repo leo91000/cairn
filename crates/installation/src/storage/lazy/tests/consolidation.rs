@@ -466,3 +466,44 @@ fn consolidation_preserves_the_full_configured_node_reserve() {
     assert_eq!(read(&disk, 0, 7), b"durable");
     assert!(base_hashes(&disk).is_empty());
 }
+
+#[test]
+fn consolidation_rechecks_a_reserve_increase_before_admitting_the_next_block() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("disks/owned/lazy");
+    let manifest = local_base(&directory, &[None, None]);
+    let disk = LazyDisk::create(&directory, &manifest, source()).unwrap();
+    disk.write_at(0, b"first").unwrap();
+    disk.write_at(BLOCK, b"second").unwrap();
+    let generation = disk.seal().unwrap();
+    let low = super::super::super::policy::Policy {
+        reserve_mi_b: 64,
+        reserve_percent: 1,
+        ..Default::default()
+    };
+    let policy_path = root.path().join("storage-policy.json");
+    std::fs::write(&policy_path, serde_json::to_vec(&low).unwrap()).unwrap();
+    let (_, free) = super::super::super::policy::space(&directory).unwrap();
+    let raised_path = policy_path.clone();
+    disk.on_consolidation_block_admitted(Box::new(move || {
+        let raised = super::super::super::policy::Policy {
+            reserve_mi_b: free.div_ceil(1024 * 1024) * 2,
+            reserve_percent: 1,
+            ..Default::default()
+        };
+        std::fs::write(raised_path, serde_json::to_vec(&raised).unwrap()).unwrap();
+    }));
+    assert_eq!(
+        disk.consolidate().unwrap_err().kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert_eq!(block_files(&directory).len(), 1);
+    assert!(disk.sealed_pending());
+    assert!(base_hashes(&disk).is_empty());
+    assert_eq!(read(&disk, 0, 5), b"first");
+    assert_eq!(read(&disk, BLOCK, 6), b"second");
+
+    std::fs::write(policy_path, serde_json::to_vec(&low).unwrap()).unwrap();
+    assert_eq!(disk.consolidate().unwrap(), Some(generation));
+    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0);
+}

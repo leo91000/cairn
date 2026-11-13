@@ -50,6 +50,8 @@ pub struct LazyDisk {
     background: tokio::sync::Mutex<()>,
     #[cfg(test)]
     consolidation_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    consolidation_admission_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     consolidation_stop: tokio_util::sync::CancellationToken,
     sealed_pending: AtomicBool,
     journal_bytes: AtomicU64,
@@ -293,6 +295,8 @@ impl LazyDisk {
             background: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             consolidation_hook: Mutex::new(None),
+            #[cfg(test)]
+            consolidation_admission_hook: Mutex::new(None),
             consolidation_stop: tokio_util::sync::CancellationToken::new(),
             sealed_pending: AtomicBool::new(sealed_pending),
             journal_bytes: AtomicU64::new(journal_bytes),
@@ -425,14 +429,18 @@ impl LazyDisk {
     /// Write one base block durably. Its file is complete and synced before
     /// its name appears; the caller syncs the directory before a base names it.
     /// Zero pages stay holes, so a sparse block does not allocate its full size.
-    fn persist_block(&self, hash: &str, bytes: &[u8], reserve: Option<u64>) -> io::Result<()> {
+    fn persist_block(&self, hash: &str, bytes: &[u8], consolidating: bool) -> io::Result<()> {
         use std::os::unix::fs::FileExt;
         if self.stored_block(hash, bytes.len()).is_ok() {
             File::open(self.directory.join("cache").join(hash))?.sync_all()?;
             return Ok(());
         }
         let directory = self.directory.join("cache");
-        let _headroom = self.admit_block(bytes.len() as u64, reserve)?;
+        let _headroom = if consolidating {
+            self.admit_block(bytes.len() as u64)?
+        } else {
+            None
+        };
         std::fs::create_dir_all(&directory)?;
         File::open(&self.directory)?.sync_all()?;
         let file = tempfile::Builder::new()
@@ -472,13 +480,19 @@ impl LazyDisk {
     fn admit_block(
         &self,
         bytes: u64,
-        reserve: Option<u64>,
     ) -> io::Result<Option<super::cache::WriteReservation<'static>>> {
-        let (Some(state), Some(reserve)) = (self.node_state(), reserve) else {
+        let Some(state) = self.node_state() else {
             return Ok(None);
         };
         let admission = super::cache::admission()?;
+        // A policy change applies to every new block admission, including
+        // changes made while an earlier block was being reconstructed.
+        let policy = std::fs::read(state.join("storage-policy.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<super::policy::Policy>(&bytes).ok())
+            .unwrap_or_default();
         let (total, free) = super::policy::space(&self.directory)?;
+        let reserve = policy.reserve(total);
         let (_, quota_free) = crate::microvm::budget::disk_space(&self.directory, total, u64::MAX)?;
         let quota_required = reserve
             .saturating_add(super::cache::pending_write_bytes())
@@ -491,20 +505,18 @@ impl LazyDisk {
         }
         let reservation = super::cache::reserve_write(&admission, bytes)?;
         crate::microvm::budget::charge_disk(state, bytes.div_ceil(4096) * 4096)?;
+        #[cfg(test)]
+        {
+            let hook = self
+                .consolidation_admission_hook
+                .lock()
+                .map_err(failure)?
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         Ok(Some(reservation))
-    }
-
-    /// The node reserve applied to consolidation, absent for standalone disks.
-    fn consolidation_reserve(&self) -> io::Result<Option<u64>> {
-        let Some(state) = self.node_state() else {
-            return Ok(None);
-        };
-        let policy = std::fs::read(state.join("storage-policy.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<super::policy::Policy>(&bytes).ok())
-            .unwrap_or_default();
-        let (total, _) = super::policy::space(&self.directory)?;
-        Ok(Some(policy.reserve(total)))
     }
 }
 
