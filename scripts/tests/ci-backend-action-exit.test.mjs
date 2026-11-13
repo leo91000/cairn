@@ -20,6 +20,7 @@ import { it, onTestFinished } from 'vitest'
 
 const durable = fileURLToPath(new URL('../ci-backend-durable.mjs', import.meta.url))
 const foreground = fileURLToPath(new URL('../ci-backend-trace.mjs', import.meta.url))
+const admission = fileURLToPath(new URL('./fixtures/admitted-uploader.mjs', import.meta.url))
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 
 function identity(pid) {
@@ -28,6 +29,42 @@ function identity(pid) {
     return { start: fields[19], state: fields[0] }
   }
   catch { return undefined }
+}
+
+async function cleanupUploaders(root, bodyFailure) {
+  // A fixture can fail before the publisher accepts a warmed child. Retain
+  // its registered PID/start identity and settle only this action's helpers
+  // even when the foreground process is killed at the outer assertion bound.
+  const helpers = readdirSync(path.join(root, 'publication')).filter(name => name.endsWith('.pid')).map(name => JSON.parse(readFileSync(path.join(root, 'publication', name), 'utf8')))
+  const live = (helper) => {
+    const current = identity(helper.pid)
+    return current?.start === helper.start && current.state !== 'Z'
+  }
+
+  const survivors = helpers.filter(live)
+  for (const helper of survivors) {
+    if (live(helper)) {
+      try {
+        process.kill(helper.pid, 'SIGKILL')
+      }
+      catch (error) {
+        if (error.code !== 'ESRCH')
+          throw error
+      }
+    }
+  }
+
+  if (survivors.length) {
+    await delay(50)
+    try {
+      assert.ok(survivors.every(helper => !live(helper)), 'registered uploader survived fixture cleanup')
+    }
+    catch (error) {
+      if (bodyFailure)
+        throw new AggregateError([bodyFailure, error], 'Foreground assertion and uploader cleanup failed')
+      throw error
+    }
+  }
 }
 
 async function action(t, {
@@ -46,6 +83,7 @@ async function action(t, {
   publicationDelayMs = 0,
   numericRetirementControl = false,
   receiptMode = 'complete',
+  uploaderStartupDelayMs = 0,
   cancel,
 } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-action-exit-'))
@@ -63,6 +101,10 @@ async function action(t, {
   const uploader = path.join(root, 'uploader.mjs')
   writeFileSync(uploader, `
     import fs from 'node:fs';
+    if(${uploaderStartupDelayMs})await new Promise(resolve=>setTimeout(resolve,${uploaderStartupDelayMs}));
+    fs.writeSync(3,'ready\\n');fs.closeSync(3);
+    const admitted=await new Promise(resolve=>{let text='';process.stdin.on('data',bytes=>text+=bytes);process.stdin.on('end',()=>resolve(JSON.parse(text)))});
+    Object.assign(process.env,admitted);
     const p=JSON.parse(fs.readFileSync(process.env.INPUT_PATH));
     const owned={pid:process.pid,start:fs.readFileSync('/proc/self/stat','utf8').split(') ')[1].split(' ')[19]};
     fs.writeFileSync(${JSON.stringify(path.join(root, 'publication'))}+'/'+process.env.INPUT_NAME+'.pid',JSON.stringify(owned));
@@ -93,6 +135,7 @@ async function action(t, {
     import fs from 'node:fs';
     import {artifactPublisher,runBackendAction} from ${JSON.stringify(durable)};
     import {foregroundAction} from ${JSON.stringify(foreground)};
+    import {admittedUploader} from ${JSON.stringify(admission)};
     void foregroundAction(async()=>{
       process.on('SIGXFSZ',()=>{});
       // Deliberately fill the advisory public pipes as well as exercising the
@@ -109,9 +152,14 @@ async function action(t, {
       const startedAt=Date.now()-28*60000+${timeout ? 600 : 60000};
       const env={PATH:process.env.PATH,HOME:${JSON.stringify(root)},GITHUB_RUN_ATTEMPT:'1',CI_JOB_STARTED_AT:startedAt/1000,ACTIONS_RUNTIME_TOKEN:'synthetic-private-token'};
       const publishArtifact=artifactPublisher({uploader:${JSON.stringify(uploader)},directory:${JSON.stringify(path.join(root, 'publication'))},env,uploadMs:300,closeMs:50});
+      let admissions=0;
+      const admittedPublish=admittedUploader(publishArtifact,{uploader:${JSON.stringify(uploader)},env,deadline:Date.now()+2500,onSpawn:child=>{
+        const fields=fs.readFileSync('/proc/'+child.pid+'/stat','utf8').split(') ')[1].split(' ');
+        fs.writeFileSync(${JSON.stringify(path.join(root, 'publication'))}+'/admission-'+(++admissions)+'.pid',JSON.stringify({pid:child.pid,start:fields[19]}));
+      }});
       const publish=async(...args)=>{
         if(${publicationDelayMs})await new Promise(resolve=>setTimeout(resolve,${publicationDelayMs}));
-        return publishArtifact(...args);
+        return admittedPublish(...args);
       };
       const checkpointDelivery={armed:false,delivered:false,cancelled:false};
       if(${checkpointDuringCleanup}){
@@ -164,6 +212,7 @@ async function action(t, {
   }))
   const closed = new Promise(resolve => child.once('close', resolve))
   let slow
+  let bodyFailure
   if (mode === 'closed') {
     child.stdout.destroy()
     child.stderr.destroy()
@@ -230,6 +279,10 @@ async function action(t, {
       elapsed: Date.now() - started,
     }
   }
+  catch (error) {
+    bodyFailure = error
+    throw error
+  }
   finally {
     clearInterval(slow)
     if (!exit && identity(child.pid)?.start === pinned?.start)
@@ -237,6 +290,7 @@ async function action(t, {
     child.stdout.destroy()
     child.stderr.destroy()
     await closed
+    await cleanupUploaders(root, bodyFailure)
   }
 }
 
@@ -251,7 +305,7 @@ for (const mode of ['unread', 'stopped', 'slow', 'closed']) {
             volume,
             code,
           })
-          assert.equal(result.code, code)
+          assert.equal(result.code, code, JSON.stringify(result.returned))
           const expected = Buffer.alloc(volume, 'x')
           assert.deepEqual(result.trace, expected)
           assert.equal(result.returned.guardReturn.code, code)
@@ -269,6 +323,19 @@ for (const mode of ['unread', 'stopped', 'slow', 'closed']) {
     }
   }
 }
+
+it('admits a slow-starting synthetic uploader before its unchanged publication clock', async (t) => {
+  // This exceeds the real publisher's 300 ms fixture budget. Startup is not
+  // publication; the protocol still runs with that budget and the same outer
+  // autonomous-exit bound, while the real expiry control below stays non-green.
+  const result = await action(t, { volume: 1048576, uploaderStartupDelayMs: 350 })
+  assert.equal(result.code, 7, JSON.stringify(result.returned))
+  assert.equal(result.returned.guardReturn.code, 7)
+  assert.equal(result.returned.trace.complete, true)
+  assert.equal(result.returned.finalPublicationReturned, true)
+  assert.equal(result.returned.publisherClosureVerified, true)
+  assert.deepEqual(result.trace, Buffer.alloc(1048576, 'x'))
+})
 
 it('preserves the full ten-megabyte failure trace with unread public pipes', async (t) => {
   const result = await action(t, { volume: 10000000 })
