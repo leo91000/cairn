@@ -116,7 +116,6 @@ impl<'a> Request<'a> {
             || !matches!(self.access["backend"].as_str(), Some("auto") | None)
                 && self.access["backend"] != backend
             || native && node["capabilities"]["ublk"] != true
-            || native && super::vm_disk(self.checkpoint) && node["capabilities"]["vmDisks"] != true
         {
             return false;
         }
@@ -1085,7 +1084,7 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
     let Some(attempt) = checkpoint["runnerId"].as_str() else {
         return Ok(());
     };
-    let lease_ms = super::publication::lease_ms(s).await?;
+    let lease_ms = super::settings::lease_ms(s).await?;
     let owned = attempt.to_owned();
     let run_id = run_id.to_owned();
     s.store

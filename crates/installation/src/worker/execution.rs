@@ -1928,66 +1928,8 @@ mod tests {
             checkpoint.persist().await.unwrap();
             release(&service, &checkpoint, None, fenced).await.unwrap();
             let current = service.store.run(&run).await.unwrap();
-            assert!(
-                !crate::nodes::publication::requested(&current),
-                "{backend}/{status}/fenced={fenced}: {current}",
-            );
             assert!(current["backup"].is_null());
         }
-        service.shutdown.cancel();
-    }
-
-    #[tokio::test]
-    async fn completed_turn_releases_admission_while_publication_is_busy() {
-        let root = tempfile::tempdir().unwrap();
-        let service = Service::new(crate::config::Config {
-            data_dir: root.path().join("data"),
-            home: root.path().join("home"),
-            workspace_roots: vec![root.path().into()],
-            public_url: "http://localhost:4310".into(),
-            host: "127.0.0.1".into(),
-            port: 0,
-            codex_bin: "codex".into(),
-            claude_bin: "claude".into(),
-            opencode_bin: "opencode".into(),
-            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
-            concurrency: 1,
-            logger: false,
-            worker_enabled: false,
-            runner_url: String::new(),
-        })
-        .await
-        .unwrap();
-        let run = crate::config::id();
-        service.store.transaction({
-            let run = run.clone();
-            move |db| {
-                let record = json!({ "id": run, "taskId": run, "status": "succeeded", "isolated": true });
-                db.add_run_fixture(&record, None)?;
-                Ok(())
-            }
-        }).await.unwrap();
-        let checkpoint = Checkpoint::new(service.store.clone(), run.clone(), RunCheckpoint::from_value(json!({
-            "prepared": { "backend": "firecracker", "isolated": true }, "runnerId": crate::config::id(),
-        })).unwrap());
-        // A real publication holds this operation across capture, every S3 PUT,
-        // manifest verification and the node's acknowledgement.
-        let publication = service.node_backup_operation.lock(&run).await;
-        // This is a deadlock watchdog, not a storage-latency SLA: the publication
-        // guard stays held until after release and all durable-demand assertions.
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            release(&service, &checkpoint, None, true),
-        )
-        .await
-        .expect("A completed turn must release its scheduler slot before S3 acknowledgement")
-        .unwrap();
-        let current = service.store.run(&run).await.unwrap();
-        assert!(current["backup"].is_null());
-        // Repeated completion never creates obsolete publication demand.
-        release(&service, &checkpoint, None, true).await.unwrap();
-        assert!(service.store.run(&run).await.unwrap()["backup"].is_null());
-        drop(publication);
         service.shutdown.cancel();
     }
 }

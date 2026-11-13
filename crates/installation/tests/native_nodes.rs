@@ -833,14 +833,6 @@ async fn automatic_placement_uses_agent_priorities_and_falls_back_without_conver
                 .update_run_boundary_fixture(text(&saved, "id"), json!({ "nodeId": vm_id }))
                 .await
                 .unwrap();
-            let grant = cairn_installation::nodes::disk_grants::new_disk(&f.service, &saved, vm_id)
-                .await
-                .unwrap();
-            assert!(
-                cairn_installation::nodes::disk_grants::authorize(&f.service, &grant)
-                    .await
-                    .is_ok()
-            );
         }
         placement::release(&f.service, &attempt).await.unwrap();
 
@@ -4076,7 +4068,7 @@ async fn native_mode_confirmation_covers_incoming_moves_and_reservations() {
 
 #[tokio::test]
 async fn native_mode_transition_and_unavailability_keep_the_environment_on_its_source() {
-    use cairn_installation::nodes::{moves, snapshots};
+    use cairn_installation::nodes::moves;
 
     let f = Fixture::new().await;
     let source = text(&f.node, "id");
@@ -4093,12 +4085,10 @@ async fn native_mode_transition_and_unavailability_keep_the_environment_on_its_s
         .unwrap();
     let mut run = f.run();
     let run_id = text(&run, "id").to_owned();
-    let point = id();
     run["nodeId"] = source.into();
     run["snapshot"]["agent"] = agent;
     run["nativeAuthorityNodes"] = json!([source, destination]);
     run["resources"] = json!({ "cpu": 1, "memoryMiB": 128, "diskMiB": 128 });
-    run["backup"] = json!({ "id": point });
     common::add_run(&f.service.store, &run).await;
     common::set_checkpoint(
         &f.service.store,
@@ -4108,28 +4098,6 @@ async fn native_mode_transition_and_unavailability_keep_the_environment_on_its_s
         }),
     )
     .await;
-    let manifest = json!({
-        "version": 1, "size": snapshots::BLOCK, "blockSize": snapshots::BLOCK,
-        "blocks": [{ "offset": 0, "size": snapshots::BLOCK, "hash": null }],
-        "runtime": { "runtimeId": "development", "backend": "native" },
-    });
-    f.service
-        .store
-        .put(
-            "node-backups",
-            json!({
-                "id": point, "runId": run_id, "destination": "s3", "blockFormat": "shared-v1", "sessionId": "saved-session",
-                "manifest": f.service.vault.encrypt(&format!("backup:{point}"), &manifest).unwrap(),
-            }),
-        )
-        .await
-        .unwrap();
-    assert!(
-        cairn_installation::nodes::publication::latest(&f.service, &run_id)
-            .await
-            .unwrap()
-            .is_some()
-    );
     let mut node = f.node.clone();
     let generation = id();
     node["capabilities"]["nativeModeProtocol"] = 1.into();

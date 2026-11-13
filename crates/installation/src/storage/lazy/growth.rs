@@ -60,14 +60,6 @@ impl LazyDisk {
 mod tests {
     use super::super::*;
 
-    struct Empty;
-
-    impl BlockSource for Empty {
-        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-            panic!("A local disk never fetches remote blocks")
-        }
-    }
-
     fn manifest() -> Value {
         serde_json::json!({
             "version": 1, "size": BLOCK, "blockSize": BLOCK,
@@ -78,7 +70,7 @@ mod tests {
     #[test]
     fn growth_preserves_writes_and_zero_tail_across_reopen_without_materialization() {
         let root = tempfile::tempdir().unwrap();
-        let disk = LazyDisk::create(root.path(), &manifest(), Arc::new(Empty)).unwrap();
+        let disk = LazyDisk::create(root.path(), &manifest()).unwrap();
         disk.write_at(0, b"retained").unwrap();
         disk.grow(2 * BLOCK).unwrap();
         assert_eq!(disk.size(), 2 * BLOCK);
@@ -88,7 +80,7 @@ mod tests {
         disk.write_at(BLOCK, b"new-tail").unwrap();
         drop(disk);
 
-        let disk = LazyDisk::open(root.path(), Arc::new(Empty)).unwrap();
+        let disk = LazyDisk::open(root.path()).unwrap();
         assert_eq!(disk.size(), 2 * BLOCK);
         for (offset, expected) in [(0, b"retained"), (BLOCK, b"new-tail")] {
             let mut bytes = [0; 8];
@@ -96,7 +88,8 @@ mod tests {
             assert_eq!(&bytes, expected);
         }
         let generation = disk.seal().unwrap();
-        let captured = disk.capture(generation).unwrap();
+        assert_eq!(disk.consolidate().unwrap(), Some(generation));
+        let captured = disk.base.lock().unwrap().as_ref().clone();
         assert_eq!(captured["size"], 2 * BLOCK);
         assert_eq!(captured["blocks"].as_array().unwrap().len(), 2);
     }
@@ -105,7 +98,7 @@ mod tests {
     fn committed_growth_survives_process_death_before_kernel_resize() {
         use std::io::BufRead;
         let root = tempfile::tempdir().unwrap();
-        let disk = LazyDisk::create(root.path(), &manifest(), Arc::new(Empty)).unwrap();
+        let disk = LazyDisk::create(root.path(), &manifest()).unwrap();
         disk.write_at(0, b"retained").unwrap();
         disk.sync().unwrap();
         drop(disk);
@@ -122,7 +115,7 @@ mod tests {
         let _ = child.kill();
         child.wait().unwrap();
         assert!(reached);
-        let disk = LazyDisk::open(root.path(), Arc::new(Empty)).unwrap();
+        let disk = LazyDisk::open(root.path()).unwrap();
         assert_eq!(disk.size(), 2 * BLOCK);
         let mut bytes = [0; 8];
         disk.read_at(0, &mut bytes).unwrap();
@@ -139,7 +132,7 @@ mod tests {
         if std::env::var("CAIRN_JOURNAL_CRASH_PHASE").as_deref() != Ok("growth_committed") {
             return;
         }
-        LazyDisk::open(Path::new(&root), Arc::new(Empty))
+        LazyDisk::open(Path::new(&root))
             .unwrap()
             .grow(2 * BLOCK)
             .unwrap();
@@ -148,7 +141,7 @@ mod tests {
     #[test]
     fn growth_waits_for_consolidation_and_never_shrinks_or_changes_layout() {
         let root = tempfile::tempdir().unwrap();
-        let disk = LazyDisk::create(root.path(), &manifest(), Arc::new(Empty)).unwrap();
+        let disk = LazyDisk::create(root.path(), &manifest()).unwrap();
         disk.write_at(0, b"retained").unwrap();
         let generation = disk.seal().unwrap();
         assert_eq!(
@@ -166,7 +159,7 @@ mod tests {
     #[test]
     fn consolidated_disk_grows_and_consolidates_without_any_remote_base() {
         let root = tempfile::tempdir().unwrap();
-        let disk = LazyDisk::create(root.path(), &manifest(), Arc::new(Empty)).unwrap();
+        let disk = LazyDisk::create(root.path(), &manifest()).unwrap();
         disk.write_at(0, b"base").unwrap();
         let first = disk.seal().unwrap();
         assert_eq!(disk.consolidate().unwrap(), Some(first));
@@ -177,7 +170,7 @@ mod tests {
         assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0);
         drop(disk);
 
-        let disk = LazyDisk::open(root.path(), Arc::new(Empty)).unwrap();
+        let disk = LazyDisk::open(root.path()).unwrap();
         assert_eq!(disk.size(), 3 * BLOCK);
         let base = disk.base.lock().unwrap().clone();
         assert_eq!(base["blocks"].as_array().unwrap().len(), 3);

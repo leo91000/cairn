@@ -85,7 +85,10 @@ pub struct NodeCapabilities {
     pub kvm: bool,
     #[serde(default)]
     pub ublk: bool,
-    #[serde(default)]
+    /// Accepted from older supervisors during their update; no longer a capability.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
     pub vm_disks: bool,
     #[serde(default)]
     pub native_mode_protocol: u32,
@@ -430,9 +433,7 @@ pub struct NodeDiskAccounting {
     #[ts(type = "number")]
     pub pool_reserve_bytes: u64,
     #[ts(type = "number")]
-    pub reclaimable_bytes: u64,
-    #[ts(type = "number")]
-    pub unsynchronized_bytes: u64,
+    pub unconsolidated_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

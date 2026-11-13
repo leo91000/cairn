@@ -18,5 +18,5 @@ dependency ownership, manifests/read paths or the guest/journal durability model
 
 Read/write timings and encoded/plaintext byte counters accompany the change.
 The reproducible reference measures both the codec and isolated S3/LazyDisk paths
-against the previous raw format. See [storage compression](../STORAGE-COMPRESSION.md)
+against the previous raw format. See [the superseding local-disk decision](0083-local-conversation-disks-without-s3.md)
 for the envelope and measurement details.

@@ -34,6 +34,6 @@ This benchmark uses a local host filesystem, with no ublk mount or WAN. Its ZIP
 `syncfs` can include unrelated host writeback; it does not establish a production
 startup speedup. `POSIX_FADV_DONTNEED` is a cold-read hint, not proof of a cold
 physical device. The block write is a disposable journal I/O probe, not a complete
-application filesystem transaction. Real mounting, workload isolation, S3,
-restoration and frozen-workload shutdown are qualified separately by the
+application filesystem transaction. Real mounting, workload isolation, local
+restart and frozen-workload shutdown are qualified separately by the
 disposable native-runtime CI fixture.

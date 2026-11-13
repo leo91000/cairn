@@ -1303,15 +1303,6 @@
           "default": "",
           "type": "string"
         },
-        "backup": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
-          ],
-          "x-kotlin-type": "NodeBackup"
-        },
         "cancelRequestedAt": {
           "default": null,
           "format": "int64",

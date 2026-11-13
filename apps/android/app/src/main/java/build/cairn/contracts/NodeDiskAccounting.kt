@@ -11,8 +11,7 @@ data class NodeDiskAccounting(
     val hostReserveBytes: Long,
     val localBytes: Long,
     val poolReserveBytes: Long,
-    val reclaimableBytes: Long,
-    val unsynchronizedBytes: Long,
+    val unconsolidatedBytes: Long,
     val unusedGrantedBytes: Long,
 ) {
     init {
@@ -20,8 +19,7 @@ data class NodeDiskAccounting(
         require(hostReserveBytes >= 0L)
         require(localBytes >= 0L)
         require(poolReserveBytes >= 0L)
-        require(reclaimableBytes >= 0L)
-        require(unsynchronizedBytes >= 0L)
+        require(unconsolidatedBytes >= 0L)
         require(unusedGrantedBytes >= 0L)
     }
 }

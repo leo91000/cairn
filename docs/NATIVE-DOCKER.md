@@ -97,10 +97,10 @@ each new turn, after its current policy is checked. No daemon runs between turns
 Images, BuildKit cache, named volumes and stopped container metadata reside in
 `/docker` on the conversation's journal-backed ext4 disk. Runtime sockets, PIDs,
 network namespaces and processes are ephemeral. They never travel in checkpoints.
-Live publication is crash consistent; completed turns fence all processes and
+Local consolidation is crash consistent; completed turns fence all processes and
 flush/unmount before sealing. A crash can lose unflushed pages, including database
-transactions not yet synced by a container. S3 publication failure retains local
-work and the existing unsynchronized-work status.
+transactions not yet synced by a container. The disk remains local to its node;
+losing the node loses its working files.
 An incomplete container directory or malformed saved HostConfig does not block
 daemon startup or unrelated images, volumes and valid bind mounts. Containers
 without a valid saved HostConfig remain unavailable for activation; no empty
@@ -178,19 +178,8 @@ Primary references: [Docker rootless requirements](https://docs.docker.com/engin
 
 ## Qualification and measurements
 
-The `native-runtime` CI job uses a disposable Linux host, synthetic credentials
-and loopback Moto S3. Moto 5.2.3 payload buffers are fixed at 64 KiB for both
-reference and candidate. The native S3 fixture provisions a soft open-file limit
-of at least 65,536 within its inherited hard limit before starting server threads;
-an insufficient hard limit fails explicitly. Spilled originals and concurrent
-version-list copies each consume a descriptor. This changes only the test process
-and its children, without changing host configuration or production unit limits.
-Larger emulator payloads and version-list copies spill to local temporary files:
-Moto otherwise copies the entire bucket into RAM before filtering each concurrent
-version-list request during purge. The real list/version/delete API path and final
-empty-bucket checks remain mandatory. These emulator settings are recorded in the
-measurement JSON and adds local disk/cache effects; it is not production S3 latency.
-The job executes the shipped native controller and entrypoint, the real
+The `native-runtime` CI job uses a disposable Linux host and synthetic credentials.
+It executes the shipped native controller and entrypoint, the real
 systemd/ublk/ext4 stack and the managed Docker tools. Reference binaries
 use the PR base or main push's previous commit; manual runs and tags use the
 checked-out candidate's first parent, fetching shallow history when needed. They
@@ -204,8 +193,8 @@ command runs against the owner's desktop node or its Docker daemon.
 
 `native-storage.json` records the host/kernel/build profile, shared budgets,
 startup samples, cold daemon startup before pulls, warm daemon commands, image
-pull time/digests separately, build/cache resume and restore, storage read/write
-wall and process CPU times, encoded S3 bytes and cgroup limits/accounting.
+pull time/digests separately, build/cache resume on the same node, storage read/write
+wall and process CPU times, allocated local disk bytes and cgroup limits/accounting.
 Host load averages (1/5/15 minutes) and aggregate CPU ticks bracket the fixture.
 Startup samples include CPU charged to the fresh workload cgroup at readiness;
 short executions may already be collected and report unavailable CPU as null.
@@ -217,9 +206,7 @@ first server command before image pulls. Cold here means a new conversation
 store and daemon, without forcing the host's executable page cache cold.
 A static C probe records identical direct-host and named-volume 8 MiB read / 128
 fsynced 4 KiB write workloads separately from the seeded native filesystem probe.
-The destination-ID test emulates unavailable source IDs on the same disposable
-host; it is not a physical two-node or network-transfer benchmark.
-Cold file reads use advisory `POSIX_FADV_DONTNEED`; eviction also clears userspace
-cache. This is local synthetic S3 evidence, not production WAN latency. Results
+Cold file reads use advisory `POSIX_FADV_DONTNEED`; a controller restart clears
+its userspace cache. This is local disk evidence, not production WAN latency. Results
 must be attached from successful CI before the PR is considered qualified; no
 unavailable measurement is represented as zero or as a passed test.

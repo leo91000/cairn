@@ -2757,10 +2757,15 @@ mod tests {
                                 crate::nodes::run_placement::PlacementChanges {
                                     move_request: Some(movement.then(|| {
                                         serde_json::from_value(json!({
-                            "nodeId": "destination",
-                            "reservation": "pending-destination",
-                            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
-                        })).unwrap()
+                                            "nodeId": "destination",
+                                            "reservation": "pending-destination",
+                                            "resources": {
+                                                "cpu": 1,
+                                                "memoryMiB": 128,
+                                                "diskMiB": 128
+                                            },
+                                        }))
+                                        .unwrap()
                                     })),
                                     ..Default::default()
                                 },
@@ -2775,6 +2780,8 @@ mod tests {
                         "controllerRecoveries": 4, "controllerRecoveryReservation": "attempt",
                     }))?;
                     saved.store_in(db, &id)?;
+                    // Node changes expire their environment. A legacy move flag
+                    // cannot fund another retry of an exhausted old controller.
                     assert!(!finish_recovery(db, &id, Some(&saved))?);
                     let durable = RunCheckpoint::load_in(db, &id)?.unwrap();
                     assert_eq!(durable.controller_recoveries(), 4);

@@ -4,28 +4,23 @@ pub mod attempts;
 pub(crate) mod attempts_migration;
 #[cfg(test)]
 mod attempts_migration_tests;
-pub mod checkpoint;
 pub mod connector;
 pub mod coordination;
 pub(crate) mod disk_capacity;
-pub mod disk_grants;
 pub mod exclusive;
 pub mod exclusive_state;
 pub mod executor;
 pub mod files;
 pub mod inventory;
-pub(crate) mod journal_acknowledgements;
 pub mod maintenance;
 pub(crate) mod move_operations;
 pub mod moves;
 pub mod native_mode;
 pub mod placement;
-pub mod publication;
 pub mod relay;
-pub mod restore;
+pub(crate) mod retired_publications;
 pub mod run_placement;
 pub(crate) mod settings;
-pub mod shared_blocks;
 pub mod snapshots;
 pub mod storage;
 pub mod transport;
@@ -73,7 +68,7 @@ pub(crate) const PROJECT_OPEN_HEAD_TIMEOUT: std::time::Duration =
 pub(crate) const PROJECT_OPEN_RELAY_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(270);
 
-/// Storage mode of journal-backed disks mounted from their published S3 state.
+/// Local journal storage; the persisted wire tag predates local consolidation.
 pub(crate) const ON_DEMAND: &str = "on-demand";
 
 /// Whether this request is the bounded import used by `open_project`.
@@ -147,13 +142,6 @@ pub(crate) fn owner_node(record: &Value) -> &str {
 /// The id of the agent a run was started with.
 pub(crate) fn run_agent(run: &Value) -> &str {
     text(&run["snapshot"]["agent"], "id")
-}
-
-/// A VM disk keeps its format when a native controller mounts it in place.
-pub(crate) fn vm_disk(checkpoint: &Value) -> bool {
-    checkpoint["prepared"]["diskFormat"] == "vm"
-        || checkpoint["prepared"]["diskFormat"].is_null()
-            && checkpoint["prepared"]["backend"] == "firecracker"
 }
 
 /// The run's resume checkpoint, or `null` when none was recorded.
@@ -563,7 +551,6 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 .invoke(s, body, crate::capabilities::ResumeContext::http(input)?)
                 .await
         }
-        ("GET", ["nodes", "backups", run]) => backups(s, run).await,
         ("POST", ["nodes", node, "stale-disks", "delete"]) => delete_stale_disks(s, node).await,
         ("PUT", ["nodes", node, "agents"]) => grant_agents(s, node, input.body.clone()).await,
         _ => Err(Error::not_found("Not found")),
@@ -590,18 +577,6 @@ pub(crate) async fn native_callers_live(
                 .into())
         })
         .await
-}
-
-async fn backups(s: &Service, run: &str) -> Result<Value> {
-    crate::validation::uuid(run)?;
-    Ok(s.store
-        .list("node-backups")
-        .await?
-        .into_iter()
-        .filter(|point| point["runId"] == run)
-        .map(publication::public)
-        .collect::<Vec<_>>()
-        .into())
 }
 
 pub(crate) async fn configure_storage_live(
@@ -1351,7 +1326,7 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
     let expected = Expectations {
         data_root: s.config.data_dir.to_string_lossy().into_owned(),
         image: maintenance::release().ok().map(|release| release.image),
-        lease_ms: publication::lease_ms(s).await?,
+        lease_ms: settings::lease_ms(s).await?,
     };
     let body = input.body.clone();
     let reply = s

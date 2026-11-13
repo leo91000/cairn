@@ -109,7 +109,7 @@ async fn detach_namespaces(s: &Service, run: &str, retirement: &str) -> Result<(
     Ok(())
 }
 
-/// Caller holds preparation, publication and publication-reader ownership.
+/// Caller holds environment preparation ownership; no publication writer runs.
 pub(crate) async fn detach(s: &Service, run: &str, retirement: &str) -> Result<()> {
     detach_namespaces(s, run, retirement).await?;
     mark_manager_namespace(s, run).await
@@ -207,10 +207,10 @@ pub(crate) async fn erase(
     retirement: &str,
     workspaces: &[Value],
     projects: &[Value],
-    publications: &crate::nodes::publication::RetiredPublications,
+    publications: &crate::nodes::retired_publications::RetiredPublications,
 ) -> Result<()> {
     let retired = directory(s, retirement);
-    crate::nodes::publication::retire_detached_environment(
+    crate::nodes::retired_publications::retire_detached_environment(
         s,
         run,
         publications,
@@ -310,7 +310,7 @@ mod tests {
             &retirement,
             &[],
             &[],
-            &crate::nodes::publication::RetiredPublications::default(),
+            &crate::nodes::retired_publications::RetiredPublications::default(),
         )
         .await
         .unwrap();
@@ -383,7 +383,7 @@ mod tests {
             &retirement,
             &workspaces,
             &projects,
-            &crate::nodes::publication::RetiredPublications::default(),
+            &crate::nodes::retired_publications::RetiredPublications::default(),
         )
         .await
         .unwrap();

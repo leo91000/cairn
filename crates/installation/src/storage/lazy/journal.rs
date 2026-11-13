@@ -1,5 +1,5 @@
-//! Payloads are durable append frames. SQLite owns only publication metadata.
-//! No acknowledged payload is reclaimed before the durable publication cutoff.
+//! Payloads are durable append frames. SQLite owns only journal metadata.
+//! No acknowledged payload is reclaimed before the durable consolidation cutoff.
 use super::*;
 use rusqlite::OptionalExtension;
 use std::{
@@ -40,15 +40,12 @@ pub(super) struct Record {
 
 impl Record {
     pub fn read(&self) -> io::Result<Vec<u8>> {
-        let sample = crate::performance::publication::start(
-            crate::performance::publication::Stage::NodeLocalRead,
-        );
         let mut actual = [0; HEADER];
         self.file.read_exact_at(&mut actual, self.position)?;
         let mut data = vec![0; (self.end - self.start) as usize];
         self.file
             .read_exact_at(&mut data, self.position + HEADER as u64)?;
-        sample.finish(actual.len() + data.len());
+
         if actual != self.header
             || digest(&actual[..48], &[]) != actual[48..80]
             || digest(&actual[..80], &data) != actual[80..]
@@ -67,14 +64,10 @@ impl Record {
 }
 
 pub(super) fn digest(header: &[u8], data: &[u8]) -> [u8; 32] {
-    let sample =
-        crate::performance::publication::start(crate::performance::publication::Stage::JournalHash);
     let mut hasher = blake3::Hasher::new();
     hasher.update(header);
     hasher.update(data);
-    let digest = *hasher.finalize().as_bytes();
-    sample.finish(header.len() + data.len());
-    digest
+    *hasher.finalize().as_bytes()
 }
 
 fn integer(header: &[u8], offset: usize) -> i64 {
@@ -109,14 +102,6 @@ impl CommitBatch {
 mod commit_tests {
     use super::*;
 
-    struct Empty;
-
-    impl BlockSource for Empty {
-        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-            Err(failure("Unexpected block fetch"))
-        }
-    }
-
     #[test]
     fn captured_prefix_keeps_later_appends_pending_across_segment_rotation() {
         let root = tempfile::tempdir().unwrap();
@@ -126,7 +111,7 @@ mod commit_tests {
             "blockSize": BLOCK,
             "blocks": [{"offset": 0, "size": 4096, "hash": null}]
         });
-        let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Empty)).unwrap();
+        let disk = LazyDisk::create(root.path(), &manifest).unwrap();
         let mut journal = disk.journal.lock().unwrap();
         let first = journal.append(root.path(), &disk.db, 0, b"first").unwrap();
         let batch = journal.commit_batch(first).unwrap().unwrap();
@@ -148,7 +133,7 @@ mod commit_tests {
         journal.sync().unwrap();
         drop(journal);
         drop(disk);
-        let disk = LazyDisk::open(root.path(), Arc::new(Empty)).unwrap();
+        let disk = LazyDisk::open(root.path()).unwrap();
         let mut bytes = [0; 21];
         disk.read_at(0, &mut bytes).unwrap();
         assert_eq!(&bytes[..5], b"first");
@@ -377,7 +362,7 @@ impl Journal {
         );
         // Within one generation, an exact range overwrite makes its earlier
         // index entry unnecessary. Keep physical-byte/age accounting in epochs
-        // so repeated hot writes neither grow the index nor hide backup lag.
+        // so repeated hot writes neither grow the index nor hide pending journal bytes.
         if let Some(previous) = self.latest.insert(
             (record.generation, record.start, record.end),
             record.sequence,
@@ -562,7 +547,7 @@ impl Journal {
             if zero {
                 // Appends always extend the file. Sparse zeros have precisely
                 // the same frame bytes/checksums as ordinary zero writes.
-                // Never punch an earlier frame or reclaim before publication.
+                // Never punch an earlier frame or reclaim before consolidation.
                 segment
                     .file
                     .set_len(position + HEADER as u64 + data.len() as u64)
@@ -737,20 +722,12 @@ pub(super) fn metadata(directory: &Path, initial: Option<(&Value, i64)>) -> io::
 mod tests {
     use super::*;
 
-    struct Zero;
-
-    impl BlockSource for Zero {
-        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-            Err(failure("unexpected remote read"))
-        }
-    }
-
     #[test]
     fn repeated_overwrites_bound_the_index_without_hiding_unprotected_bytes() {
         let root = tempfile::tempdir().unwrap();
         let manifest = serde_json::json!({"version":1,"size":4096,"blockSize":BLOCK,
             "blocks":[{"offset":0,"size":4096,"hash":null}]});
-        let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Zero)).unwrap();
+        let disk = LazyDisk::create(root.path(), &manifest).unwrap();
         for value in 0..100 {
             disk.write_at(0, &[value; 4096]).unwrap();
         }
@@ -767,7 +744,7 @@ mod tests {
         assert_eq!(bytes, [101; 4096]);
         assert_eq!(disk.accounting().unwrap()["dirtySince"], since);
         drop(disk);
-        let disk = LazyDisk::open(root.path(), Arc::new(Zero)).unwrap();
+        let disk = LazyDisk::open(root.path()).unwrap();
         assert_eq!(disk.journal.lock().unwrap().records.len(), 2);
         assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 101 * 4096);
         disk.read_generation(first, 0, &mut bytes).unwrap();

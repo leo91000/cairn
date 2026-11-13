@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 mod activity;
 mod isolated;
 pub(crate) mod native;
-pub(crate) mod publication;
 
 pub use activity::{Activity, heartbeat};
 pub(crate) use isolated::{Delivery, try_record};

@@ -318,14 +318,6 @@ fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<St
 mod tests {
     use super::*;
 
-    struct Offline;
-
-    impl crate::storage::BlockSource for Offline {
-        fn fetch(&self, _: &str) -> std::io::Result<Vec<u8>> {
-            panic!("Capacity must not fetch remote blocks")
-        }
-    }
-
     fn local_manifest(hash: &str) -> Value {
         let block = 4 * MIB;
         json!({ "version": 1, "size": 5 * block, "blockSize": block,
@@ -346,12 +338,7 @@ mod tests {
         let hash = crate::storage::digest::block(&payload);
         std::fs::create_dir_all(directory.join("cache")).unwrap();
         std::fs::write(directory.join("cache").join(&hash), &payload).unwrap();
-        let disk = crate::storage::LazyDisk::create(
-            &directory,
-            &local_manifest(&hash),
-            std::sync::Arc::new(Offline),
-        )
-        .unwrap();
+        let disk = crate::storage::LazyDisk::create(&directory, &local_manifest(&hash)).unwrap();
         std::fs::write(directory.join("cache").join(&hash), &payload).unwrap();
         record_retained(&directory, &attempt, 20 * MIB)
             .await
@@ -402,12 +389,7 @@ mod tests {
         let hash = crate::storage::digest::block(&payload);
         std::fs::create_dir_all(directory.join("cache")).unwrap();
         std::fs::write(directory.join("cache").join(&hash), &payload).unwrap();
-        let disk = crate::storage::LazyDisk::create(
-            &directory,
-            &local_manifest(&hash),
-            std::sync::Arc::new(Offline),
-        )
-        .unwrap();
+        let disk = crate::storage::LazyDisk::create(&directory, &local_manifest(&hash)).unwrap();
         for byte in 1..=16 {
             disk.write_at(0, &vec![byte; MIB as usize]).unwrap();
         }

@@ -81,15 +81,7 @@ mod tests {
     }
 
     fn retained_journal_generations() {
-        use crate::storage::{BlockSource, Disk, LazyDisk};
-        use std::sync::Arc;
-
-        struct NoRemote;
-        impl BlockSource for NoRemote {
-            fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-                Err(io::Error::other("Unexpected remote read"))
-            }
-        }
+        use crate::storage::{Disk, LazyDisk};
 
         let root = tempfile::tempdir().unwrap();
         let manifest = serde_json::json!({
@@ -98,13 +90,13 @@ mod tests {
             "blockSize": 4194304,
             "blocks": [{ "offset": 0, "size": 4194304, "hash": null }]
         });
-        let disk = LazyDisk::create(root.path(), &manifest, Arc::new(NoRemote)).unwrap();
+        let disk = LazyDisk::create(root.path(), &manifest).unwrap();
         for generation in 0..1500u64 {
             disk.write_at(0, &generation.to_le_bytes()).unwrap();
             disk.seal_completed().unwrap();
         }
         drop(disk);
-        let disk = LazyDisk::open(root.path(), Arc::new(NoRemote)).unwrap();
+        let disk = LazyDisk::open(root.path()).unwrap();
         let mut bytes = [0; 8];
         disk.read_at(0, &mut bytes).unwrap();
         assert_eq!(u64::from_le_bytes(bytes), 1499);

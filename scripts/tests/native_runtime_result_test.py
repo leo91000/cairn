@@ -7,8 +7,7 @@ import types
 import unittest
 from unittest.mock import Mock, call, patch
 
-# No S3 or privileged fixture is started for these observation and parsing checks.
-sys.modules.setdefault('boto3', types.ModuleType('boto3'))
+# No privileged fixture is started for these observation and parsing checks.
 path = Path(__file__).with_name('native_runtime_test.py')
 spec = importlib.util.spec_from_file_location('native_runtime_test', path)
 runtime = importlib.util.module_from_spec(spec)

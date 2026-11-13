@@ -15,7 +15,6 @@ import {
   formatBytes,
   LOCAL_NODE_ID,
   nativeModeLabel,
-  relativeAge,
 } from '../../../../packages/contracts/nodes'
 import { api } from '../api'
 import {
@@ -57,13 +56,11 @@ const labels: Record<string, string> = {
 const storageLabels: Record<string, string> = {
   'storage-unavailable': 'Waiting for storage; resumes automatically',
   'disk-space': 'Paused until disk space is available',
-  'backup-lag': 'Paused while changes are saved',
   'integrity': 'Paused: disk integrity needs attention',
 }
 const storageShort: Record<string, string> = {
   'storage-unavailable': 'Waiting for storage',
   'disk-space': 'Disk full',
-  'backup-lag': 'Saving before resuming',
   'integrity': 'Disk needs attention',
 }
 const modes: { value: Mode, label: string }[] = [{ value: 'automatic', label: 'Automatic' }, { value: 'preferred', label: 'Prefer a node' }, { value: 'fixed', label: 'Fix to a node' }]
@@ -96,18 +93,13 @@ const opener = ref<HTMLElement>()
 const panel = ref<HTMLDialogElement>()
 const position = ref<Record<string, string>>({ left: '16px', top: '80px', maxHeight: 'calc(100dvh - 96px)' })
 const sheet = ref(false)
-// Recovery ages are shown to the minute, so a slow clock is enough.
-const now = ref(Date.now())
-const timer = setInterval(() => {
-  now.value = Date.now()
-}, 30_000)
 // With only the master runner there is nothing to choose, so stay out of the way unless something happens.
 const relevant = computed(() => (!!props.run.nodeId && props.run.nodeId !== LOCAL_NODE_ID)
   || props.run.storage?.mode === 'on-demand'
   || nodes.value.some(candidate => !candidate.local)
   || !!error.value
   || (props.run.status === 'running' && !!props.run.suspendedByExclusive)
-  || !!(props.run.nodeState || props.run.movementError || props.run.restoredAt || props.run.capacityWaitUntil || props.run.backup?.error))
+  || !!(props.run.nodeState || props.run.movementError || props.run.restoredAt || props.run.capacityWaitUntil))
 watch(relevant, value => emit('relevance', value), { immediate: true })
 const destinations = computed(() => nodes.value.filter(candidate => candidate.id !== props.run.nodeId))
 const destinationOptions = computed(() => destinations.value.map(node => ({ value: node.id, label: `${node.name} · ${node.capabilities.backend === 'native' ? 'Native' : 'Firecracker VM'}` })))
@@ -121,8 +113,6 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
   const waiting = run.storage?.waitingFor
   if (run.movementError)
     return { tone: 'bad', label: 'Move failed' }
-  if (run.backup?.error)
-    return { tone: 'bad', label: 'Sync failed' }
   if (waiting)
     return { tone: waiting === 'integrity' ? 'bad' : 'warn', label: storageShort[waiting] || waiting }
   // The attention chip names the node's own cause: the header already names a suspension.
@@ -132,24 +122,15 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
     return { tone: 'busy', label: labels[run.nodeState] || run.nodeState }
   if (run.capacityWaitUntil)
     return { tone: 'warn', label: 'Waiting for capacity' }
-  if (run.storage?.backupDegraded)
-    return { tone: 'warn', label: 'Sync overdue' }
-  if (run.backup?.status === 'saving')
-    return { tone: 'warn', label: 'Saving…' }
   if (dirtyBytes.value)
-    return { tone: 'warn', label: `${formatBytes(dirtyBytes.value)} unsaved` }
-  // Native ublk disks synchronize while running like VM disks; only legacy file workspaces wait for the stop.
-  if (run.executionBackend === 'native' && run.status === 'running' && run.storage?.mode === 'native')
-    return { tone: 'warn', label: 'Local work · saved when execution stops' }
-  if (run.backup?.capturedAt)
-    return { tone: 'ok', label: `Synced ${relativeAge(run.backup.capturedAt, now.value)}` }
-  return { tone: 'idle', label: 'No sync yet' }
+    return { tone: 'warn', label: `${formatBytes(dirtyBytes.value)} awaiting consolidation` }
+  return { tone: 'idle', label: 'Local disk' }
 })
 // Failures, waits and moves interrupt the work; saving, unsaved bytes and sync age are routine.
 // An exclusive suspension is the conversation's own status, which the header already names.
 const attention = computed(() => {
   const run = props.run
-  return relevant.value && !!(run.movementError || run.backup?.error || run.storage?.waitingFor || run.storage?.backupDegraded || run.capacityWaitUntil || run.nodeState)
+  return relevant.value && !!(run.movementError || run.storage?.waitingFor || run.capacityWaitUntil || run.nodeState)
 })
 // A chip whose panel is open stays until it closes, so focus can return to it.
 // The first placement answered, or failed: either way the node's state is known for now.
@@ -349,7 +330,6 @@ defineExpose({
   settled,
 })
 onUnmounted(() => {
-  clearInterval(timer)
   window.removeEventListener('resize', resized)
 })
 </script>
@@ -372,7 +352,7 @@ onUnmounted(() => {
       <template v-if="status.label">
         <span v-if="variant === 'chip'" aria-hidden="true" class="opacity-40">|</span>
         <Icon
-          v-if="status.tone === 'busy' || (status.tone === 'warn' && run.backup?.status === 'saving')"
+          v-if="status.tone === 'busy'"
           :name="LoaderCircle"
           :size="12"
           class="shrink-0 animate-spin motion-reduce:animate-none"
@@ -448,28 +428,22 @@ onUnmounted(() => {
         <section class="mt-3 border-t border-line pt-3">
           <div class="flex items-center justify-between gap-3">
             <h3 class="m-0! text-xs! font-semibold text-ink">
-              Workspace sync
+              Local workspace storage
             </h3>
             <span v-if="status.label" :class="status.tone === 'bad' ? 'text-coral' : status.tone === 'warn' ? 'text-warning' : status.tone === 'busy' ? 'text-accent' : ''">{{ status.label }}</span>
           </div>
           <template v-if="localBytes !== undefined">
             <div class="mt-2 flex h-1.5 overflow-hidden rounded-full bg-inset" aria-hidden="true">
               <span class="bg-accent" :style="{ width: `${localBytes ? 100 * Math.max(0, localBytes - dirtyBytes) / localBytes : 0}%` }" />
-              <span :class="run.backup?.error ? 'bg-coral' : 'bg-warning'" :style="{ width: `${localBytes ? 100 * Math.min(dirtyBytes, localBytes) / localBytes : 0}%` }" />
+              <span class="bg-warning" :style="{ width: `${localBytes ? 100 * Math.min(dirtyBytes, localBytes) / localBytes : 0}%` }" />
             </div>
             <p class="m-0! mt-1.5! flex flex-wrap gap-x-3">
               <span>{{ formatBytes(localBytes) }} on this node</span>
-              <span v-if="dirtyBytes">{{ formatBytes(dirtyBytes) }} not yet saved</span>
+              <span v-if="dirtyBytes">{{ formatBytes(dirtyBytes) }} awaiting consolidation</span>
             </p>
           </template>
           <p v-if="dirtyBytes" class="m-0! mt-1.5!">
-            {{ run.storage?.dirtySince ? `Unsaved changes since ${relativeAge(run.storage.dirtySince, now)}` : 'Unsaved changes' }}; they exist only on this node until saved.
-          </p>
-          <p v-if="run.storage?.backupDegraded" role="status" class="m-0! mt-1.5! text-warning">
-            Synchronization is overdue. Work can continue while local storage is safe; unsaved changes remain only on this node.
-          </p>
-          <p v-else-if="run.backup?.capturedAt" class="m-0! mt-1.5!" :title="`${new Date(run.backup.capturedAt).toLocaleString()}. Newer disk changes may still be waiting for synchronization.`">
-            Disk synchronized {{ relativeAge(run.backup.capturedAt, now) }}.
+            The journal is durable on this node and consolidates locally in the background. There is no remote disk copy.
           </p>
           <p v-if="run.storage?.waitingFor" class="m-0! mt-1.5!" :class="run.storage.waitingFor === 'integrity' ? 'text-coral' : 'text-warning'">
             {{ storageLabels[run.storage.waitingFor] || run.storage.waitingFor }}.
@@ -491,9 +465,6 @@ onUnmounted(() => {
           </p>
           <p v-if="run.restoredAt" class="m-0! mt-1.5!">
             Resumed from a recovery point of {{ new Date(run.restoredAt).toLocaleString() }}. More recent messages remain visible; restored files can be older.
-          </p>
-          <p v-if="run.backup?.error" class="m-0! mt-2! flex items-start gap-2 rounded-lg bg-coral-soft px-2.5 py-2 text-coral">
-            <Icon :name="TriangleAlert" :size="13" class="mt-0.5 shrink-0" /><span>Synchronization: {{ run.backup.error }}</span>
           </p>
           <p v-if="run.movementError" class="m-0! mt-2! flex items-start gap-2 rounded-lg bg-coral-soft px-2.5 py-2 text-coral">
             <Icon :name="TriangleAlert" :size="13" class="mt-0.5 shrink-0" /><span>{{ run.movementError }}</span>

@@ -7,8 +7,6 @@ pub(super) enum Phase {
     Inventory,
     Preparation,
     PauseRequest,
-    Capture,
-    CaptureWait,
     PlacementRelease,
 }
 
@@ -22,8 +20,6 @@ impl Phase {
             Self::Inventory => "inventory",
             Self::Preparation => "preparation",
             Self::PauseRequest => "pause_request",
-            Self::Capture => "capture",
-            Self::CaptureWait => "capture_wait",
             Self::PlacementRelease => "placement_release",
         }
     }
@@ -53,9 +49,6 @@ pub(super) struct Counters {
     pub stale_attempts: u64,
     pub pause_requests: u64,
     pub pause_failures: u64,
-    pub capture_calls: u64,
-    pub capture_waits: u64,
-    pub capture_failures: u64,
     pub placement_releases: u64,
     pub placement_failures: u64,
 }
@@ -64,7 +57,7 @@ pub(super) struct Drain {
     started: Instant,
     phase_started: Instant,
     phase: Phase,
-    durations: [Duration; 6],
+    durations: [Duration; 4],
     finished: bool,
     pub counters: Counters,
 }
@@ -76,7 +69,7 @@ impl Drain {
             started: now,
             phase_started: now,
             phase: Phase::Inventory,
-            durations: [Duration::ZERO; 6],
+            durations: [Duration::ZERO; 4],
             finished: false,
             counters: Counters::default(),
         }
@@ -115,7 +108,7 @@ struct Summary {
     phase: &'static str,
     outcome: &'static str,
     elapsed_ms: u64,
-    durations_ms: [u64; 6],
+    durations_ms: [u64; 4],
     counters: Counters,
 }
 
@@ -133,16 +126,11 @@ impl Summary {
             inventory_ms = self.durations_ms[Phase::Inventory.index()],
             preparation_ms = self.durations_ms[Phase::Preparation.index()],
             pause_request_ms = self.durations_ms[Phase::PauseRequest.index()],
-            capture_ms = self.durations_ms[Phase::Capture.index()],
-            capture_wait_ms = self.durations_ms[Phase::CaptureWait.index()],
             placement_release_ms = self.durations_ms[Phase::PlacementRelease.index()],
             attempts = self.counters.attempts,
             stale_attempts = self.counters.stale_attempts,
             pause_requests = self.counters.pause_requests,
             pause_failures = self.counters.pause_failures,
-            capture_calls = self.counters.capture_calls,
-            capture_waits = self.counters.capture_waits,
-            capture_failures = self.counters.capture_failures,
             placement_releases = self.counters.placement_releases,
             placement_failures = self.counters.placement_failures,
         );

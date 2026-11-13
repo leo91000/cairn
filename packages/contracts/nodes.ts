@@ -325,7 +325,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now(), clock: nu
   if (node.capabilities.backend !== 'native' && !node.capabilities.kvm)
     reasons.push('KVM is unavailable: enable virtualization in the BIOS and load the kvm module.')
   if (node.capabilities.backend === 'native' && !node.capabilities.ublk)
-    reasons.push('ublk is unavailable: this node needs a current native runtime and the ublk_drv kernel module (/dev/ublk-control) to mount S3-backed conversation disks.')
+    reasons.push('ublk is unavailable: this node needs a current native runtime and the ublk_drv kernel module (/dev/ublk-control) to mount local conversation disks.')
   if ((node.local || node.status === 'online') && !node.executionReady)
     reasons.push(privilegeReason(node) ?? (node.budgetError != null ? `The shared budget could not be applied: ${node.budgetError}` : node.updateError != null ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.'))
   if (node.maintenance != null)

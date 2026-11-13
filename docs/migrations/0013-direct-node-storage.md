@@ -27,4 +27,5 @@ v3 publications. An older controller cannot serve the new transfer operation.
 Earlier binaries reject version 13. After v3 publications begin, rollback requires
 the corresponding installation database **and** object storage; changing
 `user_version` is not a downgrade. Unsupported versions never authorize deleting
-an installation. See [direct transfer operation](../DIRECT-STORAGE-TRANSFERS.md).
+an installation. This describes the historical S3 transition. Current installations follow
+[the local-disk cutover](../adr/0083-local-conversation-disks-without-s3.md).

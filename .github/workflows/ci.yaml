@@ -28,10 +28,6 @@ on:
         description: Run backend tests and doctests without release resolution or image jobs
         type: boolean
         default: false
-      publication-measurement:
-        description: Run only the controlled publication measurement alongside isolated Clippy (requires backend-only)
-        type: boolean
-        default: false
       plan-storage-reference:
         description: Optional full base SHA for typed Plan storage measurements and the old-version fence
         type: string
@@ -219,7 +215,7 @@ jobs:
         with:
           phase: after-build
   backend:
-    name: ${{ inputs.backend-only == true && inputs.publication-measurement == true && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '') && 'publication measurement' || 'backend' }}
+    name: backend
     permissions:
       contents: read
       actions: read
@@ -289,12 +285,12 @@ jobs:
         env:
           BACKEND_DIAGNOSTIC_SELECTOR: ${{ inputs.backend-diagnostic-selector || 'full' }}
       - name: Qualify native controller concurrency before building every test binary
-        if: inputs.ci-diagnostic != 'backend' && (inputs.backend-only != true || inputs.publication-measurement != true)
+        if: inputs.ci-diagnostic != 'backend'
         run: >-
           node scripts/test-backend.mjs --nextest --workspace --lib
           -E 'package(=cairn-installation) & (test(native::service::tests::) | test(nodes::files::tests::))' --no-capture
       - name: Run backend tests across binaries with isolated credentials
-        if: inputs.ci-diagnostic != 'backend' && (inputs.backend-only != true || inputs.publication-measurement != true)
+        if: inputs.ci-diagnostic != 'backend'
         timeout-minutes: 30
         run: |
           set -o pipefail
@@ -308,32 +304,16 @@ jobs:
             backend-tests.log
             backend-diagnostics/
           if-no-files-found: ignore
-      - name: Measure controlled direct publication scheduling
-        if: inputs.backend-only == true && inputs.publication-measurement == true && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '')
-        run: |
-          set -o pipefail
-          node scripts/test-backend.mjs -p cairn-installation --lib nodes::publication::pipeline_tests::measurement::direct_publication_window_comparison -- --exact --ignored --nocapture --test-threads=1 2>&1 | tee direct-publication-measurement.log
-      - name: Preserve controlled publication measurements
-        if: always() && hashFiles('direct-publication-measurement.log') != ''
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: direct-publication-measurement
-          path: direct-publication-measurement.log
-          retention-days: 14
       - name: Measure the bounded bootstrap observer without filesystem work
-        if: inputs.ci-diagnostic == 'backend' || inputs.backend-only != true || inputs.publication-measurement != true
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
         run: node scripts/test-backend.mjs --workspace --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Measure bounded Native terminal-reason metadata
-        if: inputs.ci-diagnostic == 'backend' || inputs.backend-only != true || inputs.publication-measurement != true
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
         run: node scripts/test-backend.mjs --workspace --lib native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
-        if: inputs.ci-diagnostic == 'backend' || inputs.backend-only != true || inputs.publication-measurement != true
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
         run: node scripts/test-native-namespace.mjs --sudo
       - name: Check Rust documentation examples
-        if: inputs.ci-diagnostic == 'backend' || inputs.backend-only != true || inputs.publication-measurement != true
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
         run: node scripts/test-backend.mjs --doc
       - uses: ./.github/actions/observe-rust-build
@@ -530,7 +510,7 @@ jobs:
           test -c /dev/ublk-control
       - name: Build the frontend used by installer and update fixtures
         run: pnpm exec vite build --config apps/web/vite.config.ts
-      - name: Validate node supervisor and S3 recovery
+      - name: Validate node supervisor and local disk runtime
         run: |
           python3 scripts/tests/guest_trim_test.py
           python3 scripts/tests/guest_projects_test.py
@@ -543,11 +523,11 @@ jobs:
           python3 scripts/tests/production_release_test.py
           bash tests/installation-installer-container.sh
           python3 tests/installation_update_containers.py
-          python3 -m venv .node-s3-test
-          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli blake3==1.0.8
-          .node-s3-test/bin/python scripts/tests/storage_observer_test.py
-          .node-s3-test/bin/python scripts/tests/storage_sample_test.py
-          PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py
+          for selected in 'storage::' 'storage_migration::' 'native::block::' 'microvm::pool::' 'runner::'; do
+            pnpm test:backend --workspace --lib "$selected"
+          done
+          pnpm test:backend -p cairn-installation --test worker
+          pnpm test:backend --workspace --example native_storage_qualifier stopped_inspection_keeps_its_generation_across_a_monitor_period
       - uses: ./.github/actions/observe-rust-build
         if: always()
         with:
@@ -580,7 +560,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - name: Prepare disposable host block storage and synthetic S3
+      - name: Prepare disposable host block storage
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends e2fsprogs python3-venv sudo uidmap iproute2 iptables libcap2-bin
@@ -594,8 +574,6 @@ jobs:
             sudo modprobe ublk_drv
           fi
           test -c /dev/ublk-control
-          python3 -m venv .native-s3-test
-          .native-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
       - run: rustup toolchain install 1.97.1 --profile minimal
       - name: Identify the exact reference build
         id: native-reference-key
@@ -689,14 +667,12 @@ jobs:
               for name, checksum in candidate['sha256'].items():
                   assert hashlib.sha256((Path('target/debug') / name).read_bytes()).hexdigest() == checksum
           PYREF
-      - name: Check native fixture memory and garbage semantics against the candidate
-        env:
-          CAIRN_TEST_NATIVE_QUALIFIER: ${{ github.workspace }}/target/debug/examples/native_storage_qualifier
+      - name: Check the disposable native fixture entrypoint
         run: |
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
-            node scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
+            node scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- python3 -m unittest discover -s scripts/tests -p test_native_local_runtime.py -v
           else
-            .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
+            python3 -m unittest discover -s scripts/tests -p test_native_local_runtime.py -v
           fi
       - uses: actions/upload-artifact@v7.0.1
         if: inputs.ci-diagnostic != 'native' && steps.native-reference-artifact.outputs.found != 'true'
@@ -708,13 +684,14 @@ jobs:
       - name: Qualify the exact reference on the current disposable host
         env:
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
+          DIAGNOSTIC_CANDIDATE: ${{ inputs.ci-diagnostic == 'native' && inputs.diagnostic-candidate || '' }}
         run: |
-          # Keep the reference's private protocol fixtures paired with its binaries.
-          # The current S3 launcher still provides identical host/emulator conditions.
+          # Run the same local qualification workload against each exact binary pair.
+          # Use this change's local workload for both binaries; only the runtime/qualifier pair differs.
           git fetch --no-tags origin "$REFERENCE_SHA"
           reference_fixture="$RUNNER_TEMP/cairn-native-reference-fixture"
           mkdir -p "$reference_fixture"
-          git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
+          git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
             mkdir -p "native-diagnostics/reference"
             python3 -B scripts/tests/native_admission_overlay.py "$reference_fixture" reference | tee "native-diagnostics/reference/admission-observation.json"
@@ -724,11 +701,11 @@ jobs:
           fi
           chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
-            sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/reference" 90 -- .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/reference" 90 -- node scripts/test-native-runtime.mjs --reference --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
           else
-            sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" node scripts/test-native-runtime.mjs --reference --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
           fi
-      - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
+      - name: Qualify local disks, ublk, systemd ownership and crash recovery
         env:
           DIAGNOSTIC_CANDIDATE: ${{ inputs.ci-diagnostic == 'native' && inputs.diagnostic-candidate || '' }}
         run: |
@@ -745,9 +722,9 @@ jobs:
             python3 -B scripts/tests/native_admission_overlay.py "$candidate_fixture" candidate
           fi
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
-            sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/candidate" 90 -- .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/candidate" 90 -- node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
           else
-            sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
           fi
       - uses: actions/upload-artifact@v7.0.1
         if: always()

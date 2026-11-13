@@ -382,11 +382,10 @@ class NodesTest {
         val decoded =
             wireJson.decodeFromString<ExecutionNode>(
                 nodeWireFixture(
-                    """{"id":"67096815-500d-5d8e-94fc-396f75f5aedf","name":"Desktop","status":"online","diskAccounting":{"capturedAt":10,"localBytes":4096,"unusedGrantedBytes":8192,"hostFreeBytes":16384,"hostReserveBytes":1024,"poolReserveBytes":512,"reclaimableBytes":2048,"unsynchronizedBytes":1024}}"""
+                    """{"id":"67096815-500d-5d8e-94fc-396f75f5aedf","name":"Desktop","status":"online","diskAccounting":{"capturedAt":10,"localBytes":4096,"unusedGrantedBytes":8192,"hostFreeBytes":16384,"hostReserveBytes":1024,"poolReserveBytes":512,"unconsolidatedBytes":1024}}"""
                 )
             )
-        assertEquals(2048L, decoded.diskAccounting?.reclaimableBytes)
-        assertEquals(1024L, decoded.diskAccounting?.unsynchronizedBytes)
+        assertEquals(1024L, decoded.diskAccounting?.unconsolidatedBytes)
         assertNull(node.diskAccounting)
     }
 
@@ -419,7 +418,7 @@ class NodesTest {
         assertEquals(emptyList<String>(), nodeDiagnostics(native))
         assertEquals(
             listOf(
-                "ublk indisponible : cette node a besoin d’un runtime natif à jour et du module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
+                "ublk indisponible : cette node a besoin d’un runtime natif à jour et du module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation locaux."
             ),
             nodeDiagnostics(native.copy(capabilities = native.capabilities.copy(ublk = false))),
         )

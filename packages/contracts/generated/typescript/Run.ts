@@ -38,7 +38,6 @@ export interface Run {
   resources?: ExecutionResources | null
   nativeMode?: import('../../nodes').NativeModeRequest | null
   suspendedByExclusive?: ExclusiveReservation | null
-  backup?: import('../../run-boundaries').RunBackup | null
   storage?: import('../../run-boundaries').RunStorage | null
   executionBackend?: 'firecracker' | 'native' | null
   environmentState?: ConversationEnvironmentState | null

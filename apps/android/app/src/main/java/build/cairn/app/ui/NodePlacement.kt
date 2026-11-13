@@ -94,7 +94,6 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             run.movementError != null ||
             run.restoredAt != null ||
             run.capacityWaitUntil != null ||
-            run.backup?.error != null ||
             run.storage?.mode == "on-demand" ||
             exclusive != null ||
             error != null
@@ -119,35 +118,17 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         }
     }
     val dirty = run.storage?.dirtyBytes ?: 0L
-    val failed =
-        run.backup?.error != null ||
-            run.movementError != null ||
-            run.storage?.waitingFor == "integrity"
-    val pending =
-        dirty > 0 ||
-            run.backup?.status == "saving" ||
-            run.storage?.waitingFor != null ||
-            run.storage?.backupDegraded == true
+    val failed = run.movementError != null || run.storage?.waitingFor == "integrity"
+    val pending = dirty > 0 || run.storage?.waitingFor != null
     val sync =
         when {
             run.movementError != null -> "Déplacement en échec"
-            run.backup?.error != null -> "Synchronisation en échec"
             run.storage?.waitingFor != null -> storageState(run.storage.waitingFor)
             exclusive != null -> "Suspendue pour une réservation exclusive"
             run.nodeState != null -> nodeStates[run.nodeState] ?: run.nodeState
             run.capacityWaitUntil != null -> "En attente de capacité"
-            run.storage?.backupDegraded == true ->
-                "Synchronisation en retard · travail conservé sur cette node"
-            run.backup?.status == "saving" -> "Synchronisation…"
-            dirty > 0 -> "${formatBytes(dirty)} non synchronisés"
-            // Native ublk disks synchronize while running like VM disks; only legacy file
-            // workspaces wait for the stop.
-            run.executionBackend == "native" &&
-                run.status == "running" &&
-                run.storage?.mode == "native" -> "Travail local · sauvegardé après l’arrêt"
-            run.backup?.capturedAt != null ->
-                "Synchronisé ${relativeAge(run.backup.capturedAt, now)}"
-            else -> "Pas encore synchronisé"
+            dirty > 0 -> "${formatBytes(dirty)} à consolider"
+            else -> "Disque local"
         }
     val tone =
         when {
@@ -222,7 +203,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                 }
             }
             Panel {
-                Text("Synchronisation", style = MaterialTheme.typography.titleSmall)
+                Text("Stockage local", style = MaterialTheme.typography.titleSmall)
                 Text(sync, color = tone)
                 run.storage?.localBytes?.let { local ->
                     LinearProgressIndicator(
@@ -239,24 +220,17 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                             if (dirty > 0) tone else MaterialTheme.colorScheme.surfaceVariant,
                     )
                     Text(
-                        "${formatBytes(local)} sur cette node · ${formatBytes(dirty)} non synchronisés",
+                        "${formatBytes(local)} sur cette node · ${formatBytes(dirty)} à consolider",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
                 if (dirty > 0)
                     Text(
-                        "Ces changements existent uniquement sur cette node" +
+                        "Le journal est durable sur cette node et se consolide localement en arrière-plan" +
                             (run.storage?.dirtySince?.let { " (${relativeAge(it, now)})" } ?: "") +
-                            ".",
+                            ". Aucune copie distante du disque.",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                run.backup?.capturedAt?.let {
-                    Text(
-                        "Dernière synchronisation : ${relativeAge(it, now)}",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                run.backup?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 run.movementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 run.restoredAt?.let {
                     Text(
@@ -406,7 +380,6 @@ private fun storageState(state: String): String =
     when (state) {
         "storage-unavailable" -> "En attente du stockage"
         "disk-space" -> "En pause : espace disque insuffisant"
-        "backup-lag" -> "En pause pendant la synchronisation"
         "integrity" -> "Le disque nécessite une vérification"
         else -> state
     }

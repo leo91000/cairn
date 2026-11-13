@@ -19,18 +19,8 @@ data class TaskOutcome(
 typealias ChatExecution = build.cairn.contracts.ChatExecution
 
 @Serializable
-data class NodeBackup(
-    val id: String? = null,
-    val capturedAt: Long? = null,
-    val status: String = "",
-    val error: String? = null,
-    val uploadedBytes: Long? = null,
-)
-
-@Serializable
 data class RunStorage(
     val mode: String = "",
-    val backupDegraded: Boolean = false,
     val localBytes: Long? = null,
     val dirtyBytes: Long? = null,
     val dirtySince: Long? = null,

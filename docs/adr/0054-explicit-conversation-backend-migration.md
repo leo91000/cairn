@@ -32,7 +32,8 @@ The manager needs fakeroot and e2fsprogs (`mkfs.ext4 -d` directory population).
 The userspace reader traverses the bounded circular journal across its physical
 end and honors committed revocations, including earlier transaction mappings.
 Later committed rewrites remain visible.
-Cairn pins this correction in [the reader patch](../../vendor/ext4-view/CAIRN-PATCH.md).
+Cairn pinned this correction in its historical reader patch. That reader was
+removed with physical conversion under [ADR-0083](0083-local-conversation-disks-without-s3.md).
 The source image remains read-only, including when journal recovery is needed.
 A fake numeric ownership view makes VM files belong to its fixed UID 1000;
 native admission reconciles its own workload UID. Missing tools or unsupported

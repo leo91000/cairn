@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     future::Future,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -20,19 +20,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(crate) const KIND: &str = "native-ext4-v1";
 pub(crate) const STORAGE: &str = "ublk-rootless-v1";
-
-/// Whether a native controller mounts this checkpoint as a block journal: a
-/// disk created natively, or a VM disk that native nodes mount in place.
-pub(crate) fn mounts_block(manifest: &Value) -> bool {
-    manifest["kind"] == KIND || vm_disk(&manifest["runtime"]) && manifest["kind"].is_null()
-}
-
-/// A VM disk mounted natively records its VM image for a later move back.
-fn vm_disk(runtime: &Value) -> bool {
-    runtime["backend"] == "native" && runtime["disk"] == "vm"
-}
 
 /// Where a conversation's files live in its mounted filesystems. Native disks
 /// keep them at the filesystem root; VM disks keep the guest's layout, with
@@ -45,8 +33,6 @@ pub(crate) struct View {
     pub output: PathBuf,
     /// Mounted filesystem roots, in mount order.
     pub filesystems: Vec<PathBuf>,
-    /// Whether file owners are translated from the VM agent identity.
-    pub mapped: bool,
 }
 
 impl View {
@@ -57,49 +43,12 @@ impl View {
             workspace: data.join("workspaces"),
             output: data.join("output"),
             filesystems: vec![data],
-            mapped: false,
         }
     }
 
-    /// Current VM disks keep their writable guest overlay in `upper`.
-    fn vm(root: &Path, plan: &Value) -> Result<Self> {
-        let data = root.join("data");
-        let locate = |guest: &Path| -> Result<PathBuf> {
-            if !guest.is_absolute()
-                || guest
-                    .components()
-                    .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
-            {
-                return Err(Error::bad("Invalid saved guest path."));
-            }
-            Ok(data.join("upper").join(guest.strip_prefix("/").unwrap()))
-        };
-        let output = PathBuf::from(
-            plan["guestDataRoot"]
-                .as_str()
-                .ok_or_else(|| Error::bad("Missing native guest data root."))?,
-        )
-        .join("runs")
-        .join(text(plan, "runId"))
-        .join("output");
-        Ok(Self {
-            home: locate(Path::new("/home/node"))?,
-            workspace: locate(Path::new(text(plan, "projectRoot")))?,
-            output: locate(&output)?,
-            filesystems: vec![data],
-            mapped: true,
-        })
-    }
-
-    /// Rootful VM and rootless native daemons cannot share their metadata.
-    /// Keep both stores on the durable disk, without rewriting either format.
+    /// Keep native Docker metadata on the home filesystem.
     pub(super) fn docker_data(&self) -> Result<PathBuf> {
-        let name = if self.mapped {
-            ".cairn-native-docker"
-        } else {
-            "docker"
-        };
-        Ok(self.filesystem_of(&self.home)?.join(name))
+        Ok(self.filesystem_of(&self.home)?.join("docker"))
     }
 
     /// The mounted filesystem holding `path`, for same-filesystem staging.
@@ -111,59 +60,6 @@ impl View {
             .map(PathBuf::as_path)
             .ok_or_else(|| Error::bad("Path is outside the conversation's filesystems."))
     }
-
-    /// Validate every guest-written bind source before the controller writes it.
-    pub(super) async fn prepare(&self, uid: u32, gid: u32) -> Result<()> {
-        for path in [
-            &self.home,
-            &self.workspace,
-            &self.output,
-            &self.home.join(".local"),
-        ] {
-            directory_beneath(self.filesystem_of(path)?, path, Some((uid, gid))).await?;
-        }
-        Ok(())
-    }
-}
-
-/// Walks from `root` to `path` without following links. Missing components
-/// are created when `owner` is given; the final one is owned by it. Returns
-/// whether `path` exists as a directory afterwards.
-pub(super) async fn directory_beneath(
-    root: &Path,
-    path: &Path,
-    owner: Option<(u32, u32)>,
-) -> Result<bool> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| Error::bad("Path is outside its filesystem."))?;
-    let mut current = root.to_owned();
-    let count = relative.components().count();
-    for (index, part) in relative.components().enumerate() {
-        let Component::Normal(part) = part else {
-            return Err(Error::bad("Invalid conversation path."));
-        };
-        current.push(part);
-        match tokio::fs::symlink_metadata(&current).await {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => {
-                return Err(Error::conflict(
-                    "A conversation directory on this disk is a link or a file.",
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let Some((uid, gid)) = owner else {
-                    return Ok(false);
-                };
-                tokio::fs::create_dir(&current).await?;
-                if index + 1 == count {
-                    std::os::unix::fs::lchown(&current, Some(uid), Some(gid))?;
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(true)
 }
 
 /// The view recorded when the conversation was last mounted here.
@@ -204,7 +100,7 @@ fn preparation_size(directory: &Path, requested: u64) -> Result<u64> {
 }
 
 async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
-    let mut runtime = json!({
+    let runtime = json!({
         "backend": "native",
         "storage": STORAGE,
         "os": "linux",
@@ -214,14 +110,10 @@ async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
     if directory.join("runtime.json").exists() {
         let previous: Value =
             serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-        for field in ["disk", "vmRuntimeId"] {
-            if let Some(value) = previous.get(field) {
-                runtime[field] = value.clone();
-            }
-        }
         if ["backend", "os", "arch"]
             .iter()
             .any(|field| previous[*field] != runtime[*field])
+            || previous["disk"] == "vm"
             || !matches!(previous["storage"].as_str(), Some("ublk") | Some(STORAGE))
         {
             return Err(Error::conflict("Native disk platform changed."));
@@ -411,7 +303,7 @@ async fn unmount(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Keep the volume available to crash-consistent publication even while a
+/// Keep the volume available to local consolidation even while a
 /// filesystem flush holds its lifecycle lock waiting for journal headroom.
 pub struct Handle {
     pub volume: Arc<Volume>,
@@ -474,7 +366,7 @@ pub(super) async fn mount(
     plan: &Value,
     stop: &CancellationToken,
     namespace: &storage::ublk::BackendNamespace,
-    identity: Option<&super::identity::Identity>,
+    _identity: Option<&super::identity::Identity>,
 ) -> Result<Mounted> {
     {
         let owner = environment::ownership(state, run, DISK_BUSY).await?;
@@ -483,17 +375,9 @@ pub(super) async fn mount(
         private_dir(&root).await?;
         if root.join("block-initialized").exists() && !storage::runtime::exists(directory) {
             return Err(Error::conflict(
-                "Native journal is missing; restore its S3 checkpoint before execution.",
+                "Native journal is missing; expire the environment before starting a new one.",
             ));
         }
-        if directory.join("restore.pending").exists() {
-            return Err(Error::conflict(
-                "Native journal restore must finish before execution resumes.",
-            ));
-        }
-        // A later execution invalidates restore idempotence.
-        remove(&directory.join("recovery.json")).await?;
-        tokio::fs::File::open(directory).await?.sync_all().await?;
         let requested = plan["resources"]["diskMiB"]
             .as_u64()
             .ok_or_else(|| Error::bad("Missing native disk size."))?
@@ -515,19 +399,7 @@ pub(super) async fn mount(
         let physical = crate::file_lock::exclusive(&directory.join("lock"), DISK_BUSY)?;
         record_runtime(directory, plan).await?;
         let volume = open_volume(directory, requested).await?;
-        let runtime: Value =
-            serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-        let vm = vm_disk(&runtime);
-        if vm && !root.join("block-initialized").exists() {
-            return Err(Error::conflict(
-                "A VM disk must be restored before it runs natively.",
-            ));
-        }
-        let view = if vm {
-            View::vm(&root, plan)?
-        } else {
-            View::native(&root)
-        };
+        let view = View::native(&root);
         atomic_write(&root.join("view.json"), &serde_json::to_vec(&view)?).await?;
         let target = root.join("data");
         if !root.join("block-initialized").exists() && !root.join("block-seeding").exists() {
@@ -555,18 +427,8 @@ pub(super) async fn mount(
         let device = Arc::new(std::sync::Mutex::new(device));
         let source = jail.join("disk.blk");
         let destination = target.clone();
-        let identity = identity.cloned();
         let mut mounting = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             use std::os::unix::ffi::OsStrExt;
-            if vm {
-                return super::idmap::mount_ext4(
-                    &source,
-                    &destination,
-                    identity
-                        .as_ref()
-                        .ok_or_else(|| std::io::Error::other("Missing VM mount identity"))?,
-                );
-            }
             let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
             let target = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
             if unsafe {
@@ -989,173 +851,6 @@ pub async fn status(state: &Path, run: &str) -> Result<Value> {
     Ok(status)
 }
 
-pub async fn published(state: &Path, run: &str, receipt: &Value) -> Result<Value> {
-    let volume = storage::runtime::load(&environment::directory(state, run)?).await?;
-    let generation = receipt["generation"]
-        .as_i64()
-        .ok_or_else(|| Error::bad("Missing generation."))?;
-    if receipt["grantId"] != volume.source.grant_id()? {
-        return Err(Error::conflict(
-            "Publication belongs to a replaced native disk.",
-        ));
-    }
-    let backup = text(receipt, "backupId").to_owned();
-    crate::validation::uuid(&backup)?;
-    let disk = volume.disk.clone();
-    let state = state.to_owned();
-    tokio::task::spawn_blocking(move || {
-        volume
-            .source
-            .acknowledge(&state, &disk, generation, &backup)
-    })
-    .await
-    .map_err(Error::internal)??;
-    Ok(json!({ "committed": true }))
-}
-
-/// Filesystem consistency uses a short freeze only through the durable seal;
-/// hashing and upload proceed after thaw, like the guest capture path.
-pub async fn capture_active(
-    state: &Path,
-    run: &str,
-    mounted: Arc<Handle>,
-    filesystem: bool,
-    stop: CancellationToken,
-) -> Result<Value> {
-    let _capture = crate::nodes::checkpoint::prepare_capture(state, run).await?;
-    let mount = if filesystem {
-        Some(mounted.mount.lock().await)
-    } else {
-        None
-    };
-    if mount.as_ref().is_some_and(|mount| !mount.closing.mounted)
-        || !workspace::directory(state, run)?
-            .join("block-initialized")
-            .exists()
-    {
-        return Err(Error::conflict(
-            "Native filesystem is not ready for capture.",
-        ));
-    }
-    let volume = mounted.volume.clone();
-    let waiting = volume.inspect().await?["waitingFor"].is_string();
-    let freeze = if filesystem && !waiting {
-        freeze(
-            &workspace::directory(state, run)?.join("data"),
-            stop.clone(),
-        )
-        .await?
-    } else {
-        None
-    };
-    let crash_consistent = freeze.is_none();
-    let sealed = storage::checkpoint::seal_host(state, run, volume, crash_consistent, stop).await?;
-    drop(freeze);
-    drop(mount);
-    sealed.finish(state, run).await
-}
-
-struct Frozen {
-    file: std::fs::File,
-    stop: CancellationToken,
-}
-
-impl Drop for Frozen {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // Linux x86-64 FIFREEZE/FITHAW, matching the supported native ABI.
-        if unsafe { libc::ioctl(self.file.as_raw_fd(), 0xc0045878_u64, 0) } != 0 {
-            tracing::error!(error = %std::io::Error::last_os_error(), "Native filesystem thaw failed; stopping its writer");
-            self.stop.cancel();
-        }
-    }
-}
-
-async fn freeze(target: &Path, stop: CancellationToken) -> Result<Option<Frozen>> {
-    let (send, receive) = tokio::sync::oneshot::channel();
-    // Pin the mounted filesystem before handing work to the blocking pool. A
-    // late freeze must never reopen an empty mountpoint on the host filesystem.
-    let file = tokio::fs::File::open(target).await?.into_std().await;
-    tokio::task::spawn_blocking(move || {
-        use std::os::fd::AsRawFd;
-        let frozen = (|| -> Result<Frozen> {
-            if unsafe { libc::ioctl(file.as_raw_fd(), 0xc0045877_u64, 0) } != 0 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-            Ok(Frozen { file, stop })
-        })();
-        // If the freeze completed after its deadline, dropping the unsent guard
-        // thaws it here. Cancellation can never abandon a later successful freeze.
-        let _ = send.send(frozen);
-    });
-    match tokio::time::timeout(std::time::Duration::from_secs(30), receive).await {
-        Ok(Ok(Ok(guard))) => Ok(Some(guard)),
-        Ok(Ok(Err(error))) => Err(error),
-        Ok(Err(_)) => Err(Error::unavailable("Native freeze worker stopped.")),
-        Err(_) => Ok(None),
-    }
-}
-
-pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
-    let manifest = &request["manifest"];
-    if !mounts_block(manifest)
-        || manifest["runtime"]["backend"] != "native"
-        || !matches!(
-            manifest["runtime"]["storage"].as_str(),
-            Some("ublk") | Some(STORAGE)
-        )
-        || manifest["runtime"]["os"] != "linux"
-        || manifest["runtime"]["arch"] != "x86_64"
-    {
-        return Err(Error::conflict(
-            "Native block checkpoints require native Linux x86-64 and flat ext4.",
-        ));
-    }
-    crate::nodes::snapshots::validate(manifest)?;
-    super::systemd::tools(&crate::nodes::component_runtime())?;
-    crate::validation::uuid(text(&request, "backupId"))?;
-    let root = workspace::directory(state, run)?;
-    private_dir(&root).await?;
-    let _owner =
-        crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-    let pending = root.join("block-restore.pending.json");
-    if pending.exists() {
-        let current: Value = serde_json::from_slice(&tokio::fs::read(&pending).await?)?;
-        if current["backupId"] != request["backupId"] {
-            return Err(Error::conflict(
-                "Another native block restore must finish first.",
-            ));
-        }
-    } else {
-        atomic_write(
-            &pending,
-            &serde_json::to_vec(&json!({ "backupId": request["backupId"] }))?,
-        )
-        .await?;
-    }
-    let runtime = manifest["runtime"].clone();
-    let result = crate::nodes::restore::restore_journal(state, run, request).await?;
-    let data = root.join("data");
-    if data.exists() {
-        let mut entries = tokio::fs::read_dir(&data).await?;
-        if entries.next_entry().await?.is_some() {
-            tokio::fs::rename(
-                &data,
-                root.join(format!("stale-native-{}", crate::config::id())),
-            )
-            .await?;
-        }
-    }
-    private_dir(&data).await?;
-    atomic_write(&root.join("runtime.json"), &serde_json::to_vec(&runtime)?).await?;
-    remove(&root.join("file-owner.json")).await?;
-    atomic_write(&root.join("block-initialized"), b"1").await?;
-    atomic_write(&root.join("initialized"), b"1").await?;
-    tokio::fs::remove_file(pending).await?;
-    tokio::fs::File::open(&root).await?.sync_all().await?;
-    Ok(result)
-}
-
 pub fn free_bytes(path: &Path) -> Result<u64> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(Error::internal)?;
@@ -1184,11 +879,6 @@ pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>
     let directory = &lease.directory;
     let replacement = storage::runtime::replacement(directory).await?;
     let mut grants = Vec::new();
-    if !delete && directory.join("restore.pending").exists() {
-        return Err(Error::conflict(
-            "Finish native restore before pruning local data.",
-        ));
-    }
     let mut entries = tokio::fs::read_dir(directory).await?;
     while let Some(entry) = entries.next_entry().await? {
         let name = entry.file_name();
@@ -1295,71 +985,6 @@ mod tests {
         let mut bytes = [0; 6];
         volume.read_at(0, &mut bytes).unwrap();
         assert_eq!(&bytes, b"native");
-    }
-
-    #[tokio::test]
-    async fn vm_views_reject_redirected_bind_and_runtime_directories() {
-        let root = tempfile::tempdir().unwrap();
-        let run = crate::config::id();
-        let plan =
-            json!({ "runId": run, "guestDataRoot": "/data", "projectRoot": "/data/workspace" });
-        let view = View::vm(root.path(), &plan).unwrap();
-        assert_eq!(
-            view.workspace,
-            root.path().join("data/upper/data/workspace")
-        );
-        assert_eq!(view.home, root.path().join("data/upper/home/node"));
-        std::fs::create_dir_all(root.path().join("data/upper/home")).unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.path().join("data/upper/home/node"))
-            .unwrap();
-        assert!(view.prepare(1000, 1000).await.is_err());
-        std::os::unix::fs::symlink(outside.path(), view.docker_data().unwrap()).unwrap();
-        assert!(
-            directory_beneath(
-                &root.path().join("data"),
-                &view.docker_data().unwrap(),
-                Some((1000, 1000))
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
-    }
-
-    #[tokio::test]
-    async fn vm_native_docker_preparation_preserves_the_rootful_store() {
-        use std::os::unix::fs::MetadataExt;
-
-        let root = tempfile::tempdir().unwrap();
-        let data = root.path().join("data");
-        let rootful = data.join("docker/containers/private");
-        std::fs::create_dir_all(&rootful).unwrap();
-        std::fs::write(rootful.join("config.v2.json"), b"VM daemon metadata").unwrap();
-        let view = View::vm(
-            root.path(),
-            &json!({
-                "runId": crate::config::id(), "guestDataRoot": "/data",
-                "projectRoot": "/data/workspace"
-            }),
-        )
-        .unwrap();
-        let docker = view.docker_data().unwrap();
-        assert_eq!(docker, data.join(".cairn-native-docker"));
-        let owner = std::fs::metadata(&data).unwrap();
-        directory_beneath(&data, &docker, Some((owner.uid(), owner.gid())))
-            .await
-            .unwrap();
-        std::fs::write(docker.join("native-state"), b"rootless metadata").unwrap();
-        assert_eq!(
-            std::fs::read(rootful.join("config.v2.json")).unwrap(),
-            b"VM daemon metadata"
-        );
-        assert!(!data.join("docker/native-state").exists());
-        assert_eq!(
-            View::native(root.path()).docker_data().unwrap(),
-            data.join("docker")
-        );
     }
 
     #[test]

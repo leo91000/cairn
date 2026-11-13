@@ -116,7 +116,7 @@ pub(super) async fn refresh_with_status(
     status: impl Future<Output = Result<Value>>,
 ) -> Result<()> {
     let id = text(run, "id");
-    let _refresh = s.node_backup_operation.storage_refresh(id).await;
+    let _refresh = s.node_storage_operation.storage_refresh(id).await;
     let status = status.await?;
     let observed_at = crate::config::now();
     if status["mode"] == "native" {
@@ -202,33 +202,5 @@ fn record_status(db: &Db<'_>, id: &str, node: &str, status: &Value) -> Result<()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_native_journal_marks_last_good_metrics_stale_without_zeroing_them() {
-        let previous = json!({
-            "mode": "native",
-            "dirtyBytes": 4096,
-            "localBytes": 8192,
-            "activeLocalBytes": 1024,
-            "published": { "backupId": "last-good" }
-        });
-        let response = json!({
-            "mode": "native",
-            "availability": "unavailable",
-            "reason": crate::native::MISSING_NATIVE_JOURNAL_CODE
-        });
-
-        let recorded = storage_with_missing_native_journal(&previous, &response, 123);
-
-        assert_eq!(recorded["dirtyBytes"], 4096);
-        assert_eq!(recorded["localBytes"], 8192);
-        assert_eq!(recorded["activeLocalBytes"], 1024);
-        assert_eq!(recorded["published"]["backupId"], "last-good");
-        assert_eq!(recorded["availability"], "unavailable");
-        assert_eq!(recorded["availabilityReason"], "missing_native_journal");
-        assert_eq!(recorded["metricsAvailability"], "stale");
-        assert_eq!(recorded["availabilityObservedAt"], 123);
-    }
-}
+#[path = "storage/tests.rs"]
+mod tests;

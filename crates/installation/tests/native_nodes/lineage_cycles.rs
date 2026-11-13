@@ -437,9 +437,7 @@ async fn migrating_an_expired_vm_requester_cannot_adopt_its_native_child() {
 }
 
 #[tokio::test]
-async fn fresh_environment_cannot_reserve_materialize_or_read_after_a_back_edge() {
-    use cairn_installation::nodes::disk_grants;
-
+async fn fresh_environment_cannot_reserve_or_materialize_after_a_back_edge() {
     for destination_backend in ["firecracker", "native"] {
         let mut f = fixture("auto").await;
         let vm = f.vm_node().await;
@@ -463,7 +461,7 @@ async fn fresh_environment_cannot_reserve_materialize_or_read_after_a_back_edge(
         } else {
             (&f.node, &vm)
         };
-        let point = json!({ "id": id(), "runId": source.run["id"], "destination": "s3" });
+        let _point = json!({ "id": id(), "runId": source.run["id"], "destination": "s3" });
         let mut snapshot = source.run["snapshot"].clone();
         snapshot["agent"]["access"]["backend"] = destination_backend.into();
         let grant = json!({
@@ -522,39 +520,10 @@ async fn fresh_environment_cannot_reserve_materialize_or_read_after_a_back_edge(
         placement::reserve(&f.service, &candidate, &held)
             .await
             .unwrap();
-        let credential =
-            disk_grants::issue(&f.service, &candidate, text(destination, "id"), &point)
-                .await
-                .unwrap();
-        assert!(
-            disk_grants::authorize(&f.service, &credential)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        let mut revoked = destination.clone();
-        revoked["revoked"] = true.into();
-        f.service.store.put_node_fixture(revoked).await.unwrap();
-        assert!(
-            disk_grants::authorize(&f.service, &credential)
-                .await
-                .is_err()
-        );
-        f.service
-            .store
-            .put_node_fixture(destination.clone())
-            .await
-            .unwrap();
-        assert!(
-            disk_grants::authorize(&f.service, &credential)
-                .await
-                .unwrap()
-                .is_some()
-        );
-
         // Model a legacy/corrupted ancestry change after admission. Current
         // directing operations correctly refuse to commit this back edge.
         f.service.store.update_run_boundary_fixture(text(&director.run, "id"), json!({ "nativeParentRunId": descendant.run["id"], "nativeParentAccess": "installation" })).await.unwrap();
+
         let changed = f
             .service
             .store
@@ -579,36 +548,6 @@ async fn fresh_environment_cannot_reserve_materialize_or_read_after_a_back_edge(
             materialize_error
                 .message
                 .contains("cyclic native authority lineage")
-        );
-        let Err(issue_error) =
-            disk_grants::issue(&f.service, &candidate, text(destination, "id"), &point).await
-        else {
-            panic!("A cyclic lineage must not issue a disk credential");
-        };
-        assert!(
-            issue_error
-                .message
-                .contains("cyclic native authority lineage")
-        );
-        let read_error = disk_grants::authorize(&f.service, &credential)
-            .await
-            .unwrap_err();
-        assert!(
-            read_error
-                .message
-                .contains("cyclic native authority lineage")
-        );
-        let request = common::request("GET", &format!("/internal/node-restore/{}", "0".repeat(64)))
-            .header("authorization", format!("Bearer {credential}"))
-            .body(Body::empty())
-            .unwrap();
-        let response = common::send(&f.router, request).await;
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let body = read_json(response).await;
-        assert!(
-            body.to_string()
-                .contains("remote restore is no longer supported"),
-            "{body}"
         );
         assert_eq!(f.service.store.attempts().await.unwrap(), attempts_before);
         assert_eq!(

@@ -101,19 +101,7 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
             "/internal/nodes/host.py",
             any(crate::nodes::maintenance::downloads),
         )
-        .route(
-            "/internal/nodes/stream/{id}",
-            any(crate::nodes::transport::stream),
-        )
         .route("/internal/nodes/{*path}", any(crate::nodes::internal))
-        .route(
-            "/internal/node-restore/{*path}",
-            any(|| async {
-                Err::<axum::response::Response, _>(Error::conflict(
-                    "Conversation disks are local; remote restore is no longer supported.",
-                ))
-            }),
-        )
         .route(
             "/internal/node-workspace/{*path}",
             any(crate::nodes::workspace::handle),
@@ -258,7 +246,6 @@ fn cache_policy(path: &str, response: &Response) -> &'static str {
 fn is_node_traffic(path: &str) -> bool {
     path.starts_with("/internal/nodes/")
         || path.starts_with("/internal/execution/")
-        || path.starts_with("/internal/node-restore/")
         || path.starts_with("/internal/node-workspace/")
 }
 
@@ -368,7 +355,6 @@ fn authenticate_installation(request: &Request) -> Result<()> {
     let machine = path == "/health"
         || path == "/internal/deployment-lease"
         || path.starts_with("/internal/nodes/")
-        || path.starts_with("/internal/node-restore/")
         || path.starts_with("/internal/node-workspace/")
         || path.starts_with("/internal/execution/")
         || path == "/mcp-workspace"

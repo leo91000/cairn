@@ -22,7 +22,6 @@
         "backend": "native",
         "kvm": false,
         "ublk": true,
-        "vmDisks": false,
         "nativeModeProtocol": 1,
         "cpu": 8,
         "memoryMiB": 16384,

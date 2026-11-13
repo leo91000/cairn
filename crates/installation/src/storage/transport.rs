@@ -1,4 +1,4 @@
-//! VM block transport; publication and durability belong to the shared Volume.
+//! VM block transport; consolidation and durability belong to the shared Volume.
 use super::runtime::Volume;
 use crate::error::{Error, Result};
 use serde_json::{Value, json};

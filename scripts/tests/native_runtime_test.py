@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Disposable real systemd/ublk/ext4/local-disk qualification; never a personal host.
 
-Invoked through node_s3_test.py so credentials, bucket and network are synthetic.
+Invoked through scripts/test-native-runtime.mjs with isolated fixture credentials.
 The loopback bridge exists only in this fixture; production remains Unix-only.
 """
 import base64
-import boto3
 import http.client
 import http.server
 import importlib.util
-import importlib.metadata
 import hashlib
 import json
 import os
@@ -21,7 +19,6 @@ import select
 import shutil
 import stat
 import socketserver
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -88,40 +85,6 @@ def completed_local_disk(api, manager, run):
     return result
 
 
-def fixture_garbage_inventory(root):
-    root = Path(root)
-    database = root / 'manager/manager.db'
-    if not (root / 'disposable-fixture').is_file() or not database.is_file():
-        raise RuntimeError('Garbage clock requires the private disposable manager fixture.')
-    with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as db:
-        now = int(time.time() * 1000)
-        states = [dict(state=state, objects=count, unused=unused, deferred=deferred, referenced=referenced)
-                  for state, count, unused, deferred, referenced in db.execute('''
-                    SELECT state,count(*),sum(unused_at IS NOT NULL),sum(retry_at>?),
-                      sum(EXISTS(SELECT 1 FROM shared_references r WHERE r.object=o.id))
-                    FROM shared_objects o GROUP BY state''', (now,))]
-        return dict(states=states,
-                    references=db.execute('SELECT count(*) FROM shared_references').fetchone()[0],
-                    remoteDeletions=db.execute('SELECT count(*) FROM remote_deletions').fetchone()[0])
-
-
-def advance_fixture_garbage_clock(root):
-    before = fixture_garbage_inventory(root)
-    # Every fixture publisher has stopped and its disk has been deleted. Advance
-    # the isolated GC schedule as well as orphan grace and capability expiry.
-    # Keep references, states, and uncertain PUT tombstones intact: the production
-    # collector must perform the real version listing/deletion and retain safety.
-    with sqlite3.connect(Path(root) / 'manager/manager.db') as db:
-        db.execute('''UPDATE shared_objects SET unused_at=0,retry_at=0
-                      WHERE unused_at IS NOT NULL
-                      AND NOT EXISTS(SELECT 1 FROM shared_references r WHERE r.object=shared_objects.id)''')
-        db.execute('UPDATE remote_deletions SET retry_at=0')
-        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_storage_grants'").fetchone():
-            db.execute('''UPDATE direct_storage_grants SET expires_at=0
-                          WHERE object IN (SELECT id FROM shared_objects WHERE unused_at IS NOT NULL
-                            AND NOT EXISTS(SELECT 1 FROM shared_references r WHERE r.object=shared_objects.id))''')
-    return before
-
 SPEC = importlib.util.spec_from_file_location('native_host', Path(__file__).resolve().parents[2] / 'deploy/nodes/native-host.py')
 host = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(host)
@@ -183,8 +146,6 @@ print(json.dumps({'write':write,'readColdHint':reads[0],'readWarm':reads[1]}))
 def main():
     if os.environ.get('CAIRN_NATIVE_DISPOSABLE_HOST') != '1' or os.geteuid() != 0:
         raise RuntimeError('Requires root on an explicitly designated disposable host.')
-    if not os.environ.get('CAIRN_NODE_TEST_S3_ENDPOINT', '').startswith('http://127.0.0.1:'):
-        raise RuntimeError('Run via the isolated loopback S3 launcher.')
     binary = Path(sys.argv[1]).resolve(strict=True)
     qualifier = Path(sys.argv[2]).resolve(strict=True)
     identifier = str(uuid.uuid4())
@@ -197,11 +158,7 @@ def main():
                             cpu=Path('/proc/cpuinfo').read_text().split('model name')[1].splitlines()[0],
                             memory=Path('/proc/meminfo').read_text().splitlines()[0],
                             loadAverageStart=os.getloadavg(), cpuTicksStart=Path('/proc/stat').read_text().splitlines()[0]),
-                   s3Emulator=dict(name='Moto', version=importlib.metadata.version('moto'),
-                                   keyBufferBytes=int(os.environ['MOTO_S3_DEFAULT_KEY_BUFFER_SIZE']),
-                                   openFileLimits=resource.getrlimit(resource.RLIMIT_NOFILE),
-                                   backing='SpooledTemporaryFile; larger payloads and version-list copies spill to local disk.'),
-                   conditions='Disposable hosted Linux VM; local disks, synthetic S3 only to verify old objects are retained; no WAN latency. '
+                   conditions='Disposable hosted Linux VM; local disks and synthetic credentials; no WAN latency. '
                               'Cold file reads use advisory POSIX_FADV_DONTNEED; controller restart clears userspace cache.',
                    workload='Seeded random42 8MiB asset +128 fsynced 4KiB text writes, per-process wall/CPU milliseconds.',
                    resources=dict(nativeCpu=1, nativeMemoryMiB=512, nativeDiskMiB=256,
@@ -304,19 +261,6 @@ def main():
                     body = self.rfile.read(length) if length else None
                     connection.request(self.command, self.path, body=body, headers=dict(self.headers))
                     response = connection.getresponse()
-                    if self.path.endswith('/direct-reader') and self.command == 'POST':
-                        # This response owns the publication reader. Forward its
-                        # headers and heartbeats while bounded PUT RPCs proceed.
-                        self.send_response(response.status)
-                        for key, value in response.getheaders():
-                            if key.lower() not in ('content-length', 'transfer-encoding', 'connection'):
-                                self.send_header(key, value)
-                        self.send_header('Connection', 'close')
-                        self.end_headers()
-                        while chunk := response.read1(16384):
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                        return
                     payload = response.read()
                     self.send_response(response.status)
                     for key, value in response.getheaders():
@@ -790,8 +734,6 @@ def main():
             assert stopped_health['usage']['diskBytes'] > 0
             assert stopped_health['diskGrowth']['retainedBytes'][run] > 0, 'Stopped journal lost its measured admission credit.'
             consolidated = manager('consolidate', run=run)
-            s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
-            initial_objects = {obj['Key']: obj['Size'] for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])}
             metrics['localConsolidatedBytes'] = consolidated['allocatedBytes']
             metrics['referenceRawBytes'] = len(asset) + 128 * 4096
             status = api('/disks/' + run + '/storage-status')
@@ -800,7 +742,7 @@ def main():
             try:
                 api('/disks/' + run + '/evict', receipt)
             except urllib.error.HTTPError as error:
-                assert error.code == 409
+                assert error.code in (404, 405, 409)
             else:
                 raise AssertionError('Local environment data was evicted.')
             prepare_base(other)
@@ -893,11 +835,12 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                                                           remoteRequests=manager('metrics')['remoteRequests']-before_reads)
             assert metrics['nativeOverwriteConsolidation']['remoteRequests'] == 0
             (managed(run) / 'overwrite-pressure').unlink()
+            assert api('/disks/' + run + '/storage-status')['localBytes'] > 0
             # No local environment can be evicted, including a current writer.
             try:
                 api('/disks/' + run + '/evict', dict(receipt, attempt=resumed))
             except urllib.error.HTTPError as error:
-                assert error.code == 409
+                assert error.code in (404, 405, 409)
             else:
                 raise AssertionError('Eviction removed an active writer cache.')
             # Local work has no backup-lag state or remote dependency.
@@ -950,7 +893,7 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
             try:
                 api('/disks/' + run + '/evict', receipt)
             except urllib.error.HTTPError as error:
-                assert error.code == 409
+                assert error.code in (404, 405, 409)
             else:
                 raise AssertionError('Eviction removed local journal writes.')
             progress('storage-growth-pressure-complete')
@@ -1191,16 +1134,11 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 manager('purge', run=current)
                 api('/disks/' + current + '/delete', {'permanentlyDeleted': True})
                 if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
-                    # Backup purge and permanent local disk deletion are
-                    # separate operations; exercise both before checking state.
+                    # Permanent local deletion must also retire private Docker state.
                     docker_runtime_path = state / 'native' / current / 'docker-runtime'
                     assert not docker_runtime_path.exists() and not docker_runtime_path.is_symlink(), 'Permanent deletion retained Docker runtime state.'
             if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
                 metrics['dockerRuntimeCleanupVerified'] = True
-            metrics['remoteGarbageAfterCleanup'] = fixture_garbage_inventory(root)
-            remaining = {obj['Key']: obj['Size'] for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])}
-            assert remaining == initial_objects, 'Local disk cleanup changed the old S3 objects.'
-            metrics['retainedRemoteObjects'] = len(remaining)
             progress('purge-completed')
             metrics['harnessCpuSeconds'] = resource.getrusage(resource.RUSAGE_SELF).ru_utime
             metrics['host']['loadAverageEnd'] = os.getloadavg()

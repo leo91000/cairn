@@ -121,7 +121,7 @@ procedure before it can be trusted again.
 ## Compatibility and qualification
 
 `scripts/tests/native_runtime_test.py` runs only as root with
-`CAIRN_NATIVE_DISPOSABLE_HOST=1` and loopback synthetic S3. It exercises ordinary
+`CAIRN_NATIVE_DISPOSABLE_HOST=1` on an explicitly disposable host. It exercises ordinary
 UID plus host sudo and a real `/etc` write, protected denial of sudo/personal
 paths, concurrent conversations, root process descendants, both transitions,
 retained files and host changes, idempotent generation retry and effective health

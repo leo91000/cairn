@@ -1569,10 +1569,7 @@ async fn failed_manager_erasure_allows_destination_admission_and_preserves_its_n
         .owner
         .service
         .store
-        .update_run_boundary(
-            &change.run,
-            json!({ "backup":{ "id":id() }, "storage":{ "dirtyBytes":4096 } }),
-        )
+        .update_run_boundary(&change.run, json!({ "storage":{ "dirtyBytes":4096 } }))
         .await
         .unwrap();
     change.owner.service.retire_environments().await.unwrap();
@@ -1581,7 +1578,6 @@ async fn failed_manager_erasure_allows_destination_admission_and_preserves_its_n
     assert_eq!(failed[0]["cleaned"], false);
     assert!(failed[0]["error"].is_string());
     assert!(!change.admission_blocked().await);
-    assert!(change.owner.run(&change.run).await["backup"].is_null());
     assert!(change.owner.run(&change.run).await["storage"].is_null());
     let run = change.owner.run(&change.run).await;
     let reservation = id();

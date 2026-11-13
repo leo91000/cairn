@@ -34,7 +34,7 @@ pub fn command(binary: &str, args: &[String], env: &Environment, cwd: Option<&Pa
     command
         .args(args)
         .env_clear()
-        // Storage credentials stay with the server's own S3 client.
+        // Legacy storage credentials never reach child processes.
         .envs(env.iter().filter(|(key, _)| !storage_key(key)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
