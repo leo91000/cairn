@@ -285,7 +285,7 @@ jobs:
         env:
           BACKEND_DIAGNOSTIC_SELECTOR: ${{ inputs.backend-diagnostic-selector || 'full' }}
       - name: Qualify native controller concurrency before building every test binary
-        if: inputs.ci-diagnostic != 'backend' && (inputs.backend-only != true || inputs.publication-measurement != true)
+        if: inputs.ci-diagnostic != 'backend'
         run: >-
           node scripts/test-backend.mjs --nextest --workspace --lib
           -E 'package(=cairn-installation) & (test(native::service::tests::) | test(nodes::files::tests::))' --no-capture

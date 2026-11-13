@@ -46,8 +46,7 @@ impl View {
         }
     }
 
-    /// Rootful VM and rootless native daemons cannot share their metadata.
-    /// Keep both stores on the durable disk, without rewriting either format.
+    /// Keep native Docker metadata on the home filesystem.
     pub(super) fn docker_data(&self) -> Result<PathBuf> {
         Ok(self.filesystem_of(&self.home)?.join("docker"))
     }
