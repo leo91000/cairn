@@ -73,5 +73,5 @@ it('delivers rule budget alerts without a fabricated chat target', async () => {
     waitUntil: (value: Promise<unknown>) => { delivered = value },
   })
   await delivered
-  expect(showNotification).toHaveBeenCalledWith('Rule limit', expect.objectContaining({ data: { url: `/installations/${installationId}/chats?rule=${ruleId}` } }))
+  expect(showNotification).toHaveBeenCalledWith('Rule limit', expect.objectContaining({ renotify: true, data: { url: `/installations/${installationId}/?rule=${ruleId}` } }))
 })

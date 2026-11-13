@@ -14,7 +14,8 @@ globalThis.addEventListener('push', (event) => {
       icon: '/icons/icon-192.png',
       badge: '/icons/icon-192.png',
       tag: `${data.installationId}:rule-${data.ruleId}`,
-      data: { url: `/installations/${data.installationId}/chats?rule=${data.ruleId}` },
+      renotify: true,
+      data: { url: `/installations/${data.installationId}/?rule=${data.ruleId}` },
     }))
     return
   }

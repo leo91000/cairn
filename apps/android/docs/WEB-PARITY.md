@@ -831,7 +831,6 @@ published artifact version, and disables indexing and caching. Expiration, revoc
 and conversation deletion deny both history and files. The same management operations
 are available through public MCP and cairn_installation with management authority.
 
-
 Rule budget alerts (ADR-0075 F): web and Android display an installation-level
 alert only for its creator. Android rechecks the active account and current rule
 state before displaying it. Both open the installation inbox; ticket I supplies

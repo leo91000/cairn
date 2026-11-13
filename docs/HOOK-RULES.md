@@ -72,6 +72,14 @@ wait.
 A rule holds at most 200 blocks nested eight levels deep. One triggering runs at most
 500 blocks and iterations, waits excluded, and 50 tool calls.
 
+The catalog also publishes fixed data limits: a triggering records at most 1 MiB
+of event and step data (with room reserved for failure details), its persisted
+control state is at most 512 KiB, and a rule's remembered values total at most
+1 MiB. Combined tool input is at most 256 KiB. Exceeding a limit stops the
+triggering; an action whose result could not be recorded is never retried.
+Results live in the step records and are loaded by node identifier when execution
+resumes, rather than copied into every persisted cursor.
+
 ## The engine
 
 Each queued plugin hook event becomes one triggering per rule that listens to that
@@ -276,12 +284,3 @@ Until Cairn records who writes each conversation entry, no conversation meets th
 conditions: `cairn_installation` writes no rule and installs no template. It never grants a right, never lifts
 an emergency pause or exhausted budget, never touches another account's rule and never
 reduces a grant a rule of a current account uses.
-
-
-The catalog also publishes fixed data limits: a triggering records at most 1 MiB
-of event and step data (with room reserved for failure details), its persisted
-control state is at most 512 KiB, and a rule's remembered values total at most
-1 MiB. Combined tool input is at most 256 KiB. Exceeding a limit stops the
-triggering; an action whose result could not be recorded is never retried.
-Results live in the step records and are loaded by node identifier when execution
-resumes, rather than copied into every persisted cursor.
