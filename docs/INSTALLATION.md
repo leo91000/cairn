@@ -85,8 +85,12 @@ The update supervisor and installer reruns retain any existing Garage service
 and its saved configuration; this also lets a stopped legacy service start again.
 The installer repairs ownership of an existing legacy storage configuration left
 by an interrupted installation. If that installation has no saved `compose.json`,
-restore its previous Compose configuration from backup before rerunning; the
-installer refuses to start an old image without its required storage service.
+restore its previous Compose configuration from backup or recover it with the
+matching legacy installer before rerunning. This also applies when only its old
+image was saved before interruption: the installer refuses to start an unknown
+old image without its storage service. New local installations record their layout
+in the initial configuration, so an interruption before writing Compose remains
+recoverable without legacy storage.
 Once rollback is no
 longer needed, the operator can stop and remove that service and its data,
 credentials and bucket. Do not remove unrelated Docker services or volumes.

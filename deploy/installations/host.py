@@ -233,19 +233,24 @@ def install(origin, code):
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(ROOT, 0o700)
     compose_file = ROOT / 'compose.json'
-    legacy_storage = ROOT / 'data/storage-s3.json'
-    if not compose_file.exists() and (legacy_storage.exists() or legacy_storage.is_symlink()):
-        raise RuntimeError('The legacy installation has storage configuration but no saved Compose file. Restore the previous Compose configuration from backup before rerunning the installer; existing identity and storage are retained.')
-    claimed = claimed_identity(origin)
     config_file = ROOT / 'installation.json'
-    if config_file.exists():
-        config = json.loads(config_file.read_text())
+    saved_config = config_file.exists()
+    config = json.loads(config_file.read_text()) if saved_config else {}
+    if not isinstance(config, dict):
+        raise RuntimeError('The saved installation configuration is invalid; restore its backup before rerunning the installer. It is retained.')
+    legacy_paths = [ROOT / name for name in ('data/storage-s3.json', 'garage.env', 'garage.toml', 'garage')]
+    legacy_present = any(path.exists() or path.is_symlink() for path in legacy_paths)
+    unknown_layout = saved_config and config.get('layout') != 'local-disks-v1'
+    if not compose_file.exists() and (unknown_layout or legacy_present):
+        raise RuntimeError('The legacy installation has no saved Compose file. Restore the previous Compose configuration from backup, or recover it with the matching legacy installer, before rerunning; existing identity and storage are retained.')
+    claimed = claimed_identity(origin)
+    if saved_config:
         if config['origin'] != origin:
             raise RuntimeError('This installation belongs to another beacon origin; its identity is retained.')
         image = config['image']
     else:
         image = release(origin)
-        atomic(config_file, json.dumps({'image': image, 'origin': origin}))
+        atomic(config_file, json.dumps({'image': image, 'origin': origin, 'layout': 'local-disks-v1'}))
     if not IMAGE.fullmatch(image):
         raise RuntimeError('Invalid saved installation image.')
 

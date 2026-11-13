@@ -17,40 +17,53 @@ REPO = Path(__file__).resolve().parents[2]
 
 class Installer(unittest.TestCase):
     def test_interrupted_legacy_install_without_compose_refuses_before_docker_or_rewrites(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            legacy = {
-                'installation.json': json.dumps({
+        artifacts = [None, 'data/storage-s3.json', 'garage.env', 'garage.toml', 'garage']
+        cases = [(False, None, False)]
+        cases += [(marked, artifact, linked) for marked in (False, True)
+                  for artifact in artifacts if artifact for linked in (False, True)]
+        for marked, artifact, linked in cases:
+            with self.subTest(marked=marked, artifact=artifact, linked=linked), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = {
                     'origin': 'https://cairn.example.test',
                     'image': 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64,
-                }).encode(),
-                'data/storage-s3.json': b'opaque legacy credentials',
-                'garage.env': b'legacy environment',
-                'garage.toml': b'legacy configuration',
-            }
-            for name, contents in legacy.items():
-                path = root / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(contents)
-                path.chmod(0o600)
-            binaries = root / 'bin'
-            binaries.mkdir()
-            docker = binaries / 'docker'
-            docker.write_text("#!/usr/bin/env python3\nfrom pathlib import Path\nimport os\nPath(os.environ['CAIRN_INSTALLATION_ROOT'], 'docker-called').touch()\n")
-            docker.chmod(0o755)
-            result = subprocess.run(
-                ['python3', str(write_supervisors(root)[0]),
-                 'https://cairn.example.test', '--claim-code', 'a' * 64],
-                env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                     'CAIRN_INSTALLATION_ROOT': directory}, capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('Restore the previous Compose configuration', result.stderr)
-            self.assertFalse((root / 'compose.json').exists())
-            self.assertFalse((root / 'claim.env').exists())
-            self.assertFalse((root / 'docker-called').exists())
-            for name, contents in legacy.items():
-                self.assertEqual((root / name).read_bytes(), contents)
-            self.assertNotIn('opaque legacy credentials', result.stdout + result.stderr)
+                }
+                if marked:
+                    config['layout'] = 'local-disks-v1'
+                legacy = {'installation.json': json.dumps(config).encode()}
+                if linked:
+                    path = root / artifact
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.symlink_to(root / 'missing-legacy-target')
+                elif artifact and artifact != 'garage':
+                    legacy[artifact] = b'opaque legacy credentials'
+                elif artifact:
+                    (root / artifact).mkdir()
+                for name, contents in legacy.items():
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(contents)
+                    path.chmod(0o600)
+                binaries = root / 'bin'
+                binaries.mkdir()
+                docker = binaries / 'docker'
+                docker.write_text("#!/usr/bin/env python3\nfrom pathlib import Path\nimport os\nPath(os.environ['CAIRN_INSTALLATION_ROOT'], 'docker-called').touch()\n")
+                docker.chmod(0o755)
+                result = subprocess.run(
+                    ['python3', str(write_supervisors(root)[0]),
+                     'https://cairn.example.test', '--claim-code', 'a' * 64],
+                    env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
+                         'CAIRN_INSTALLATION_ROOT': directory}, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Restore the previous Compose configuration', result.stderr)
+                self.assertFalse((root / 'compose.json').exists())
+                self.assertFalse((root / 'claim.env').exists())
+                self.assertFalse((root / 'docker-called').exists())
+                for name, contents in legacy.items():
+                    self.assertEqual((root / name).read_bytes(), contents)
+                if linked:
+                    self.assertEqual((root / artifact).readlink(), root / 'missing-legacy-target')
+                self.assertNotIn('opaque legacy credentials', result.stdout + result.stderr)
 
     def test_legacy_storage_owner_repair_preserves_private_bytes_and_refuses_links(self):
         spec = importlib.util.spec_from_file_location('installation_host', REPO / 'deploy/installations/host.py')
@@ -107,6 +120,7 @@ if 'up' in sys.argv:
             (root / 'installation.json').write_text(json.dumps({
                 'origin': 'https://cairn.example.test',
                 'image': 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64,
+                'layout': 'local-disks-v1',
             }))
             result = subprocess.run(
                 ['python3', str(write_supervisors(Path(directory))[0]),
@@ -130,6 +144,7 @@ if 'up' in sys.argv:
             (installation / 'installation.json').write_text(json.dumps({
                 'origin': 'https://cairn.example.test',
                 'image': 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64,
+                'layout': 'local-disks-v1',
             }))
             result = subprocess.run(
                 ['python3', str(write_supervisors(Path(directory))[0]),
@@ -235,8 +250,21 @@ if 'exec' in args:
                 self.assertFalse(any('ports' in service for service in compose['services'].values()))
                 self.assertFalse((installation / 'claim.env').exists())
                 identity = (installation / 'data/installation-relay/identity.json').read_bytes()
+                saved_config = (installation / 'installation.json').read_bytes()
+                self.assertEqual(json.loads(saved_config)['layout'], 'local-disks-v1')
+                # New local installs can be resumed even before the first Compose
+                # write. The initial atomic config already identifies this layout.
+                (installation / 'compose.json').unlink()
+                result = subprocess.run(command, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((installation / 'installation.json').read_bytes(), saved_config)
+                self.assertEqual((installation / 'data/installation-relay/identity.json').read_bytes(), identity)
                 # Reinstalling an older installation retains operator-owned S3
                 # configuration and data, even if they can no longer be parsed.
+                old_config = json.loads(saved_config)
+                del old_config['layout']
+                (installation / 'installation.json').write_text(json.dumps(old_config))
+                old_config_bytes = (installation / 'installation.json').read_bytes()
                 legacy = {
                     'garage.env': b'legacy environment',
                     'garage.toml': b'legacy configuration',
@@ -266,6 +294,17 @@ if 'exec' in args:
                 self.assertEqual(retained['services']['garage'], garage)
                 self.assertEqual(retained['services']['manager']['depends_on']['garage'], dependency)
                 self.assertEqual(retained['services']['manager']['image'], compose['services']['manager']['image'])
+                self.assertEqual((installation / 'installation.json').read_bytes(), old_config_bytes)
+                # An operator can intentionally remove the old Garage service
+                # while retaining its private files after the local-disk upgrade.
+                del retained['services']['garage']
+                del retained['services']['manager']['depends_on']['garage']
+                (installation / 'compose.json').write_text(json.dumps(retained))
+                result = subprocess.run(command, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn('garage', json.loads((installation / 'compose.json').read_text())['services'])
+                for name, contents in legacy.items():
+                    self.assertEqual((installation / name).read_bytes(), contents)
                 self.assertNotIn('a' * 64, result.stdout + result.stderr)
             finally:
                 server.shutdown()
