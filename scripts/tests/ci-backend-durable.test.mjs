@@ -411,8 +411,14 @@ it.each(['hang', 'before-admission'])('bounds each uploader by the actual remain
   const realSpawn = childProcess.spawn
   const spawnObserver = vi.spyOn(childProcess, 'spawn').mockImplementation((command, args, options) => {
     const child = realSpawn(command, args, options)
-    if (command === process.execPath && args?.[0] === f.uploader)
-      children.push(child)
+    if (command === process.execPath && args?.[0] === f.uploader) {
+      const observed = { child }
+      children.push(observed)
+      const initial = current(child.pid)
+      if (initial)
+        observed.identity = { pid: initial.pid, startTicks: initial.start }
+    }
+
     return child
   })
   syncBuiltinESMExports()
@@ -423,27 +429,31 @@ it.each(['hang', 'before-admission'])('bounds each uploader by the actual remain
     await assert.rejects(publish({ clock: f.receipt.clock, acquisition: 'admitted-before-command' }), /failed|unknown/)
     assert.ok(Date.now() - started < 500)
     assert.equal(children.length, 1)
-    assert.ok(Number.isSafeInteger(children[0].pid) && children[0].pid > 0, 'Uploader process must be spawned')
-    // The uploader may be killed before its own marker is written. Observe the
-    // real spawned process so absent admission cannot hide a leaked child.
-    assert.ok(hasExited(children[0]), 'Spawned uploader must exit before publication returns')
+    const { child, identity } = children[0]
+    assert.ok(Number.isSafeInteger(child.pid) && child.pid > 0, 'Uploader process must be spawned')
+    assert.ok(identity, 'Initial uploader identity must be observed')
+    // A marker or Node exit event may still be absent after OS retirement.
+    // Check the pinned OS identity; unreadable process state remains a failure.
+    assert.ok(!isLive(identity), 'Spawned uploader must not remain live after publication returns')
     const marker = path.join(f.root, 'hanging-uploader')
     if (mode === 'before-admission')
       assert.equal(existsSync(marker), false)
     if (existsSync(marker)) {
       const pid = JSON.parse(readFileSync(marker, 'utf8'))
-      assert.equal(pid.pid, children[0].pid)
+      assert.equal(pid.pid, child.pid)
       assert.ok(!isLive({ pid: pid.pid, startTicks: pid.start }))
     }
   }, async () => {
     spawnObserver.mockRestore()
     syncBuiltinESMExports()
-    for (const child of children) {
-      if (!hasExited(child))
+    for (const { child, identity } of children) {
+      if (identity)
+        signalOwned(identity)
+      else if (!hasExited(child))
         child.kill('SIGKILL')
     }
 
-    await vi.waitFor(() => assert.ok(children.every(hasExited)), { timeout: 1000, interval: 10 })
+    await vi.waitFor(() => assert.ok(children.every(({ child }) => hasExited(child))), { timeout: 1000, interval: 10 })
   })
 })
 
