@@ -92,6 +92,7 @@ for current behavior.
 | 0081 | [Side questions use Claude Code's native side mechanism; Codex stays unavailable](0081-native-side-questions.md) |
 | 0082 | [Explicit backend moves reuse VM disks](0082-move-vm-disks-between-execution-backends.md) |
 | 0083 | [Disques de conversation locaux à leur node, sans S3](0083-local-conversation-disks-without-s3.md) |
+| 0084 | [Drain native filesystem access per attempt](0084-native-attempt-access-drain.md) |
 
 ## Renumbered collisions
 
