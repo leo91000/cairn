@@ -362,19 +362,22 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         assert 'secretAccessKey' not in saved and 'accessKeyId' not in saved
         checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
         assert checked == {'ok': True}
-        # Public relayed settings plus the existing disk publication seam exercise
-        # an old disk against real Garage after changing the default to HTTPS S3.
+        # Legacy encrypted objects remain on their original Garage after the
+        # default changes to HTTPS S3 and their local references are purged.
         storage_test = Path('/fixture/storage-continuity')
         assert storage_test.is_file() and os.access(storage_test, os.X_OK), 'Mount the executable identified by Cargo'
-        subprocess.run([str(storage_test), '--ignored', '--exact',
-                        'existing_disks_keep_publishing_reading_and_purging_on_their_original_storage',
-                        '--nocapture'], check=True, env={
+        completed = subprocess.run([str(storage_test), '--ignored', '--exact',
+                        'legacy_disk_objects_survive_local_reference_purge_on_original_storage',
+                        '--nocapture'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env={
                             **os.environ,
                             'DATA_DIR': str(ROOT / 'data'),
                             'CAIRN_INSTALLER_TEST_STORAGE_CONFIG': str(ROOT / 'data/storage-s3.json.integrated'),
                             'CAIRN_INSTALLER_TEST_EXTERNAL_ENDPOINT': endpoint,
                         })
-        print('Container: retained disk publication, remote reads and purge on original Garage passed', flush=True)
+        print(completed.stdout, end='', flush=True)
+        completed.check_returncode()
+        assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in completed.stdout, 'Expected one executed storage retention test'
+        print('Container: legacy remote objects preserved after local reference purge passed', flush=True)
         r2_endpoint = f'https://{R2_HOST}:{proxy.server_port}'
         r2_settings = {
             'bucket': 'cairn-external', 'endpoint': r2_endpoint, 'region': 'auto',

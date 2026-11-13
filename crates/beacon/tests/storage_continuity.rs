@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 #[ignore = "requires the installer container's real Garage and external HTTPS S3 fixtures"]
-async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_storage() {
+async fn legacy_disk_objects_survive_local_reference_purge_on_original_storage() {
     let bytes = Arc::new(Mutex::new(vec![41u8; 4096]));
     let source = bytes.clone();
     let controller = Router::new().fallback(move |request: Request<Body>| {
@@ -149,7 +149,7 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
         .await
         .unwrap();
 
-    // The existing public publication seam drives actual encrypted S3 uploads.
+    // Seed legacy encrypted objects through the retained publication seam.
     let first = publication::capture(service, &service.store.run(&run_id).await.unwrap())
         .await
         .unwrap();
@@ -200,7 +200,7 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
     assert!(
         points
             .iter()
-            .all(|point| point["endpoint"] == "http://garage:3900")
+            .all(|point| point["endpoint"] == integrated["endpoint"])
     );
 
     // Evict local cached bytes so reads must use each point's original S3 credentials.
@@ -238,32 +238,65 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
             block["object"].as_str().unwrap(),
         ));
     }
-    publication::purge(service, &run_id).await.unwrap();
-    // Advance both the GC grace period and the issued PUT capabilities' expiry;
-    // production purge must retain objects while a delayed PUT could recreate them.
+    let mut retained = Vec::new();
+    for object in objects {
+        let bytes = original_storage
+            .download_bytes(&object, 65536)
+            .await
+            .unwrap();
+        retained.push((object, bytes));
+    }
+    // An earlier version may already have queued a deletion. Local retirement
+    // leaves that record and every original remote byte for the operator.
+    let queued = id();
     service
         .store
-        .write(|db| {
-            db.0.execute(
-                "UPDATE shared_objects SET unused_at=0 WHERE unused_at IS NOT NULL",
-                [],
-            )?;
-            db.0.execute("UPDATE direct_storage_grants SET expires_at=0", [])?;
-            Ok(())
+        .write({
+            let queued = queued.clone();
+            let key = retained[0].0.clone();
+            let location = first_point.to_string();
+            move |db| {
+                db.0.execute(
+                    "INSERT INTO remote_deletions(id,location,key,prefix) VALUES(?1,?2,?3,0)",
+                    [queued, location, key],
+                )?;
+                Ok(())
+            }
         })
         .await
         .unwrap();
-    while shared_blocks::collect(service).await.unwrap() > 0 {}
-    for object in objects {
+    publication::purge(service, &run_id).await.unwrap();
+    for (object, expected) in retained {
         assert_eq!(
             original_storage
                 .download_bytes(&object, 65536)
                 .await
-                .unwrap_err()
-                .status,
-            409
+                .unwrap(),
+            expected,
+            "Legacy remote object changed during local reference purge: {object}"
         );
     }
+    service
+        .store
+        .read(move |db| {
+            let pending: i64 = db.0.query_row(
+                "SELECT count(*) FROM remote_deletions WHERE id=?1",
+                [queued],
+                |row| row.get(0),
+            )?;
+            assert_eq!(pending, 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        !service
+            .config
+            .data_dir
+            .join("node-backups")
+            .join(&run_id)
+            .exists()
+    );
     let response = fixture
         .get(&format!("/nodes/backups/{run_id}"))
         .send()
