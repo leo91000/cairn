@@ -688,6 +688,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vm_retirement_retries_log_cleanup_after_restart_before_acknowledging() {
+        for owner in ["plan", "run", "vm"] {
+            let root = tempfile::tempdir().unwrap();
+            let broker = fixture_broker(root.path()).await;
+            let run = crate::config::id();
+            let attempt = crate::config::id();
+            let vm = crate::config::id();
+            let retirement = crate::config::id();
+            let state = broker.state.clone();
+            let identity = match owner {
+                "plan" => {
+                    let plans = broker.data.join("runner-plans");
+                    private_dir(&plans).await.unwrap();
+                    std::fs::write(broker.state_file(&attempt, "stopped"), b"").unwrap();
+                    let path = plans.join(format!("{attempt}.json"));
+                    std::fs::write(&path, json!({ "runId":run }).to_string()).unwrap();
+                    path
+                }
+                "run" => {
+                    let path = broker.state_file(&attempt, "run");
+                    std::fs::write(&path, &run).unwrap();
+                    path
+                }
+                _ => {
+                    let path = broker.state_file(&attempt, "vm.json");
+                    std::fs::write(&path, json!({ "runId":run, "vmId":vm }).to_string()).unwrap();
+                    for suffix in ["boot.log", "vmm.log"] {
+                        std::fs::write(broker.state_file(&vm, suffix), b"old VM output").unwrap();
+                    }
+                    path
+                }
+            };
+            let log = broker.state_file(&attempt, "log");
+            private_dir(&log).await.unwrap();
+            let endpoint = format!("/disks/{run}/delete");
+            let body = json!({ "retirementId":retirement }).to_string();
+            let app = router(broker);
+            let failed = app
+                .oneshot(authorized_post(endpoint.clone(), Body::from(body.clone())))
+                .await
+                .unwrap();
+            assert!(!failed.status().is_success());
+            let receipt = state.join("disk-retirements").join(&run).join(&retirement);
+            assert!(!receipt.exists());
+            assert!(
+                identity.exists(),
+                "{owner}: cleanup lost the run's attempt identity"
+            );
+
+            std::fs::remove_dir(&log).unwrap();
+            std::fs::write(&log, b"old private output").unwrap();
+            let restarted = router(fixture_broker(root.path()).await);
+            let retired = restarted
+                .oneshot(authorized_post(endpoint, Body::from(body)))
+                .await
+                .unwrap();
+            assert_eq!(retired.status(), 200);
+            assert!(receipt.exists());
+            assert!(!identity.exists());
+            assert!(!log.exists());
+            for suffix in ["boot.log", "vmm.log"] {
+                assert!(!state.join(format!("{vm}.{suffix}")).exists());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn late_retirement_retry_preserves_the_next_vm_environment() {
         async fn retire(app: &Router, run: &str, id: &str) -> axum::response::Response {
             app.clone()

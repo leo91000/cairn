@@ -1020,6 +1020,7 @@ pub(super) async fn erase_attempt_content(
     permanent: bool,
 ) -> Result<()> {
     let mut attempts = HashSet::new();
+    let mut identities = Vec::new();
     let plans = broker.data.join("runner-plans");
     if plans.is_dir() {
         let mut entries = tokio::fs::read_dir(&plans).await?;
@@ -1041,7 +1042,7 @@ pub(super) async fn erase_attempt_content(
             }
             // Fence a delayed start before removing its short-lived credentials.
             atomic_write(&broker.state_file(attempt, "stopped"), b"").await?;
-            tokio::fs::remove_file(entry.path()).await?;
+            identities.push(entry.path());
             attempts.insert(attempt.to_owned());
         }
     }
@@ -1052,7 +1053,7 @@ pub(super) async fn erase_attempt_content(
             if tokio::fs::read_to_string(entry.path()).await? == run {
                 atomic_write(&broker.state_file(attempt, "stopped"), b"").await?;
                 attempts.insert(attempt.to_owned());
-                tokio::fs::remove_file(entry.path()).await?;
+                identities.push(entry.path());
             }
             continue;
         }
@@ -1070,10 +1071,19 @@ pub(super) async fn erase_attempt_content(
                 remove_if_present(&broker.state_file(&record.vm_id, suffix)).await?;
             }
         }
-        tokio::fs::remove_file(entry.path()).await?;
+        identities.push(entry.path());
     }
     for attempt in attempts {
         remove_if_present(&broker.state_file(&attempt, "log")).await?;
+    }
+    // Keep every run-to-attempt identity until all associated log erasures are
+    // durable. An error or restart must leave enough ownership to retry them.
+    tokio::fs::File::open(&broker.state)
+        .await?
+        .sync_all()
+        .await?;
+    for identity in identities {
+        remove_if_present(&identity).await?;
     }
     if plans.is_dir() {
         tokio::fs::File::open(&plans).await?.sync_all().await?;
