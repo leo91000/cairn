@@ -1215,6 +1215,26 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_preparation_errors_back_off_then_open_the_circuit() {
+        const CHILD: &str = "CAIRN_TEST_POOL_PREPARATION_FAILURE";
+        if std::env::var_os(CHILD).is_none() {
+            let commands = tempfile::tempdir().unwrap();
+            let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .env_clear()
+                .env(CHILD, "true")
+                .env("PATH", commands.path())
+                .env("TMPDIR", std::env::temp_dir())
+                .args([
+                    "--exact",
+                    "microvm::pool::tests::repeated_preparation_errors_back_off_then_open_the_circuit",
+                    "--nocapture",
+                ])
+                .status()
+                .await
+                .unwrap();
+            assert!(status.success(), "Preparation failure child failed");
+            return;
+        }
+
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
         let cgroup = root.path().join("cgroup");
@@ -1242,11 +1262,8 @@ mod tests {
             .await
             .unwrap();
         pool.initialize(cgroup).await.unwrap();
-        // Fail each real background preparation before formatting or guest boot.
-        // Keep policy valid so the failure reaches the asynchronous retry gate.
-        let environments = pool.state.join("environments");
-        std::fs::remove_dir(&environments).unwrap();
-        std::fs::write(&environments, b"blocked preparation directory").unwrap();
+        // The isolated PATH has no formatter: each real background preparation
+        // fails before formatting or guest boot, with valid storage policy.
         let mut now = Instant::now();
         for seconds in [10, 20, 40, 80, 160, 3600] {
             pool.maintain_ready(now).await.unwrap();
