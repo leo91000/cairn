@@ -281,8 +281,12 @@ abstract class SideQuestionCases {
                 }
             }
             try {
+                // Selection renders the panel before connect finishes refreshing its lists.
                 compose.waitUntil(20000) {
-                    compose.onAllNodesWithText("Tout afficher").fetchSemanticsNodes().isNotEmpty()
+                    compose
+                        .onAllNodesWithText("Tout afficher")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() && !vm.state.value.busy
                 }
                 compose
                     .onNodeWithText(
