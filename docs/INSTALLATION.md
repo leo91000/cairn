@@ -76,7 +76,7 @@ capacity, retention and recovery.
 
 New installations have no Garage service and need no bucket or S3 credentials.
 Updating an older installation expires environments that depend on S3, without
-copying their files back. The [migration and release note](migrations/0032-local-conversation-disks.md)
+copying their files back. The [migration and release note](migrations/0033-local-conversation-disks.md)
 describe this loss: push commits and
 save files to keep before updating. The update does not erase old
 `data/storage-s3.json`, `garage.env`, `garage.toml`, Garage data, external buckets
