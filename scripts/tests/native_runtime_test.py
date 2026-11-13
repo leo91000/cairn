@@ -450,7 +450,7 @@ def main():
                 self.end_headers()
                 self.wfile.write(response)
 
-        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write'):
+        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write', idle=False):
             seed(run)
             channel = data / 'runs' / run / 'home/cairn-mcp.sock'
             if run in mcp_servers:
@@ -506,7 +506,9 @@ def main():
             if measure:
                 script += "while ! test -e measure-go; do sleep 0.05; done\n/usr/bin/python3 - <<'MEASURE' > measure.json\n" + MEASURE + '\nMEASURE\n'
                 script += 'printf measured > measure-ready\n'
-            if long:
+            if long and idle:
+                script += 'sleep infinity\n'
+            elif long:
                 # Read the actual read-only bind as the unprivileged workload,
                 # including concurrent steering updates after a disk warning.
                 script += "/usr/bin/python3 - <<'INBOX' &\nimport json,os,time\nfrom pathlib import Path\nseen={}\nwhile True:\n    for name in ('messages.json','disk-notice.json'):\n        try: value=json.loads((Path('/run/cairn-chat')/name).read_text())\n        except FileNotFoundError: continue\n        except PermissionError:\n            Path('inbox-read-error').write_text(name); raise\n        if name=='disk-notice.json': marker,content='disk-notice-seen',value['id']\n        elif value: marker,content='steering-seen',value[0]['text']\n        else: continue\n        if seen.get(marker)==content: continue\n        with open(marker,'w') as output:\n            output.write(content); output.flush(); os.fsync(output.fileno())\n        seen[marker]=content\n    time.sleep(0.02)\nINBOX\n"
@@ -738,6 +740,44 @@ def main():
             assert durable.read_bytes() == b'kept across read-only close'
             api('/runs/' + readonly_resume, method='DELETE')
             fenced(readonly_run, readonly_resume)
+            # A task allowance exhausted by managed tmp must not strand syncfs
+            # after the workload is fenced and capacity monitoring has stopped.
+            quota_run = create()
+            quota_attempt = start(quota_run, idle=True)
+            quota_mount = state / 'native' / quota_run / 'data'
+            quota_durable = managed(quota_run) / 'quota-durable-marker'
+            quota_durable.write_bytes(b'acknowledged before task pressure')
+            dirty = managed(quota_run) / 'quota-dirty-pages'
+            dirty.write_bytes(bytes(64 * 1024))
+            command('sync', '-f', str(quota_mount))
+            quota_policy = dict(contexts[quota_run]['policy'], reserveMiB=16 * 1024 * 1024)
+            quota_tmp = state / 'native' / quota_run / 'tmp/quota-pressure'
+            try:
+                storage_policy(quota_policy)
+                eventually(lambda: api('/disks/' + quota_run + '/storage-status')['paused'] is True, timeout=25)
+                # Overwrite allocated pages without fsync while node admission
+                # is blocked; kernel writeback cannot reach its journal yet.
+                with dirty.open('r+b', buffering=0) as stream:
+                    assert stream.write(bytes([7]) * (64 * 1024)) == 64 * 1024
+                with quota_tmp.open('wb') as stream:
+                    stream.truncate(256 * 1024 * 1024)
+                stop_reason = state / (quota_attempt + '.stop-reason.json')
+                eventually(lambda: json.loads(stop_reason.read_text()).get('reason') == 'conversation_disk_limit', timeout=25)
+                eventually(lambda: workload_stopped(quota_attempt), timeout=25)
+            finally:
+                storage_policy(contexts[quota_run]['policy'])
+            # Retain tmp pressure through completion: no external cleanup or
+            # larger grant can rescue the stopped monitor's zero backing limit.
+            api('/runs/' + quota_attempt, method='DELETE', timeout=25)
+            fenced(quota_run, quota_attempt, timeout=25, expect_flush_failure=True)
+            quota_tmp.unlink()
+            quota_resume = start(quota_run)
+            assert quota_durable.read_bytes() == b'acknowledged before task pressure'
+            api('/runs/' + quota_resume, method='DELETE')
+            fenced(quota_run, quota_resume)
+            metrics['nativeTaskQuotaClose'] = dict(taskAllowanceMiB=256, crashPrefixRetained=True,
+                                                  acknowledgedMarkerRecovered=True, ownershipReleased=True)
+            progress('native-task-headroom-close-complete')
             assert not (state / 'native-block' / run / 'root/disk.blk').exists(), 'Retired device inode was retained.'
             stopped_health = retained_health(api, run)
             assert stopped_health['usage']['diskBytes'] > 0

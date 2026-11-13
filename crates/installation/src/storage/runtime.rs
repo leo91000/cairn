@@ -130,6 +130,8 @@ pub struct Volume {
     task_limit: AtomicU64,
     task_usage: Mutex<Option<TaskUsage>>,
     task_pending: super::cache::PendingWrites,
+    task_waiting: AtomicU64,
+    flush_budget_failed: AtomicBool,
     active_since: AtomicI64,
     active_attempt: Mutex<String>,
     pressure: AtomicBool,
@@ -304,6 +306,8 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
         task_limit: AtomicU64::new(u64::MAX),
         task_usage: Mutex::new(None),
         task_pending: super::cache::PendingWrites::default(),
+        task_waiting: AtomicU64::new(0),
+        flush_budget_failed: AtomicBool::new(false),
         active_since: AtomicI64::new(0),
         active_attempt: Mutex::new(String::new()),
         pressure: AtomicBool::new(false),
@@ -993,6 +997,64 @@ impl Disk for Volume {
 }
 
 impl Volume {
+    /// Every workload is fenced. Fold journal history to release task headroom
+    /// while the filesystem flush runs. If even the consolidated backing cannot
+    /// admit its pending writes, fail them so syncfs can report a crash-prefix
+    /// close instead of retaining ownership forever. No allowance is enlarged.
+    pub(crate) async fn flush_fenced<T>(
+        self: &Arc<Self>,
+        flush: impl std::future::Future<Output = io::Result<T>>,
+    ) -> io::Result<T> {
+        tokio::pin!(flush);
+        let mut timer = tokio::time::interval(std::time::Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut flush => return result,
+                _ = timer.tick(), if !self.flush_budget_failed.load(Ordering::Acquire) => {
+                    let incoming = self.task_waiting.load(Ordering::Acquire);
+                    if incoming == 0 {
+                        continue;
+                    }
+                    if self.task_limit.load(Ordering::Acquire) == 0 {
+                        self.flush_budget_failed.store(true, Ordering::Release);
+                        continue;
+                    }
+                    let Ok(permit) = CONSOLIDATIONS.try_acquire() else {
+                        continue;
+                    };
+                    let volume = self.clone();
+                    let result = tokio::task::spawn_blocking(move || -> io::Result<bool> {
+                        {
+                            let _admission = super::cache::admission()?;
+                            if volume.task_has_room(incoming)? {
+                                return Ok(false);
+                            }
+                        }
+                        if volume.disk.journal_bytes() > 0 && !volume.disk.sealed_pending() {
+                            volume.disk.seal()?;
+                        }
+                        volume.disk.consolidate()?;
+                        let Some(_settled) = volume.disk.try_consolidation_guard()? else {
+                            return Ok(false);
+                        };
+                        // Exclude new admissions from the final decision; an
+                        // in-flight or newer journal prefix can still make room.
+                        let _admission = super::cache::admission()?;
+                        Ok(volume.task_pending.bytes() == 0
+                            && volume.disk.journal_bytes() == 0
+                            && !volume.task_has_room(incoming)?)
+                    })
+                    .await;
+                    drop(permit);
+                    if !matches!(result, Ok(Ok(false))) {
+                        self.flush_budget_failed.store(true, Ordering::Release);
+                    }
+                }
+            }
+        }
+    }
+
     /// Bound complete retained backing. Native supervision subtracts its managed
     /// /tmp from the issued allowance; zero remaining bytes blocks new writes.
     pub(crate) fn limit_backing(&self, bytes: u64) -> Result<()> {
@@ -1050,13 +1112,22 @@ impl Volume {
         // admission before journal I/O. Pending writes remain conservatively
         // charged to every writer/cache-fill check until their I/O finishes.
         loop {
+            if self.flush_budget_failed.load(Ordering::Acquire) {
+                return Err(io::Error::from_raw_os_error(libc::EIO));
+            }
             if self.stop.is_cancelled() {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "Disk stopped"));
             }
             let guard = super::cache::admission()?;
             let (total, free) = super::policy::space(&self.directory)?;
             let incoming = bytes as u64 * 4 + frames as u64 * 4096;
-            if self.task_has_room(incoming)?
+            let task_has_room = self.task_has_room(incoming)?;
+            if task_has_room {
+                self.task_waiting.store(0, Ordering::Release);
+            } else if matches!(admission, WriteAdmission::Wait) {
+                self.task_waiting.fetch_max(incoming, Ordering::Release);
+            }
+            if task_has_room
                 && free
                     > self
                         .policy()?

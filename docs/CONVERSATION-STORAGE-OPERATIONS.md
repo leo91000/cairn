@@ -64,8 +64,16 @@ node reserve. If node headroom is insufficient, consolidation waits for space.
 A full node waits for space. Consolidating overwritten journal history, expiring
 environments and deleting conversations are the ways Cairn releases disk backing.
 Disabling automatic expiration means an operator must arrange explicit cleanup.
-Integrity and space protection continue to stop unsafe I/O; synchronization errors
+Integrity and space protection continue to stop unsafe I/O. Remote synchronization
 and backup-lag states no longer describe local disks.
+
+After every native workload process is fenced, filesystem flushing can still need
+journal headroom. Close first consolidates retained journal history under the same
+budgets. If the task allowance still cannot admit the pending writes, or that
+consolidation cannot proceed, finalization reports a flush failure and preserves
+the acknowledged crash prefix while releasing physical ownership. Unflushed kernel
+pages are not promised in that case. Neither `/tmp` nor filesystem finalization
+gets an extra allowance or a node-reserve exception.
 
 ## Expiration, deletion and upgrades
 

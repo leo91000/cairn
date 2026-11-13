@@ -95,6 +95,18 @@ impl LazyDisk {
         *self.consolidation_commit_hook.lock().unwrap() = Some(hook);
     }
 
+    /// Exclude both the base swap and its pending file reclamation while a
+    /// fenced caller decides whether consolidation can still release headroom.
+    pub(crate) fn try_consolidation_guard(
+        &self,
+    ) -> io::Result<Option<std::sync::MutexGuard<'_, ()>>> {
+        match self.consolidating.try_lock() {
+            Ok(guard) => Ok(Some(guard)),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(error) => Err(failure(error)),
+        }
+    }
+
     /// Fold every sealed generation into a new local base, then retire its
     /// journal segments and the block files no base references. Each block
     /// file and its directory are durable before the base names it. A crash
@@ -102,10 +114,8 @@ impl LazyDisk {
     /// leaves only unreferenced files, which recovery or the next run removes.
     /// Guest reads and writes continue throughout; the commit drains readers.
     pub fn consolidate(&self) -> io::Result<Option<i64>> {
-        let _running = match self.consolidating.try_lock() {
-            Ok(running) => running,
-            Err(TryLockError::WouldBlock) => return Ok(None),
-            Err(error) => return Err(failure(error)),
+        let Some(_running) = self.try_consolidation_guard()? else {
+            return Ok(None);
         };
         let generation: Option<i64> = self
             .db
