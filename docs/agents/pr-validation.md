@@ -74,8 +74,11 @@ preserves the native adapter, supported-release resume and rollback checks.
 The backend job retains its complete test workload, measurements, namespace
 qualification and doctests within its existing 30-minute budget. Backend-only
 and diagnostic dispatches skip this job; they do not resolve engine releases.
-The post-suite bootstrap/terminal measurements and namespace test compilation keep
-`--workspace --lib`, retaining the dependency features used by the workspace suite.
+The native controller preflight, post-suite bootstrap/terminal measurements and
+namespace test compilation keep `--workspace --lib`, retaining the dependency
+features used by the workspace suite. The preflight keeps its installation package
+filter and native service/files test filters, so it executes the same cases before
+building every test binary.
 Package-only selection changes Cargo's unified dependency graph and rebuilds the
 installation test library. Exact case filters and the namespace executable check
 still select the intended installation tests.
