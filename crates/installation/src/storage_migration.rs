@@ -40,11 +40,15 @@ fn migrate(db: &mut Db<'_>) -> Result<()> {
                 ..Default::default()
             },
         )?;
-        if let Some(mut checkpoint) = crate::worker::checkpoint::RunCheckpoint::load_in(db, id)? {
-            checkpoint.move_recovery_reservation = None;
-            checkpoint.store_in(db, id)?;
-        }
     }
+    // A completed move can leave its paid recovery marker after placement state
+    // has cleared. Remove only that authorization, keeping ordinary recovery
+    // evidence and current placement hints even for checkpoint-only leftovers.
+    db.0.execute(
+        "UPDATE run_checkpoints SET state=json_remove(state,'$.moveRecoveryReservation')
+         WHERE json_type(state,'$.moveRecoveryReservation') IS NOT NULL",
+        [],
+    )?;
 
     // A completed point can already be installed even when its acknowledgement
     // was lost. Shared references and grants also cover interrupted publications
@@ -432,6 +436,61 @@ mod tests {
                     .unwrap()
                     .move_recovery_reservation
                     .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_only_move_authorizations_are_cancelled_without_changing_normal_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let checkpoint = json!({
+            "prepared": { "backend": "firecracker", "isolated": true },
+            "runnerId": "attempt", "completed": false, "terminalCode": 75,
+            "remainingMs": 1234, "controllerRecoveries": 4,
+            "controllerRecoveryReservation": "attempt",
+            "providerRetryReservation": "provider-attempt",
+        });
+        let original = checkpoint.clone();
+        store
+            .transaction(move |db| {
+                db.put_node_fixture(&json!({ "id": ACTIVE, "revoked": false }))?;
+                for id in ["move", "ordinary"] {
+                    run(db, id, Some(ACTIVE))?;
+                    db.update_run_placement(
+                        id,
+                        crate::nodes::run_placement::PlacementChanges {
+                            target_node_id: Some(Some(ACTIVE.to_owned())),
+                            ..Default::default()
+                        },
+                    )?;
+                    let mut saved = RunCheckpoint::from_value(original.clone())?;
+                    if id == "move" {
+                        saved.move_recovery_reservation = Some("attempt".to_owned());
+                    }
+                    saved.store_in(db, id)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            store.transaction(migrate).await.unwrap();
+            for id in ["move", "ordinary"] {
+                let saved = RunCheckpoint::load(&store, id).await.unwrap().unwrap();
+                assert_eq!(saved.to_value().unwrap(), checkpoint, "{id}");
+                let current = store.run(id).await.unwrap();
+                assert_eq!(current["nodeId"], ACTIVE, "{id}");
+                assert_eq!(current["targetNodeId"], ACTIVE, "{id}");
+                assert_eq!(current["sessionId"], "retained-session", "{id}");
+                assert!(current["environmentState"].is_null(), "{id}");
+            }
+            assert!(
+                store
+                    .list("environment-retirements")
+                    .await
+                    .unwrap()
+                    .is_empty()
             );
         }
     }
