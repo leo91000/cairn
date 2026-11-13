@@ -27,7 +27,7 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
                 let (fail_fence, state) = (fail_fence.clone(), state.clone());
                 async move {
                     if request.uri().path() == "/health" {
-                        return Json(json!({ "diskRetirementProtocol":1 })).into_response();
+                        return Json(json!({ "diskRetirementProtocol":2 })).into_response();
                     }
                     if request.uri().path().ends_with("/delete") {
                         let body = to_bytes(request.into_body(), 4096).await.unwrap();

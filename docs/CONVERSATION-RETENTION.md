@@ -47,7 +47,7 @@ before acknowledging it. Receipts survive subsequent environments and controller
 restarts, so delayed duplicates are harmless. They remain permanently (one small
 receipt per retired environment on that node).
 
-The manager checks `diskRetirementProtocol: 1` before sending deletion and requires
+The manager checks `diskRetirementProtocol: 2` before sending deletion and requires
 the matching acknowledgement. Fresh environments require a compatible controller;
 legacy controllers cannot silently ignore the request identity. The bundled VM
 controller shares the manager volume, so its verified upgrade is also required

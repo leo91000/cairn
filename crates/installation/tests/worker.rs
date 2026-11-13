@@ -2310,7 +2310,7 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         return Json(json!({
             "status": "ok",
             "nodeProtocol": 2,
-            "diskRetirementProtocol": 1,
+            "diskRetirementProtocol": 2,
             "dataRoot": state.data,
             "sharedResources": true,
             "budget": { "slots": state.slots, "limits": { "cpu": 7, "memoryMiB": 15872, "diskMiB": 104857 } },

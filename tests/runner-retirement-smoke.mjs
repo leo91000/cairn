@@ -25,7 +25,7 @@ export async function retirementSmoke({
   const receipt = `/runner-state/disk-retirements/${run}/${retirementId}`
   const node = code => docker('exec', name, '/usr/local/bin/node', '-e', code)
   const exists = file => node(`console.log(require('node:fs').existsSync(${JSON.stringify(file)}))`) === 'true'
-  const retire = () => api(endpoint, 'POST', { retirementId })
+  const retire = () => api(endpoint, 'POST', { retirementId, attempts: [attempt] })
   const restart = async () => {
     docker('restart', name)
     docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
@@ -35,11 +35,18 @@ export async function retirementSmoke({
   assert.ok(exists(log), 'the stopped guest must have real output to erase')
   assert.equal(node(`console.log(require('node:fs').readFileSync(${JSON.stringify(owner)},'utf8'))`), run)
   node(`const fs=require('node:fs');fs.renameSync(${JSON.stringify(log)},${JSON.stringify(`${log}.saved`)});fs.mkdirSync(${JSON.stringify(log)});`)
-  await api(endpoint, 'POST', { retirementId }, 500)
+  // Emulate the previous controller's failed deletion: it removed its mappings
+  // before failing on the final private log. The manager still knows the attempt.
+  node(`const fs=require('node:fs');const prefix='/runner-state/${attempt}';
+    if(fs.existsSync(prefix+'.vm.json')){const vm=JSON.parse(fs.readFileSync(prefix+'.vm.json','utf8')).vmId;
+      for(const suffix of ['boot.log','vmm.log'])fs.rmSync('/runner-state/'+vm+'.'+suffix,{force:true});}
+    fs.rmSync(prefix+'.run',{force:true});fs.rmSync(prefix+'.vm.json',{force:true});
+    fs.rmSync('/data/runner-plans/${attempt}.json',{force:true});`)
+  await api(endpoint, 'POST', { retirementId, attempts: [attempt] }, 500)
   assert.equal(exists(receipt), false, 'failed cleanup cannot acknowledge retirement')
   assert.ok(exists(owner), 'failed log erasure must retain its run-to-attempt identity')
   // Ordinary manager worker release can erase this shared plan independently.
-  await rm(path.join(plans, `${attempt}.json`))
+  await rm(path.join(plans, `${attempt}.json`), { force: true })
   node(`const fs=require('node:fs');fs.rmdirSync(${JSON.stringify(log)});fs.renameSync(${JSON.stringify(`${log}.saved`)},${JSON.stringify(log)});`)
   await restart()
   const retired = await (await retire()).json()

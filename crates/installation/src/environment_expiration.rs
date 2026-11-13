@@ -111,6 +111,8 @@ struct Retirement {
     /// Older turns may have released capacity before their manager plan was erased.
     #[serde(default)]
     manager_plans: Vec<String>,
+    #[serde(default)]
+    disk_attempts: Vec<RetiredAttempt>,
     process: Option<ProcessIdentity>,
     isolated: bool,
     account_id: Option<String>,
@@ -130,6 +132,24 @@ struct Retirement {
 }
 
 impl Retirement {
+    fn attempts_on_node(&self, node: &str) -> Vec<String> {
+        let mut ids = self
+            .disk_attempts
+            .iter()
+            .chain(&self.attempts)
+            .filter(|attempt| attempt.node_id == node)
+            .map(|attempt| attempt.id.clone())
+            .collect::<Vec<_>>();
+        if self.attempt_node.as_deref() == Some(node)
+            && let Some(attempt) = &self.attempt
+        {
+            ids.push(attempt.clone());
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     fn plan_ids(&self) -> Vec<String> {
         let mut ids = self
             .attempt
@@ -459,6 +479,17 @@ fn detach_environment_in(
         }
     }
     let recorded = db.attempts()?;
+    let disk_attempts = recorded
+        .iter()
+        .filter(|attempt| {
+            attempt.run_id == run_id
+                && attempt.role == crate::nodes::placement::AttemptRole::Execution
+        })
+        .map(|attempt| RetiredAttempt {
+            id: attempt.id.clone(),
+            node_id: attempt.node_id.clone(),
+        })
+        .collect();
     let manager_plans = recorded
         .iter()
         .filter(|attempt| {
@@ -484,6 +515,20 @@ fn detach_environment_in(
             nodes.push(attempt.node_id.clone());
         }
     }
+    let isolated = run["isolated"] == true || checkpoint.isolated();
+    let attempt_node = checkpoint
+        .node_id
+        .clone()
+        .flatten()
+        .or_else(|| environment["nodeId"].as_str().map(str::to_owned))
+        .or_else(|| placement.node_id.clone())
+        .or_else(|| isolated.then(|| crate::nodes::LOCAL_NODE_ID.to_owned()));
+    if isolated
+        && let Some(node) = &attempt_node
+        && !nodes.contains(node)
+    {
+        nodes.push(node.clone());
+    }
     let retirement = Retirement {
         id: id(),
         run_id: run_id.to_owned(),
@@ -491,11 +536,12 @@ fn detach_environment_in(
         expired_at,
         nodes,
         attempt: checkpoint.runner_id().map(str::to_owned),
-        attempt_node: checkpoint.node_id.clone().flatten(),
+        attempt_node,
         attempts,
         manager_plans,
+        disk_attempts,
         process: checkpoint.process().cloned(),
-        isolated: run["isolated"] == true || checkpoint.isolated(),
+        isolated,
         account_id: run["accountId"].as_str().map(str::to_owned),
         workspaces: environment["workspaces"]
             .as_array()
@@ -967,6 +1013,7 @@ impl Service {
                 &node,
                 retirement.isolated,
                 &retirement.id,
+                &retirement.attempts_on_node(&node),
             )
             .await
             {
@@ -1064,12 +1111,18 @@ mod tests {
 
     #[tokio::test]
     async fn startup_finishes_legacy_cleaning_once_and_preserves_its_expiration_time() {
+        use crate::attempt_fixture::DbAttemptFixture;
+        use crate::node_fixture::DbNodeFixture;
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
-        let run = id();
+        let (run, attempt, released) = (id(), id(), id());
+        let node = crate::nodes::LOCAL_NODE_ID.to_owned();
         store.transaction(move |db| {
-            db.add_run_fixture(&json!({ "id": run, "taskId": "chat", "trigger": "chat", "status": "succeeded", "createdAt": 0 }), None)?;
+            db.add_run_fixture(&json!({ "id": run, "taskId": "chat", "trigger": "chat", "status": "succeeded", "createdAt": 0, "isolated":true }), None)?;
             db.save_conversation_boundary(&json!({ "id": "chat", "runId": run, "environmentState": "cleaning", "environmentExpiredAt": 1234, "environmentError": "offline" }))?;
+            db.put_node_fixture(&json!({ "id":node }))?;
+            db.put_attempt_fixture(&json!({ "id":released,"runId":run,"nodeId":node,"released":true }))?;
+            db.save_checkpoint_boundary(&run, &json!({ "runnerId":attempt,"completed":true,"prepared":{"isolated":true} }))?;
             finish_legacy_cleaning(db)?;
             finish_legacy_cleaning(db)?;
             let chat = db.conversation_boundary("chat")?.unwrap();
@@ -1078,6 +1131,11 @@ mod tests {
             assert!(chat["environmentError"].is_null());
             assert_eq!(db.run(&run)?.unwrap()["environmentExpirationCause"], "inactivity");
             assert_eq!(db.list(RETIREMENTS)?.len(), 1);
+            let queued: Retirement = serde_json::from_value(db.list(RETIREMENTS)?.remove(0))?;
+            assert!(queued.nodes.contains(&node));
+            let mut expected = vec![attempt, released]; expected.sort();
+            assert_eq!(queued.attempts_on_node(&node), expected);
+            assert!(queued.attempts_on_node(&id()).is_empty());
             Ok(())
         }).await.unwrap();
     }

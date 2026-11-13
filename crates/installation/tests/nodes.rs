@@ -4382,7 +4382,7 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
         let recorded = recorded.clone();
         async move {
             if request.uri().path() == "/health" {
-                return Json(json!({ "diskRetirementProtocol":1 }));
+                return Json(json!({ "diskRetirementProtocol":2 }));
             }
             recorded
                 .lock()

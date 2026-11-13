@@ -848,6 +848,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn captured_legacy_attempts_reclaim_unmapped_logs_without_touching_replacements() {
+        use crate::node_fixture::StoreNodeFixture;
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let (run, old, foreign, fresh, retirement) = (
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+        );
+        let state = broker.state.clone();
+        let log = broker.state_file(&old, "log");
+        std::fs::write(&log, b"private output left by the previous version").unwrap();
+        std::fs::write(broker.state_file(&old, "stopped"), b"").unwrap();
+        let mut captured = vec![old.clone()];
+        for _ in 0..crate::storage::retirement::MAX_ATTEMPTS {
+            let id = crate::config::id();
+            std::fs::write(
+                broker.state_file(&id, "log"),
+                b"another unmapped old output",
+            )
+            .unwrap();
+            captured.push(id);
+        }
+        let mut scopes = captured
+            .iter()
+            .map(|id| json!({ "id":id,"nodeId":crate::nodes::LOCAL_NODE_ID }))
+            .collect::<Vec<_>>();
+        scopes.push(json!({ "id":foreign,"nodeId":crate::config::id() }));
+        let foreign_log = broker.state_file(&foreign, "log");
+        std::fs::write(&foreign_log, b"not attributed to this node").unwrap();
+        let (url, server) = crate::common::serve_locally(router(broker)).await;
+        let mut config = crate::common::config(root.path());
+        config.runner_url = url.clone();
+        let manager = crate::service::Service::new(config).await.unwrap();
+        manager
+            .store
+            .put_node_fixture(json!({ "id":crate::nodes::LOCAL_NODE_ID, "local":true }))
+            .await
+            .unwrap();
+        let pending = json!({
+            "id":retirement, "runId":run, "cause":"inactivity", "expiredAt":crate::config::now(),
+            "nodes":[crate::nodes::LOCAL_NODE_ID], "attempt":old, "attemptNode":crate::nodes::LOCAL_NODE_ID,
+            "attempts":[], "managerPlans":[old,foreign],
+            "diskAttempts":scopes,
+            "process":null, "isolated":true, "accountId":null, "workspaces":[], "projects":[], "fenced":true, "local":true,
+            "publications":crate::nodes::publication::RetiredPublications::default(), "cleaned":false, "error":null, "retryAfter":null
+        });
+        manager
+            .store
+            .write(move |db| db.put("environment-retirements", &pending))
+            .await
+            .unwrap();
+        manager.retire_environments().await.unwrap();
+        assert!(!log.exists());
+        for id in &captured {
+            assert!(!state.join(format!("{id}.log")).exists());
+        }
+        assert!(
+            manager
+                .store
+                .get("environment-retirements", &retirement)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::read(&foreign_log).unwrap(),
+            b"not attributed to this node"
+        );
+        let disk = crate::storage::environment::directory(&state, &run).unwrap();
+        std::fs::write(disk.join("replacement"), b"new disk").unwrap();
+        let fresh_log = state.join(format!("{fresh}.log"));
+        std::fs::write(&fresh_log, b"new private output").unwrap();
+        std::fs::write(state.join(format!("{fresh}.run")), &run).unwrap();
+        // Completed receipts still honor old cleanup hints, but cannot re-scan
+        // this run's new attempts or erase the replacement's canonical disk.
+        let response = manager
+            .http
+            .post(format!("{url}/disks/{run}/delete"))
+            .bearer_auth(SECRET)
+            .json(&json!({ "retirementId":retirement,"attempts":[old] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            std::fs::read(disk.join("replacement")).unwrap(),
+            b"new disk"
+        );
+        assert_eq!(std::fs::read(&fresh_log).unwrap(), b"new private output");
+        assert!(foreign_log.exists());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn late_retirement_retry_preserves_the_next_vm_environment() {
         async fn retire(app: &Router, run: &str, id: &str) -> axum::response::Response {
             app.clone()

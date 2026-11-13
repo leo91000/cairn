@@ -1823,7 +1823,7 @@ mod tests {
             let calls = calls.clone();
             async move {
                 if request.uri().path() == "/health" {
-                    return Json(json!({ "diskRetirementProtocol":1 })).into_response();
+                    return Json(json!({ "diskRetirementProtocol":2 })).into_response();
                 }
                 if request.method() == axum::http::Method::DELETE {
                     calls.fetch_add(1, Ordering::SeqCst);

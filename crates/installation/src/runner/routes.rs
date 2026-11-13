@@ -114,7 +114,7 @@ async fn health(broker: &Broker) -> Result<Response> {
         "backend": Backend::Firecracker,
         "runtimeId": runtime_id,
         "nodeProtocol": NODE_PROTOCOL,
-        "diskRetirementProtocol": 1,
+        "diskRetirementProtocol": crate::storage::retirement::PROTOCOL,
         "directStorageProtocol": 1,
         "sharedResources": broker.pool.budget().await.is_some(),
         "exclusiveReservations": true,
@@ -393,6 +393,15 @@ async fn disk_action(
     if let Some(retirement) = &retirement
         && retirement.completed().await?
     {
+        let active = broker.active.lock().await;
+        if retirement
+            .attempts()
+            .iter()
+            .any(|id| active.contains_key(id))
+        {
+            return Err(Error::conflict("A retired attempt is still active."));
+        }
+        erase_attempt_content(broker, run, false, retirement.attempts(), true).await?;
         return json_response(json!({ "deleted": true, "retirementId": retirement.id() }));
     }
     if retirement.is_some() {
@@ -417,7 +426,14 @@ async fn disk_action(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    erase_attempt_content(broker, run, retirement.is_none()).await?;
+    erase_attempt_content(
+        broker,
+        run,
+        retirement.is_none(),
+        retirement.as_ref().map_or(&[], |value| value.attempts()),
+        false,
+    )
+    .await?;
     // Preserve the lock inode: an overlapping boot must contend on it.
     let mut leftovers = tokio::fs::read_dir(&directory).await?;
     while let Some(entry) = leftovers.next_entry().await? {

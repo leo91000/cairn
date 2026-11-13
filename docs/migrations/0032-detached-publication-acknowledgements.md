@@ -33,3 +33,10 @@ A shared manager plan is kept until every affected node acknowledges retirement
 or is permanently revoked. Controllers persist their own run-to-attempt mapping
 before creating a log or retrying legacy plan-only cleanup, so ordinary worker
 plan removal cannot orphan an attempt's output after a failed deletion.
+
+Retirement protocol 2 also carries captured, node-qualified old attempt IDs in
+bounded batches. This repairs legacy cleaning failures that removed ownership
+files before removing logs. A completed environment receipt reaps only those
+explicit old attempts; it never revisits the replacement disk or its attempts.
+Protocol 1 and unqualified legacy responses cannot open admission under this
+guarantee, and cached local upgrade proofs are versioned.

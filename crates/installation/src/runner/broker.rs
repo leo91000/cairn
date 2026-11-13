@@ -1026,7 +1026,13 @@ pub(super) async fn erase_attempt_content(
     broker: &Broker,
     run: &str,
     permanent: bool,
+    known: &[String],
+    only_known: bool,
 ) -> Result<()> {
+    if only_known && known.is_empty() {
+        return Ok(());
+    }
+    crate::storage::retirement::seed_attempts(&broker.state, &broker.data, run, known).await?;
     let mut attempts = HashSet::new();
     let mut identities = Vec::new();
     let plans = broker.data.join("runner-plans");
@@ -1037,6 +1043,9 @@ pub(super) async fn erase_attempt_content(
             let Some(attempt) = name.strip_suffix(".json").filter(|v| uuid(v).is_ok()) else {
                 continue;
             };
+            if only_known && !known.iter().any(|id| id == attempt) {
+                continue;
+            }
             if vm_plan_run_id(&entry.path()).await?.as_deref() != Some(run) {
                 continue;
             }
@@ -1065,6 +1074,9 @@ pub(super) async fn erase_attempt_content(
     while let Some(entry) = entries.next_entry().await? {
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(attempt) = name.strip_suffix(".run").filter(|v| uuid(v).is_ok()) {
+            if only_known && !known.iter().any(|id| id == attempt) {
+                continue;
+            }
             if tokio::fs::read_to_string(entry.path()).await? == run {
                 atomic_write(&broker.state_file(attempt, "stopped"), b"").await?;
                 attempts.insert(attempt.to_owned());
@@ -1075,6 +1087,9 @@ pub(super) async fn erase_attempt_content(
         let Some(attempt) = name.strip_suffix(".vm.json").filter(|v| uuid(v).is_ok()) else {
             continue;
         };
+        if only_known && !known.iter().any(|id| id == attempt) {
+            continue;
+        }
         let record: AttemptRecord = serde_json::from_slice(&tokio::fs::read(entry.path()).await?)?;
         if record.run_id != run {
             continue;
