@@ -330,11 +330,27 @@ for (const entry of ['command', 'workspace link', 'search draft'] as const) {
       await page.getByRole('link', { name: 'New conversation', exact: true }).click()
     }
     else {
+      if (entry === 'search draft')
+        await page.getByRole('tab', { name: 'Tout', exact: true }).click()
       await page.keyboard.press('Control+k')
       const palette = page.getByRole('dialog', { name: 'Search and commands', exact: true })
       if (entry === 'search draft') {
         await palette.getByRole('combobox', { name: 'Search', exact: true }).fill('Same content, separate conversation')
-        await palette.getByRole('option', { name: /^Start a conversation:/ }).click()
+        const firstChat = attempts[0]!.chatId
+        await expect.poll(() => workspace.service.chats.detail(firstChat).run?.status).toBe('succeeded')
+        const decoy = await workspace.api('/api/chats', 'POST', {})
+        await workspace.api(`/api/chats/${decoy.id}`, 'PUT', { title: 'Same content, separate conversation decoy', revision: decoy.revision })
+        const decoyOption = palette.getByRole('option', { name: 'Same content, separate conversation decoy Main agent', exact: true })
+        await expect(decoyOption).toBeVisible()
+        const filDecoy = page.getByRole('button', { name: 'Open “Same content, separate conversation decoy”', exact: true, includeHidden: true })
+        await expect(filDecoy).toHaveCount(1)
+        const start = palette.getByRole('option', { name: /^Start a conversation:/ })
+        await start.hover()
+        await page.mouse.down()
+        await workspace.api(`/api/chats/${decoy.id}`, 'DELETE', {})
+        // The Fil observes the same live list even while the modal is open.
+        await expect(filDecoy).toHaveCount(0)
+        await page.mouse.up()
       }
       else {
         await palette.getByRole('option', { name: 'New conversation C', exact: true }).click()
@@ -355,6 +371,38 @@ for (const entry of ['command', 'workspace link', 'search draft'] as const) {
     }
   })
 }
+
+test('workspace search keeps pointer cancellation and keyboard selection after a live update', async ({ page, workspace }) => {
+  const decoy = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${decoy.id}`, 'PUT', { title: 'Pointer cancellation decoy', revision: decoy.revision })
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+  await composer.fill('Keep this draft until I choose')
+  await page.getByRole('tab', { name: 'Tout', exact: true }).click()
+  const filDecoy = page.getByRole('button', { name: 'Open “Pointer cancellation decoy”', exact: true, includeHidden: true })
+  await expect(filDecoy).toHaveCount(1)
+  await page.keyboard.press('Control+k')
+  const palette = page.getByRole('dialog', { name: 'Search and commands', exact: true })
+  const search = palette.getByRole('combobox', { name: 'Search', exact: true })
+  await search.fill('Pointer cancellation')
+  const decoyOption = palette.getByRole('option', { name: 'Pointer cancellation decoy Main agent', exact: true })
+  await expect(decoyOption).toBeVisible()
+  const start = palette.getByRole('option', { name: /^Start a conversation:/ })
+  await start.hover()
+  await page.mouse.down()
+  await workspace.api(`/api/chats/${decoy.id}`, 'DELETE', {})
+  await expect(filDecoy).toHaveCount(0)
+  await palette.getByRole('listbox').hover({ position: { x: 1, y: 1 } })
+  await page.mouse.up()
+  await expect(palette).toBeVisible()
+  await expect(composer).toHaveValue('Keep this draft until I choose')
+  await expect(decoyOption).toHaveCount(0)
+  await search.press('ArrowDown')
+  await search.press('Enter')
+  await expect(palette).toBeHidden()
+  await expect(composer).toHaveValue('Pointer cancellation')
+})
 
 test('new conversation on the same route clears the abandoned attempt’s error', async ({ page }) => {
   await useRelayForHttpMocks(page)
