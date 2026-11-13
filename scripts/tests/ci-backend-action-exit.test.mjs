@@ -84,6 +84,7 @@ async function action(t, {
   numericRetirementControl = false,
   receiptMode = 'complete',
   uploaderStartupDelayMs = 0,
+  sampleWorkMs = 0,
   cancel,
 } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-action-exit-'))
@@ -129,7 +130,8 @@ async function action(t, {
     }
   `)
   const waitForClose = blockedTraceClose ? `from pathlib import Path\nwhile not Path(${JSON.stringify(path.join(root, 'close-go'))}).exists(): time.sleep(.01)` : ''
-  const workload = `import sys,time\np=b'x'*${volume}\nsys.${stream}.buffer.write(p)\nsys.${stream}.buffer.flush()\n${waitForClose}\n${timeout || cancel === 'periodic' || sdk === 'periodic-expiry' ? 'time.sleep(30)' : ''}\nraise SystemExit(${code})`
+  const waitForSample = sampleWorkMs ? `from pathlib import Path\nwhile not Path(${JSON.stringify(path.join(root, 'sample-started'))}).exists(): time.sleep(.001)` : ''
+  const workload = `import sys,time\n${waitForSample}\np=b'x'*${volume}\nsys.${stream}.buffer.write(p)\nsys.${stream}.buffer.flush()\n${waitForClose}\n${timeout || cancel === 'periodic' || sdk === 'periodic-expiry' ? 'time.sleep(30)' : ''}\nraise SystemExit(${code})`
   const worker = path.join(root, 'worker.mjs')
   writeFileSync(worker, `
     import fs from 'node:fs';
@@ -138,6 +140,14 @@ async function action(t, {
     import {admittedUploader} from ${JSON.stringify(admission)};
     void foregroundAction(async()=>{
       process.on('SIGXFSZ',()=>{});
+      const progress=console.log;
+      console.log=(message,...args)=>{
+        if(${sampleWorkMs}&&typeof message==='string'&&message.startsWith('CI_DIAGNOSTIC {"reason":"periodic"')){
+          fs.writeFileSync(${JSON.stringify(path.join(root, 'sample-started'))},'ready');
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${sampleWorkMs});
+        }
+        progress(message,...args);
+      };
       // Deliberately fill the advisory public pipes as well as exercising the
       // real private trace. Production forwards no raw workload bytes here.
       process.stdout.write(Buffer.alloc(65536,'p'));process.stderr.write(Buffer.alloc(65536,'q'));
@@ -186,7 +196,7 @@ async function action(t, {
         };
       }
       const result=await runBackendAction({log:${JSON.stringify(log)},output:${JSON.stringify(path.join(root, 'proof'))},command:'python3',args:['-c',${JSON.stringify(workload)}],env,
-        receipt:{clock:{jobId:123,startedAt},qualificationClaim:false},publish,firstCheckpointMs:30,checkpointMs:40,
+        receipt:{clock:{jobId:123,startedAt},qualificationClaim:false},publish,firstCheckpointMs:${sampleWorkMs ? 30000 : 30},checkpointMs:40,
         // Keep both real local-I/O waits inside the unchanged outer exit bound,
         // alongside the fixture's shortened guard and publisher waits.
         localCloseMs:${blockedTraceClose ? 100 : 'undefined'},
@@ -323,6 +333,33 @@ for (const mode of ['unread', 'stopped', 'slow', 'closed']) {
     }
   }
 }
+
+// Model an inventory scan slower than its requested cadence while the real
+// workload pipe is ready. Keep the existing outer exit and publication bounds.
+// These controls defer artifact checkpoints to isolate inventory sampling; the
+// existing periodic-expiry and cleanup-checkpoint cases exercise that overlap.
+it('drains private output between synchronous inventory samples slower than the sample cadence', async (t) => {
+  const result = await action(t, {
+    mode: 'stopped',
+    stream: 'stderr',
+    volume: 1048576,
+    sampleWorkMs: 200,
+  })
+  assert.equal(result.code, 7, JSON.stringify(result.returned))
+  assert.deepEqual(result.trace, Buffer.alloc(1048576, 'x'))
+  assert.equal(result.returned.trace.complete, true)
+  assert.equal(result.returned.ownedClosureVerified, true)
+  assert.equal(result.returned.publisherClosureVerified, true)
+})
+
+it('keeps the real guard deadline non-green while synchronous samples exceed their cadence', async (t) => {
+  const result = await action(t, { timeout: true, sampleWorkMs: 40 })
+  assert.equal(result.code, 124, JSON.stringify(result.returned))
+  assert.equal(result.returned.guardReturn.code, 124)
+  assert.equal(result.returned.trace.complete, true)
+  assert.equal(result.returned.ownedClosureVerified, true)
+  assert.equal(result.returned.publisherClosureVerified, true)
+})
 
 it('admits a slow-starting synthetic uploader before its unchanged publication clock', async (t) => {
   // This exceeds the real publisher's 300 ms fixture budget. Startup is not
