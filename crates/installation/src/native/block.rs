@@ -938,8 +938,56 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 mod tests {
     use super::*;
 
-        let volume = open_volume(directory, requested).await?;
-        let view = View::native(&root);
+    #[tokio::test]
+    async fn native_volume_admission_consolidates_overwrites_before_the_task_allowance_is_exhausted()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/native");
+        let block = 4 * 1024 * 1024u64;
+        let disk = storage::runtime::create(
+            &directory.join("lazy"),
+            &json!({
+                "version": 1, "size": 4 * block, "blockSize": block,
+                "blocks": (0..4).map(|index| json!({ "offset": index * block, "size": block, "hash": null })).collect::<Vec<_>>()
+            }),
+            &json!({
+                "master": "http://127.0.0.1:1/", "grant": "native-allowance",
+                "policy": { "reserveMiB": 64, "reservePercent": 1 }
+            }),
+        )
+        .await
+        .unwrap();
+        for value in 1..=3 {
+            disk.write_at(0, &vec![value; block as usize]).unwrap();
+        }
+        drop(disk);
+        // Use the constructor invoked before the real native ublk mount, with
+        // its issued allowance, without configuring Volume::limit_backing here.
+        let volume = open_volume(&directory, 2 * block).await.unwrap();
+        let writing = volume.clone();
+        let mut writer = tokio::task::spawn_blocking(move || writing.write_at(0, b"native"));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let blocked = !writer.is_finished();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), &mut writer).await;
+        if result.is_err() {
+            volume.stop.cancel();
+            let _ = writer.await;
+        }
+        assert!(
+            blocked,
+            "native admission must wait for retained journal history"
+        );
+        result.unwrap().unwrap().unwrap();
+        assert_eq!(
+            volume.disk.accounting().unwrap()["published"]["local"],
+            true
+        );
+        assert!(storage::runtime::retained_backing_bytes(&directory).unwrap() < 2 * block);
+        let mut bytes = [0; 6];
+        volume.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"native");
+    }
+
     #[test]
     fn completed_close_preserves_cancellation_without_a_flush_failure() {
         for (completion, previous, expected) in [

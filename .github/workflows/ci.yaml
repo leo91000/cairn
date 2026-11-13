@@ -523,7 +523,7 @@ jobs:
           python3 scripts/tests/production_release_test.py
           bash tests/installation-installer-container.sh
           python3 tests/installation_update_containers.py
-          for selected in 'storage::' 'storage_migration::' 'microvm::pool::' 'runner::'; do
+          for selected in 'storage::' 'storage_migration::' 'native::block::' 'microvm::pool::' 'runner::'; do
             pnpm test:backend --workspace --lib "$selected"
           done
           pnpm test:backend -p cairn-installation --test worker
