@@ -59,8 +59,9 @@ update and the matching bucket. Only the last remotely published files can retur
 The supervisor does not take this database backup.
 
 Remote deletion and shared-block collection workers no longer run, including for
-already queued deletions. No bucket data is erased. S3 settings and deployment
-configuration are left for a later change.
+already queued deletions. No bucket data is erased. S3 settings are removed from
+the apps and tools, and new deployments no longer configure S3 or Garage. Existing
+operator configuration, credentials and Garage data remain untouched.
 
 ## Note de version
 
