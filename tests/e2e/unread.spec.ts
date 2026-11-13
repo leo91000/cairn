@@ -164,3 +164,53 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(page.getByRole('menuitem', { name: 'Archive mission', exact: true })).toBeVisible()
   })
 }
+
+test.describe('native touch search selection', () => {
+  test.use({ hasTouch: true, isMobile: true })
+
+  test('a touched search action survives live regrouping and touch cancellation', async ({ page, workspace }) => {
+    await useRelayForHttpMocks(page)
+    await workspace.api('/api/chats')
+    const finished = await workspace.api('/api/chats', 'POST', {})
+    await workspace.api(`/api/chats/${finished.id}/messages`, 'POST', { id: randomUUID(), text: 'Native touch finished result' })
+    await expect.poll(() => workspace.service.chats.detail(finished.id).run?.status).toBe('succeeded')
+    await page.goto(workspacePath('/chats'))
+    await authenticateWorkspace(page)
+    const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+    await composer.fill('Keep the touch draft until selection')
+    await page.getByRole('tab', { name: 'Tout', exact: true }).click()
+    await page.getByRole('button', { name: 'Search workspace', exact: true }).click()
+    const palette = page.getByRole('dialog', { name: 'Search and commands', exact: true })
+    await palette.getByRole('combobox', { name: 'Search', exact: true }).fill('Native touch')
+    await page.setViewportSize({ width: 390, height: 844 })
+    // This Chromium project can hold a real touch across the live update. A tap
+    // also delivers compatibility mouse/click events after its pointerup.
+    const touch = await page.context().newCDPSession(page)
+    for (const cancel of [true, false]) {
+      const title = `Native touch decoy ${cancel ? 'cancel' : 'choose'}`
+      const decoy = await workspace.api('/api/chats', 'POST', {})
+      await workspace.api(`/api/chats/${decoy.id}`, 'PUT', { title, revision: decoy.revision })
+      const decoyOption = palette.getByRole('option', { name: new RegExp(`^${title}`) })
+      await expect(decoyOption).toBeVisible()
+      const filDecoy = page.getByRole('button', { name: `Open “${title}”`, exact: true, includeHidden: true })
+      await expect(filDecoy).toHaveCount(1)
+      const start = palette.getByRole('option', { name: /^Start a conversation:/ })
+      const bounds = await start.boundingBox()
+      expect(bounds).not.toBeNull()
+      const point = { x: bounds!.x + bounds!.width / 2, y: bounds!.y + bounds!.height / 2 }
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] })
+      await workspace.api(`/api/chats/${decoy.id}`, 'DELETE', {})
+      await expect(filDecoy).toHaveCount(0)
+      await touch.send('Input.dispatchTouchEvent', { type: cancel ? 'touchCancel' : 'touchEnd', touchPoints: [] })
+      if (cancel) {
+        await expect(palette).toBeVisible()
+        await expect(composer).toHaveValue('Keep the touch draft until selection')
+        await expect(decoyOption).toHaveCount(0)
+      }
+    }
+
+    await expect(palette).toBeHidden()
+    await expect(composer).toHaveValue('Native touch')
+    await touch.detach()
+  })
+})

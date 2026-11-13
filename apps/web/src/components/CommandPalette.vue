@@ -317,18 +317,34 @@ const results = computed(() => {
 // its target in place until the click has been delivered.
 const pressedResults = shallowRef<Command[]>()
 const displayedResults = computed(() => pressedResults.value ?? results.value)
-let releaseTimer: ReturnType<typeof setTimeout> | undefined
+let pressedOption: Element | undefined
+let pressedPointerId: number | undefined
 
 function holdResults(event: PointerEvent) {
-  if (event.button === 0 && event.isPrimary) {
-    clearTimeout(releaseTimer)
-    pressedResults.value = displayedResults.value
-  }
+  const option = event.target instanceof Element ? event.target.closest('[role="option"]') : null
+  if (event.button !== 0 || !event.isPrimary || !option)
+    return
+
+  pressedResults.value = displayedResults.value
+  pressedOption = option
+  pressedPointerId = event.pointerId
 }
 
 function releaseResults() {
-  clearTimeout(releaseTimer)
-  releaseTimer = setTimeout(() => pressedResults.value = undefined, 0)
+  pressedResults.value = undefined
+  pressedOption = undefined
+  pressedPointerId = undefined
+}
+
+function finishPointer(event: PointerEvent) {
+  if (event.pointerId !== pressedPointerId)
+    return
+
+  const releasedElement = document.elementFromPoint(event.clientX, event.clientY)
+  // Touch compatibility clicks may arrive after pointerup's next timer task.
+  // Keep an intended selection stable until click; a release away cancels it.
+  if (!releasedElement || !pressedOption?.contains(releasedElement))
+    releaseResults()
 }
 
 const grouped = computed(() => {
@@ -348,15 +364,18 @@ watch(active, async () => {
 const previous = document.activeElement as HTMLElement | null
 onBeforeUnmount(() => {
   // A modal dialog keeps the page inert until it closes.
-  clearTimeout(releaseTimer)
-  window.removeEventListener('pointerup', releaseResults)
+  window.removeEventListener('pointerup', finishPointer)
+  window.removeEventListener('click', releaseResults)
+  window.removeEventListener('contextmenu', releaseResults)
   window.removeEventListener('pointercancel', releaseResults)
   window.removeEventListener('blur', releaseResults)
   dialog.value?.close()
   previous?.focus()
 })
 onMounted(() => {
-  window.addEventListener('pointerup', releaseResults)
+  window.addEventListener('pointerup', finishPointer)
+  window.addEventListener('click', releaseResults)
+  window.addEventListener('contextmenu', releaseResults)
   window.addEventListener('pointercancel', releaseResults)
   window.addEventListener('blur', releaseResults)
   dialog.value?.showModal()
