@@ -1,4 +1,4 @@
-# 0032 — Local conversation disks
+# 0033 — Local conversation disks
 
 The manager retires S3-dependent working environments at startup, before any
 worker recovery or admission. This applies to conversations and standalone mission
@@ -36,9 +36,11 @@ Subsequent starts do not repeat the migration, even while physical retirement is
 still retrying. Disk deletion on the node needs no publication or base-block read.
 Missing local base blocks prevent mount rather than triggering a remote restore.
 
-There is **no schema change**: `DATABASE_VERSION` remains 31. Older managers can
-technically open the database, but that is not a rollback of this destructive
-migration. A rollback requires an operator database backup taken before the
+This change adds **no schema change**: `DATABASE_VERSION` remains 32, introduced
+by [detached publication acknowledgements](0032-detached-publication-acknowledgements.md).
+Managers using schema 31 cannot open this database. Managers supporting schema 32
+can technically open it, but that is not a rollback of this destructive migration.
+A rollback requires an operator database backup taken before the
 update and the matching bucket. Only the last remotely published files can return.
 The supervisor does not take this database backup.
 

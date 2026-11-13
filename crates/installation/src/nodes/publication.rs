@@ -2022,6 +2022,7 @@ async fn retire_environment(s: &Service, run: &str) -> Result<()> {
     crate::validation::uuid(run)?;
     let _operation = s.node_backup_operation.lock(run).await;
     let _readers = s.node_backup_operation.drain(run).await;
+    super::journal_acknowledgements::retire(s, run).await?;
     let points = s.store.node_backups_for_run(run).await?;
     let directory = root(s, run);
     if directory.exists() {
