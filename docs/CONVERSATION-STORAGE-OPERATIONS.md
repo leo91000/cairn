@@ -46,8 +46,9 @@ environment, including journal, base blocks and managed temporary files. Native
 automatic growth stays bounded by the installation's per-task allowance. Old
 sealed generations are consolidated before growth changes the disk geometry.
 Consolidation needs temporary room for replacement blocks before retiring old
-segments, and may use half the configured reserve; ordinary guest writes preserve
-the full reserve. No other environment is evicted for admission or growth.
+segments. Guest writes and consolidation both preserve the full configured node
+reserve and respect the node budget. No other environment is evicted for admission
+or growth.
 
 A full node waits for space. Consolidating overwritten journal history, expiring
 environments and deleting conversations are the ways Cairn releases disk backing.

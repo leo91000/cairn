@@ -438,3 +438,31 @@ fn consolidation_counts_journal_and_base_together_against_the_node_budget() {
     assert!(base_hashes(&disk).is_empty());
     assert!(disk.accounting().unwrap()["journalBytes"].as_u64().unwrap() > 0);
 }
+
+#[test]
+fn consolidation_preserves_the_full_configured_node_reserve() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("disks/owned/lazy");
+    let manifest = local_base(&directory, &[None]);
+    let disk = LazyDisk::create(&directory, &manifest, source()).unwrap();
+    disk.write_at(0, b"durable").unwrap();
+    disk.seal().unwrap();
+    let (_, free) = super::super::super::policy::space(&directory).unwrap();
+    let policy = super::super::super::policy::Policy {
+        reserve_mi_b: free.div_ceil(1024 * 1024) * 3 / 2,
+        reserve_percent: 1,
+        ..Default::default()
+    };
+    std::fs::write(
+        root.path().join("storage-policy.json"),
+        serde_json::to_vec(&policy).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        disk.consolidate().unwrap_err().kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert!(disk.sealed_pending());
+    assert_eq!(read(&disk, 0, 7), b"durable");
+    assert!(base_hashes(&disk).is_empty());
+}

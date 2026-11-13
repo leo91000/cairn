@@ -432,9 +432,9 @@ impl LazyDisk {
             return Ok(());
         }
         let directory = self.directory.join("cache");
+        let _headroom = self.admit_block(bytes.len() as u64, reserve)?;
         std::fs::create_dir_all(&directory)?;
         File::open(&self.directory)?.sync_all()?;
-        let _headroom = self.admit_block(bytes.len() as u64, reserve)?;
         let file = tempfile::Builder::new()
             .prefix(super::cache::TEMPORARY_BLOCK)
             .tempfile_in(&directory)?;
@@ -467,8 +467,8 @@ impl LazyDisk {
         Ok(())
     }
 
-    /// Consolidation may use half of the node reserve: it then retires journal
-    /// segments, while guest writes keep the whole reserve.
+    /// Consolidation preserves the whole node reserve while retaining both
+    /// old and replacement backing until the durable base swap.
     fn admit_block(
         &self,
         bytes: u64,
@@ -483,7 +483,7 @@ impl LazyDisk {
         let quota_required = reserve
             .saturating_add(super::cache::pending_write_bytes())
             .saturating_add(bytes);
-        if free <= (reserve / 2).saturating_add(bytes) || quota_free <= quota_required {
+        if free <= reserve.saturating_add(bytes) || quota_free <= quota_required {
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
                 "Journal consolidation is waiting for disk space",
