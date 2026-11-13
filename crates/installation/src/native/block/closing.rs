@@ -271,12 +271,11 @@ mod tests {
             let volume = operations.volume.clone();
             let terminal = Arc::new(AtomicBool::new(false));
             let first = tokio::spawn({
-                let state = state.clone();
                 let terminal = terminal.clone();
                 async move {
                     let _workspace_owner = workspace_owner;
                     let result = StorageClose::default()
-                        .finish(&state, closing.close(&operations))
+                        .finish(closing.close(&operations))
                         .await;
                     terminal.store(true, Ordering::SeqCst);
                     result
@@ -315,7 +314,7 @@ mod tests {
             let second_started = std::time::Instant::now();
             let second_entered = AtomicBool::new(false);
             let mut storage_close = StorageClose::default();
-            let second = storage_close.finish(&state, async {
+            let second = storage_close.finish(async {
                 second_entered.store(true, Ordering::SeqCst);
                 second_state.close(&second_operations).await
             });
@@ -426,7 +425,7 @@ mod tests {
         let mut storage_close = StorageClose::default();
         assert!(
             storage_close
-                .finish(root.path(), closing.close(&operations))
+                .finish(closing.close(&operations))
                 .await
                 .is_err()
         );
@@ -434,7 +433,7 @@ mod tests {
         let unrelated = crate::native::disk::lock(root.path()).await.unwrap();
         let retry = tokio::time::timeout(
             Duration::from_millis(250),
-            storage_close.finish(root.path(), closing.close(&operations)),
+            storage_close.finish(closing.close(&operations)),
         )
         .await;
         drop(unrelated);

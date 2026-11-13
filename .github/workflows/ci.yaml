@@ -288,6 +288,11 @@ jobs:
         uses: ./.github/actions/backend-durable-evidence
         env:
           BACKEND_DIAGNOSTIC_SELECTOR: ${{ inputs.backend-diagnostic-selector || 'full' }}
+      - name: Qualify native controller concurrency before building every test binary
+        if: inputs.ci-diagnostic != 'backend' && (inputs.backend-only != true || inputs.publication-measurement != true)
+        run: >-
+          node scripts/test-backend.mjs --nextest -p cairn-installation --lib
+          -E 'test(native::service::tests::) | test(nodes::files::tests::)' --no-capture
       - name: Run backend tests across binaries with isolated credentials
         if: inputs.ci-diagnostic != 'backend' && (inputs.backend-only != true || inputs.publication-measurement != true)
         timeout-minutes: 30
