@@ -1075,6 +1075,13 @@ pub(super) async fn erase_attempt_content(
     for attempt in attempts {
         remove_if_present(&broker.state_file(&attempt, "log")).await?;
     }
+    if plans.is_dir() {
+        tokio::fs::File::open(&plans).await?.sync_all().await?;
+    }
+    tokio::fs::File::open(&broker.state)
+        .await?
+        .sync_all()
+        .await?;
     Ok(())
 }
 

@@ -157,7 +157,15 @@ async fn detach_worktree(project: &Path, old: &Path, retired: &Path) -> Result<(
             "The retired worktree registration will retry.",
         ));
     }
-    super::remove_worktree(project, retired).await
+    super::remove_worktree(project, retired).await?;
+    if common.is_dir() {
+        tokio::fs::File::open(&common).await?.sync_all().await?;
+    }
+    tokio::fs::File::open(common.parent().unwrap())
+        .await?
+        .sync_all()
+        .await?;
+    Ok(())
 }
 
 /// Every target is relative to the captured environment, never the new run root.
@@ -205,7 +213,12 @@ pub(crate) async fn erase(
             detach_worktree(project, old, &target).await?;
         }
     }
-    super::remove(&retired).await
+    super::remove(&retired).await?;
+    match tokio::fs::File::open(retired.parent().unwrap()).await {
+        Ok(parent) => parent.sync_all().await.map_err(Error::from),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]

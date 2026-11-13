@@ -2503,7 +2503,11 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                         .join(crate::conversation_deletion::retired::MANAGER_NAMESPACE)
                         .exists()
                 {
-                    tokio::fs::remove_dir_all(stage).await?;
+                    tokio::fs::remove_dir_all(&stage).await?;
+                    tokio::fs::File::open(stage.parent().unwrap())
+                        .await?
+                        .sync_all()
+                        .await?;
                 }
                 let mut entries = tokio::fs::read_dir(&controller.state).await?;
                 while let Some(entry) = entries.next_entry().await? {
@@ -2544,6 +2548,10 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                         .await;
                     }
                 }
+            }
+            let plans = controller.data.join("runner-plans");
+            if plans.is_dir() {
+                tokio::fs::File::open(plans).await?.sync_all().await?;
             }
             if let Some(retirement) = &retirement {
                 retirement.commit(&root).await?;

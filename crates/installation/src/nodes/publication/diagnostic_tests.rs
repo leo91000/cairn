@@ -1530,18 +1530,11 @@ async fn attempt_persists_bounded_failure_context_and_retains_it_after_recovery(
         .update_run_boundary(&run_id, json!({ "environmentState": "expired" }))
         .await
         .unwrap();
-    // This manager 409 is caused by expiration before snapshot capture, so status
-    // alone must leave the category unknown and must not produce a new alert.
+    // A queued attempt cannot mutate publication diagnostics after expiration.
     super::attempt(&s, &attempt_run).await;
     let conflicted = s.store.run(&run_id).await.unwrap();
     let conflict_context = conflicted["backup"]["lastFailureContext"].clone();
-    assert_eq!(conflicted["backup"]["status"], "error");
-    assert_eq!(conflicted["backup"]["requestedRevision"], 8);
-    assert_eq!(conflicted["backup"]["acknowledgedRevision"], 8);
-    assert_eq!(conflict_context["phase"], "publication");
-    assert_eq!(conflict_context["category"], "unknown");
-    assert_eq!(conflict_context["managerStatus"], 409);
-    assert_eq!(conflict_context["inputRequestedRevision"], 7);
+    assert_eq!(conflicted["backup"], failed["backup"]);
     let events_after_conflict = {
         let run_id = run_id.clone();
         s.store
