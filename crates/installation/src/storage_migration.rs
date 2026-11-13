@@ -58,7 +58,9 @@ fn migrate(db: &mut Db<'_>) -> Result<()> {
     remote.extend(
         db.json_rows(
             "SELECT DISTINCT json_quote(p.run_id) FROM shared_publications p
-         JOIN shared_references r ON r.publication=p.id",
+         JOIN shared_references r ON r.publication=p.id
+         WHERE NOT EXISTS(SELECT 1 FROM direct_journal_acknowledgements a
+                          WHERE a.publication=p.id AND a.detached=1)",
             [],
         )?
         .iter()
@@ -256,6 +258,60 @@ mod tests {
         let local = store.run("local").await.unwrap();
         assert!(local["environmentState"].is_null());
         assert_eq!(local["sessionId"], "retained-session");
+        store.transaction(migrate).await.unwrap();
+        assert_eq!(
+            store.list("environment-retirements").await.unwrap(),
+            retired
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_publications_do_not_expire_a_local_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.put_node_fixture(&json!({ "id": ACTIVE, "revoked": false }))?;
+                for (id, detached) in [("local", true), ("remote", false)] {
+                    run(db, id, Some(ACTIVE))?;
+                    db.0.execute(
+                        "INSERT INTO shared_publications VALUES(?1,?1)",
+                        [id],
+                    )?;
+                    db.0.execute(
+                        "INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,'s3',?1,4096,'{}','ready')",
+                        [id],
+                    )?;
+                    db.0.execute("INSERT INTO shared_references VALUES(?1,?1)", [id])?;
+                    db.0.execute(
+                        "INSERT INTO direct_journal_acknowledgements(publication,run_id,node_id,detached) VALUES(?1,?1,'old-node',?2)",
+                        rusqlite::params![id, detached],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store.transaction(migrate).await.unwrap();
+        let local = store.run("local").await.unwrap();
+        assert!(local["environmentState"].is_null());
+        assert_eq!(local["sessionId"], "retained-session");
+        let remote = store.run("remote").await.unwrap();
+        assert_eq!(remote["environmentState"], "expired");
+        store
+            .read(|db| {
+                let pins: i64 = db.0.query_row(
+                    "SELECT count(*) FROM shared_references WHERE publication='local'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(pins, 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let retired = store.list("environment-retirements").await.unwrap();
+        assert_eq!(retired.len(), 1);
         store.transaction(migrate).await.unwrap();
         assert_eq!(
             store.list("environment-retirements").await.unwrap(),

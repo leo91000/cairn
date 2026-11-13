@@ -17,7 +17,9 @@ then expires environments with any of these indications of a possible remote bas
   was lost.
 - A shared publication with block references, or a disk grant that names remote
   publications. These cover interrupted publication bookkeeping and missing point
-  records; the manager does not assume those bases are safely local.
+  records; the manager does not assume those bases are safely local. Publications
+  already detached into an older environment's retirement do not expire its local
+  replacement; their exact references remain with that earlier retirement.
 - An owner node, recorded on the run, checkpoint or unreleased execution admission,
   that is already revoked. This includes a materialized admission whose checkpoint
   was never published.
