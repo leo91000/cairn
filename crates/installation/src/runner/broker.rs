@@ -243,6 +243,10 @@ impl Broker {
         let stop = self.stop.child_token();
         let (done, receiver) = watch::channel(false);
         let physical_teardown = reservation.subscribe_teardown();
+        // Ownership must survive a crash even before active registration. Every
+        // exposed log can then be reclaimed without its shared manager plan.
+        atomic_write(&self.state_file(id, "run"), plan.run_id().as_bytes()).await?;
+        tokio::fs::File::open(&self.state).await?.sync_all().await?;
         // A successful start exposes the log immediately, including during disk
         // preparation and guest boot. Preserve bytes left by an admission retry.
         tokio::fs::OpenOptions::new()
@@ -250,7 +254,6 @@ impl Broker {
             .append(true)
             .open(self.state_file(id, "log"))
             .await?;
-        atomic_write(&self.state_file(id, "run"), plan.run_id().as_bytes()).await?;
         atomic_write(&self.state_file(id, "active"), b"1").await?;
         active.insert(
             id.into(),
@@ -723,7 +726,7 @@ mod ownership_tests {
     }
 
     #[tokio::test]
-    async fn startup_log_creation_failure_does_not_publish_or_occupy_an_attempt() {
+    async fn startup_log_creation_failure_retains_cleanup_ownership_without_admission() {
         let root = tempfile::tempdir().unwrap();
         let (broker, run) = pending_claim(root.path()).await;
         let id = startup_plan(&broker, &run).await;
@@ -732,7 +735,12 @@ mod ownership_tests {
             .unwrap();
         assert!(broker.start(&id).await.is_err());
         assert!(!broker.active.lock().await.contains_key(&id));
-        assert!(!broker.state_file(&id, "run").exists());
+        assert_eq!(
+            tokio::fs::read_to_string(broker.state_file(&id, "run"))
+                .await
+                .unwrap(),
+            run
+        );
         assert!(!broker.state_file(&id, "active").exists());
         tokio::time::timeout(Duration::from_secs(1), async {
             while broker.pool.health().await.occupied != 0 {
@@ -1040,6 +1048,13 @@ pub(super) async fn erase_attempt_content(
             if !permanent && !owned {
                 continue;
             }
+            // Legacy attempts can have only a shared plan and a log. Persist
+            // independent ownership before a manager can remove that plan.
+            atomic_write(&broker.state_file(attempt, "run"), run.as_bytes()).await?;
+            tokio::fs::File::open(&broker.state)
+                .await?
+                .sync_all()
+                .await?;
             // Fence a delayed start before removing its short-lived credentials.
             atomic_write(&broker.state_file(attempt, "stopped"), b"").await?;
             identities.push(entry.path());

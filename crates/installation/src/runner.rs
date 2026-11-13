@@ -755,6 +755,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manager_and_bundled_controller_keep_retry_ownership_across_plan_cleanup() {
+        use crate::node_fixture::StoreNodeFixture;
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let (run, attempt, retirement) = (
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+        );
+        let state = broker.state.clone();
+        let plans = broker.data.join("runner-plans");
+        private_dir(&plans).await.unwrap();
+        let plan = plans.join(format!("{attempt}.json"));
+        std::fs::write(&plan, json!({ "runId":run }).to_string()).unwrap();
+        std::fs::write(broker.state_file(&attempt, "stopped"), b"").unwrap();
+        let log = broker.state_file(&attempt, "log");
+        private_dir(&log).await.unwrap();
+        let (url, server) = crate::common::serve_locally(router(broker)).await;
+        let mut config = crate::common::config(root.path());
+        config.runner_url = url;
+        let manager = crate::service::Service::new(config.clone()).await.unwrap();
+        manager
+            .store
+            .put_node_fixture(json!({ "id":crate::nodes::LOCAL_NODE_ID, "local":true }))
+            .await
+            .unwrap();
+        let pending = json!({
+            "id":retirement, "runId":run, "cause":"node-change", "expiredAt":crate::config::now(),
+            "nodes":[crate::nodes::LOCAL_NODE_ID], "attempt":attempt, "attemptNode":crate::nodes::LOCAL_NODE_ID,
+            "attempts":[], "managerPlans":[attempt], "process":null, "isolated":true,
+            "accountId":null, "workspaces":[], "projects":[], "fenced":true, "local":true,
+            "publications":crate::nodes::publication::RetiredPublications::default(),
+            "cleaned":false, "error":null, "retryAfter":null
+        });
+        manager
+            .store
+            .write(move |db| db.put("environment-retirements", &pending))
+            .await
+            .unwrap();
+        manager.retire_environments().await.unwrap();
+        let pending = manager
+            .store
+            .get("environment-retirements", &retirement)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(pending["error"].is_string());
+        assert!(
+            plan.exists(),
+            "manager must not remove a controller's retry identity before disk acknowledgement"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state.join(format!("{attempt}.run"))).unwrap(),
+            run
+        );
+        let receipt = state.join("disk-retirements").join(&run).join(&retirement);
+        assert!(!receipt.exists());
+        // Ordinary worker release can independently remove the shared plan.
+        std::fs::remove_file(&plan).unwrap();
+        std::fs::remove_dir(&log).unwrap();
+        std::fs::write(&log, b"old private output").unwrap();
+        let owned = retirement.clone();
+        manager
+            .store
+            .write(move |db| {
+                let mut pending = db.get("environment-retirements", &owned)?.unwrap();
+                pending["retryAfter"] = Value::Null;
+                db.put("environment-retirements", &pending)
+            })
+            .await
+            .unwrap();
+        drop(manager);
+        server.abort();
+        let _ = server.await;
+        let (url, restarted_server) =
+            crate::common::serve_locally(router(fixture_broker(root.path()).await)).await;
+        config.runner_url = url;
+        let restarted = crate::service::Service::new(config).await.unwrap();
+        restarted.retire_environments().await.unwrap();
+        assert!(receipt.exists());
+        assert!(!log.exists());
+        assert!(
+            restarted
+                .store
+                .get("environment-retirements", &retirement)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        restarted_server.abort();
+    }
+
+    #[tokio::test]
     async fn late_retirement_retry_preserves_the_next_vm_environment() {
         async fn retire(app: &Router, run: &str, id: &str) -> axum::response::Response {
             app.clone()

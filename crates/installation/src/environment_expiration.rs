@@ -980,8 +980,12 @@ impl Service {
             .write(move |db| db.put(RETIREMENTS, &released))
             .await?;
         self.worker.notify();
-        if let Err(error) =
-            crate::conversation_deletion::retired::erase_plans(self, &retirement.plan_ids()).await
+        // A bundled controller can still need these shared plans to identify
+        // failed cleanup. Its durable acknowledgement precedes their removal.
+        if retirement.nodes.is_empty()
+            && let Err(error) =
+                crate::conversation_deletion::retired::erase_plans(self, &retirement.plan_ids())
+                    .await
         {
             failure.get_or_insert(error);
         }

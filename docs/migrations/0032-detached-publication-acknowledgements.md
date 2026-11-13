@@ -28,3 +28,8 @@ legacy storage owners and removes only the root contents, preserving a mounted
 staging root. Environment retirement also removes the captured old manager
 attempt plans by identity, including retries after restart; replacement plans
 remain independent. These queues use existing records and add no SQL layout.
+
+A shared manager plan is kept until every affected node acknowledges retirement
+or is permanently revoked. Controllers persist their own run-to-attempt mapping
+before creating a log or retrying legacy plan-only cleanup, so ordinary worker
+plan removal cannot orphan an attempt's output after a failed deletion.

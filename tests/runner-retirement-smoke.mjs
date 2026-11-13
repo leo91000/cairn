@@ -1,7 +1,7 @@
 // Identified retirement after a real guest ran, including controller restart.
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { attemptOutput } from './runner-probe.mjs'
@@ -38,6 +38,8 @@ export async function retirementSmoke({
   await api(endpoint, 'POST', { retirementId }, 500)
   assert.equal(exists(receipt), false, 'failed cleanup cannot acknowledge retirement')
   assert.ok(exists(owner), 'failed log erasure must retain its run-to-attempt identity')
+  // Ordinary manager worker release can erase this shared plan independently.
+  await rm(path.join(plans, `${attempt}.json`))
   node(`const fs=require('node:fs');fs.rmdirSync(${JSON.stringify(log)});fs.renameSync(${JSON.stringify(`${log}.saved`)},${JSON.stringify(log)});`)
   await restart()
   const retired = await (await retire()).json()
