@@ -115,10 +115,12 @@ Actions:
   the action may have taken effect. A tool that answers exactly `{retryAfter: seconds}`
   (optionally with `error`) tells Cairn the service did nothing: only that action runs
   again, after the larger of that delay and an exponential backoff, for at most five
-  attempts in all.
+  attempts in all. A requested delay beyond seven days fails the triggering. Retries
+  share the rule's waiting limit, and membership is checked again before resuming.
   Any other error ends the triggering with its message.
 - `storeValue` with the rule scope keeps up to 64 KiB.
-- `wait` resumes the next steps later; a rule keeps at most 20 triggerings waiting.
+- `wait` resumes the next steps later; a rule keeps at most 20 triggerings waiting,
+  including retries and waits for membership verification.
 - Conversation actions and conditions about conversation keys come with conversation
   keys; until then they fail the triggering with a message saying so.
 
@@ -138,7 +140,8 @@ triggerings without effect in the last 24 hours). The event payload, each action
 input, result and error (`get_hook_rule_triggering`) are visible to the creator, the
 owner and members with access to the execution agent of the version that triggering
 ran with. Cairn keeps the 200 newest triggerings of each rule, and every one still
-running, waiting or retrying.
+running, waiting or retrying. Hourly accounting is retained independently of this
+history, and lifting an exhausted budget gives subsequent triggerings a fresh window.
 
 ## Versions
 

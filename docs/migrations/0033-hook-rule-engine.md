@@ -4,11 +4,13 @@ Version 32 upgrades to 33 automatically in `Store::open`, before the SQL actors 
 ([ADR-0075](../adr/0075-plugin-hooks-rules-and-scoped-grants.md), « Budget du moteur de
 règles »).
 
-One immediate transaction creates four empty tables and advances `user_version`:
+One immediate transaction creates five empty tables and advances `user_version`:
 
 - `hook_rule_triggerings`: one row per triggering, with its pinned version, its event,
   its interpreter position, the action pending or in flight, its counters and state;
   unique per rule and queued event.
+- `hook_rule_receipts`: delivery deduplication while events are queued and hourly
+  accounting independent of history; lifting a budget clears its accounting.
 - `hook_rule_steps`: the actions each triggering ran, with input, result and error.
 - `hook_rule_values`: the values rules remember, at most 64 KiB each.
 - `hook_rule_quiet_hours`: the number of triggerings that ended without effect, by

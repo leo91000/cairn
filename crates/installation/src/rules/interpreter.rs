@@ -124,6 +124,7 @@ impl Cursor {
         evaluator: &Evaluator,
     ) -> Result<Option<&'a RuleNode>, String> {
         loop {
+            super::evaluate::check_deadline()?;
             let Some(frame) = self.frames.last_mut() else {
                 return Ok(None);
             };

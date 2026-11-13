@@ -29,6 +29,7 @@ pub(crate) struct Fixture {
     pub(crate) bearer: String,
     pub(crate) run: String,
     pub(crate) instance: String,
+    pub(crate) http_origin: String,
     pub(crate) posts: Arc<AtomicUsize>,
     pub(crate) pause: Arc<AtomicBool>,
     pub(crate) entered: Arc<tokio::sync::Notify>,
@@ -169,7 +170,7 @@ impl Fixture {
                 ),
         )
         .await;
-        s.plugins.route_http_to(Some(origin));
+        s.plugins.route_http_to(Some(origin.clone()));
         let shape = json!({
             "type": "object",
             "additionalProperties": false,
@@ -183,6 +184,8 @@ impl Fixture {
                 "author": { "type": "string" },
                 "retry": { "type": "boolean" },
                 "retryAfter": { "type": "number" },
+                "delay": { "type": "number" },
+                "agentView": { "type": "boolean" },
                 "instance": { "type": "string" },
                 "items": {
                     "type": "array",
@@ -271,6 +274,7 @@ return {
         return { resourceType=input.resourceType,id=input.id,name=input.id,parent=parent }
     end,
     tool = function(input)
+        if input.input.agentView then return input.agent end
         if input.input.chunks then
             local destination = if input.input.target then cairn.files.read({instance=input.instances[1].id,id=input.input.target}) else cairn.files.create({instance=input.instances[1].id,name="chunks.txt",data=""})
             for _ = 1, input.input.chunks do
@@ -368,6 +372,7 @@ return {
             bearer: text(&config["env"], "CAIRN_MCP_RUN_TOKEN").into(),
             run: text(&run, "id").into(),
             instance: text(&instance, "id").into(),
+            http_origin: origin,
             posts,
             pause,
             entered,

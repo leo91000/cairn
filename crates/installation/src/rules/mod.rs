@@ -742,12 +742,13 @@ pub(crate) async fn lift_budget(
     input: HookRuleInput,
     actor: Actor,
 ) -> Result<HookRule> {
-    change_state(s, input.rule_id, actor, move |_, row, viewer| {
+    change_state(s, input.rule_id, actor, move |db, row, viewer| {
         if !mine(row, viewer) && !viewer.owner {
             return Err(Error::forbidden(
                 "Only its creator or the installation owner can resume this rule's budget.",
             ));
         }
+        engine::reset_budget(db, &row.id)?;
         row.budget_exhausted_at = None;
         row.budget_reason = None;
         Ok("hook_rule.budget_resumed")

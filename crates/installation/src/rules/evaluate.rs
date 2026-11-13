@@ -30,6 +30,34 @@ const BOUND: &str = "__cairn_bound";
 thread_local! {
     static ITERATIONS: Cell<usize> = const { Cell::new(0) };
     static PRODUCED: Cell<usize> = const { Cell::new(0) };
+    static DEADLINE: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+}
+
+/// The whole pure planning step shares a deadline, including successive formulas.
+/// Checking it inside the interpreter and CEL callbacks also retires a blocking job
+/// if its async caller has already reached the timeout.
+pub(crate) fn with_deadline<T>(deadline: std::time::Instant, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<std::time::Instant>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DEADLINE.with(|current| current.set(self.0));
+        }
+    }
+    let _restore = Restore(DEADLINE.with(|current| current.replace(Some(deadline))));
+    run()
+}
+
+pub(crate) fn check_deadline() -> Outcome<()> {
+    let expired = DEADLINE.with(|deadline| {
+        deadline
+            .get()
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    });
+    if expired {
+        Err("Evaluating this step exceeded its time limit.".into())
+    } else {
+        Ok(())
+    }
 }
 
 /// The variables of one place in a triggering, as JSON.
@@ -68,6 +96,7 @@ fn too_large() -> ExecutionError {
 }
 
 fn bound(value: Value) -> Result<Value, ExecutionError> {
+    check_deadline().map_err(|error| ExecutionError::function_error("limit", error))?;
     let size = size(&value);
     if size > MAX_BYTES {
         return Err(too_large());
@@ -90,6 +119,7 @@ fn bound(value: Value) -> Result<Value, ExecutionError> {
 }
 
 fn range(value: Value) -> Result<Value, ExecutionError> {
+    check_deadline().map_err(|error| ExecutionError::function_error("limit", error))?;
     let count = match &value {
         Value::List(items) => items.len(),
         Value::Map(map) => map.map.len(),
@@ -740,6 +770,7 @@ impl Evaluator {
     /// Evaluates one formula. Checking it again guards against a version saved under
     /// earlier, looser limits.
     pub(crate) fn formula(&self, source: &str, items: &Map<String, Json>) -> Outcome<Json> {
+        check_deadline()?;
         let mut scope = self.scope.clone();
         scope.names.extend(items.keys().cloned());
         let program = instrument(formula::check(source, &scope)?);
@@ -750,6 +781,7 @@ impl Evaluator {
         ITERATIONS.with(|used| used.set(0));
         PRODUCED.with(|produced| produced.set(0));
         let value = Value::resolve(&program, &context).map_err(|error| error.to_string())?;
+        check_deadline()?;
         let json = value.json().map_err(|error| error.to_string())?;
         if serde_json::to_vec(&json).map_or(true, |bytes| bytes.len() > MAX_BYTES) {
             return Err(too_large().to_string());
@@ -761,6 +793,7 @@ impl Evaluator {
     pub(crate) fn template(&self, text: &str, items: &Map<String, Json>) -> Outcome<Json> {
         let mut rendered = String::new();
         for part in formula::template(text)? {
+            check_deadline()?;
             match part {
                 Part::Text(text) => rendered.push_str(&text),
                 Part::Expression(source) => match self
@@ -780,6 +813,7 @@ impl Evaluator {
     }
 
     pub(crate) fn value(&self, value: &RuleValue, items: &Map<String, Json>) -> Outcome<Json> {
+        check_deadline()?;
         match value {
             RuleValue::Literal { value } => Ok(value.clone()),
             RuleValue::Template { text } => self.template(text, items),
@@ -803,6 +837,22 @@ mod tests {
 
     fn value(value: &RuleValue, variables: &Variables) -> Outcome<Json> {
         Evaluator::new(variables)?.value(value, &Map::new())
+    }
+
+    #[test]
+    fn an_expired_step_stops_formulas_and_callbacks_and_releases_its_deadline() {
+        let evaluator = Evaluator::new(&Variables::default()).unwrap();
+        with_deadline(std::time::Instant::now(), || {
+            assert!(
+                evaluator
+                    .formula("1 + 1", &Map::new())
+                    .unwrap_err()
+                    .contains("time limit")
+            );
+            assert!(bound(Value::Int(1)).is_err());
+            assert!(range(Value::List(Arc::new(vec![]))).is_err());
+        });
+        assert_eq!(evaluator.formula("1 + 1", &Map::new()).unwrap(), json!(2));
     }
 
     fn variables() -> Variables {

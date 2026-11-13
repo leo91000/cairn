@@ -15,6 +15,7 @@ use std::sync::atomic::Ordering;
 #[path = "fixtures/plugin_grants.rs"]
 mod fixture;
 
+use common::agent_fixture::AgentFixture;
 use fixture::{Fixture, contribution, support};
 
 const OWNER: &str = "fixture-owner";
@@ -370,6 +371,26 @@ async fn the_hourly_cap_suspends_the_rule_and_tells_its_creator() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    emit(
+        &f,
+        "after-reset",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 2);
+    let (_, current) = call(
+        &f,
+        OWNER,
+        "GET",
+        &format!("/api/hook-rules/{rule}"),
+        Value::Null,
+    )
+    .await;
+    assert!(
+        current["blocks"].as_array().unwrap().is_empty(),
+        "{current}"
+    );
 }
 
 #[tokio::test]
@@ -505,6 +526,7 @@ fn version_32_adds_the_engine_tables_and_reopens_without_changing_them() {
          DROP TABLE hook_rule_triggerings;
          DROP TABLE hook_rule_values;
          DROP TABLE hook_rule_quiet_hours;
+         DROP TABLE hook_rule_receipts;
          PRAGMA user_version=32;",
     )
     .unwrap();
@@ -521,6 +543,7 @@ fn version_32_adds_the_engine_tables_and_reopens_without_changing_them() {
             "hook_rule_steps",
             "hook_rule_values",
             "hook_rule_quiet_hours",
+            "hook_rule_receipts",
         ] {
             assert_eq!(
                 db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
@@ -569,4 +592,354 @@ async fn a_service_retry_delay_longer_than_an_hour_is_respected() {
     assert!(triggering["resumesAt"].as_i64().unwrap() >= before + 7_200_125);
     engine::tick(&f.s).await.unwrap();
     assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn plugin_tools_receive_only_the_agents_public_identity() {
+    let f = granted().await;
+    let rule = rule(
+        &f,
+        OWNER,
+        steps(&json!([post(
+            "identity",
+            &f,
+            &json!({
+                "agentView": { "type": "literal", "value": true },
+            })
+        )])),
+        60,
+    )
+    .await;
+    emit(
+        &f,
+        "identity",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    let detail = detail(&f, OWNER, &listed["triggerings"][0]).await;
+    let agent =
+        f.s.store
+            .agent_snapshot(MAIN_AGENT_ID)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        detail["steps"][0]["result"],
+        json!({ "id": MAIN_AGENT_ID, "name": agent["name"] })
+    );
+}
+
+#[tokio::test]
+async fn a_deferred_listener_does_not_replay_another_rules_quiet_triggering() {
+    let f = Fixture::new().await;
+    f.set(json!([contribution("hook", "message", json!([]))]))
+        .await;
+    let quiet = rule(&f, OWNER, steps(&json!([])), 60).await;
+    let agent =
+        f.s.agent_fixture(json!({ "name": "Restricted listener" }), None)
+            .await
+            .unwrap();
+    let agent_id = text(&agent, "id");
+    f.set_for(
+        agent_id,
+        json!([contribution("hook", "message", support())]),
+    )
+    .await;
+    let (_, source) = call(
+        &f,
+        OWNER,
+        "GET",
+        &format!("/api/hook-rules/{quiet}"),
+        Value::Null,
+    )
+    .await;
+    let mut definition = source["definition"].clone();
+    definition["executionAgentId"] = agent_id.into();
+    let (status, other) = call(
+        &f,
+        OWNER,
+        "POST",
+        "/api/hook-rules",
+        json!({ "definition": definition }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+
+    // Unknown resources make the restricted listener defer, while the broad grant
+    // can receive this event without asking the resource resolver.
+    emit(
+        &f,
+        "deferred",
+        json!({ "channel": "unknown", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(history(&f, OWNER, &quiet).await["withoutEffect"], 1);
+    let (queued, receipts) =
+        f.s.store
+            .read(|db| {
+                Ok((
+                    db.0.query_row("SELECT count(*) FROM plugin_hook_events", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                    db.0.query_row("SELECT count(*) FROM hook_rule_receipts", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                ))
+            })
+            .await
+            .unwrap();
+    assert_eq!((queued, receipts), (1, 1));
+}
+
+#[tokio::test]
+async fn slow_tools_do_not_hold_up_new_hook_intake_or_other_executor_slots() {
+    let f = granted().await;
+    rule(&f, OWNER, steps(&json!([post("post", &f, &json!({}))])), 60).await;
+    f.pause.store(true, Ordering::SeqCst);
+    emit(
+        &f,
+        "slow",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    let service = f.s.clone();
+    let worker = tokio::spawn(async move { engine::tick(&service).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+        .await
+        .unwrap();
+    emit(
+        &f,
+        "new",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    let progressed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while f.posts.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    f.release.notify_one();
+    worker.await.unwrap().unwrap();
+    assert!(progressed.is_ok(), "A tool in flight blocked a new event.");
+}
+
+#[tokio::test]
+async fn all_terminal_paths_are_pruned_without_losing_the_hourly_accounting() {
+    let f = granted().await;
+    let rule = rule(
+        &f,
+        OWNER,
+        steps(&json!([post("post", &f, &json!({}))])),
+        250,
+    )
+    .await;
+    let id = rule.clone();
+    f.s.store.transaction(move |db| {
+        let at = cairn_installation::config::now();
+        for index in 0..250 {
+            let event = format!("failed-{index}");
+            db.0.execute(
+                "INSERT INTO hook_rule_triggerings(id,rule_id,version,event_id,event,status,cursor,in_flight,actions,tool_calls,counted_at,verify,created_at,updated_at,finished_at) \
+                 VALUES(?1,?2,1,?3,'{}','failed','{\"frames\":[],\"steps\":{},\"count\":1}',0,1,1,?4,0,?5,?4,?4)",
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), id, event, at, at - 1000 + index],
+            )?;
+            db.0.execute("INSERT INTO hook_rule_receipts VALUES(?1,?2,?3)", rusqlite::params![id, event, at])?;
+        }
+        db.0.execute("INSERT INTO hook_rule_quiet_hours VALUES(?1,?2,1)", rusqlite::params![id, at / 3_600_000 - 24 * 8])?;
+        Ok(())
+    }).await.unwrap();
+    engine::tick(&f.s).await.unwrap();
+    let retained =
+        f.s.store
+            .read(|db| {
+                Ok((
+                    db.0.query_row("SELECT count(*) FROM hook_rule_triggerings", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                    db.0.query_row("SELECT count(*) FROM hook_rule_receipts", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                    db.0.query_row("SELECT count(*) FROM hook_rule_quiet_hours", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                ))
+            })
+            .await
+            .unwrap();
+    assert_eq!(retained, (200, 250, 0));
+    emit(
+        &f,
+        "over-cap",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+    let (_, current) = call(
+        &f,
+        OWNER,
+        "GET",
+        &format!("/api/hook-rules/{rule}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(current["blocks"][0]["kind"], "budgetExhausted");
+}
+
+#[tokio::test]
+async fn retries_share_the_waiting_limit_and_reject_delays_over_seven_days() {
+    let f = granted().await;
+    let rule = rule(
+        &f,
+        OWNER,
+        steps(&json!([post(
+            "refused",
+            &f,
+            &json!({
+                "retry": { "type": "literal", "value": true },
+                "retryAfter": { "type": "formula", "expression": "payload.delay" },
+            })
+        )])),
+        60,
+    )
+    .await;
+    emit(
+        &f,
+        "too-long",
+        json!({ "channel": "support", "author": "alice", "delay": 30 * 86_400 }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    let failed = detail(&f, OWNER, &listed["triggerings"][0]).await;
+    assert_eq!(failed["status"], "failed", "{failed}");
+    assert!(failed["error"].as_str().unwrap().contains("seven days"));
+    for index in 0..21 {
+        emit(
+            &f,
+            &format!("retry-{index}"),
+            json!({ "channel": "support", "author": "alice", "delay": 3600 }),
+        )
+        .await;
+    }
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    let retrying = listed["triggerings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["status"] == "retrying")
+        .count();
+    assert_eq!(retrying, 20, "{listed}");
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_member_retry_waits_for_fresh_membership_before_it_calls_the_tool() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let rule = rule(
+        &f,
+        MEMBER,
+        steps(&json!([post(
+            "refused",
+            &f,
+            &json!({
+                "retry": { "type": "literal", "value": true },
+                "retryAfter": { "type": "literal", "value": 3600 },
+            })
+        )])),
+        60,
+    )
+    .await;
+    emit(
+        &f,
+        "member-retry",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(
+        history(&f, OWNER, &rule).await["triggerings"][0]["status"],
+        "retrying"
+    );
+    f.marker("accept").await;
+    common::relay_fixture::authority_unavailable(&f.s, true).await;
+    // Restarting removes the in-memory freshness observation while preserving the
+    // pending action and the last authoritative membership snapshot.
+    let restarted = cairn_installation::service::Service::new(f.s.config.clone())
+        .await
+        .unwrap();
+    restarted
+        .plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    restarted.plugins.route_http_to(Some(f.http_origin.clone()));
+    restarted
+        .store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE hook_rule_triggerings SET next_at=0 WHERE status='retrying'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    engine::tick(&restarted).await.unwrap();
+    let waiting = history(&f, OWNER, &rule).await;
+    assert_eq!(waiting["triggerings"][0]["status"], "waiting", "{waiting}");
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+    common::relay_fixture::authority_unavailable(&f.s, false).await;
+    restarted.synchronize_task_authors().await.unwrap();
+    restarted
+        .store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE hook_rule_triggerings SET next_at=0 WHERE status='waiting'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    engine::tick(&restarted).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        history(&f, OWNER, &rule).await["triggerings"][0]["status"],
+        "completed"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_rule_does_not_block_other_listeners() {
+    let f = granted().await;
+    let broken = rule(&f, OWNER, steps(&json!([])), 60).await;
+    let working = rule(&f, OWNER, steps(&json!([post("post", &f, &json!({}))])), 60).await;
+    f.s.store
+        .transaction(move |db| {
+            db.0.execute(
+                "UPDATE hook_rule_versions SET definition='{}' WHERE rule_id=?",
+                [broken],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    emit(
+        &f,
+        "valid-listener",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        history(&f, OWNER, &working).await["triggerings"][0]["status"],
+        "completed"
+    );
 }
