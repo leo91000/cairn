@@ -379,9 +379,21 @@ abstract class ChatJourneyCases {
                 }
             server.start()
             val vault =
-                MemoryVault().apply {
-                    write(server.url("/").toString(), "cairn_session=fixture; Path=/; Max-Age=3600")
-                }
+                object : SessionVault {
+                        private val cookies = mutableMapOf<String, String>()
+
+                        override fun read(origin: String) = cookies[origin]
+
+                        override fun write(origin: String, cookie: String?) {
+                            if (cookie == null) cookies.remove(origin) else cookies[origin] = cookie
+                        }
+                    }
+                    .apply {
+                        write(
+                            server.url("/").toString(),
+                            "cairn_session=fixture; Path=/; Max-Age=3600",
+                        )
+                    }
             val vm =
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
