@@ -453,7 +453,7 @@ fn consolidation_rechecks_a_reserve_increase_before_admitting_the_next_block() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("disks/owned/lazy");
     let manifest = local_base(&directory, &[None, None]);
-    let disk = LazyDisk::create(&directory, &manifest, source()).unwrap();
+    let disk = LazyDisk::create(&directory, &manifest).unwrap();
     disk.write_at(0, b"first").unwrap();
     disk.write_at(BLOCK, b"second").unwrap();
     let generation = disk.seal().unwrap();
@@ -500,7 +500,7 @@ fn failed_consolidations_keep_only_one_bounded_internal_copy_on_retry() {
     let environment = root.path().join("disks/owned");
     let directory = environment.join("lazy");
     let manifest = local_base(&directory, &[None, None]);
-    let disk = LazyDisk::create(&directory, &manifest, source()).unwrap();
+    let disk = LazyDisk::create(&directory, &manifest).unwrap();
     let low = super::super::super::policy::Policy {
         reserve_mi_b: 64,
         reserve_percent: 1,
