@@ -158,6 +158,9 @@ def main():
         for selected in ['storage::', 'storage_migration::', 'native::block::', 'microvm::pool::', 'runner::']:
             run_qualification(args.repo, env, ['--workspace', '--lib', selected], selected)
         run_qualification(args.repo, env, ['-p', 'cairn-installation', '--test', 'worker'], 'worker')
+        run_qualification(args.repo, env, ['--workspace', '--example', 'native_storage_qualifier',
+                                         'stopped_inspection_keeps_its_generation_across_a_monitor_period'],
+                          'stopped local journal inspection')
         assert client.list_objects_v2(Bucket='cairn-node-test').get('KeyCount', 0) == 1
         assert client.get_object(Bucket='cairn-node-test', Key='qualification-preserved-object')['Body'].read() == b'keep legacy disk objects'
 

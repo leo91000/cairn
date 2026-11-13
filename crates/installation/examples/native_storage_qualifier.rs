@@ -32,6 +32,40 @@ use tokio_util::sync::CancellationToken;
 
 const TRUSTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 
+struct LocalBlocks;
+
+impl storage::BlockSource for LocalBlocks {
+    fn fetch(&self, _: &str) -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::other(
+            "Remote reads are forbidden by local disk qualification.",
+        ))
+    }
+}
+
+async fn inspect_stopped_journal<T: Send + 'static>(
+    directory: PathBuf,
+    inspect: impl FnOnce(Arc<LazyDisk>) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(move || {
+        // A Volume would start a consolidation monitor and retire the very
+        // generation being audited. This stopped inspection owns only a journal,
+        // with the normal cross-process lock and no possible remote reads.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let disk = loop {
+            match LazyDisk::open(&directory.join("lazy"), Arc::new(LocalBlocks)) {
+                Ok(disk) => break disk,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        inspect(Arc::new(disk))
+    })
+    .await
+    .map_err(Error::internal)?
+}
+
 async fn authority(s: &Service) -> Result<()> {
     s.store.set("native-authority", json!({
         "observedAt": now(), "accounts": { TRUSTED: { "email": "fixture@example.test", "accessId": "fixture" } }
@@ -144,19 +178,8 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             // The caller has already observed the controller's full physical
             // close. Its detached background consolidation may still own the
             // journal briefly; never bypass that exclusive file lock.
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-            let volume = loop {
-                match storage::runtime::load(&directory).await {
-                    Ok(volume) => break volume,
-                    Err(error) if tokio::time::Instant::now() < deadline => {
-                        let _ = error;
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
-                    Err(error) => return Err(error),
-                }
-            };
-            let disk = volume.disk.clone();
-            let summary = tokio::task::spawn_blocking(move || -> Result<Value> {
+            let owned = directory.clone();
+            inspect_stopped_journal(directory, move |disk| {
                 let generation = disk.seal_completed()?;
                 disk.consolidate()?;
                 let verify = disk.seal()?;
@@ -172,15 +195,16 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                     }
                 }
                 disk.consolidate()?;
-                Ok(json!({ "generation": generation, "logicalBytes": disk.size() }))
+                let mut status = disk.accounting()?;
+                status["completedGeneration"] = disk
+                    .completed()?
+                    .map_or(Value::Null, |value| value["generation"].clone());
+                Ok(json!({
+                    "generation": generation, "logicalBytes": disk.size(), "status": status,
+                    "allocatedBytes": cairn_installation::microvm::budget::allocated(&owned)?
+                }))
             })
             .await
-            .map_err(Error::internal)??;
-            let mut result = summary;
-            result["status"] = volume.inspect().await?;
-            result["allocatedBytes"] =
-                cairn_installation::microvm::budget::allocated(&directory)?.into();
-            Ok(result)
         }
         "publish" | "live-publish" => {
             if command["op"] == "live-publish" {
@@ -396,3 +420,45 @@ async fn main() -> Result<()> {
 
 #[path = "../tests/common/run_fixture.rs"]
 mod run_fixture;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_inspection_keeps_its_generation_across_a_monitor_period() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/run");
+        let disk = LazyDisk::create(
+            &directory.join("lazy"),
+            &json!({
+                "version": 1, "size": 4096, "blockSize": 4194304,
+                "blocks": [{ "offset": 0, "size": 4096, "hash": null }]
+            }),
+            Arc::new(LocalBlocks),
+        )
+        .unwrap();
+        disk.set_context(&json!({
+            "master": "http://127.0.0.1:1/", "grant": "inspection",
+            "policy": { "reserveMiB": 64, "reservePercent": 1 }
+        }))
+        .unwrap();
+        disk.write_at(0, b"kept").unwrap();
+        drop(disk);
+        let inspected = inspect_stopped_journal(directory, |disk| {
+            let generation = disk.seal_completed()?;
+            let manifest = disk.capture(generation)?;
+            // Real Docker inspections exceed the Volume monitor's five-second
+            // interval. Keep the captured generation through that same window.
+            std::thread::sleep(std::time::Duration::from_secs(7));
+            let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
+            Ok(disk.captured_block(generation, hash)?)
+        })
+        .await;
+        assert!(
+            inspected.is_ok(),
+            "inspection generation was retired concurrently: {inspected:?}"
+        );
+        assert_eq!(&inspected.unwrap()[..4], b"kept");
+    }
+}
