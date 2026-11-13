@@ -2355,9 +2355,6 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
     if path.ends_with("/administrative-pause") {
         return Json(json!({ "administrativePausedMs": 0 })).into_response();
     }
-    if path.ends_with("/snapshot") {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
     if request.method() == "DELETE" {
         return Json(json!({})).into_response();
     }
