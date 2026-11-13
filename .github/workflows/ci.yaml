@@ -1255,6 +1255,8 @@ jobs:
           # the hosted image's default plaintext swap.
           if sudo modprobe zram num_devices=1; then
             sudo swapoff -a
+            # swapoff leaves zram initialized; reset before changing its algorithm.
+            echo 1 | sudo tee /sys/block/zram0/reset > /dev/null
             echo zstd | sudo tee /sys/block/zram0/comp_algorithm > /dev/null
             echo 4G | sudo tee /sys/block/zram0/disksize > /dev/null
             sudo mkswap /dev/zram0
