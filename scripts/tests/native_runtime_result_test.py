@@ -76,6 +76,32 @@ class ControllerResultTest(unittest.TestCase):
                     self.read(content)
 
 
+class RunningLocalStorageTest(unittest.TestCase):
+    def test_waits_for_the_same_unpaused_snapshot_after_local_write_pressure(self):
+        ready = dict(paused=False, published=dict(local=True, generation=2))
+        samples = [dict(paused=True), dict(availability='unavailable'), ready]
+        api = Mock(side_effect=samples)
+        with patch.object(runtime.time, 'sleep'):
+            snapshot = runtime.running_local_storage(api, 'run')
+        self.assertIs(snapshot, ready)
+        self.assertIs(snapshot['paused'], False)
+        self.assertEqual(api.call_args_list, [call('/disks/run/storage-status')] * len(samples))
+
+    def test_ready_snapshot_is_not_replaced_by_a_later_pressure_observation(self):
+        ready = dict(paused=False)
+        api = Mock(side_effect=[ready, dict(paused=True)])
+        self.assertIs(runtime.running_local_storage(api, 'run'), ready)
+        api.assert_called_once_with('/disks/run/storage-status')
+
+    def test_persistent_pressure_fails_at_the_bounded_observation_deadline(self):
+        api = Mock(return_value=dict(paused=True))
+        with patch.object(runtime.time, 'monotonic', side_effect=[0, 1, 26]), \
+                patch.object(runtime.time, 'sleep'):
+            with self.assertRaisesRegex(AssertionError, 'Timed out waiting for native runtime evidence'):
+                runtime.running_local_storage(api, 'run')
+        api.assert_called_once_with('/disks/run/storage-status')
+
+
 class RetainedHealthTest(unittest.TestCase):
     def test_busy_missing_and_stale_credit_wait_for_the_same_fresh_positive_snapshot(self):
         run = 'stopped-run'

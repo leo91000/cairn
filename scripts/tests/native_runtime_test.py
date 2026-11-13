@@ -68,6 +68,13 @@ def require_finalization_failure(path, wait_result):
     return proof
 
 
+def running_local_storage(api, run):
+    def resumed():
+        status = api('/disks/' + run + '/storage-status')
+        return status if status.get('paused') is False else None
+    return eventually(resumed, timeout=25)
+
+
 def completed_local_disk(api, manager, run):
     def consolidated():
         status = api('/disks/' + run + '/storage-status')
@@ -894,7 +901,7 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
             else:
                 raise AssertionError('Eviction removed an active writer cache.')
             # Local work has no backup-lag state or remote dependency.
-            status = api('/disks/' + run + '/storage-status')
+            status = running_local_storage(api, run)
             assert 'backupDegraded' not in status and 'backupUrgent' not in status
             assert status['paused'] is False
             descendant = managed(run) / 'descendant'
