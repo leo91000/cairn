@@ -203,7 +203,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                 }
             }
             Panel {
-                Text("Synchronisation", style = MaterialTheme.typography.titleSmall)
+                Text("Stockage local", style = MaterialTheme.typography.titleSmall)
                 Text(sync, color = tone)
                 run.storage?.localBytes?.let { local ->
                     LinearProgressIndicator(
