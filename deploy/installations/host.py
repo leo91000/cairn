@@ -212,6 +212,17 @@ def claimed_identity(origin):
     return True
 
 
+def repair_legacy_storage_owner():
+    storage = ROOT / 'data/storage-s3.json'
+    if os.getuid() != 0 or not (storage.exists() or storage.is_symlink()):
+        return
+    if not stat.S_ISREG(storage.lstat().st_mode):
+        raise RuntimeError('The retained legacy storage configuration must be a regular file. Restore it before rerunning the installer; it is retained.')
+    # An interrupted older installer may have written root:0600 before chown.
+    # Its retained manager image still needs this existing file; never rewrite it.
+    os.chown(storage, 1000, 1000, follow_symlinks=False)
+
+
 def install(origin, code):
     origin = beacon_origin(origin)
     if code and not re.fullmatch('[a-f0-9]{64}', code):
@@ -259,6 +270,7 @@ def install(origin, code):
                     deployment['services']['manager']['depends_on']['garage'] = dependencies['garage']
                 elif isinstance(dependencies, list) and 'garage' in dependencies:
                     deployment['services']['manager']['depends_on']['garage'] = {'condition': 'service_started'}
+                repair_legacy_storage_owner()
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             raise RuntimeError('The existing Compose configuration cannot be read safely. Restore or repair it before rerunning the installer; it is retained.') from None
     atomic(compose_file, json.dumps(deployment, indent=2))

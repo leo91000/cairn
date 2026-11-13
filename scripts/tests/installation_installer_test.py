@@ -2,11 +2,13 @@
 import os
 import json
 import http.server
+import importlib.util
 import threading
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from supervisor_fixture import write_supervisors
 
@@ -14,6 +16,34 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 class Installer(unittest.TestCase):
+    def test_legacy_storage_owner_repair_preserves_private_bytes_and_refuses_links(self):
+        spec = importlib.util.spec_from_file_location('installation_host', REPO / 'deploy/installations/host.py')
+        host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(host)
+        with tempfile.TemporaryDirectory() as directory:
+            host.ROOT = Path(directory)
+            storage = host.ROOT / 'data/storage-s3.json'
+            storage.parent.mkdir()
+            storage.write_bytes(b'opaque legacy credentials')
+            storage.chmod(0o600)
+            with patch.object(host.os, 'getuid', return_value=0), patch.object(host.os, 'chown') as chown:
+                host.repair_legacy_storage_owner()
+                chown.assert_called_once_with(storage, 1000, 1000, follow_symlinks=False)
+                self.assertEqual(storage.read_bytes(), b'opaque legacy credentials')
+                self.assertEqual(storage.stat().st_mode & 0o777, 0o600)
+                storage.unlink()
+                chown.reset_mock()
+                host.repair_legacy_storage_owner()
+                self.assertFalse(storage.exists())
+                chown.assert_not_called()
+                target = host.ROOT / 'other-private-file'
+                target.write_bytes(b'other private data')
+                storage.symlink_to(target)
+                with self.assertRaisesRegex(RuntimeError, 'regular file'):
+                    host.repair_legacy_storage_owner()
+                chown.assert_not_called()
+                self.assertEqual(target.read_bytes(), b'other private data')
+
     def test_truncated_download_never_starts_the_installer(self):
         script = (REPO / 'deploy/installations/install.sh').read_text()
         partial = script[:script.index('python3 -m py_compile')]

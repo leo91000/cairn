@@ -230,8 +230,26 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
             assert not (ROOT / 'garage.env').exists()
             assert not (ROOT / 'garage.toml').exists()
             assert not (ROOT / 'garage').exists()
+            # A pre-local-disk installation may have stopped between its private
+            # config write and chown. Its saved image/service must remain usable.
+            legacy_storage = ROOT / 'data/storage-s3.json'
+            legacy_storage.write_bytes(b'opaque legacy storage credentials')
+            legacy_storage.chmod(0o600)
+            os.chown(legacy_storage, 0, 0)
+            config['services']['garage'] = {'image': 'retained-legacy-storage-image'}
+            (ROOT / 'compose.json').write_text(json.dumps(config))
             result = run_installer()
             assert result.returncode == 0, result.stderr
+            assert legacy_storage.stat().st_uid == 1000
+            assert legacy_storage.stat().st_mode & 0o777 == 0o600
+            assert legacy_storage.read_bytes() == b'opaque legacy storage credentials'
+            retained = json.loads((ROOT / 'compose.json').read_text())
+            assert retained['services']['garage'] == config['services']['garage']
+            # Leave the fresh-install fixture for the following real parser and
+            # manager/Beacon phases; only the synthetic legacy input is removed.
+            del config['services']['garage']
+            (ROOT / 'compose.json').write_text(json.dumps(config))
+            legacy_storage.unlink()
             print('Container: KVM/TUN diagnostics, manager and local runner configuration passed')
         finally:
             server.shutdown()
