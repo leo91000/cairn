@@ -345,10 +345,8 @@ async fn the_hourly_cap_suspends_the_rule_and_tells_its_creator() {
         .iter()
         .map(|t| t["status"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert!(
-        statuses.contains(&"failed") && statuses.contains(&"completed"),
-        "{listed}"
-    );
+    assert!(statuses == ["completed"], "{listed}");
+    assert_eq!(listed["withoutEffect"], 1);
     let alerts = f.s.store.keys("push-outbox:").await.unwrap();
     assert!(
         alerts
@@ -1339,7 +1337,9 @@ async fn conversation_actions_and_predicates_fail_explicitly_until_ticket_g() {
         }]),
     ] {
         let f = granted().await;
-        let rule = rule(&f, OWNER, nodes, 60).await;
+        let mut nodes = nodes.as_array().unwrap().clone();
+        nodes.insert(0, remember_seen());
+        let rule = rule(&f, OWNER, json!(nodes), 60).await;
         emit(
             &f,
             "conversation-stub",
@@ -1729,13 +1729,12 @@ async fn a_membership_outage_keeps_admitted_events_waiting_without_holding_the_s
         .await
         .unwrap();
     engine::tick(&restarted).await.unwrap();
+    let stopped = history(&f, OWNER, &rule).await;
     assert!(
-        history(&f, OWNER, &rule).await["triggerings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|t| t["status"] == "stopped")
+        stopped["triggerings"].as_array().unwrap().is_empty(),
+        "{stopped}"
     );
+    assert_eq!(stopped["withoutEffect"], 30);
     assert_eq!(f.posts.load(Ordering::SeqCst), 0);
 }
 
@@ -1864,14 +1863,11 @@ async fn recorded_data_and_combined_inputs_have_byte_limits() {
     .await;
     engine::tick(&f.s).await.unwrap();
     let listed = history(&f, OWNER, &rule).await;
-    let result = detail(&f, OWNER, &listed["triggerings"][0]).await;
-    assert_eq!(result["status"], "failed", "{result}");
     assert!(
-        result["error"]
-            .as_str()
-            .unwrap()
-            .contains("action input exceeds")
+        listed["triggerings"].as_array().unwrap().is_empty(),
+        "{listed}"
     );
+    assert_eq!(listed["withoutEffect"], 1);
     assert_eq!(f.posts.load(Ordering::SeqCst), 0);
 }
 
@@ -2017,13 +2013,8 @@ async fn one_rules_waiting_limit_does_not_hold_the_instances_shared_queue() {
             .await
             .unwrap();
     assert_eq!(waiting, 20);
-    assert!(
-        slow_history["triggerings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t["status"] == "failed")
-    );
+    assert_eq!(slow_history["triggerings"].as_array().unwrap().len(), 20);
+    assert_eq!(slow_history["withoutEffect"], 50);
 }
 
 #[tokio::test]
@@ -2066,4 +2057,70 @@ async fn a_full_rule_refuses_only_its_delivery_without_calling_the_resolver() {
             .await
             .unwrap();
     assert_eq!(queued, 0);
+}
+
+#[tokio::test]
+async fn exhausted_budgets_stop_uncounted_work_even_after_the_hour_rolls_over() {
+    let f = granted().await;
+    let rule = rule(&f, OWNER, steps(&json!([post("post", &f, &json!({}))])), 1).await;
+    for event in ["counted", "exhausted"] {
+        emit(
+            &f,
+            event,
+            json!({ "channel": "support", "author": "alice" }),
+        )
+        .await;
+        engine::tick(&f.s).await.unwrap();
+    }
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+    let id = rule.clone();
+    f.s.store.transaction(move |db| {
+        // A previously admitted triggering resumes after the cap's time window,
+        // while the explicit suspension still awaits a human budget lift.
+        db.0.execute(
+            "UPDATE hook_rule_receipts SET counted_at=? WHERE counted_at IS NOT NULL",
+            [cairn_installation::config::now() - 7_200_000],
+        )?;
+        db.0.execute(
+            "INSERT INTO hook_rule_triggerings(id,rule_id,version,event_id,event,status,cursor,in_flight,actions,tool_calls,verify,next_at,created_at,updated_at) \
+             SELECT 'old-uncounted',rule_id,version,'old-uncounted',event,'waiting','{\"frames\":[{\"path\":[],\"next\":0}],\"count\":0}',0,0,0,0,0,created_at,updated_at \
+             FROM hook_rule_triggerings WHERE rule_id=? LIMIT 1", [id],
+        )?;
+        Ok(())
+    }).await.unwrap();
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+    let listed = history(&f, OWNER, &rule).await;
+    assert_eq!(listed["triggerings"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["withoutEffect"], 2);
+}
+
+#[tokio::test]
+async fn failed_conditions_without_actions_are_counted_without_displacing_history() {
+    let f = granted().await;
+    let rule = rule(
+        &f,
+        OWNER,
+        json!([{
+            "type": "if", "id": "condition",
+            "condition": { "type": "formula", "expression": "payload.absent.deep == true" },
+            "then": [remember_seen()], "otherwise": [],
+        }]),
+        60,
+    )
+    .await;
+    emit(
+        &f,
+        "bad-condition",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    assert!(
+        listed["triggerings"].as_array().unwrap().is_empty(),
+        "{listed}"
+    );
+    assert_eq!(listed["withoutEffect"], 1);
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
 }

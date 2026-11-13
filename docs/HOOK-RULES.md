@@ -96,7 +96,9 @@ disabled, paused, rights-lost or ended rule stops its triggerings, while an exha
 budget lets those already counted finish. A rule blocked while some of its triggerings
 wait stops them. A member's triggering acts only once their
 membership was verified within the last minute, and again after each wait; while the
-Beacon cannot confirm it, the triggering waits, and fails after seven days.
+Beacon cannot confirm it, the triggering waits, and fails after seven days. Member
+triggerings use at most four of the eight executors, leaving capacity for owner
+rules during a Beacon outage.
 
 Variables:
 
@@ -144,7 +146,8 @@ Actions:
 A triggering counts against the hourly cap when it runs its first action. Beyond the
 cap, that triggering fails, the rule becomes `budgetExhausted` and its creator receives
 a notification; the triggerings already counted finish. A triggering that ends without
-any action is not kept: the history only counts them by hour. Each triggering runs at
+any action is not kept, including failures and stops before the first action: the
+history only counts them by hour. Each triggering runs at
 most 500 blocks and iterations, waits excluded, and 50 tool calls.
 
 ### History

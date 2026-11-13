@@ -272,6 +272,16 @@ impl Db<'_> {
         error: Option<&str>,
     ) -> Result<()> {
         let terminal = matches!(status, "completed" | "failed" | "stopped");
+        if terminal && t.actions == 0 {
+            let removed = self
+                .0
+                .execute("DELETE FROM hook_rule_triggerings WHERE id=?", [&t.id])?;
+            if removed > 0 {
+                self.count_quiet(&t.rule_id)?;
+                self.prune_hook_triggerings(&t.rule_id)?;
+            }
+            return Ok(());
+        }
         let finished = terminal.then(now);
         let cursor = if terminal {
             Cursor::default()
@@ -488,6 +498,18 @@ pub(crate) fn stop_rule(db: &Db<'_>, rule: &str, reason: &str) -> Result<()> {
 
 fn stop_triggerings(db: &Db<'_>, rule: &str, version: Option<u32>, reason: &str) -> Result<()> {
     let at = now();
+    let quiet = db.0.execute(
+        "DELETE FROM hook_rule_triggerings WHERE rule_id=?1 AND (?2 IS NULL OR version=?2) \
+         AND status IN ('running','waiting','retrying') AND actions=0",
+        params![rule, version],
+    )?;
+    if quiet > 0 {
+        db.0.execute(
+            "INSERT INTO hook_rule_quiet_hours(rule_id,hour,count) VALUES(?1,?2,?3) \
+             ON CONFLICT(rule_id,hour) DO UPDATE SET count=count+excluded.count",
+            params![rule, at / 3_600_000, quiet as i64],
+        )?;
+    }
     db.0.execute(
         "UPDATE hook_rule_steps SET status='failed',error=CASE WHEN status='running' \
          THEN ?2||' The tool may already have taken effect.' ELSE ?2 END,finished_at=?3 \
@@ -813,13 +835,29 @@ async fn claim(s: &Service, capacity: usize) -> Result<Vec<String>> {
                  WHERE status='running' AND in_flight=1 AND lease_until<?1",
             )?
             .execute(params![at, interrupted, serde_json::to_string(&Cursor::default())?])?;
-            let due = db.0.prepare_cached(
-                "SELECT id FROM hook_rule_triggerings WHERE (status='running' AND \
-                 (lease_until IS NULL OR lease_until<?1)) OR (status IN ('waiting','retrying') \
-                 AND next_at<=?1) ORDER BY created_at LIMIT ?2",
-            )?
-                .query_map(params![at, capacity as i64], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // Member checks may wait on Beacon. Leave half of the executors
+            // available to owner rules, even if older member work remains due.
+            let members_running: i64 = db.0.query_row(
+                "SELECT count(*) FROM hook_rule_triggerings t JOIN hook_rules r ON r.id=t.rule_id \
+                 WHERE r.creator_owner=0 AND t.status='running' AND t.lease_until>=?1",
+                [at], |row| row.get(0),
+            )?;
+            let member_capacity = (PARALLEL / 2).saturating_sub(members_running as usize);
+            let mut due = Vec::new();
+            for (owner, limit) in [(false, member_capacity), (true, capacity)] {
+                let limit = limit.min(capacity.saturating_sub(due.len()));
+                if limit == 0 {
+                    continue;
+                }
+                let mut statement = db.0.prepare_cached(
+                    "SELECT t.id FROM hook_rule_triggerings t JOIN hook_rules r ON r.id=t.rule_id \
+                     WHERE r.creator_owner=?3 AND ((t.status='running' AND \
+                     (t.lease_until IS NULL OR t.lease_until<?1)) OR (t.status IN ('waiting','retrying') \
+                     AND t.next_at<=?1)) ORDER BY t.created_at,t.id LIMIT ?2",
+                )?;
+                due.extend(statement.query_map(params![at, limit as i64, owner], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?);
+            }
             for id in &due {
                 db.0.prepare_cached("UPDATE hook_rule_triggerings SET status='running',next_at=NULL,lease_until=?2 WHERE id=?1")?
                     .execute(params![id, at + LEASE])?;
@@ -1074,13 +1112,7 @@ async fn finish(
             if current.status != "running" {
                 return Ok(());
             }
-            if status == "completed" && t.actions == 0 {
-                db.0.execute("DELETE FROM hook_rule_triggerings WHERE id=?", [&t.id])?;
-                db.count_quiet(&t.rule_id)?;
-                db.prune_hook_triggerings(&t.rule_id)?;
-            } else {
-                db.save_hook_triggering(&t, status, None, error.as_deref())?;
-            }
+            db.save_hook_triggering(&t, status, None, error.as_deref())?;
             Ok(())
         })
         .await
@@ -1116,6 +1148,10 @@ fn exhaust(db: &Db<'_>, row: &RuleRow, reason: &str) -> Result<()> {
 fn count(db: &Db<'_>, t: &mut Triggering, row: &RuleRow, version: &VersionRow) -> Result<bool> {
     if t.counted_at.is_some() {
         return Ok(true);
+    }
+    let current = required(db.hook_rule(&row.id)?, "Rule not found")?;
+    if current.budget_exhausted_at.is_some() {
+        return Ok(false);
     }
     let cap = i64::from(version.definition.limits.triggerings_per_hour);
     let used: i64 = db
@@ -2145,6 +2181,45 @@ pub(crate) fn get(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn member_work_leaves_executor_capacity_for_owner_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+        service.store.transaction(|db| {
+            for (rule, owner) in [("member", false), ("owner", true)] {
+                db.0.execute(
+                    "INSERT INTO hook_rules(id,creator_account_id,creator_owner,revision,version,created_at,updated_at) \
+                     VALUES(?1,?1,?2,'revision',1,1,1)", params![rule, owner],
+                )?;
+            }
+            for index in 0..50 {
+                db.0.execute(
+                    "INSERT INTO hook_rule_triggerings(id,rule_id,version,event_id,event,status,cursor,in_flight,actions,tool_calls,verify,created_at,updated_at) \
+                     VALUES(?1,'member',1,?1,'{}','running','{}',0,0,0,1,1,1)",
+                    [format!("member-{index}")],
+                )?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let first = claim(&service, PARALLEL).await.unwrap();
+        assert_eq!(first.len(), PARALLEL / 2);
+        service.store.transaction(|db| {
+            db.0.execute(
+                "INSERT INTO hook_rule_triggerings(id,rule_id,version,event_id,event,status,cursor,in_flight,actions,tool_calls,verify,created_at,updated_at) \
+                 VALUES('owner-triggering','owner',1,'owner-event','{}','running','{}',0,0,0,0,2,2)", [],
+            )?;
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(
+            claim(&service, PARALLEL - first.len()).await.unwrap(),
+            ["owner-triggering"]
+        );
+        // More old member work cannot take the reserved slots on a later pass.
+        assert!(claim(&service, PARALLEL).await.unwrap().is_empty());
+    }
 
     #[test]
     fn only_explicit_safe_replies_or_known_pre_call_refusals_are_retryable() {
