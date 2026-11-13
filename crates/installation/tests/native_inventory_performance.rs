@@ -1,4 +1,4 @@
-//! Synthetic retained-native-cache qualification; no real workspaces are opened.
+//! Synthetic retained local environment qualification; no real workspaces are opened.
 mod common;
 
 use cairn_installation::{
@@ -15,7 +15,7 @@ use std::time::Instant;
 
 const NODE: &str = "00000000-0000-4000-8000-000000000004";
 
-async fn seed_retained_caches(service: &Service, kib: usize, count: u32) {
+async fn seed_retained_environments(service: &Service, kib: usize, count: u32) {
     service
         .store
         .transaction(move |db| {
@@ -26,13 +26,10 @@ async fn seed_retained_caches(service: &Service, kib: usize, count: u32) {
             for index in 0..count {
                 let run = format!("run-{index}");
                 let attempt = format!("attempt-{index}");
-                let point = format!("point-{index}");
-                let snapshot = format!("snapshot-{index}");
-                db.add_run_fixture(
+                                                db.add_run_fixture(
                     &json!({
                         "id": run, "taskId": run, "status": "succeeded", "finishedAt": finished,
-                        "nodeId": NODE, "storage": { "mode": "on-demand", "dirtyBytes": 0 },
-                        "backup": { "id": point, "snapshotId": snapshot, "status": "ready" },
+                        "nodeId": NODE, "storage": { "mode": "native", "dirtyBytes": 0 },
                         "snapshot": { "agent": { "instructions": instructions } },
                     }),
                     None,
@@ -55,13 +52,6 @@ async fn seed_retained_caches(service: &Service, kib: usize, count: u32) {
                         "materialized": true, "diskMiB": 1024, "activeDiskMiB": 1024,
                     }),
                 )?;
-                db.put(
-                    "node-backups",
-                    &json!({
-                        "id": point, "runId": run, "nodeId": NODE, "snapshotId": snapshot,
-                        "destination": "s3", "diskGeneration": 1,
-                    }),
-                )?;
                 retained.insert(run, json!(1_048_576));
             }
             db.put_node_fixture(
@@ -81,46 +71,77 @@ async fn seed_retained_caches(service: &Service, kib: usize, count: u32) {
 }
 
 #[tokio::test]
-async fn retained_environment_accounting_never_marks_backing_reclaimable() {
+async fn retained_local_accounting_preserves_stale_ownership_and_queued_resumes() {
     let root = tempfile::tempdir().unwrap();
     common::managed_codex_home(&root.path().join("home"));
     let service = Service::new(common::config(root.path())).await.unwrap();
-    seed_retained_caches(&service, 0, 9).await;
+    seed_retained_environments(&service, 0, 9).await;
     let inventory = nodes::typed_inventory(&service).await.unwrap();
     assert_eq!(
-        serde_json::to_value(&inventory[0]).unwrap()["diskAccounting"]["reclaimableBytes"],
+        serde_json::to_value(&inventory[0]).unwrap()["diskAccounting"]["unconsolidatedBytes"],
         0
     );
-    service.store.transaction(|db| {
-        common::run_fixture::change_run_fixture(db, "run-0", &json!({ "status": "running", "finishedAt": null }))?;
-        common::run_fixture::change_run_fixture(db, "run-1", &json!({ "recoveryPending": true }))?;
-        db.update_run_placement("run-2", PlacementChanges {
-            move_request: Some(Some(MoveRequest { backend: None, source_read_ready: None,
-                reservation: "destination-attempt".into(), node_id: nodes::LOCAL_NODE_ID.into(),
-                resources: serde_json::from_value(json!({ "cpu": 1, "memoryMiB": 128, "diskMiB": 128 }))?,
-                requested_at: None, automatic: false, idle: None, idle_status: None, required_tags: None, backup_id: None,
-            })),
-            ..Default::default()
-        })?;
-        db.save_checkpoint_boundary("run-3", &json!({ "nodeId": nodes::LOCAL_NODE_ID, "runnerId": "attempt-3" }))?;
-        db.put_attempt_fixture(&json!({
-            "id": "attempt-4", "runId": "run-4", "nodeId": NODE, "released": false,
-        }))?;
-        db.update_run_boundary("run-5", &json!({ "storage": { "mode": "on-demand", "dirtyBytes": 1 } }))?;
-        db.update_run_boundary("run-6", &json!({
-            "backup": { "id": "point-6", "snapshotId": "snapshot-6", "status": "ready", "requestedRevision": 1 },
-        }))?;
-        common::run_fixture::change_run_fixture(db, "run-8", &json!({
-            "status": "queued", "finishedAt": null, "recoveryPending": true,
-        }))?;
-        Ok(())
-    }).await.unwrap();
+    service
+        .store
+        .transaction(|db| {
+            common::run_fixture::change_run_fixture(
+                db,
+                "run-0",
+                &json!({ "status": "running", "finishedAt": null }),
+            )?;
+            common::run_fixture::change_run_fixture(
+                db,
+                "run-1",
+                &json!({ "recoveryPending": true }),
+            )?;
+            db.update_run_placement(
+                "run-2",
+                PlacementChanges {
+                    move_request: Some(Some(MoveRequest {
+                        backend: None,
+                        source_read_ready: None,
+                        reservation: "destination-attempt".into(),
+                        node_id: nodes::LOCAL_NODE_ID.into(),
+                        resources: serde_json::from_value(
+                            json!({ "cpu": 1, "memoryMiB": 128, "diskMiB": 128 }),
+                        )?,
+                        requested_at: None,
+                        automatic: false,
+                        idle: None,
+                        idle_status: None,
+                        required_tags: None,
+                        backup_id: None,
+                    })),
+                    ..Default::default()
+                },
+            )?;
+            db.save_checkpoint_boundary(
+                "run-3",
+                &json!({ "nodeId": nodes::LOCAL_NODE_ID, "runnerId": "attempt-3" }),
+            )?;
+            db.put_attempt_fixture(&json!({
+                "id": "attempt-4", "runId": "run-4", "nodeId": NODE, "released": false,
+            }))?;
+            db.update_run_boundary(
+                "run-5",
+                &json!({ "storage": { "mode": "native", "dirtyBytes": 1 } }),
+            )?;
+            common::run_fixture::change_run_fixture(
+                db,
+                "run-8",
+                &json!({
+                    "status": "queued", "finishedAt": null, "recoveryPending": true,
+                }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let inventory = nodes::typed_inventory(&service).await.unwrap();
     let node = serde_json::to_value(&inventory[0]).unwrap();
-    // Retained environments remain owned through queued resumes and state
-    // changes. Their backing is never eligible for cache reclamation.
-    assert_eq!(node["diskAccounting"]["reclaimableBytes"], 0);
-    assert_eq!(node["diskAccounting"]["unsynchronizedBytes"], 1);
+    // The inventory reports the local journal and stale ownership without
+    // treating retained environments as remotely recoverable caches.
+    assert_eq!(node["diskAccounting"]["unconsolidatedBytes"], 1);
     assert_eq!(node["staleDisks"]["count"], 1);
     service.shutdown.cancel();
 }
@@ -132,15 +153,14 @@ async fn inventory_with_clean_retained_native_caches() {
         let root = tempfile::tempdir().unwrap();
         common::managed_codex_home(&root.path().join("home"));
         let service = Service::new(common::config(root.path())).await.unwrap();
-        seed_retained_caches(&service, kib, 100).await;
+        seed_retained_environments(&service, kib, 100).await;
         let mut elapsed = Vec::new();
         for _ in 0..6 {
             let started = Instant::now();
             let inventory = nodes::typed_inventory(&service).await.unwrap();
             elapsed.push(started.elapsed().as_micros());
             let node = serde_json::to_value(&inventory[0]).unwrap();
-            assert_eq!(node["diskAccounting"]["unsynchronizedBytes"], 0);
-            assert_eq!(node["diskAccounting"]["reclaimableBytes"], 0);
+            assert_eq!(node["diskAccounting"]["unconsolidatedBytes"], 0);
             assert_eq!(node["staleDisks"]["count"], 0);
         }
         println!(

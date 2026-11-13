@@ -20,7 +20,6 @@ impl Controller {
         value["backend"] = "native".into();
         value["nodeProtocol"] = 2.into();
         value["diskRetirementProtocol"] = crate::storage::retirement::PROTOCOL.into();
-        value["directStorageProtocol"] = 1.into();
         value["runtimeId"] = crate::nodes::component_runtime().into();
         value["dataRoot"] = json!(self.data);
         if let Ok(active) = self.active.try_lock() {

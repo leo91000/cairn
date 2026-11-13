@@ -28,12 +28,6 @@ fn block_digest(bytes: &[u8]) -> String {
     super::digest::block(bytes)
 }
 
-/// Immutable plaintext blocks of a legacy remote base. A disk never reads them:
-/// every base block is a local file, and a missing one is an integrity error.
-pub trait BlockSource: Send + Sync {
-    fn fetch(&self, hash: &str) -> io::Result<Vec<u8>>;
-}
-
 pub struct LazyDisk {
     directory: PathBuf,
     size: AtomicU64,
@@ -45,7 +39,6 @@ pub struct LazyDisk {
     commit_failure: std::sync::atomic::AtomicBool,
     accounting: Mutex<Value>,
     base: Mutex<Arc<Value>>,
-    source: Arc<dyn BlockSource>,
     consolidating: Mutex<()>,
     scratch: scratch::Scratch,
     background: tokio::sync::Mutex<()>,
@@ -191,37 +184,28 @@ impl LazyDisk {
         Ok(())
     }
 
-    pub fn create(
-        directory: &Path,
-        manifest: &Value,
-        source: Arc<dyn BlockSource>,
-    ) -> io::Result<Self> {
-        Self::create_at_generation(directory, manifest, source, 1)
+    pub fn create(directory: &Path, manifest: &Value) -> io::Result<Self> {
+        Self::create_at_generation(directory, manifest, 1)
     }
 
-    /// A rebuilt disk keeps its grant and advances the same publication sequence.
+    /// A rebuilt disk keeps its monotone local journal generation.
     pub(crate) fn create_at_generation(
         directory: &Path,
         manifest: &Value,
-        source: Arc<dyn BlockSource>,
         generation: i64,
     ) -> io::Result<Self> {
         validate(manifest)?;
         if generation < 1 || generation == i64::MAX {
             return Err(failure("Invalid initial journal generation"));
         }
-        Self::connect(directory, Some((manifest, generation)), source)
+        Self::connect(directory, Some((manifest, generation)))
     }
 
-    pub fn open(directory: &Path, source: Arc<dyn BlockSource>) -> io::Result<Self> {
-        Self::connect(directory, None, source)
+    pub fn open(directory: &Path) -> io::Result<Self> {
+        Self::connect(directory, None)
     }
 
-    fn connect(
-        directory: &Path,
-        initial: Option<(&Value, i64)>,
-        source: Arc<dyn BlockSource>,
-    ) -> io::Result<Self> {
+    fn connect(directory: &Path, initial: Option<(&Value, i64)>) -> io::Result<Self> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let timing = crate::performance::Operation::new(
             "journal_open",
@@ -295,7 +279,6 @@ impl LazyDisk {
             commit_failure: std::sync::atomic::AtomicBool::new(false),
             accounting: Mutex::new(accounting),
             base: Mutex::new(Arc::new(manifest)),
-            source,
             consolidating: Mutex::new(()),
             scratch: scratch::Scratch::default(),
             background: tokio::sync::Mutex::new(()),
@@ -394,12 +377,9 @@ impl LazyDisk {
         }
         // Concurrent disk readers and snapshot reconstruction may need the same
         // cold block. Hold only its lock across I/O; unrelated blocks stay parallel.
-        let fetching = self.blocks.fetching(hash, &self.source)?;
-        let waiting = crate::performance::publication::start(
-            crate::performance::publication::Stage::NodeCacheWait,
-        );
-        let _fetching = super::read_scope::lock(&fetching)?;
-        waiting.finish(0);
+        let fetching = self.blocks.fetching(hash, &self.directory)?;
+        let _fetching = fetching.lock().map_err(failure)?;
+
         if let Some(bytes) = self.cached_block(hash, foreground)? {
             if bytes.len() != length {
                 return Err(failure("Invalid cached block extent"));
@@ -552,15 +532,12 @@ impl LazyDisk {
         let mut missing = vec![(0, bytes.len())];
         let manifest = self.base.lock().map_err(failure)?.clone();
         {
-            let lookup = crate::performance::publication::start(
-                crate::performance::publication::Stage::NodeJournalLookup,
-            );
             let records = self.journal.lock().map_err(failure)?.overlapping(
                 generation,
                 offset,
                 offset + bytes.len() as u64,
             );
-            lookup.finish(0);
+
             for record in records {
                 self.metrics
                     .journal_rows
@@ -594,7 +571,7 @@ impl LazyDisk {
                 }
             }
         }
-        // Never hold the journal lock across remote I/O. This read observes a
+        // Never hold the journal lock across base-block I/O. This read observes a
         // consistent journal prefix; later writes are independent of cache arrival.
         if missing.is_empty() {
             return Ok(());

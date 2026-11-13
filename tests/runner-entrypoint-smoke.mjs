@@ -57,7 +57,7 @@ export async function entrypointSmoke({
       const plan = {
         id,
         runId,
-        storage,
+        storage: { ...storage, owner: runId },
         expires: Date.now() + 180000,
         sandbox: 'yolo',
         cwd: workspace,

@@ -16,6 +16,8 @@ Le protocole traite les PUT ambigus, les autorisations encore valables, la révo
 
 Un signalement de corruption conserve durablement l'identité du bloc sur la node jusqu'à sa réconciliation explicite. L'acquittement du journal est sérialisé avec cette file et refuse sa collecte tant qu'un signalement attend. Le manager conserve la provenance des lectures autorisées : un ancien détenteur peut uniquement mettre en quarantaine l'incarnation exacte déjà autorisée, y compris après révocation ou suppression du point. Cette opération monotone ne renouvelle aucun accès, ne fournit aucune clé et ne touche pas une incarnation de remplacement. Une partition réseau retarde nécessairement cette connaissance pour les autres nodes.
 
-Voir l'[étude de faisabilité et les sources](../R2-DIRECT-NODE-TRANSFERS-2026-10-28.md).
+L’étude de faisabilité et les sources accompagnaient l’ancien runtime S3 ;
+elle a été retirée avec lui. Voir la décision qui remplace ce parcours :
+[ADR-0083](0083-local-conversation-disks-without-s3.md).
 
 La confiance dans les superviseurs permet aussi les drivers S3 qui ignorent la création conditionnelle, comme le Garage embarqué vérifié lors de l'implémentation. Le superviseur vérifie systématiquement le contenu, son hash, sa taille et l'incarnation autorisée avant tout PUT. Une reprise peut remplacer la représentation chiffrée du même contenu ; elle ne modifie pas l'identité logique de l'objet. Le protocole demande une création conditionnelle signée et utilise sa protection supplémentaire lorsqu'elle est disponible, sans en faire une preuve de contenu. Un lecteur n'obtient aucun droit d'écriture. Ce modèle ne convient pas à des superviseurs non fiables.

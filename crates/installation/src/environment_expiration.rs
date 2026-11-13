@@ -123,7 +123,7 @@ struct Retirement {
     /// Manager namespaces and recovery/account references are logically detached.
     local: bool,
     #[serde(default)]
-    publications: crate::nodes::publication::RetiredPublications,
+    publications: crate::nodes::retired_publications::RetiredPublications,
     /// Physical erasure may keep retrying after the new environment is admitted.
     #[serde(default)]
     cleaned: bool,
@@ -980,17 +980,15 @@ impl Service {
         }
         if !retirement.local {
             let run = retirement.run_id.clone();
-            let _publication = self.node_backup_operation.lock(&run).await;
-            let _readers = self.node_backup_operation.drain(&run).await;
             crate::conversation_deletion::retired::detach(self, &run, &retirement.id).await?;
             let mut detached = retirement.clone();
             *retirement = self
                 .store
                 .transaction(move |db| {
                     detached.publications =
-                        crate::nodes::publication::detach_environment_in(db, &run)?;
+                        crate::nodes::retired_publications::detach_environment_in(db, &run)?;
                     db.remove_account_lease(&run)?;
-                    db.update_run_boundary(&run, &json!({ "backup":null, "storage":null }))?;
+                    db.update_run_boundary(&run, &json!({ "storage":null }))?;
                     detached.local = true;
                     db.put(RETIREMENTS, &serde_json::to_value(&detached)?)?;
                     Ok(detached)

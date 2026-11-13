@@ -42,7 +42,6 @@ const SILENCE: Duration = Duration::from_secs(60);
 /// unreachable through Beacon.
 fn node_route(path: &str) -> bool {
     (path.starts_with("/internal/nodes/")
-        || path.starts_with("/internal/node-restore/")
         || path.starts_with("/internal/node-workspace/"))
         && !path
             .split('/')
@@ -200,12 +199,12 @@ mod tests {
         for path in [
             "/internal/nodes/enroll",
             "/internal/nodes/heartbeat",
-            "/internal/node-restore/abc",
             "/internal/node-workspace/abc/blocks",
         ] {
             assert!(node_route(path), "{path}");
         }
         for path in [
+            "/internal/node-restore/abc",
             "/api/chats",
             "/internal/execution/health",
             "/internal/nodes",

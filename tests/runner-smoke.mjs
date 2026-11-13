@@ -274,7 +274,7 @@ console.log('probe.done');
       const plan = {
         id,
         runId,
-        storage,
+        storage: { ...storage, owner: runId },
         resources: { cpu: 2, memoryMiB: 4096, diskMiB: mode === 'first' ? 1024 : 65536 },
         expires: Date.now() + 300000,
         sandbox: 'yolo',
@@ -439,7 +439,7 @@ console.log('probe.done');
       const plan = {
         id,
         runId,
-        storage,
+        storage: { ...storage, owner: runId },
         resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 },
         expires: Date.now() + 60000,
         sandbox,
@@ -532,7 +532,7 @@ console.log('probe.done');
       const plan = {
         id,
         runId,
-        storage,
+        storage: { ...storage, owner: runId },
         resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 },
         expires: Date.now() + 60000,
         sandbox: 'yolo',

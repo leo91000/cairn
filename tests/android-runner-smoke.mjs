@@ -84,20 +84,15 @@ async function main() {
     docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', ...ublkDeviceArguments(), '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '7g', '--cpus', '3', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     url = `http://${docker('port', name, '4311/tcp')}`
     await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
-    // SDK installation uses the same local journal without remote publication.
-    const { storage } = await prepareLocalStorage({
-      root,
-      docker,
-      name,
-      api,
-    })
+    // SDK installation and device restarts keep the same durable local journal.
+    const { storage } = await prepareLocalStorage({ api })
     for (const mode of ['first', 'resume']) {
       const id = randomUUID()
       const ackId = randomUUID()
       const plan = {
         id,
         runId,
-        storage,
+        storage: { ...storage, owner: runId },
         expires: Date.now() + 1800000,
         sandbox: 'yolo',
         cwd: `${runRoot}/workspace`,

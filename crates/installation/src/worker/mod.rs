@@ -407,7 +407,6 @@ mod tests {
             .await
             .unwrap();
         service.worker.start(service.clone()).await.unwrap();
-        service.node_publication_notify.notify_one();
         tokio::time::timeout(Duration::from_secs(10), async {
             while observed.load(Ordering::SeqCst) == 0 {
                 tokio::time::sleep(Duration::from_millis(20)).await;

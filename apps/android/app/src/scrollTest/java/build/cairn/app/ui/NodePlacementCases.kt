@@ -1193,7 +1193,6 @@ abstract class NodePlacementCases {
                         nodeId = "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
                         executionBackend = "native",
                         storage = RunStorage(mode = "native", dirtyBytes = 0),
-                        backup = NodeBackup(capturedAt = System.currentTimeMillis() - 120_000),
                         taskId = "",
                     )
                 )
@@ -1208,27 +1207,18 @@ abstract class NodePlacementCases {
                 }
             }
             compose.waitUntil(20000) {
-                compose
-                    .onAllNodesWithText("Travail local · sauvegardé après l’arrêt")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+                compose.onAllNodesWithText("Disque local").fetchSemanticsNodes().isNotEmpty()
             }
             // Native ublk disks synchronize while running, like VM disks.
             compose.runOnIdle {
                 run.value = run.value.copy(storage = RunStorage(mode = "on-demand", dirtyBytes = 0))
             }
-            compose.onNodeWithText("Travail local · sauvegardé après l’arrêt").assertDoesNotExist()
-            compose.onNodeWithText("Synchronisé il y a 2 min").assertExists()
+            compose.onNodeWithText("Disque local").assertExists()
             compose.runOnIdle {
                 run.value =
-                    run.value.copy(
-                        storage =
-                            RunStorage(mode = "on-demand", dirtyBytes = 4096, backupDegraded = true)
-                    )
+                    run.value.copy(storage = RunStorage(mode = "on-demand", dirtyBytes = 4096))
             }
-            compose
-                .onNodeWithText("Synchronisation en retard · travail conservé sur cette node")
-                .assertExists()
+            compose.onNodeWithText("4 Kio à consolider").assertExists()
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText("Node : Bureau GPU").fetchSemanticsNodes().isNotEmpty()
             }
@@ -1281,7 +1271,6 @@ abstract class NodePlacementCases {
 
     @Test
     fun ownerCanPreferOrPinAnAuthorizedNodeAndSeeSynchronizationAge() {
-        val publishedDisk = mutableStateOf(false)
         val expired = mutableStateOf(false)
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
@@ -1388,14 +1377,6 @@ abstract class NodePlacementCases {
                                             dirtyBytes = 183890000,
                                             dirtySince = System.currentTimeMillis() - 60000,
                                         ),
-                                    backup =
-                                        NodeBackup(
-                                            id =
-                                                if (publishedDisk.value) "retained-converted-disk"
-                                                else null,
-                                            capturedAt = System.currentTimeMillis() - 120000,
-                                            status = "ready",
-                                        ),
                                     taskId = "",
                                 ),
                             )
@@ -1411,7 +1392,7 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Node : Mon serveur").performClick()
             compose.onNodeWithText("Fichiers chargés à la demande").assertExists()
             compose
-                .onNodeWithText("182,5 Mio sur cette node · 175,4 Mio non synchronisés")
+                .onNodeWithText("182,5 Mio sur cette node · 175,4 Mio à consolider")
                 .assertExists()
             capture("execution-sheet")
             compose.onNodeWithText("Enregistrer").performScrollTo().assertIsNotEnabled()
@@ -1447,7 +1428,9 @@ abstract class NodePlacementCases {
                 saved[1]["selection"]?.jsonObject?.get("pinnedNodeId")?.jsonPrimitive?.content,
             )
             assertEquals(JsonNull, saved[1]["selection"]?.jsonObject?.get("preferredNodeId"))
-            compose.onNodeWithText("Dernière synchronisation", substring = true).assertExists()
+            compose
+                .onNodeWithText("Le journal est durable sur cette node", substring = true)
+                .assertExists()
             compose.onNodeWithText("Préférence enregistrée", substring = true).assertExists()
             // Changing node discards files; it does not require a published recovery point.
             compose.onNodeWithText("Déplacer…").performScrollTo().performClick()

@@ -264,6 +264,23 @@ it('adopts a fast setsid daemon with closed stdio before its parent disappears',
   }
 })
 
+it.each(['backend', 'native'])('accepts workflow diagnostic prerequisites without an explicit backend-change selection (%s)', (role) => {
+  const environment = {
+    ...process.env,
+    BACKEND_ONLY: 'true',
+    VALIDATION_ONLY: 'true',
+    PLAN_STORAGE_REFERENCE: '',
+    DIAGNOSTIC_CANDIDATE: '358461be03f947ff168950d0a85999e5ad5f9274',
+    DIAGNOSTIC_REFERENCE: '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
+    GITHUB_REPOSITORY: 'invalid',
+  }
+  delete environment.BACKEND_QUALIFICATION
+  const result = spawnSync(process.execPath, [new URL('../ci-diagnostic-source.mjs', import.meta.url).pathname, role], { encoding: 'utf8', env: environment })
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /Invalid CI clock identity/)
+  assert.doesNotMatch(result.stderr, /Diagnostics require/)
+})
+
 it('rejects an independent Plan storage request before reading CI metadata or fetching sources', () => {
   const file = new URL('../ci-diagnostic-source.mjs', import.meta.url)
   const result = spawnSync(process.execPath, [file.pathname, 'backend'], {
@@ -272,7 +289,6 @@ it('rejects an independent Plan storage request before reading CI metadata or fe
       ...process.env,
       BACKEND_ONLY: 'true',
       VALIDATION_ONLY: 'true',
-      BACKEND_QUALIFICATION: 'none',
       DIAGNOSTIC_CANDIDATE: '358461be03f947ff168950d0a85999e5ad5f9274',
       PLAN_STORAGE_REFERENCE: '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
     },
@@ -324,7 +340,7 @@ it('keeps actual archive argv at HEAD normally and uses the exact candidate only
   writeFileSync(path.join(bin, 'git'), '#!/usr/bin/env node\nrequire(\'node:fs\').writeFileSync(process.env.CI_TEST_GIT_ARGS,JSON.stringify(process.argv.slice(2)))\n', { mode: 0o755 })
   writeFileSync(path.join(bin, 'tar'), '#!/bin/sh\ncat >/dev/null\n', { mode: 0o755 })
   const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
-  const step = workflow.jobs['native-runtime'].steps.find(value => value.name === 'Qualify real ublk, S3, eviction, systemd ownership and crash recovery')
+  const step = workflow.jobs['native-runtime'].steps.find(value => value.name === 'Qualify local disks, ublk, systemd ownership and crash recovery')
   const code = step.run.split('\n').find(line => line.startsWith('git archive '))
   for (const selected of ['', '358461be03f947ff168950d0a85999e5ad5f9274']) {
     const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', code], {
@@ -342,46 +358,7 @@ it('keeps actual archive argv at HEAD normally and uses the exact candidate only
   }
 })
 
-it('provides the candidate qualifier before the real memory-test entrypoint in both routes', (t) => {
-  const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
-  const steps = workflow.jobs['native-runtime'].steps
-  const consumer = steps.findIndex(step => step.run?.includes('-p test_native_s3_memory.py'))
-  const source = new URL('./test_native_s3_memory.py', import.meta.url).pathname
-  const prefix = `
-import ast, os, unittest
-from pathlib import Path
-source=Path(${JSON.stringify(source)})
-tree=ast.parse(source.read_text())
-method=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='test_fixture_purge_preserves_old_remote_objects_and_queued_tombstones')
-# Exercise the actual path lookup, assertion and chmod. The following Moto
-# server/Rust fixture work remains a real eight-test CI step, never local work.
-prefix=ast.Module(body=method.body[:3],type_ignores=[])
-exec(compile(ast.fix_missing_locations(prefix),str(source),'exec'),dict(Path=Path,os=os,self=unittest.TestCase(),__file__=str(Path.cwd()/'scripts/tests/test_native_s3_memory.py')))
-`
-  for (const mode of ['normal', 'native']) {
-    const directory = temporary(t)
-    const producer = mode === 'native'
-      ? steps.findIndex(step => step.name === 'Build the immutable diagnostic pair')
-      : steps.findIndex(step => step.with?.name === 'browser-backend')
-    if (producer < consumer) {
-      const binary = path.join(directory, 'target/debug/examples/native_storage_qualifier')
-      mkdirSync(path.dirname(binary), { recursive: true })
-      writeFileSync(binary, 'tiny-candidate-358-fixture')
-    }
-
-    const explicit = steps[consumer].env?.CAIRN_TEST_NATIVE_QUALIFIER
-    const environment = { ...process.env }
-    delete environment.CAIRN_TEST_NATIVE_QUALIFIER
-
-    if (explicit)
-      // eslint-disable-next-line no-template-curly-in-string -- resolve the actual workflow workspace placeholder in the fixture
-      environment.CAIRN_TEST_NATIVE_QUALIFIER = explicit.replace('${{ github.workspace }}', directory)
-    const result = spawnSync('python3', ['-B', '-c', prefix], { cwd: directory, env: environment, encoding: 'utf8' })
-    assert.equal(result.status, 0, `${mode} route: ${result.stderr}`)
-  }
-})
-
-it('verifies the pinned candidate qualifier before the eight preparation tests', (t) => {
+it('verifies the pinned candidate qualifier before local preparation tests', (t) => {
   const directory = temporary(t)
   const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
   const step = workflow.jobs['native-runtime'].steps.find(value => value.name === 'Verify the exact reference binaries')

@@ -1,9 +1,8 @@
 # Qualifying journal recovery
 
 Decision: [ADR-0072](adr/0072-fast-journal-recovery-and-receipt-reconciliation.md).
-Record quantitative results in the PR description and retain raw output only
-in temporary files or CI artifacts, following the
-[storage qualification rules](STORAGE-COMPRESSION.md#qualification).
+The local disk model is defined in
+[ADR-0083](adr/0083-local-conversation-disks-without-s3.md).
 
 ## Workload and measured operations
 
@@ -36,7 +35,7 @@ revision in the PR description. Run the harness alone in each worktree:
 ```sh
 TMPDIR=/var/tmp CAIRN_REOPEN_BENCH_GIB=16 CARGO_BUILD_JOBS=8 \
   CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
-  node scripts/test-backend.mjs -p cairn-installation --lib \
+  node scripts/test-backend.mjs --workspace --lib \
   journal_reopen_measurement -- --ignored --nocapture --test-threads=1
 ```
 
@@ -54,3 +53,25 @@ admission even before the test's synthetic node quota is reached. On developer
 machines with a real Cairn installation, web uninstall-command tests also need
 an isolated filesystem view because their mocked cleanup still checks for an
 existing `/var/lib/cairn-node` directory. Preserve the real installation.
+
+## Qualification
+
+For storage behavior changes, record reproducible reference and candidate
+measurements in the PR description: both source SHAs, exact command, encoded
+bytes, cold/warm read latency, write latency, CPU, workload, build profile and
+host conditions. Report logical and physically allocated bytes separately,
+including the local base, journal and metadata. Remote encoded bytes are zero
+for local conversation disks. State whether a cold read clears only the process
+cache, uses an advisory filesystem hint or also clears the host page cache.
+
+Use matching workloads and profiles. Keep raw JSON and logs in temporary files or
+CI artifacts; commit no measurement artifacts. Local measurements do not establish
+production network latency, and shared-host timings are not stable CI thresholds.
+
+Run the repository's formatting, quality, isolated backend and workspace Clippy
+checks. Storage changes additionally require the complete affected local journal,
+consolidation, growth, disk admission, ublk and native ownership suites. Use the
+native runtime qualification on a disposable host with systemd and working ublk;
+VM discard changes also require the Firecracker discard and retained-image boot
+checks described in [durable guest discard](STORAGE-DISCARD.md). Report unavailable
+host capabilities explicitly and obtain equivalent CI evidence before merging.

@@ -1,5 +1,5 @@
 //! Controller-owned mounted disks. One live journal per conversation directory.
-use super::{Disk, DiskWrite, LazyDisk, policy::Policy, source::Source};
+use super::{Disk, DiskWrite, LazyDisk, assignment::Assignment, policy::Policy};
 use crate::{
     error::{Error, Result},
     microvm::budget::allocated,
@@ -123,7 +123,7 @@ impl AttemptStop {
 
 pub struct Volume {
     pub disk: Arc<LazyDisk>,
-    pub source: Arc<Source>,
+    pub(crate) assignment: Arc<Assignment>,
     pub stop: CancellationToken,
     directory: PathBuf,
     policy: RwLock<Policy>,
@@ -280,15 +280,12 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
             "Unassigned disks must belong to the prepared environment namespace.",
         ));
     }
-    let source = Arc::new(
-        if unassigned {
-            Source::prepared(tokio::runtime::Handle::current(), stop.clone())
-        } else {
-            Source::new(&context, tokio::runtime::Handle::current(), stop.clone())?
-        }
-        .persistent(&root)?,
-    );
-    let disk = Arc::new(LazyDisk::open(&root, source.clone())?);
+    let assignment = Arc::new(if unassigned {
+        Assignment::prepared()
+    } else {
+        Assignment::new(&context)?
+    });
+    let disk = Arc::new(LazyDisk::open(&root)?);
     if unassigned && disk.has_base_blocks()? {
         return Err(Error::conflict(
             "Unassigned disk must remain entirely journal-backed.",
@@ -299,7 +296,7 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
     disk.memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
     let volume = Arc::new(Volume {
         disk,
-        source,
+        assignment,
         stop,
         directory: directory.to_owned(),
         policy: RwLock::new(policy),
@@ -432,18 +429,6 @@ async fn consolidate(disk: Arc<LazyDisk>) -> bool {
     true
 }
 
-/// A durable fence excludes detached acknowledgements even after transport loss
-/// or controller restart. It never needs the journal publication lock.
-pub async fn fence_publication(state: &Path, run: &str, publication: &str) -> Result<()> {
-    crate::validation::uuid(run)?;
-    crate::validation::uuid(publication)?;
-    let state = state.to_owned();
-    let publication = publication.to_owned();
-    tokio::task::spawn_blocking(move || super::reports::fences(&state)?.fence(&publication))
-        .await
-        .map_err(Error::internal)?
-}
-
 /// The caller also holds the conversation disk lock. Existing inspections must
 /// finish before replacement; subsequent opens are rejected until the durable switch.
 pub struct Replacement {
@@ -507,12 +492,9 @@ async fn blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
     static IO: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
-    let admission = crate::performance::publication::start(
-        crate::performance::publication::Stage::NodeIoAdmission,
-    );
     let permit = IO.acquire().await.map_err(Error::internal)?;
-    admission.finish(0);
-    crate::performance::publication::blocking(move || {
+
+    tokio::task::spawn_blocking(move || {
         let _permit = permit;
         operation()
     })
@@ -554,15 +536,12 @@ async fn load_with_opener(
         }
         // Release both the registry lock and the bounded I/O permit while the
         // previous readers drain; another disk must still be able to open.
-        let waiting = crate::performance::publication::start(
-            crate::performance::publication::Stage::NodeOpenRetry,
-        );
         tokio::time::sleep(remaining.min(std::time::Duration::from_millis(20))).await;
-        waiting.finish(0);
     }
 }
 
 /// Initialize and synchronize a journal on the same bounded pool as journal opens.
+#[cfg(test)]
 pub(crate) async fn create(
     directory: &Path,
     manifest: &Value,
@@ -624,11 +603,7 @@ pub(crate) async fn clone_native_base(source: &Path, target: &Path, context: &Va
     let (source, target, context) = (source.to_owned(), target.to_owned(), context.clone());
     blocking(move || {
         // Validate current authority; immutable cached bases never carry it.
-        Source::new(
-            &context,
-            tokio::runtime::Handle::current(),
-            CancellationToken::new(),
-        )?;
+        Assignment::new(&context)?;
         LazyDisk::clone_sealed(&source, &target)?;
         LazyDisk::bind_cloned_context(&target, &context)?;
         Ok(())
@@ -645,20 +620,11 @@ async fn create_source(
 ) -> Result<Arc<LazyDisk>> {
     let (directory, manifest, context) = (directory.to_owned(), manifest.clone(), context.clone());
     blocking(move || {
-        let source = Arc::new(
-            if prepared {
-                Source::prepared(tokio::runtime::Handle::current(), CancellationToken::new())
-            } else {
-                Source::new(
-                    &context,
-                    tokio::runtime::Handle::current(),
-                    CancellationToken::new(),
-                )?
-            }
-            .persistent(&directory)?,
-        );
+        if !prepared {
+            Assignment::new(&context)?;
+        }
         let disk = Arc::new(LazyDisk::create_at_generation(
-            &directory, &manifest, source, generation,
+            &directory, &manifest, generation,
         )?);
         disk.set_context(&context)?;
         disk.sync()?;
@@ -667,8 +633,7 @@ async fn create_source(
     .await
 }
 
-/// Retain the mounted disk's authorization and monotone publication sequence
-/// through resize; the next acknowledged publication can then retire its old base.
+/// Retain the mounted disk's assignment and monotone local generation through resize.
 pub(crate) async fn rebuild_identity(directory: &Path) -> Result<(Value, i64)> {
     let volume = load(directory).await?;
     blocking(move || {
@@ -708,7 +673,7 @@ impl Volume {
             // A dropped async caller must not unlock the conversation while
             // its blocking authorization fsync can still change this journal.
             let _owner = owner;
-            volume.source.assign(&context, || {
+            volume.assignment.assign(&context, || {
                 volume.disk.set_context(&context)?;
                 volume.disk.sync()?;
                 Ok(())
@@ -766,8 +731,8 @@ impl Volume {
 
     /// Prepared disks stay entirely journal-backed until a conversation claims them.
     fn consolidates(&self) -> bool {
-        self.source
-            .authorization()
+        self.assignment
+            .assigned()
             .is_ok_and(|grant| grant.is_some())
     }
 
@@ -787,9 +752,6 @@ impl Volume {
         if self.pressure.load(Ordering::SeqCst) || self.space_pressure.load(Ordering::Acquire) {
             return Ok(Some("disk-space"));
         }
-        if self.source.waiting() {
-            return Ok(Some("storage-unavailable"));
-        }
         // Local disks have no publication backlog; only integrity and space pause.
         Ok(None)
     }
@@ -806,7 +768,7 @@ impl Volume {
         Ok(())
     }
 
-    /// CPU protection must not wait for filesystem accounting or remote reads.
+    /// CPU protection must not wait for filesystem accounting or disk I/O.
     pub(crate) fn cpu_pause_reason(&self) -> Result<Option<&'static str>> {
         self.control_reason()
     }
@@ -918,14 +880,11 @@ impl Volume {
             Some("integrity")
         } else if self.pressure.load(Ordering::SeqCst) {
             Some("disk-space")
-        } else if self.source.waiting() {
-            Some("storage-unavailable")
         } else {
             // Without a dirty timestamp, the policy only reports disk space.
             policy.pause_reason(total, free, None, crate::config::now())
         };
         status["mode"] = "on-demand".into();
-        status["grantId"] = self.source.authorization()?.into();
         status["waitingFor"] = reason.into();
         status["freeBytes"] = free.into();
         status["reserveBytes"] = policy.reserve(total).into();
@@ -1229,10 +1188,7 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        microvm::suspension,
-        storage::{BlockSource, environment, remote::RemoteSource},
-    };
+    use crate::{microvm::suspension, storage::environment};
     use serde_json::json;
 
     fn prepared_manifest() -> Value {
@@ -1538,15 +1494,7 @@ mod tests {
         let volume = load(&directory).await.unwrap();
         let live = volume.disk.clone();
         assert!(volume.inspect().await.unwrap()["grantId"].is_null());
-        assert!(volume.source.grant_id().is_err());
-        assert_eq!(
-            volume
-                .source
-                .fetch(&format!("b3-{}", "a".repeat(64)))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
+        assert!(volume.assignment.assigned().unwrap().is_none());
         let wrong = environment::ownership(state.path(), &crate::config::id(), "busy")
             .await
             .unwrap();
@@ -1556,7 +1504,7 @@ mod tests {
             "policy": context["policy"],
         });
         assert!(volume.authorize(&wrong, &authorized).await.is_err());
-        assert!(volume.source.grant_id().is_err());
+        assert!(volume.assignment.assigned().unwrap().is_none());
         drop(wrong);
         let physical = crate::file_lock::exclusive(&directory.join("lock"), "busy").unwrap();
         let run = crate::config::id();
@@ -1564,7 +1512,7 @@ mod tests {
         volume.authorize(&owner, &authorized).await.unwrap();
         assert!(Arc::ptr_eq(&live, &volume.disk));
         assert_eq!(
-            volume.source.grant_id().unwrap(),
+            volume.assignment.assigned().unwrap().unwrap(),
             crate::auth::digest("owner-grant")
         );
         assert!(volume.authorize(&owner, &authorized).await.is_err());
@@ -1576,7 +1524,7 @@ mod tests {
         let physical = environment::directory(state.path(), &run).unwrap();
         let reopened = load(&physical).await.unwrap();
         assert_eq!(
-            reopened.source.grant_id().unwrap(),
+            reopened.assignment.assigned().unwrap().unwrap(),
             crate::auth::digest("owner-grant")
         );
         reopened.read_at(0, &mut bytes).unwrap();
@@ -2524,14 +2472,7 @@ mod tests {
             "grant": "test",
             "policy": policy
         });
-        let source = Arc::new(
-            RemoteSource::new(
-                &context,
-                tokio::runtime::Handle::current(),
-                CancellationToken::new(),
-            )
-            .unwrap(),
-        );
+
         let disk = LazyDisk::create(
             &directory.join("lazy"),
             &json!({
@@ -2540,7 +2481,6 @@ mod tests {
                 "blockSize": 4194304,
                 "blocks": [{"offset": 0,"size": 4096,"hash": null}]
             }),
-            source,
         )
         .unwrap();
         disk.set_context(&context).unwrap();

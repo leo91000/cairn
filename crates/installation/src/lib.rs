@@ -47,7 +47,6 @@ pub mod native;
 pub mod network;
 pub mod nodes;
 pub mod notifications;
-pub mod object_storage;
 pub mod opencode;
 pub mod outcome;
 pub mod performance;

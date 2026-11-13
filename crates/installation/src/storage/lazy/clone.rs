@@ -175,14 +175,6 @@ mod tests {
     use crate::storage::Disk;
     use std::os::unix::fs::MetadataExt;
 
-    struct LocalOnly;
-
-    impl BlockSource for LocalOnly {
-        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-            Err(failure("A local base cannot fetch remote data"))
-        }
-    }
-
     #[tokio::test]
     async fn malformed_base_metadata_never_enables_truncation_of_a_shared_payload() {
         use std::io::Write;
@@ -282,24 +274,24 @@ mod tests {
                 .unwrap()
                 .ino()
         );
-        let first_disk = LazyDisk::open(&first, Arc::new(LocalOnly)).unwrap();
+        let first_disk = LazyDisk::open(&first).unwrap();
         first_disk.write_at(0, b"first!!!").unwrap();
         first_disk.seal().unwrap();
         drop(first_disk);
-        let second_disk = LazyDisk::open(&second, Arc::new(LocalOnly)).unwrap();
+        let second_disk = LazyDisk::open(&second).unwrap();
         second_disk.write_at(8, b"second").unwrap();
         second_disk.sync().unwrap();
         drop(second_disk);
-        let original = LazyDisk::open(&source, Arc::new(LocalOnly)).unwrap();
+        let original = LazyDisk::open(&source).unwrap();
         let mut bytes = [0; 8];
         original.read_at(0, &mut bytes).unwrap();
         assert_eq!(&bytes, b"original");
         drop(original);
         std::fs::remove_dir_all(&source).unwrap();
-        let first_disk = LazyDisk::open(&first, Arc::new(LocalOnly)).unwrap();
+        let first_disk = LazyDisk::open(&first).unwrap();
         first_disk.read_at(0, &mut bytes).unwrap();
         assert_eq!(&bytes, b"first!!!");
-        let second_disk = LazyDisk::open(&second, Arc::new(LocalOnly)).unwrap();
+        let second_disk = LazyDisk::open(&second).unwrap();
         let mut bytes = [0; 14];
         second_disk.read_at(0, &mut bytes).unwrap();
         assert_eq!(&bytes, b"originalsecond");

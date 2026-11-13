@@ -1,8 +1,8 @@
 # Durable guest discard
 
 Cairn propagates guest ext4 FITRIM through native virtio-blk Async and managed ublk.
-The guest filesystem decides which extents are free. No controller mounts a
-conversation filesystem, infers free ranges from a partial cache or overwrites
+The guest filesystem decides which extents are free. The controller never mounts
+the guest filesystem to infer free extents from a partial cache or overwrite
 allocated files.
 
 ## Storage and durability
@@ -11,8 +11,10 @@ Discard reads as zeros after its durable acknowledgement. Each range uses normal
 checksummed `CAIRNJ03` write frames, including the ordinary zero payload checksum.
 Zero payloads extend the append file sparsely instead of writing their data pages.
 Headers, frame lengths, sequence numbers, group commit, segment rotation, crash
-recovery and publication ownership retain their existing contracts. Readers see precisely the same bytes as an ordinary zero write. No payload is
-punched out of an earlier frame, and nothing is reclaimed before publication.
+recovery retain their existing contracts. Readers see precisely the same bytes
+as an ordinary zero write. No payload is punched out of an earlier frame. Local
+consolidation reclaims obsolete journal segments only after their replacement
+base is durable, as specified by [ADR-0083](adr/0083-local-conversation-disks-without-s3.md).
 
 The complete range is checked before any mutation. A large operation can commit
 a prefix before returning an error, like the existing write batch interface;
@@ -21,22 +23,11 @@ workspace views. Persistence failures are errors, never successful discards.
 A no-op discard also drains staged writes before acknowledging their zero hint.
 
 The journal indexes authenticated zero frames in memory. Already zero ranges and
-the sparse tail need no new frames or remote fetches. Discarding unavailable base
-bytes is allowed; reading an unavailable surviving neighbour still fails. A
-partial-block publication must obtain every surviving byte and verify it normally.
+the sparse tail need no new frames. Discarding damaged base bytes is allowed;
+reading a damaged surviving neighbour still fails. Local consolidation must
+obtain and verify every surviving byte of a partially discarded block.
 The zero hint is reconstructed during existing journal authentication at reopen;
 it adds no serialized field or unauthenticated shortcut to payload reads.
-
-Capture continues to reconstruct independent 4 MiB regions. A fully zero region
-has a null manifest hash and no S3 object. A partially zero region uses the same
-zstd/raw fallback, authenticated envelope and exact plaintext deduplication as
-before. There are no delta chains, extra range protocols or new read dependencies.
-Allocated files at different offsets can still prevent an exact block match.
-
-Current publication, shared incarnations and owner references remain authoritative.
-An object shared with another conversation cannot be collected until every owner
-releases it. Old objects become eligible only after the normal publication and
-GC grace period; a successful FITRIM alone does not delete an S3 key.
 
 ## Transports and latency
 
@@ -52,11 +43,11 @@ No userspace worker or additional seccomp syscall is needed.
 
 Discard starts after prior completion receipts are consumed and fences subsequent
 read/write/flush requests until its own receipt is consumed, including on error.
-The VMM control thread never waits for the backing discard: remote
-reads, queued publication and dirty-page writeback can block the kernel operation
+The VMM control thread never waits for the backing discard: local disk reads
+and dirty-page writeback can block the kernel operation
 without preventing a storage-pressure pause. Both the native frontend and ublk
 advertise a maximum 8 MiB request to bound each maintenance ordering boundary.
-Explicit snapshot/drain operations retain their existing I/O completion barriers.
+Disk draining retains its I/O completion barriers.
 
 The ublk-only transport decision is recorded in
 [ADR-0055](adr/0055-ublk-only-vm-storage.md). The ublk backend handles payload-free DISCARD and WRITE_ZEROES separately from the 512 KiB
@@ -75,8 +66,8 @@ only when it observes a tool failure, timeout or cancellation.
 Background trim consumes CPU and durable journal barriers and can temporarily
 increase foreground latency. The new `performance.discard` counters expose count,
 logical bytes, elapsed time, errors and concurrency. Fully freed regions avoid
-future object reads; partial regions still use the normal 4 MiB read/cache path.
-Local measurements cannot establish production S3 network latency.
+future base-block reads; partial regions still use the normal 4 MiB local read/cache
+path. See [local measurement guidance](JOURNAL-RECOVERY.md#qualification).
 
 ## Existing conversations and deployment
 
@@ -86,8 +77,7 @@ Each boot therefore attaches a small, read-only SquashFS control disk containing
 the current init, a standard-library Python maintenance script and static BusyBox.
 The bootstrap mounts it before the overlay pivot. The retained guest bridge still
 runs from its original root image; maintenance runs from the immutable control
-disk. The control disk is local to the node and is not part of the conversation's
-S3 manifest. The guest kernel already enables SquashFS/XZ; the build asserts it.
+disk. The control disk is local to the node and separate from the conversation disk. The guest kernel already enables SquashFS/XZ; the build asserts it.
 
 The conversation filesystem stays on `/dev/vdb`;
 the read-only control disk uses `/dev/vdc`. The root image remains read-only. An interrupted
@@ -110,9 +100,8 @@ on the next normal pass, and do not invalidate previously acknowledged writes.
 Ship the full node image, including patched Firecracker, control disk and backend.
 The normal node restart performs the accepted cold restart of running guests.
 Existing conversations gain maintenance on their next cold boot, including when
-resumed from their durable disk. Dormant remote conversations are not automatically
-started or bucket-scanned by this feature. Their bytes are reclaimed after they
-are resumed and a trimmed publication replaces the previous one.
+resumed from their local durable disk. Consolidation reclaims obsolete local
+segments after the trimmed data becomes part of the durable base.
 
 ## Reproduction and evidence
 
@@ -141,10 +130,10 @@ drives, so it does not substitute for ublk or production-network qualification.
 when used. Production qualification must use the image's musl binary and policy.
 
 Focused native tests cover process-kill recovery, sync failures, no-op durability,
-missing bases, authenticated sparse payloads, sealed/publication boundaries,
+missing bases, authenticated sparse payloads, sealed/consolidation boundaries,
 request ordering and bounds, view isolation and late workspace mount scheduling.
 The normal full Quality/container workflow and the native Firecracker discard
 workflow are both required for this change's review evidence. Reproducible
 measurement JSON and host conditions belong with the PR/release reference;
-controlled gains are not a forecast for the whole production bucket.
+controlled gains are not a forecast for production workloads.
 

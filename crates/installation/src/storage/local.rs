@@ -44,7 +44,7 @@ pub(crate) async fn prepare_seeded(
     Ok(disk)
 }
 
-/// Format or grow the temporary ext4 image used to build an S3-backed journal.
+/// Format or grow the temporary ext4 image used to build a local journal.
 pub async fn prepare(disk_dir: &Path, desired: u64) -> Result<PathBuf> {
     let disk = disk_dir.join("data.ext4");
     if !disk.exists() {

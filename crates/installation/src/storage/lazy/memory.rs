@@ -124,7 +124,7 @@ impl WorkingSet {
     }
 }
 
-type SourceLocks = HashMap<(usize, String), Weak<Mutex<()>>>;
+type SourceLocks = HashMap<(PathBuf, String), Weak<Mutex<()>>>;
 
 pub(super) struct BlockCache {
     pub bytes: Mutex<BytesCache>,
@@ -161,8 +161,8 @@ impl BlockCache {
         if let Some(working_set) = foreground.get(directory) {
             return Ok(working_set.clone());
         }
-        // Final publication can reopen a disk after its guest has exited.
-        // Keep only bounded extent metadata; no disk, grant or source is retained.
+        // Local consolidation can reopen a disk after its guest has exited.
+        // Keep only bounded extent metadata; no disk or file descriptor is retained.
         while foreground.len() >= 64 {
             foreground.pop_lru();
         }
@@ -171,16 +171,12 @@ impl BlockCache {
         Ok(working_set)
     }
 
-    pub fn fetching(
-        &self,
-        hash: &str,
-        source: &Arc<dyn super::BlockSource>,
-    ) -> io::Result<Arc<Mutex<()>>> {
+    pub fn fetching(&self, hash: &str, directory: &Path) -> io::Result<Arc<Mutex<()>>> {
         // A source can wait until its own conversation is cancelled. Only
         // readers using that same source may inherit its in-flight transfer.
         // The source stays alive through the read, so its address cannot be
         // recycled while this lock is held. Verified bytes remain node-wide.
-        let key = (Arc::as_ptr(source).cast::<()>() as usize, hash.to_owned());
+        let key = (directory.to_owned(), hash.to_owned());
         let mut fetching = self.fetching.lock().map_err(failure)?;
         if let Some(lock) = fetching.get(&key).and_then(Weak::upgrade) {
             return Ok(lock);

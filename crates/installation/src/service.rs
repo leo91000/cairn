@@ -22,11 +22,7 @@ pub struct Service {
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
     pub started: tokio::time::Instant,
     pub(crate) native_authority_refresh: Arc<tokio::sync::Mutex<()>>,
-    pub node_backup_operation: Arc<crate::nodes::coordination::Coordination>,
-    pub node_publication_notify: Arc<tokio::sync::Notify>,
-    pub node_backup_lock: Arc<tokio::sync::Mutex<()>>,
-    pub shared_block_collection: Arc<tokio::sync::Mutex<()>>,
-    pub(crate) publication_integrity: Arc<tokio::sync::RwLock<()>>,
+    pub node_storage_operation: Arc<crate::nodes::coordination::Coordination>,
     pub node_transport: Arc<crate::nodes::transport::Transport>,
     pub avatars: Arc<crate::agent_avatars::AgentAvatars>,
     pub artifacts: Arc<crate::artifacts::Artifacts>,
@@ -47,8 +43,6 @@ pub struct Service {
     pub vault: Vault,
     pub skills: Skills,
     pub http: reqwest::Client,
-    pub disk_http: reqwest::Client,
-    pub hot_s3: Arc<crate::object_storage::HotS3>,
     pub shutdown: CancellationToken,
 }
 
@@ -62,7 +56,6 @@ impl Service {
         }
         let store = Store::open(&config.data_dir)?;
         let vault = Vault::new(store.clone(), &config.data_dir)?;
-        crate::nodes::connector::record_manager_origin(&config).await?;
         let service = Arc::new(Self {
             accepted_jobs: Arc::default(),
             node_move_operations: Arc::default(),
@@ -71,11 +64,7 @@ impl Service {
             node_lease_deadlines: Arc::default(),
             started: tokio::time::Instant::now(),
             native_authority_refresh: Arc::default(),
-            node_backup_operation: Arc::default(),
-            node_publication_notify: Arc::default(),
-            node_backup_lock: Arc::default(),
-            shared_block_collection: Arc::default(),
-            publication_integrity: Arc::default(),
+            node_storage_operation: Arc::default(),
             node_transport: Arc::default(),
             avatars: Arc::default(),
             artifacts: Arc::default(),
@@ -98,14 +87,6 @@ impl Service {
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(20))
-                .build()
-                .map_err(Error::internal)?,
-            hot_s3: Arc::new(crate::object_storage::HotS3::new()),
-            // Publications can take minutes while making progress. Their reader
-            // bounds individual I/O waits instead of timing out the whole disk.
-            disk_http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(std::time::Duration::from_secs(20))
                 .build()
                 .map_err(Error::internal)?,
             config,

@@ -1,3 +1,5 @@
+mod legacy_disks;
+
 use crate::{
     config::now,
     error::{Error, Result, required},
@@ -133,7 +135,7 @@ impl Store {
             if current == 12 {
                 tx.execute_batch("CREATE TABLE direct_storage_grants(object TEXT PRIMARY KEY REFERENCES shared_objects(id) ON DELETE CASCADE,expires_at INTEGER NOT NULL,settled INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0,1)));")?;
                 tx.execute_batch("CREATE TABLE direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(object);")?;
-                tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
+                tx.execute_batch(legacy_disks::LEGACY_DISK_ACK_SCHEMA)?;
                 tx.pragma_update(None, "user_version", 13)?;
             } else if !(13..=DATABASE_VERSION).contains(&current) {
                 return Err(Error::bad(
@@ -259,7 +261,7 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if !fresh && version == 31 {
-            crate::nodes::journal_acknowledgements::upgrade(&mut writer)?;
+            legacy_disks::upgrade(&mut writer)?;
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if !fresh && version == 32 {
@@ -287,8 +289,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::runs::SCHEMA)?;
             tx.execute_batch(crate::worker::progress::SCHEMA)?;
             tx.execute_batch(crate::accounts::sql::SCHEMA)?;
-            tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
-            tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
+            tx.execute_batch(legacy_disks::LEGACY_DISK_SCHEMA)?;
+            tx.execute_batch(legacy_disks::LEGACY_DISK_ACK_SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
             tx.execute_batch(crate::nodes::inventory::SCHEMA)?;
             tx.execute_batch(crate::nodes::attempts::SCHEMA)?;
@@ -1430,14 +1432,14 @@ mod schema_tests {
             let upgraded = Store::open(root.path()).unwrap();
             let mut retained = upgraded.node_boundary(&node).await.unwrap().unwrap();
             assert_eq!(retained["name"], "Retained node");
-            assert_eq!(retained["capabilities"]["vmDisks"], false);
+            assert!(retained["capabilities"]["vmDisks"].is_null());
             retained["capabilities"]["vmDisks"] = true.into();
             upgraded.put_node_fixture(retained).await.unwrap();
             drop(upgraded);
             let reopened = Store::open(root.path()).unwrap();
             assert_eq!(
                 reopened.node_boundary(&node).await.unwrap().unwrap()["capabilities"]["vmDisks"],
-                true
+                Value::Null
             );
             let connection = Connection::open(root.path().join("manager.db")).unwrap();
             assert_eq!(

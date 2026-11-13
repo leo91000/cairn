@@ -1,16 +1,11 @@
-//! The installation's own runner reads disks through the manager's private
-//! Docker origin, while every other plain-HTTP origin stays refused (#159).
-//!
-//! The controller finds its data root in `DATA_DIR`, like the generated Compose
-//! services. This crate holds a single test so that no other test shares the
-//! process environment it sets.
+//! Local runner journals reopen without a manager origin or remote credentials.
 mod common;
 
 use cairn_installation::{
     config::{Config, id},
-    nodes::{LOCAL_NODE_ID, connector, disk_grants, restore, snapshots},
+    nodes::connector,
     service::Service,
-    storage::{bootstrap, policy::Policy, remote::RemoteSource, runtime},
+    storage::{bootstrap, policy::Policy, runtime},
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -19,25 +14,14 @@ use tokio_util::sync::CancellationToken;
 /// The manager origin written by `deploy/installations/host.py`.
 const INSTALLATION_ORIGIN: &str = "http://manager:4310";
 
-fn refused(context: &serde_json::Value) -> String {
-    RemoteSource::new(
-        context,
-        tokio::runtime::Handle::current(),
-        CancellationToken::new(),
-    )
-    .err()
-    .expect("plain-HTTP origin must be refused")
-    .message
-}
-
 #[tokio::test]
-async fn installation_runner_reads_disks_from_the_private_manager_origin_only() {
+async fn installation_runner_reopens_its_local_disk_without_remote_storage() {
     let root = TempDir::new().unwrap();
     let data = root.path().join("data");
     // SAFETY: this crate's only test sets the variable before starting any thread.
     unsafe { std::env::set_var("DATA_DIR", &data) };
     std::fs::create_dir(root.path().join("home")).unwrap();
-    let service = Service::new(Config {
+    let _service = Service::new(Config {
         public_url: INSTALLATION_ORIGIN.into(),
         ..common::config(root.path())
     })
@@ -47,12 +31,8 @@ async fn installation_runner_reads_disks_from_the_private_manager_origin_only() 
     // The manager's plan for its local node carries its own origin; the
     // runner prepares the conversation disk from it.
     let run = json!({ "id": id() });
-    let grant = disk_grants::new_disk(&service, &run, LOCAL_NODE_ID)
-        .await
-        .unwrap();
     let storage = json!({
-        "master": service.config.public_url,
-        "grant": grant,
+        "owner": run["id"],
         "policy": Policy {
             reserve_mi_b: 64,
             reserve_percent: 1,
@@ -67,62 +47,10 @@ async fn installation_runner_reads_disks_from_the_private_manager_origin_only() 
     bootstrap::prepare(&directory, 128 * 1024 * 1024, &storage, &stop)
         .await
         .unwrap();
-    // A restarted controller reopens the disk from its persisted authorization.
+    // A restarted controller reopens the disk from its local owner and policy.
     drop(runtime::load(&directory).await.unwrap());
 
-    // Resuming a published disk on the local node sends the same origin to
-    // the runner's restore endpoint.
-    let state = root.path().join("runner-state");
-    let images = state.join("images/development");
-    std::fs::create_dir_all(&images).unwrap();
-    for file in ["root.ext4", "vmlinux"] {
-        std::fs::write(images.join(file), b"").unwrap();
-    }
-    let restoration = |master: &str| {
-        json!({
-            "manifest": {
-                "version": 1,
-                "size": 4096,
-                "blockSize": snapshots::BLOCK,
-                "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
-                "runtime": { "runtimeId": "development" },
-            },
-            "master": master,
-            "grant": "fixture",
-            "backupId": "published",
-            "policy": storage["policy"],
-        })
-    };
-    let restored =
-        restore::controller(&state, &id(), restoration(&service.config.public_url)).await;
-    match restored {
-        Ok(ready) => assert_eq!(ready["ready"], true),
-        // Hosts without FUSE stop after the origin was accepted.
-        Err(error) => assert_eq!(error.message, "Node has no FUSE device."),
-    }
-    let refused_restore =
-        restore::controller(&state, &id(), restoration("http://master.internal:4310/"))
-            .await
-            .unwrap_err();
-    assert!(
-        refused_restore.message.contains("HTTPS"),
-        "{}",
-        refused_restore.message
-    );
-
-    // Another plain-HTTP origin, as a remote node's master could supply, is
-    // refused even on the installation's own runner.
-    for origin in [
-        "http://master.internal:4310/",
-        "http://10.0.0.2:4310/",
-        "http://manager:4311/",
-        "https://manager:4310/path",
-    ] {
-        let message = refused(&json!({ "master": origin, "grant": "fixture" }));
-        assert!(message.contains("HTTPS"), "{origin}: {message}");
-    }
-
-    // Enrollment, and through it a remote node's connection and disk reads,
+    // Enrollment of a remote execution node
     // keeps requiring HTTPS even for the manager's own private origin.
     let node = root.path().join("node");
     let enrollment = connector::enroll(INSTALLATION_ORIGIN, &node)

@@ -376,18 +376,6 @@ mod tests {
                 .await
                 .unwrap();
             assert!(!terminal.load(Ordering::SeqCst));
-            let replaced = crate::native::block::published(
-                &state,
-                &run,
-                &json!({
-                    "generation": 1,
-                    "grantId": "wrong-disk",
-                    "backupId": crate::config::id()
-                }),
-            )
-            .await
-            .unwrap_err();
-            assert!(replaced.is_conflict());
             assert!(workspace::execution_ownership(&state, &run).await.is_err());
             assert!(environment::lock(&state, &run, "probe").await.is_err());
             assert!(

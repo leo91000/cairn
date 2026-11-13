@@ -222,10 +222,6 @@ impl Authorization {
             None => futures_util::future::pending().await,
         }
     }
-
-    pub(crate) fn has_async_checks(&self) -> bool {
-        self.service.is_some()
-    }
 }
 
 #[cfg(test)]

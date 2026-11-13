@@ -101,46 +101,6 @@ describe('parallel CI coverage', () => {
     expect(quality.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
   })
 
-  it('keeps measurement-only evidence separate from full and diagnostic backend qualification', () => {
-    const backend = quality.jobs.backend
-    const normal = backend.steps.find(step => step.name === 'Run backend tests across binaries with isolated credentials')
-    const measurement = backend.steps.find(step => step.name === 'Measure controlled direct publication scheduling')
-    const tails = backend.steps.filter(step => [
-      'Measure the bounded bootstrap observer without filesystem work',
-      'Measure bounded Native terminal-reason metadata',
-      'Qualify native backend namespace isolation with ordinary private bind mounts',
-      'Check Rust documentation examples',
-    ].includes(step.name))
-    expect(tails).toHaveLength(4)
-    expect(quality.on.workflow_dispatch.inputs['publication-measurement'].default).toBe(false)
-    expect(backend['timeout-minutes']).toBe(30)
-    expect(measurement.run).toContain('pipeline_tests::measurement::direct_publication_window_comparison -- --exact --ignored --nocapture --test-threads=1')
-    expect(normal.run).toContain('--nextest --test-threads 8 --no-fail-fast --color never --status-level all')
-    expect(backend.steps.some(step => step.run === 'pnpm validate:pr rust')).toBe(false)
-
-    const selected = (step, backendOnly, measure, diagnostic) => runInNewContext(step.if
-      .replaceAll('inputs.backend-only', 'backendOnly')
-      .replaceAll('inputs.publication-measurement', 'measure')
-      .replaceAll('inputs.ci-diagnostic', 'diagnostic'), {
-      backendOnly,
-      measure,
-      diagnostic,
-    }, { timeout: 1000 })
-    for (const [backendOnly, measure, diagnostic, full, measured, tail] of [
-      [false, false, 'none', true, false, true],
-      [true, false, '', true, false, true],
-      [true, true, 'none', false, true, false],
-      [true, true, '', false, true, false],
-      [true, true, 'backend', false, false, true],
-      [false, true, 'none', true, false, true],
-    ]) {
-      expect(selected(normal, backendOnly, measure, diagnostic)).toBe(full)
-      expect(selected(measurement, backendOnly, measure, diagnostic)).toBe(measured)
-      for (const step of tails)
-        expect(selected(step, backendOnly, measure, diagnostic)).toBe(tail)
-    }
-  })
-
   it('runs the selected confirmed backend-change case in a separate bounded job after the backend suite', () => {
     const input = quality.on.workflow_dispatch.inputs['backend-qualification']
     expect(input).toEqual({
@@ -597,8 +557,9 @@ describe('parallel CI coverage', () => {
   it('observes exact archived native fixtures symmetrically while keeping original binaries and qualification flags', () => {
     const steps = quality.jobs['native-runtime'].steps
     const reference = steps.find(step => step.name === 'Qualify the exact reference on the current disposable host')
-    const candidate = steps.find(step => step.name === 'Qualify real ublk, S3, eviction, systemd ownership and crash recovery')
-    expect(reference.run).toContain('git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py')
+    const candidate = steps.find(step => step.name === 'Qualify local disks, ublk, systemd ownership and crash recovery')
+    // eslint-disable-next-line no-template-curly-in-string -- same local harness for both exact binary pairs
+    expect(reference.run).toContain('git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py')
     // eslint-disable-next-line no-template-curly-in-string -- literal shell fallback is the provenance contract
     expect(candidate.run).toContain('git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py')
     // eslint-disable-next-line no-template-curly-in-string -- literal GitHub expression is the provenance contract
@@ -614,11 +575,11 @@ describe('parallel CI coverage', () => {
 
   it('keeps all native preparation tests after their verified candidate producer', () => {
     const steps = quality.jobs['native-runtime'].steps
-    const host = steps.findIndex(step => step.name === 'Prepare disposable host block storage and synthetic S3')
+    const host = steps.findIndex(step => step.name === 'Prepare disposable host block storage')
     const toolchain = steps.findIndex(step => step.run === 'rustup toolchain install 1.97.1 --profile minimal')
     const pair = steps.findIndex(step => step.name === 'Build the immutable diagnostic pair')
     const verify = steps.findIndex(step => step.name === 'Verify the exact reference binaries')
-    const consumers = steps.filter(step => step.run?.includes('-p test_native_s3_memory.py'))
+    const consumers = steps.filter(step => step.run?.includes('-p test_native_local_runtime.py'))
     expect(consumers).toHaveLength(1)
     const consumer = consumers[0]
     const index = steps.indexOf(consumer)
@@ -628,15 +589,14 @@ describe('parallel CI coverage', () => {
     expect(pair).toBeLessThan(verify)
     expect(verify).toBeLessThan(index)
     expect(index).toBeLessThan(steps.findIndex(step => step.name === 'Qualify the exact reference on the current disposable host'))
-    expect(steps[host].run).not.toContain('test_native_s3_memory.py')
+    expect(steps[host].run).not.toContain('test_native_local_runtime.py')
     expect(consumer.if).toBeUndefined()
-    // eslint-disable-next-line no-template-curly-in-string -- exact absolute candidate fixture path in the workflow
-    expect(consumer.env.CAIRN_TEST_NATIVE_QUALIFIER).toBe('${{ github.workspace }}/target/debug/examples/native_storage_qualifier')
-    expect(consumer.run).toContain('scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v')
+
+    expect(consumer.run).toContain('scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- python3 -m unittest discover -s scripts/tests -p test_native_local_runtime.py -v')
     expect(consumer.run).not.toMatch(/(?:--filter|--ignore|\s-k\s)/)
     expect(steps.filter(step => step.run?.includes('node scripts/ci-diagnostic-native-build.mjs'))).toHaveLength(1)
-    const memoryTests = readFileSync(new URL('./test_native_s3_memory.py', import.meta.url), 'utf8')
-    expect(memoryTests.match(/^\s+def test_/gm)).toHaveLength(8)
+    const memoryTests = readFileSync(new URL('./test_native_local_runtime.py', import.meta.url), 'utf8')
+    expect(memoryTests.match(/^\s+def test_/gm)).toHaveLength(1)
   })
 
   it('isolates each diagnostic job even when legacy independent inputs are populated', () => {
@@ -701,6 +661,7 @@ describe('parallel CI coverage', () => {
     const containers = job.steps.findIndex(step => step.run?.includes('python3 tests/installation_update_containers.py'))
     expect(web).toBeGreaterThan(-1)
     expect(containers).toBeGreaterThan(web)
+    expect(job.steps[containers].run).toContain('pnpm test:backend --workspace --example native_storage_qualifier stopped_inspection_keeps_its_generation_across_a_monitor_period')
   })
 
   it('runs every network topology exactly once on independent hosts', () => {

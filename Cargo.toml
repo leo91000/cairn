@@ -12,7 +12,6 @@ members = [
 resolver = "3"
 exclude = [
   "vendor/rtc-dtls",
-  "vendor/ext4-view",
   "vendor/rtc-sctp",
   "vendor/rtc",
   "vendor/webrtc"
@@ -25,8 +24,6 @@ webrtc = { path = "vendor/webrtc" }
 rtc = { path = "vendor/rtc" }
 # Keep stream resets from closing replacement channels on the pinned stack.
 rtc-sctp = { path = "vendor/rtc-sctp" }
-# Correct circular journal replay and revocations without changing the reader version.
-ext4-view = { path = "vendor/ext4-view" }
 # Preserve the pinned 0.21.0 stack; fix only DTLS retransmission under loss.
 rtc-dtls = { path = "vendor/rtc-dtls" }
 

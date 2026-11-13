@@ -11,7 +11,6 @@ use axum::{
     response::Response,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -35,8 +34,6 @@ struct Command {
     method: String,
     path: String,
     body: String,
-    /// Bulk responses may arrive through one `/internal/nodes/stream` upload.
-    stream_body: bool,
 }
 
 struct Frame {
@@ -50,8 +47,6 @@ struct Call {
     head: Option<oneshot::Sender<Head>>,
     body: mpsc::Sender<Frame>,
     sequence: u64,
-    streaming: bool,
-    length: Option<u64>,
 }
 
 #[derive(Default)]
@@ -117,13 +112,10 @@ impl Transport {
                     method: method.into(),
                     path: path.into(),
                     body: STANDARD.encode(body),
-                    stream_body: true,
                 },
                 head: Some(head_tx),
                 body: body_tx,
                 sequence: 0,
-                streaming: false,
-                length: None,
             };
             state.calls.insert(id.clone(), call);
             state
@@ -234,14 +226,13 @@ impl Transport {
         let call = state
             .calls
             .get_mut(id)
-            .filter(|c| c.node == node && !c.streaming)
+            .filter(|c| c.node == node)
             .ok_or_else(|| Error::conflict("Execution request no longer exists."))?;
         if is_retry(call, sequence)? {
             return Ok(ack(sequence));
         }
         if call.head.is_some() {
             let head = parse_head(&value)?;
-            call.length = head.1;
             if let Some(reader) = call.head.take() {
                 // A reader that already gave up needs no head.
                 let _ = reader.send(head);
@@ -259,76 +250,6 @@ impl Transport {
             state.calls.remove(id);
         }
         Ok(ack(sequence))
-    }
-
-    /// One authenticated HTTP upload per bulk response, with bounded backpressure.
-    /// Legacy JSON frames remain usable by nodes that ignore streamBody.
-    async fn stream(self: &Arc<Self>, node: &str, id: &str, body: Body) -> Result<()> {
-        let (sender, length) = {
-            let mut state = self.state.lock().unwrap();
-            let call = state
-                .calls
-                .get_mut(id)
-                .filter(|call| {
-                    call.node == node
-                        && !call.streaming
-                        && call.sequence == 1
-                        && call.head.is_none()
-                })
-                .ok_or_else(|| Error::conflict("Execution stream no longer available."))?;
-            call.streaming = true;
-            (call.body.clone(), call.length)
-        };
-        // Disconnects, cancellation and errors remove the call; the reader then
-        // sees an incomplete response unless we sent the explicit final frame.
-        let _pending = Pending {
-            hub: self.clone(),
-            id: id.to_owned(),
-        };
-        let mut body = body.into_data_stream();
-        let mut received = 0u64;
-        loop {
-            let next = tokio::select! {
-                () = sender.closed() => return Err(Error::conflict("Execution reader closed.")),
-                next = tokio::time::timeout(Duration::from_secs(60), body.next()) => {
-                    next.map_err(|_| Error::unavailable("Node upload stalled."))?
-                }
-            };
-            let Some(bytes) = next else { break };
-            let bytes = bytes.map_err(|_| Error::unavailable("Node upload interrupted."))?;
-            received = received
-                .checked_add(bytes.len() as u64)
-                .ok_or_else(|| Error::bad("Response too large."))?;
-            if length.is_some_and(|length| received > length) {
-                return Err(Error::bad("Node response exceeds its declared length."));
-            }
-            for chunk in bytes.chunks(FRAME_BYTES) {
-                tokio::time::timeout(
-                    Duration::from_secs(20),
-                    sender.send(Frame {
-                        bytes: Bytes::copy_from_slice(chunk),
-                        done: false,
-                    }),
-                )
-                .await
-                .map_err(|_| Error::unavailable("Execution reader is stalled."))?
-                .map_err(|_| Error::conflict("Execution reader closed."))?;
-            }
-        }
-        if length.is_some_and(|length| received != length) {
-            return Err(Error::bad("Node response was truncated."));
-        }
-        tokio::time::timeout(
-            Duration::from_secs(20),
-            sender.send(Frame {
-                bytes: Bytes::new(),
-                done: true,
-            }),
-        )
-        .await
-        .map_err(|_| Error::unavailable("Execution reader is stalled."))?
-        .map_err(|_| Error::conflict("Execution reader closed."))?;
-        Ok(())
     }
 }
 
@@ -351,7 +272,7 @@ fn ack(sequence: u64) -> Value {
 fn replying_call<'a>(calls: &'a HashMap<String, Call>, node: &str, id: &str) -> Result<&'a Call> {
     calls
         .get(id)
-        .filter(|c| c.node == node && !c.streaming)
+        .filter(|c| c.node == node)
         .ok_or_else(|| Error::conflict("Execution request no longer exists."))
 }
 
@@ -368,24 +289,13 @@ fn is_retry(call: &Call, sequence: u64) -> Result<bool> {
 
 /// How long a node may take to start answering, by operation.
 fn head_timeout(method: &str, path: &str, native: bool) -> Duration {
-    if method == "POST" && path.ends_with("/direct-reader") {
-        return super::snapshots::DIRECT_PUBLICATION_STARTUP;
-    }
     if native && crate::nodes::is_project_import_request(method, path) {
         return crate::nodes::PROJECT_OPEN_HEAD_TIMEOUT;
     }
-    Duration::from_secs(if method == "POST" && path.ends_with("/direct-upload") {
-        crate::storage::direct::TRANSFER_SECONDS + 60
-    } else if method == "POST" && path.ends_with("/publication") {
-        super::snapshots::PUBLICATION_STARTUP.as_secs()
-    } else if path.starts_with("/exclusive/") {
+    let seconds = if method == "POST" && matches!(path, "/exclusive/acquire" | "/exclusive/release")
+    {
         150
-    } else if path.ends_with("/restore") {
-        120
     } else if path.starts_with("/prepare/")
-        || path.ends_with("snapshot")
-        || path.ends_with("snapshot-completed")
-        || path.ends_with("/evict")
         || native
             && method == "DELETE"
             && path.starts_with("/runs/")
@@ -394,25 +304,8 @@ fn head_timeout(method: &str, path: &str, native: bool) -> Duration {
         300
     } else {
         30
-    })
-}
-
-pub async fn stream(State(app): State<App>, request: Request) -> Result<axum::Json<Value>> {
-    if request.method() != "POST" {
-        return Err(Error::method_not_allowed("Method not allowed."));
-    }
-    let node = authenticate(&app.service, request.headers()).await?;
-    let id = request
-        .uri()
-        .path()
-        .trim_start_matches("/internal/nodes/stream/")
-        .to_owned();
-    crate::validation::uuid(&id)?;
-    app.service
-        .node_transport
-        .stream(&node, &id, request.into_body())
-        .await?;
-    Ok(axum::Json(json!({ "complete": true })))
+    };
+    Duration::from_secs(seconds)
 }
 
 pub async fn authenticate(s: &Service, headers: &axum::http::HeaderMap) -> Result<String> {
@@ -456,12 +349,7 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
         format!("/{path}"),
         request.method().as_str().to_owned(),
     );
-    let limit = if path.ends_with("/restore") || path.ends_with("/publication") {
-        super::snapshots::MAX_MANIFEST_BYTES
-    } else {
-        MAX_REQUEST_BYTES
-    };
-    let body = axum::body::to_bytes(request.into_body(), limit)
+    let body = axum::body::to_bytes(request.into_body(), MAX_REQUEST_BYTES)
         .await
         .map_err(|_| Error::bad("Execution request too large."))?;
     s.node_transport
@@ -495,36 +383,6 @@ pub(crate) fn url_for_node(s: &Service, node: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn storage_pressure_publication_accepts_a_slow_cold_journal_header() {
-        let hub = Arc::new(Transport::default());
-        let node = crate::config::id();
-        let path = format!("/snapshots/{}/publication", crate::config::id());
-        let (request_hub, request_node) = (hub.clone(), node.clone());
-        let request = tokio::spawn(async move {
-            request_hub
-                .request_for_backend(&request_node, "POST", &path, vec![], true)
-                .await
-        });
-        let command = hub.poll(&node).await.unwrap();
-        tokio::time::advance(Duration::from_secs(90)).await;
-        tokio::task::yield_now().await;
-        assert!(
-            !request.is_finished(),
-            "A cold publication must outlive the ordinary control deadline"
-        );
-        hub.reply(
-            &node,
-            json!({
-                "id": command["id"], "sequence": 0, "status": 200,
-                "length": 0, "done": true
-            }),
-        )
-        .await
-        .unwrap();
-        assert!(request.await.unwrap().unwrap().status().is_success());
-    }
 
     #[tokio::test(start_paused = true)]
     async fn native_project_import_head_waits_for_the_route_budget_only() {

@@ -5,7 +5,7 @@
 - For storage behavior changes, include reproducible read/write measurements in
   the PR description against a reference: encoded bytes, cold/warm read latency,
   write latency, CPU, workload and host conditions. Commit no measurement artifacts.
-  See [storage measurement guidance](docs/STORAGE-COMPRESSION.md#qualification).
+  See [storage measurement guidance](docs/JOURNAL-RECOVERY.md#qualification).
   Distinguish local measurements from production network latency.
 - Keep the web and Android apps at feature parity: a user-facing feature added or changed in
   `apps/web` ships in `apps/android` in the same change, and vice versa. Use native
