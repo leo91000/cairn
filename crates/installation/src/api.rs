@@ -55,6 +55,31 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
             crate::notifications::recipients(s, input.identity.as_ref(), chat, question).await?;
         return Ok(serde_json::to_value(recipients)?);
     }
+    if let (method @ ("GET" | "PUT" | "DELETE"), ["chats", chat, "share"]) = route {
+        let name = match method {
+            "GET" => "get_chat_share",
+            "PUT" => "set_chat_share",
+            _ => "revoke_chat_share",
+        };
+        let mut args = if method == "PUT" {
+            if !input.body.is_object() {
+                return Err(Error::bad("Expected sharing options as an object."));
+            }
+            input.body.clone()
+        } else {
+            json!({})
+        };
+        args["chatId"] = (*chat).into();
+        return crate::capabilities::chat_operation(name)
+            .unwrap()
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::http(input)?,
+                None,
+            )
+            .await;
+    }
     if let Some(result) = record_routes(s, input, route).await? {
         return Ok(result);
     }

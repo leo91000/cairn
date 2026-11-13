@@ -455,7 +455,7 @@ pub async fn http(
     serve(s, &record, request).await
 }
 
-async fn serve(s: &Service, record: &Deliverable, request: Request) -> Result<Response> {
+pub(crate) async fn serve(s: &Service, record: &Deliverable, request: Request) -> Result<Response> {
     let artifact = &record.id;
     let query: std::collections::HashMap<String, String> =
         serde_urlencoded::from_str(request.uri().query().unwrap_or("")).map_err(Error::internal)?;

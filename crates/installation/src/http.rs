@@ -383,6 +383,9 @@ fn authenticate_installation(request: &Request) -> Result<()> {
         .get::<InstallationIdentity>()
         .ok_or_else(|| Error::unauthorized("Access this installation through the Beacon."))?;
     if let Some(token) = &identity.public_artifact {
+        if crate::conversation_sharing::public_read(path, request.method().as_str(), token) {
+            return Ok(());
+        }
         if path == format!("/api/shared-artifacts/{token}")
             && crate::artifacts::sharing::public_read(path, request.method().as_str())
         {
@@ -423,6 +426,7 @@ fn owner_operation(method: &str, path: &str) -> bool {
         ["tasks", _] => method == "DELETE",
         ["task-authors" | "notification-recipients", ..] => true,
         ["runs", _, "artifacts", _, "visibility"] => !read,
+        ["chats", _, "share"] => true,
         _ => false,
     }
 }
@@ -653,6 +657,17 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
         ["", "api", "agents", agent, "avatar"] => {
             crate::agent_avatars::http(s, agent, request).await?
         }
+        ["", "api", "shared-conversations", token] => {
+            crate::conversation_sharing::http(s, token, None, request).await?
+        }
+        [
+            "",
+            "api",
+            "shared-conversations",
+            token,
+            "artifacts",
+            artifact,
+        ] => crate::conversation_sharing::http(s, token, Some(artifact), request).await?,
         ["", "api", "shared-artifacts", token] => {
             crate::artifacts::sharing::http(s, token, request).await?
         }

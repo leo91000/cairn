@@ -1124,8 +1124,9 @@ async fn dispatch(
     // no credit round trip per chunk, and relay capacity is released at once.
     // Every peer accepts a finite response on a streamed route. Public files keep
     // streaming, so an anonymous reader never holds a whole file in the Beacon.
-    let private_file =
-        cairn_protocol::file_path(&input.path) && !input.path.starts_with("/api/shared-artifacts/");
+    let private_file = cairn_protocol::file_path(&input.path)
+        && !input.path.starts_with("/api/shared-artifacts/")
+        && !input.path.starts_with("/api/shared-conversations/");
     // A route error is a small handler body, even after compression removes its
     // Content-Length.
     let fits_frame = !(200..300).contains(&status)

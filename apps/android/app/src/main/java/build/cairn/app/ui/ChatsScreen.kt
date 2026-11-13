@@ -478,6 +478,7 @@ internal fun ChatPage(
     var queueExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var newSession by remember(id) { mutableStateOf(false) }
     var compacting by remember(id) { mutableStateOf(false) }
+    var sharing by remember(id) { mutableStateOf(false) }
     var renaming by remember(id) { mutableStateOf(false) }
     var cancelledExpanded by rememberSaveable(id) { mutableStateOf(false) }
     BackHandler(selected && fullscreen) { fullscreen = false }
@@ -1114,6 +1115,14 @@ internal fun ChatPage(
                                     )
                                     HorizontalDivider()
                                 }
+                                if (chat?.lifecycle == "active" && state.isOwner)
+                                    DropdownMenuItem(
+                                        text = { Text("Partager la conversation") },
+                                        onClick = {
+                                            menu = false
+                                            sharing = true
+                                        },
+                                    )
                                 if (chat?.lifecycle == "active")
                                     DropdownMenuItem(
                                         text = { Text("Renommer") },
@@ -2298,6 +2307,8 @@ internal fun ChatPage(
                         newSession = false
                     }
                 }
+            if (sharing && chat != null && state.isOwner)
+                ConversationSharingDialog(vm, chat.id) { sharing = false }
             if (renaming && chat != null)
                 ConversationRename(chat.title, state.busy, state.error, { renaming = false }) {
                     title,

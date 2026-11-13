@@ -1519,6 +1519,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "restore_chat",
         "read_chat_content",
     ]);
+    public_names.extend(["get_chat_share", "set_chat_share", "revoke_chat_share"]);
     public_names.insert("upload_chat_attachment");
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
     public_names.extend([
@@ -9923,4 +9924,29 @@ async fn chat_plan_settings_have_http_and_both_mcp_parity_with_live_authorizatio
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn installation_tools_manage_expiring_conversation_links() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let chat = s.chat_create(json!({})).await.unwrap();
+    let input = json!({ "chatId": chat["id"] });
+    let created = call(&s, &configuration, "set_chat_share", input.clone()).await;
+    assert!(created["result"]["isError"] != true, "{created}");
+    let share = result(&created);
+    assert!(
+        share["publicUrl"]
+            .as_str()
+            .unwrap()
+            .contains("/conversations/")
+    );
+    let read = call(&s, &configuration, "get_chat_share", input.clone()).await;
+    assert_eq!(result(&read)["token"], share["token"]);
+    let revoked = call(&s, &configuration, "revoke_chat_share", input.clone()).await;
+    assert!(result(&revoked)["publicUrl"].is_null());
+    let read = call(&s, &configuration, "get_chat_share", input).await;
+    assert!(result(&read)["publicUrl"].is_null());
 }
