@@ -141,7 +141,11 @@ describe('application image tool versions', () => {
     for (const name of ['backend', 'cli-qualification']) {
       expect(jobs.publish.needs).toContain(name)
       expect(jobs.publish.if).toContain(`needs.${name}.result == 'success'`)
+      expect(jobs['backend-migration-qualification'].needs).toContain(name)
     }
+
+    expect(jobs['backend-migration-qualification'].if).toContain('needs.backend.result == \'success\'')
+    expect(jobs['backend-migration-qualification'].if).toContain('inputs.backend-only == true || needs.cli-qualification.result == \'success\'')
   })
 
   it('holds an engine at an exact version given as its channel', async () => {

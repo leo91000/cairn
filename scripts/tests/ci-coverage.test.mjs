@@ -101,7 +101,6 @@ describe('parallel CI coverage', () => {
     expect(quality.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
   })
 
-
   it('runs the selected confirmed backend-change case in a separate bounded job after the backend suite', () => {
     const input = quality.on.workflow_dispatch.inputs['backend-qualification']
     expect(input).toEqual({
@@ -559,6 +558,7 @@ describe('parallel CI coverage', () => {
     const steps = quality.jobs['native-runtime'].steps
     const reference = steps.find(step => step.name === 'Qualify the exact reference on the current disposable host')
     const candidate = steps.find(step => step.name === 'Qualify local disks, ublk, systemd ownership and crash recovery')
+    // eslint-disable-next-line no-template-curly-in-string -- same local harness for both exact binary pairs
     expect(reference.run).toContain('git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py')
     // eslint-disable-next-line no-template-curly-in-string -- literal shell fallback is the provenance contract
     expect(candidate.run).toContain('git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py')
@@ -591,7 +591,7 @@ describe('parallel CI coverage', () => {
     expect(index).toBeLessThan(steps.findIndex(step => step.name === 'Qualify the exact reference on the current disposable host'))
     expect(steps[host].run).not.toContain('test_native_local_runtime.py')
     expect(consumer.if).toBeUndefined()
-    // eslint-disable-next-line no-template-curly-in-string -- exact absolute candidate fixture path in the workflow
+
     expect(consumer.run).toContain('scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- python3 -m unittest discover -s scripts/tests -p test_native_local_runtime.py -v')
     expect(consumer.run).not.toMatch(/(?:--filter|--ignore|\s-k\s)/)
     expect(steps.filter(step => step.run?.includes('node scripts/ci-diagnostic-native-build.mjs'))).toHaveLength(1)

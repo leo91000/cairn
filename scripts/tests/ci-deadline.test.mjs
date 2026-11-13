@@ -264,7 +264,7 @@ it('adopts a fast setsid daemon with closed stdio before its parent disappears',
   }
 })
 
-it.each(['backend', 'native'])('accepts workflow diagnostic prerequisites without the retired migration input (%s)', (role) => {
+it.each(['backend', 'native'])('accepts workflow diagnostic prerequisites without an explicit backend-change selection (%s)', (role) => {
   const environment = {
     ...process.env,
     BACKEND_ONLY: 'true',
