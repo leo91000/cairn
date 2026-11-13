@@ -18,10 +18,15 @@ use crate::{
     store::Db,
 };
 use cairn_contracts::{PluginContributionKind as Kind, RuleAction, RuleNode, RuleValueScope};
+use futures_util::{StreamExt, stream};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json, json};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS hook_rule_triggerings(
@@ -50,6 +55,7 @@ CREATE TABLE IF NOT EXISTS hook_rule_triggerings(
 CREATE INDEX IF NOT EXISTS hook_rule_triggerings_rule ON hook_rule_triggerings(rule_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS hook_rule_triggerings_due ON hook_rule_triggerings(status,next_at);
 CREATE INDEX IF NOT EXISTS hook_rule_triggerings_lease ON hook_rule_triggerings(status,lease_until);
+CREATE INDEX IF NOT EXISTS hook_rule_triggerings_active ON hook_rule_triggerings(rule_id,version) WHERE status IN ('running','waiting','retrying');
 CREATE TABLE IF NOT EXISTS hook_rule_receipts(
  rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
  event_id TEXT NOT NULL,
@@ -125,6 +131,46 @@ const PARALLEL: usize = 8;
 #[derive(Default)]
 pub struct Engine {
     pub(crate) wake: tokio::sync::Notify,
+    delivery_retries: Mutex<HashMap<(String, String), (Instant, u32)>>,
+    maintenance: Mutex<Option<Instant>>,
+}
+
+impl Engine {
+    fn delivery_waiting(&self, key: &(String, String)) -> bool {
+        self.delivery_retries
+            .lock()
+            .unwrap()
+            .get(key)
+            .is_some_and(|(at, _)| *at > Instant::now())
+    }
+
+    fn defer_delivery(&self, key: (String, String)) {
+        let mut retries = self.delivery_retries.lock().unwrap();
+        let attempts = retries
+            .get(&key)
+            .map_or(1, |(_, attempts)| attempts.saturating_add(1));
+        let seconds = (2_u64.saturating_pow(attempts.min(6)) * 2).min(60);
+        retries.insert(
+            key,
+            (
+                Instant::now() + std::time::Duration::from_secs(seconds),
+                attempts,
+            ),
+        );
+    }
+
+    fn clear_delivery(&self, key: &(String, String)) {
+        self.delivery_retries.lock().unwrap().remove(key);
+    }
+
+    fn maintenance_due(&self) -> bool {
+        let mut last = self.maintenance.lock().unwrap();
+        if last.is_some_and(|last| last.elapsed() < std::time::Duration::from_secs(60)) {
+            return false;
+        }
+        *last = Some(Instant::now());
+        true
+    }
 }
 
 /// What one action of a triggering did.
@@ -253,6 +299,7 @@ impl Db<'_> {
                     finished
                 ],
             )?;
+            self.prune_hook_triggerings(&t.rule_id)?;
         }
         Ok(())
     }
@@ -368,7 +415,7 @@ fn stop_triggerings(db: &Db<'_>, rule: &str, version: Option<u32>, reason: &str)
             serde_json::to_string(&Cursor::default())?
         ],
     )?;
-    Ok(())
+    db.prune_hook_triggerings(rule)
 }
 
 /// Why a rule must not act now, if it must not. An exhausted budget lets the
@@ -447,41 +494,28 @@ fn eligible_listener(db: &Db<'_>, rule: &str) -> Result<Option<(RuleRow, Version
 
 /// Turns queued hook events into triggerings, then acknowledges them. An event no
 /// rule may receive is dropped, so a quiet queue never blocks later events.
-async fn intake(s: &Arc<Service>) -> Result<usize> {
-    let instances = s
-        .store
-        .read(|db| {
-            Ok(db
-                .0
-                .prepare_cached(
-                    "SELECT DISTINCT instance_id FROM plugin_hook_events ORDER BY instance_id",
-                )?
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?)
-        })
-        .await?;
+async fn intake_instance(s: &Arc<Service>, instance: String) -> Result<usize> {
     let mut created = 0;
-    for instance in instances {
-        let Some(connection) = s.store.plugin_instance(&instance).await? else {
-            continue;
-        };
-        let Ok(package) = crate::plugins::registry::active(s, &connection.plugin_id).await else {
-            continue;
-        };
-        let (revision, digest) = (connection.revision.clone(), package.digest.clone());
-        let queue = instance.clone();
-        let events = s
-            .store
-            .read(move |db| db.plugin_hooks(&queue, &revision, &digest, now()))
-            .await?;
-        for event in events {
-            let (instance, hook) = (instance.clone(), event.name.clone());
-            let listeners = s
+    let Some(connection) = s.store.plugin_instance(&instance).await? else {
+        return Ok(0);
+    };
+    let Ok(package) = crate::plugins::registry::active(s, &connection.plugin_id).await else {
+        return Ok(0);
+    };
+    let (revision, digest) = (connection.revision.clone(), package.digest.clone());
+    let queue = instance.clone();
+    let events = s
+        .store
+        .read(move |db| db.plugin_hooks(&queue, &revision, &digest, now()))
+        .await?;
+    for event in events {
+        let (instance, hook, event_id) = (instance.clone(), event.name.clone(), event.id.clone());
+        let listeners = s
                 .store
                 .read(move |db| {
                     let mut listeners = Vec::new();
-                    let rules = db.0.prepare_cached("SELECT DISTINCT rule_id FROM hook_rule_uses WHERE kind='hook' AND instance_id=? AND name=?")?
-                        .query_map(params![instance, hook], |row| row.get::<_, String>(0))?
+                    let rules = db.0.prepare_cached("SELECT DISTINCT rule_id FROM hook_rule_uses u WHERE kind='hook' AND instance_id=?1 AND name=?2 AND NOT EXISTS(SELECT 1 FROM hook_rule_receipts r WHERE r.rule_id=u.rule_id AND r.event_id=?3)")?
+                        .query_map(params![instance, hook, event_id], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<Vec<_>>>()?;
                     for rule in rules {
                         match eligible_listener(db, &rule) {
@@ -493,8 +527,22 @@ async fn intake(s: &Arc<Service>) -> Result<usize> {
                     Ok(listeners)
                 })
                 .await?;
-            let mut deferred = false;
-            for (row, version) in listeners {
+        let fields = package
+            .manifest
+            .hook(&event.name)
+            .and_then(|hook| hook.payload_schema.get("properties"))
+            .and_then(Json::as_object)
+            .map(|fields| fields.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let queued = event.clone();
+        let mut deliveries = stream::iter(listeners).map(|(row, version)| {
+                let event = queued.clone();
+                let fields = fields.clone();
+                async move {
+                let key = (event.id.clone(), row.id.clone());
+                if s.rules.delivery_waiting(&key) {
+                    return Ok((now() - event.created_at < DELIVERY_PATIENCE, false));
+                }
                 let agent = version.definition.execution_agent_id.to_string();
                 // Cairn never delivers an event whose payload designates a resource
                 // outside the execution agent's hook grant. A resolution that failed for
@@ -513,22 +561,22 @@ async fn intake(s: &Arc<Service>) -> Result<usize> {
                         if !matches!(error.status, 400 | 403 | 404)
                             && now() - event.created_at < DELIVERY_PATIENCE =>
                     {
-                        deferred = true;
-                        continue;
+                        s.rules.defer_delivery(key);
+                        return Ok((true, false));
                     }
-                    Err(_) => continue,
+                    Err(_) => {
+                        s.rules.clear_delivery(&key);
+                        return Ok((false, false));
+                    }
                 }
+                s.rules.clear_delivery(&key);
                 let record = json!({
                     "id": event.id,
                     "hook": event.name,
                     "instanceId": event.instance_id,
                     "payload": event.payload,
                     "receivedAt": event.created_at,
-                    "payloadFields": package.manifest.hook(&event.name)
-                        .and_then(|hook| hook.payload_schema.get("properties"))
-                        .and_then(Json::as_object)
-                        .map(|fields| fields.keys().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default(),
+                    "payloadFields": fields,
                 });
                 let (rule, number, event_id) = (row.id.clone(), version.version, event.id.clone());
                 let inserted = s
@@ -548,23 +596,63 @@ async fn intake(s: &Arc<Service>) -> Result<usize> {
                             > 0)
                     })
                     .await?;
-                created += usize::from(inserted);
-            }
-            if deferred {
-                continue;
-            }
-            let (instance, event) = (event.instance_id.clone(), event.id.clone());
-            s.store
-                .transaction(move |db| db.remove_plugin_hook(&instance, &event))
-                .await?;
+                    Ok::<_, Error>((false, inserted))
+                }
+            }).buffer_unordered(PARALLEL);
+        let mut deferred = false;
+        while let Some(delivery) = deliveries.next().await {
+            let (waiting, inserted) = delivery?;
+            deferred |= waiting;
+            created += usize::from(inserted);
         }
+        if deferred {
+            continue;
+        }
+        let (instance, event) = (event.instance_id.clone(), event.id.clone());
+        s.store
+            .transaction(move |db| db.remove_plugin_hook(&instance, &event))
+            .await?;
     }
     Ok(created)
+}
+
+/// Queue discovery is read-only and never waits for a plugin resource resolver.
+async fn queued_instances(s: &Service) -> Result<Vec<String>> {
+    let queued = s.store.read(|db| {
+        Ok(db.0.prepare_cached("SELECT id,instance_id FROM plugin_hook_events ORDER BY instance_id,created_at,id")?
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }).await?;
+    let events = queued
+        .iter()
+        .map(|(event, _)| event.as_str())
+        .collect::<HashSet<_>>();
+    s.rules
+        .delivery_retries
+        .lock()
+        .unwrap()
+        .retain(|(event, _), _| events.contains(event.as_str()));
+    Ok(queued
+        .into_iter()
+        .map(|(_, instance)| instance)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect())
 }
 
 /// Claims due triggerings. An action left in flight by an interrupted executor stays
 /// ambiguous: its triggering fails rather than replaying it.
 async fn claim(s: &Service, capacity: usize) -> Result<Vec<String>> {
+    let due = s.store.read(|db| {
+        Ok(db.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hook_rule_triggerings WHERE (status='running' \
+             AND (lease_until IS NULL OR lease_until<?1)) OR (status IN ('waiting','retrying') AND next_at<=?1))",
+            [now()], |row| row.get::<_, bool>(0),
+        )?)
+    }).await?;
+    if !due {
+        return Ok(Vec::new());
+    }
     s.store
         .transaction(move |db| {
             let at = now();
@@ -625,26 +713,40 @@ fn sweep_rule(db: &Db<'_>, rule: &str) -> Result<()> {
             stop_triggerings(db, rule, Some(number), &reason)?;
         }
     }
-    db.prune_hook_triggerings(rule)
+    Ok(())
 }
 
 /// Stops the waiting triggerings of rules that became blocked in the meantime, such as
 /// a lost right, rather than letting them resume once the right returns.
 async fn sweep(s: &Service) -> Result<()> {
+    let maintenance = s.rules.maintenance_due();
+    let (active, retained, expired) = s.store.read(move |db| {
+        let active = db.0.prepare_cached(
+            "SELECT DISTINCT rule_id FROM hook_rule_triggerings WHERE status IN ('running','waiting','retrying')",
+        )?.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let retained = if maintenance {
+            db.0.prepare_cached("SELECT rule_id FROM hook_rule_triggerings UNION SELECT rule_id FROM hook_rule_quiet_hours")?
+                .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?
+        } else { Vec::new() };
+        let expired = maintenance && db.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hook_rule_receipts WHERE counted_at IS NULL OR counted_at<=?1)",
+            [now() - 3_600_000], |row| row.get::<_, bool>(0),
+        )?;
+        Ok((active, retained, expired))
+    }).await?;
+    if active.is_empty() && retained.is_empty() && !expired {
+        return Ok(());
+    }
     s.store
-        .transaction(|db| {
-            let rules =
-                db.0.prepare_cached(
-                    "SELECT id FROM hook_rules",
-                )?
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for rule in rules {
+        .transaction(move |db| {
+            for rule in active {
                 if let Err(error) = sweep_rule(db, &rule) {
                     tracing::warn!(rule = %rule, error = %error, "Rule state is unavailable");
                     stop_rule(db, &rule, "The rule state could not be loaded.")?;
                 }
             }
+            for rule in retained { db.prune_hook_triggerings(&rule)?; }
+            if !maintenance { return Ok(()) }
             // Delivery receipts outlive quiet triggerings while another listener is
             // deferred. Counted receipts also meter the hour independently of history.
             db.0.execute(
@@ -664,10 +766,29 @@ async fn sweep(s: &Service) -> Result<()> {
 /// progressing while a tool call occupies another executor slot.
 pub async fn tick(s: &Arc<Service>) -> Result<usize> {
     let mut tasks = tokio::task::JoinSet::new();
+    let mut intakes = tokio::task::JoinSet::new();
+    let mut admitting = HashSet::new();
+    let mut checked = HashSet::new();
     let mut ran = 0;
     loop {
-        if let Err(error) = intake(s).await {
-            tracing::warn!(error = %error, "Rule hook intake failed");
+        match queued_instances(s).await {
+            Ok(instances) => {
+                for instance in instances {
+                    if intakes.len() >= PARALLEL {
+                        break;
+                    }
+                    if admitting.contains(&instance) || !checked.insert(instance.clone()) {
+                        continue;
+                    }
+                    admitting.insert(instance.clone());
+                    let service = s.clone();
+                    intakes.spawn(async move {
+                        let result = intake_instance(&service, instance.clone()).await;
+                        (instance, result)
+                    });
+                }
+            }
+            Err(error) => tracing::warn!(error = %error, "Rule queue discovery failed"),
         }
         if let Err(error) = sweep(s).await {
             tracing::warn!(error = %error, "Rule history sweep failed");
@@ -677,7 +798,7 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
         if capacity > 0 {
             let due = match claim(s, capacity).await {
                 Ok(due) => due,
-                Err(error) if tasks.is_empty() => return Err(error),
+                Err(error) if tasks.is_empty() && intakes.is_empty() => return Err(error),
                 Err(error) => {
                     tracing::warn!(error = %error, "Rule claiming failed; existing executors continue");
                     Vec::new()
@@ -693,17 +814,31 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
             }
         }
 
-        if tasks.is_empty() {
+        if tasks.is_empty() && intakes.is_empty() {
             return Ok(ran);
         }
 
         tokio::select! {
             () = s.shutdown.cancelled() => {
                 tasks.abort_all();
+                intakes.abort_all();
                 return Ok(ran);
             }
-            () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-            completed = tasks.join_next() => {
+            () = tokio::time::sleep(std::time::Duration::from_secs(2)) => { checked.clear(); }
+            () = s.rules.wake.notified() => { checked.clear(); }
+            completed = intakes.join_next(), if !intakes.is_empty() => {
+                match completed {
+                    Some(Ok((instance, result))) => {
+                        admitting.remove(&instance);
+                        if let Err(error) = result {
+                            tracing::warn!(instance = %instance, error = %error, "Rule hook intake failed");
+                        }
+                    }
+                    Some(Err(error)) => tracing::warn!(error = %error, "Rule intake stopped"),
+                    None => {}
+                }
+            }
+            completed = tasks.join_next(), if !tasks.is_empty() => {
                 match completed {
                     Some(Ok((id, Err(error)))) => {
                         tracing::warn!(triggering = %id, error = %error, "Rule triggering failed to run");
@@ -794,10 +929,11 @@ async fn finish(
             if status == "completed" && t.actions == 0 {
                 db.0.execute("DELETE FROM hook_rule_triggerings WHERE id=?", [&t.id])?;
                 db.count_quiet(&t.rule_id)?;
+                db.prune_hook_triggerings(&t.rule_id)?;
             } else {
                 db.save_hook_triggering(&t, status, None, error.as_deref())?;
             }
-            db.prune_hook_triggerings(&t.rule_id)
+            Ok(())
         })
         .await
 }
@@ -877,6 +1013,15 @@ fn waiting_count(db: &Db<'_>, rule: &str, except: &str) -> Result<i64> {
     )?)
 }
 
+/// This path is only for preparation failures, before invocation can have effects.
+fn pre_call_failure(error: Error) -> Result<Json> {
+    if matches!(error.status, 408 | 429) || (error.status >= 500 && error.status != 502) {
+        Ok(json!({ "retryAfter": 0, "error": error.message }))
+    } else {
+        Err(error)
+    }
+}
+
 async fn call_tool(
     s: &Service,
     triggering: &str,
@@ -885,71 +1030,80 @@ async fn call_tool(
     tool: &str,
     input: &Json,
 ) -> Result<Json> {
-    let connection = required(
-        s.store.plugin_instance(instance).await?,
-        "This plugin instance no longer exists.",
-    )?;
-    if !connection.enabled {
-        return Err(Error::conflict("This plugin instance is disabled."));
-    }
-    let package = crate::plugins::registry::active(s, &connection.plugin_id).await?;
-    let declaration = package.manifest.tool(tool).ok_or_else(|| {
-        Error::bad(format!(
-            "{} has no tool named {tool}.",
-            package.manifest.name
-        ))
-    })?;
-    let valid = jsonschema::validator_for(&declaration.input_schema)
-        .is_ok_and(|validator| validator.is_valid(input));
-    if !valid {
-        return Err(Error::bad(format!("The input does not fit {tool}.")));
-    }
-    let profile = required(
-        s.store.agent_snapshot(agent).await?,
-        "The execution agent no longer exists.",
-    )?;
-    let snapshot =
-        crate::plugins::grant_authorization::Snapshot::capture(s, agent, None, &package).await?;
-    let scope = crate::plugins::grant_authorization::contribution_scope(
-        s,
-        snapshot,
-        vec![connection],
-        Kind::Tool,
-        tool,
-        input,
-    )
-    .await?;
-    let payload = json!({
-        "tool": tool,
-        "input": input,
-        "agent": { "id": agent, "name": crate::validation::text(&profile, "name") },
-        "instances": scope.instances(),
-    });
-    let triggering = triggering.to_owned();
-    let allowed = s
-        .store
-        .transaction(move |db| {
-            let Some(current) = db.hook_triggering(&triggering)? else {
-                return Ok(false);
-            };
-            if !current.in_flight || guard(db, &current)? {
-                return Ok(false);
-            }
-            Ok(db
-                .0
-                .query_row(
-                    "SELECT lease_until>?2 FROM hook_rule_triggerings WHERE id=?1",
-                    params![triggering, now()],
-                    |row| row.get::<_, Option<bool>>(0),
-                )?
-                .unwrap_or(false))
-        })
+    let prepared: Result<_> = async {
+        let connection = required(
+            s.store.plugin_instance(instance).await?,
+            "This plugin instance no longer exists.",
+        )?;
+        if !connection.enabled {
+            return Err(Error::conflict("This plugin instance is disabled."));
+        }
+        let package = crate::plugins::registry::active(s, &connection.plugin_id).await?;
+        let declaration = package.manifest.tool(tool).ok_or_else(|| {
+            Error::bad(format!(
+                "{} has no tool named {tool}.",
+                package.manifest.name
+            ))
+        })?;
+        let valid = jsonschema::validator_for(&declaration.input_schema)
+            .is_ok_and(|validator| validator.is_valid(input));
+        if !valid {
+            return Err(Error::bad(format!("The input does not fit {tool}.")));
+        }
+        let profile = required(
+            s.store.agent_snapshot(agent).await?,
+            "The execution agent no longer exists.",
+        )?;
+        let snapshot =
+            crate::plugins::grant_authorization::Snapshot::capture(s, agent, None, &package)
+                .await?;
+        let scope = crate::plugins::grant_authorization::contribution_scope(
+            s,
+            snapshot,
+            vec![connection],
+            Kind::Tool,
+            tool,
+            input,
+        )
         .await?;
-    if !allowed {
-        return Err(Error::conflict(
-            "This triggering stopped before the tool could be called.",
-        ));
+        let payload = json!({
+            "tool": tool,
+            "input": input,
+            "agent": { "id": agent, "name": crate::validation::text(&profile, "name") },
+            "instances": scope.instances(),
+        });
+        let triggering = triggering.to_owned();
+        let allowed = s
+            .store
+            .transaction(move |db| {
+                let Some(current) = db.hook_triggering(&triggering)? else {
+                    return Ok(false);
+                };
+                if !current.in_flight || guard(db, &current)? {
+                    return Ok(false);
+                }
+                Ok(db
+                    .0
+                    .query_row(
+                        "SELECT lease_until>?2 FROM hook_rule_triggerings WHERE id=?1",
+                        params![triggering, now()],
+                        |row| row.get::<_, Option<bool>>(0),
+                    )?
+                    .unwrap_or(false))
+            })
+            .await?;
+        if !allowed {
+            return Err(Error::conflict(
+                "This triggering stopped before the tool could be called.",
+            ));
+        }
+        Ok((package, scope, payload))
     }
+    .await;
+    let (package, scope, payload) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return pre_call_failure(error),
+    };
     tokio::time::timeout(
         TOOL_TIMEOUT,
         crate::plugins::scope::invoke(s, &package, "tool", payload, &scope),
@@ -958,18 +1112,67 @@ async fn call_tool(
     .map_err(|_| Error::unavailable("The tool did not answer in time; it may have taken effect."))?
 }
 
-/// A tool says the service did nothing yet and when to try again.
-fn retry_after(result: &Json) -> Option<f64> {
-    result
-        .as_object()
-        .filter(|fields| {
-            fields.len() <= 2
-                && fields
-                    .keys()
-                    .all(|key| key == "retryAfter" || key == "error")
+#[derive(Debug, PartialEq)]
+enum ToolOutcome<'a> {
+    Success,
+    Retry(f64),
+    Failed(&'a str),
+}
+
+fn retry_delay(value: &Json) -> Option<f64> {
+    let seconds = value.as_f64().or_else(|| {
+        let text = value.as_str()?.trim();
+        text.parse::<f64>().ok().or_else(|| {
+            chrono::DateTime::parse_from_rfc2822(text)
+                .ok()
+                .map(|date| ((date.timestamp_millis() - now()) as f64 / 1000.0).max(0.0))
         })
-        .and_then(|fields| fields.get("retryAfter"))
-        .and_then(Json::as_f64)
+    })?;
+    (seconds.is_finite() && seconds >= 0.0).then_some(seconds)
+}
+
+/// The legacy explicit no-effect reply and the bundled plugins' `ok` convention.
+/// A status code alone never proves a mutation was not performed.
+fn tool_outcome(result: &Json) -> ToolOutcome<'_> {
+    let Some(fields) = result.as_object() else {
+        return ToolOutcome::Success;
+    };
+    let legacy = fields.contains_key("retryAfter")
+        && fields.len() <= 2
+        && fields
+            .keys()
+            .all(|key| key == "retryAfter" || key == "error");
+    if legacy {
+        return retry_delay(&result["retryAfter"]).map_or(
+            ToolOutcome::Failed("The plugin returned an invalid retry delay."),
+            ToolOutcome::Retry,
+        );
+    }
+    if result["ok"] != false {
+        return ToolOutcome::Success;
+    }
+    if result["retryable"] == true {
+        return match fields.get("retryAfter").filter(|delay| !delay.is_null()) {
+            Some(delay) => retry_delay(delay).map_or(
+                ToolOutcome::Failed("The plugin returned an invalid retry delay."),
+                ToolOutcome::Retry,
+            ),
+            None => ToolOutcome::Retry(0.0),
+        };
+    }
+    ToolOutcome::Failed(
+        result["message"]
+            .as_str()
+            .or_else(|| result["error"].as_str())
+            .unwrap_or("The plugin reported a failure."),
+    )
+}
+
+fn retry_after(result: &Json) -> Option<f64> {
+    match tool_outcome(result) {
+        ToolOutcome::Retry(delay) => Some(delay),
+        _ => None,
+    }
 }
 
 fn node<'a>(steps: &'a [RuleNode], id: &str) -> Option<&'a RuleNode> {
@@ -1156,6 +1359,17 @@ fn record_late_tool_result(
             result: Some(result),
             error: Some("The triggering stopped before this action could be retried."),
         },
+        Ok(result) if matches!(tool_outcome(result), ToolOutcome::Failed(_)) => {
+            let ToolOutcome::Failed(error) = tool_outcome(result) else {
+                unreachable!()
+            };
+            StepRecord {
+                status: "failed",
+                input: None,
+                result: Some(result),
+                error: Some(error),
+            }
+        }
         Ok(result) => StepRecord {
             status: "completed",
             input: None,
@@ -1205,44 +1419,6 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
         return Ok(Step::Done);
     }
 
-    // A member's triggering acts only on a recently verified membership, and checks it
-    // again after each wait. The cursor stays where it is until it does.
-    if !row.creator_owner {
-        let verified = s
-            .missions
-            .verify_membership(s, std::time::Duration::from_secs(60))
-            .await;
-        if verified.is_err() {
-            let since = *triggering.verify_since.get_or_insert_with(now);
-            if now() - since > MEMBERSHIP_PATIENCE {
-                let error = "Its creator's membership could not be verified for seven days.";
-                finish(s, triggering, "failed", Some(error.into())).await?;
-            } else {
-                let at = now() + 60_000;
-                let note = "Waiting to verify its creator's membership.";
-                s.store
-                    .transaction(move |db| {
-                        if guard(db, &triggering)? {
-                            return Ok(());
-                        }
-                        if waiting_count(db, &triggering.rule_id, &triggering.id)? >= MAX_WAITING {
-                            refuse(
-                                db,
-                                &triggering,
-                                "This rule already has 20 triggerings waiting.",
-                            )?;
-                            return Ok(());
-                        }
-                        db.save_hook_triggering(&triggering, "waiting", Some(at), Some(note))
-                    })
-                    .await?;
-            }
-            return Ok(Step::Done);
-        }
-        triggering.verify = false;
-        triggering.verify_since = None;
-    }
-
     let base = base(&triggering.event, values, triggering.created_at);
     let (definition, cursor, pending) = (
         version.definition.clone(),
@@ -1281,6 +1457,44 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
             (node, input, cursor)
         }
     };
+    // A member's triggering acts only on a recently verified membership, and checks it
+    // again after each wait. The cursor stays where it is until it does.
+    if !row.creator_owner {
+        let verified = s
+            .missions
+            .verify_membership(s, std::time::Duration::from_secs(60))
+            .await;
+        if verified.is_err() {
+            let since = *triggering.verify_since.get_or_insert_with(now);
+            if now() - since > MEMBERSHIP_PATIENCE {
+                let error = "Its creator's membership could not be verified for seven days.";
+                finish(s, triggering, "failed", Some(error.into())).await?;
+            } else {
+                let at = now() + 60_000;
+                let note = "Waiting to verify its creator's membership.";
+                s.store
+                    .transaction(move |db| {
+                        if guard(db, &triggering)? {
+                            return Ok(());
+                        }
+                        if waiting_count(db, &triggering.rule_id, &triggering.id)? >= MAX_WAITING {
+                            refuse(
+                                db,
+                                &triggering,
+                                "This rule already has 20 triggerings waiting.",
+                            )?;
+                            return Ok(());
+                        }
+                        db.save_hook_triggering(&triggering, "waiting", Some(at), Some(note))
+                    })
+                    .await?;
+            }
+            return Ok(Step::Done);
+        }
+        triggering.verify = false;
+        triggering.verify_since = None;
+    }
+
     let RuleNode::Action { action, .. } = &node else {
         return Err(Error::internal("The interpreter stopped on a block."));
     };
@@ -1387,6 +1601,31 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                             return Ok(Step::Done);
                         }
                     };
+                    if serde_json::to_vec(&result)
+                        .map_or(true, |bytes| bytes.len() > evaluate::MAX_BYTES)
+                    {
+                        let error = "The tool's result is larger than 256 KiB.";
+                        let failed = StepRecord {
+                            status: "failed",
+                            input: None,
+                            result: None,
+                            error: Some(error),
+                        };
+                        db.record_step(&prepared.id, position, &node, attempts, failed)?;
+                        db.save_hook_triggering(&prepared, "failed", None, Some(error))?;
+                        return Ok(Step::Done);
+                    }
+                    if let ToolOutcome::Failed(error) = tool_outcome(&result) {
+                        let failed = StepRecord {
+                            status: "failed",
+                            input: None,
+                            result: Some(&result),
+                            error: Some(error),
+                        };
+                        db.record_step(&prepared.id, position, &node, attempts, failed)?;
+                        db.save_hook_triggering(&prepared, "failed", None, Some(error))?;
+                        return Ok(Step::Done);
+                    }
                     if let Some(seconds) = retry_after(&result) {
                         if attempts >= MAX_ATTEMPTS {
                             let error =
@@ -1440,20 +1679,6 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                         };
                         db.record_step(&prepared.id, position, &node, attempts, retrying)?;
                         db.save_hook_triggering(&prepared, "retrying", Some(resumes_at), None)?;
-                        return Ok(Step::Done);
-                    }
-                    if serde_json::to_vec(&result)
-                        .map_or(true, |bytes| bytes.len() > evaluate::MAX_BYTES)
-                    {
-                        let error = "The tool's result is larger than 256 KiB.";
-                        let failed = StepRecord {
-                            status: "failed",
-                            input: None,
-                            result: None,
-                            error: Some(error),
-                        };
-                        db.record_step(&prepared.id, position, &node, attempts, failed)?;
-                        db.save_hook_triggering(&prepared, "failed", None, Some(error))?;
                         return Ok(Step::Done);
                     }
                     let completed = StepRecord {
@@ -1752,4 +1977,44 @@ pub(crate) fn get(
     let row = required(db.hook_rule(&t.rule_id)?, "Rule not found")?;
     let visible = visible_for(db, &row, t.version, viewer)?;
     view(db, id, visible, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_safe_replies_or_known_pre_call_refusals_are_retryable() {
+        for status in [408, 429, 500, 503, 504] {
+            let reply = pre_call_failure(Error::new(status, "not invoked")).unwrap();
+            assert_eq!(tool_outcome(&reply), ToolOutcome::Retry(0.0));
+        }
+        for status in [400, 401, 403, 404, 409, 502] {
+            assert!(pre_call_failure(Error::new(status, "permanent refusal")).is_err());
+        }
+        assert_eq!(
+            tool_outcome(&json!({"ok": false, "status": 429, "retryable": false})),
+            ToolOutcome::Failed("The plugin reported a failure.")
+        );
+        assert_eq!(
+            tool_outcome(&json!({"ok": true, "error": "domain data"})),
+            ToolOutcome::Success
+        );
+        assert_eq!(
+            tool_outcome(&json!({"retryAfter": -1})),
+            ToolOutcome::Failed("The plugin returned an invalid retry delay.")
+        );
+    }
+
+    #[test]
+    fn retry_after_accepts_numeric_headers_and_http_dates() {
+        assert_eq!(retry_delay(&json!("3600")), Some(3600.0));
+        assert_eq!(
+            retry_delay(&json!("Sun, 06 Nov 1994 08:49:37 GMT")),
+            Some(0.0)
+        );
+        assert_eq!(retry_delay(&json!("not a date")), None);
+        assert_eq!(retry_delay(&json!("NaN")), None);
+        assert_eq!(retry_delay(&json!("inf")), None);
+    }
 }

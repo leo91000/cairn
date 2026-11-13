@@ -56,9 +56,13 @@ async fn granted() -> Fixture {
 /// Queues a hook event as the plugin's transport would. The queue identity derives from
 /// the external one, so queuing it again models an event read again after a stop.
 async fn emit(f: &Fixture, external: &str, payload: Value) {
+    emit_on(f, &f.instance, external, payload).await;
+}
+
+async fn emit_on(f: &Fixture, instance_id: &str, external: &str, payload: Value) {
     let instance =
         f.s.store
-            .plugin_instance(&f.instance)
+            .plugin_instance(instance_id)
             .await
             .unwrap()
             .unwrap();
@@ -1354,4 +1358,264 @@ async fn conversation_actions_and_predicates_fail_explicitly_until_ticket_g() {
             "{failed}"
         );
     }
+}
+
+fn remember_seen() -> Value {
+    json!({
+        "type": "action", "id": "remember",
+        "action": {
+            "type": "storeValue", "scope": "rule", "name": "seen",
+            "value": { "type": "literal", "value": true },
+        },
+    })
+}
+
+async fn has_seen(f: &Fixture, rule: &str) -> bool {
+    let rule = rule.to_owned();
+    f.s.store.read(move |db| {
+        Ok(db.0.query_row("SELECT EXISTS(SELECT 1 FROM hook_rule_values WHERE rule_id=? AND name='seen' AND value='true')", [rule], |row| row.get::<_, bool>(0))?)
+    }).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
+    let f = Fixture::new().await;
+    f.marker("live-parent").await;
+    let other = common::save_plugin(
+        &f.s,
+        "grant-probe",
+        &json!({ "name": "Fast", "enabled": true }),
+        None,
+    )
+    .await
+    .unwrap();
+    let other_id = text(&other, "id");
+    let current = f.api("GET", json!({})).await.unwrap();
+    f.api("PUT", json!({
+        "agentId": MAIN_AGENT_ID,
+        "revision": current["revision"],
+        "grants": [
+            { "instanceId": f.instance, "access": { "type": "selected", "contributions": [contribution("hook", "message", json!([]))] } },
+            { "instanceId": other_id, "access": { "type": "selected", "contributions": [contribution("hook", "message", json!([]))] } },
+        ],
+        "runCredentialInstances": [],
+    })).await.unwrap();
+    let fast = rule(&f, OWNER, json!([remember_seen()]), 60).await;
+    let agent =
+        f.s.agent_fixture(json!({ "name": "Resolving" }), None)
+            .await
+            .unwrap();
+    let agent_id = text(&agent, "id");
+    f.set_for(
+        agent_id,
+        json!([contribution("hook", "message", support())]),
+    )
+    .await;
+    let (_, source) = call(
+        &f,
+        OWNER,
+        "GET",
+        &format!("/api/hook-rules/{fast}"),
+        Value::Null,
+    )
+    .await;
+    let mut slow_definition = source["definition"].clone();
+    slow_definition["executionAgentId"] = agent_id.into();
+    let (status, response) = call(
+        &f,
+        OWNER,
+        "POST",
+        "/api/hook-rules",
+        json!({ "definition": slow_definition }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let mut other_definition = source["definition"].clone();
+    other_definition["trigger"]["instanceId"] = other_id.into();
+    let (status, other_rule) = call(
+        &f,
+        OWNER,
+        "POST",
+        "/api/hook-rules",
+        json!({ "definition": other_definition }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{other_rule}");
+    let other_rule = text(&other_rule, "id");
+    f.pause.store(true, Ordering::SeqCst);
+    emit(
+        &f,
+        "slow-resolution",
+        json!({ "channel": "support", "thread": "support-thread", "author": "alice" }),
+    )
+    .await;
+    let service = f.s.clone();
+    let worker = tokio::spawn(async move { engine::tick(&service).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+        .await
+        .unwrap();
+    emit_on(
+        &f,
+        other_id,
+        "new-instance",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    let progress = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !has_seen(&f, &fast).await || !has_seen(&f, other_rule).await {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    f.release.notify_one();
+    worker.await.unwrap().unwrap();
+    assert!(
+        progress.is_ok(),
+        "Resource resolution held up independent rule work."
+    );
+}
+
+#[tokio::test]
+async fn transient_delivery_resolution_is_backed_off() {
+    let f = granted().await;
+    f.marker("resolver-unavailable").await;
+    rule(&f, OWNER, json!([remember_seen()]), 60).await;
+    emit(
+        &f,
+        "unavailable",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let attempts = f.posts.load(Ordering::SeqCst);
+    assert!(attempts > 0);
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), attempts);
+}
+
+#[tokio::test]
+async fn an_idle_ruleset_does_not_need_the_sqlite_writer() {
+    let f = granted().await;
+    rule(&f, OWNER, json!([remember_seen()]), 60).await;
+    let mut writer = rusqlite::Connection::open_with_flags(
+        f.s.config.data_dir.join("manager.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap();
+    let locked = writer
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), engine::tick(&f.s)).await;
+    drop(locked);
+    result
+        .expect("Idle rule polling acquired the writer.")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn reported_plugin_failures_stop_the_tree_and_only_confirmed_retries_wait() {
+    for (response, expected) in [
+        (
+            json!({ "ok": false, "status": 403, "error": "permission_denied" }),
+            "failed",
+        ),
+        (
+            json!({
+                "ok": false,
+                "retryable": false,
+                "status": 503,
+                "retryAfter": "3600",
+                "error": "request_not_confirmed",
+                "rfcMessageId": "fixture@example.test",
+            }),
+            "failed",
+        ),
+        (
+            json!({
+                "ok": false,
+                "retryable": true,
+                "status": 429,
+                "retryAfter": "3600",
+                "error": "rate_limited",
+            }),
+            "retrying",
+        ),
+        (
+            json!({
+                "ok": false,
+                "retryable": true,
+                "status": 503,
+                "error": "temporarily_unavailable",
+            }),
+            "retrying",
+        ),
+    ] {
+        let f = granted().await;
+        let rule = rule(
+            &f,
+            OWNER,
+            steps(&json!([
+                post(
+                    "reported",
+                    &f,
+                    &json!({ "result": { "type": "literal", "value": response } })
+                ),
+                post("mustNotRun", &f, &json!({})),
+            ])),
+            60,
+        )
+        .await;
+        let at = cairn_installation::config::now();
+        emit(
+            &f,
+            "reported-failure",
+            json!({ "channel": "support", "author": "alice" }),
+        )
+        .await;
+        engine::tick(&f.s).await.unwrap();
+        let listed = history(&f, OWNER, &rule).await;
+        let result = detail(&f, OWNER, &listed["triggerings"][0]).await;
+        assert_eq!(result["status"], expected, "{result}");
+        assert_eq!(result["steps"][0]["result"], response);
+        assert_eq!(result["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+        if expected == "retrying" && response.get("retryAfter").is_some() {
+            assert!(result["resumesAt"].as_i64().unwrap() >= at + 3_600_000);
+        }
+    }
+}
+
+#[tokio::test]
+async fn ignored_member_events_do_not_fill_waiting_slots_during_a_membership_outage() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let rule = rule(
+        &f,
+        MEMBER,
+        steps(&json!([post("post", &f, &json!({}))])),
+        60,
+    )
+    .await;
+    common::relay_fixture::authority_unavailable(&f.s, true).await;
+    emit(
+        &f,
+        "ignored-during-outage",
+        json!({ "channel": "support", "author": "bob" }),
+    )
+    .await;
+    let restarted = cairn_installation::service::Service::new(f.s.config.clone())
+        .await
+        .unwrap();
+    restarted
+        .plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    restarted.plugins.route_http_to(Some(f.http_origin.clone()));
+    engine::tick(&restarted).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    assert!(
+        listed["triggerings"].as_array().unwrap().is_empty(),
+        "{listed}"
+    );
+    assert_eq!(listed["withoutEffect"], 1);
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
 }

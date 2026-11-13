@@ -186,6 +186,7 @@ impl Fixture {
                 "retryAfter": { "type": "number" },
                 "delay": { "type": "number" },
                 "agentView": { "type": "boolean" },
+                "result": {},
                 "instance": { "type": "string" },
                 "items": {
                     "type": "array",
@@ -259,6 +260,10 @@ return {
             pcall(function() cairn.http.request({url="https://service.example.test/effect"}) end)
             return {items=cairn.array({})}
         end
+        if input.instance.settings.marker == "resolver-unavailable" then
+            cairn.http.request({url="https://service.example.test/effect"})
+            return {}
+        end
         if input.id == "unknown" then return {} end
         if input.instance.settings.marker == "resolver-effects" then
             pcall(function() cairn.http.request({url="https://service.example.test/effect"}) end)
@@ -275,6 +280,7 @@ return {
     end,
     tool = function(input)
         if input.input.agentView then return input.agent end
+        if input.input.result then return input.input.result end
         if input.input.chunks then
             local destination = if input.input.target then cairn.files.read({instance=input.instances[1].id,id=input.input.target}) else cairn.files.create({instance=input.instances[1].id,name="chunks.txt",data=""})
             for _ = 1, input.input.chunks do

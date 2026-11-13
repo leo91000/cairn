@@ -117,6 +117,10 @@ Actions:
   again, after the larger of that delay and an exponential backoff, for at most five
   attempts in all. A requested delay beyond seven days fails the triggering. Retries
   share the rule's waiting limit, and membership is checked again before resuming.
+  Replies with `ok: false` end the triggering as failures. They retry only when the
+  plugin explicitly sets `retryable: true`; a status such as 429 or 503 alone never
+  confirms a mutation was not performed. Numeric and HTTP `Retry-After` values are
+  supported. Transient refusals detected by Cairn before invocation also retry.
   Any other error ends the triggering with its message.
 - `storeValue` with the rule scope keeps up to 64 KiB.
 - `wait` resumes the next steps later; a rule keeps at most 20 triggerings waiting,
