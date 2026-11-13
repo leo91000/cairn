@@ -174,9 +174,10 @@ pub(crate) fn expire_node_in(
 ) -> Result<Vec<String>> {
     let mut expired = Vec::new();
     for run in runs_on_node(db, node)? {
-        if db.get(PENDING, &run)?.is_some()
-            || crate::conversation_lifecycle::require_active_run(db, &run).is_err()
-        {
+        let purging = db
+            .conversation_for_run(&run)?
+            .is_some_and(|chat| chat.lifecycle == cairn_contracts::ConversationLifecycle::Purging);
+        if db.get(PENDING, &run)?.is_some() || purging {
             continue;
         }
         request_in(

@@ -123,8 +123,8 @@ async fn execute_inner(
     }
     .await;
     if let Some((runner, _)) = execution.reservation.take() {
-        // No controller received this reserved attempt; workspace preparation
-        // stopped before prepare_runner claimed it.
+        // No controller received this attempt: ownership did not reach its
+        // durable checkpoint, so preparation must release the reservation.
         placement::release(s, &runner).await?;
     }
     result
@@ -976,6 +976,7 @@ impl Execution<'_> {
                 (runner, placement)
             }
         };
+        self.reservation = Some((runner.clone(), placement.clone()));
         timing.next("materialize");
         if !self.run["environmentExpiredAt"].is_null() {
             crate::conversation_deletion::require_retirement_protocol(
@@ -1007,6 +1008,8 @@ impl Execution<'_> {
                 move |db| publication.authorize_in(db),
             )
             .await?;
+        // The persisted checkpoint now owns fencing/release on subsequent errors.
+        self.reservation = None;
         drop(self.preparation.take());
         s.worker.notify();
         timing.next("plan");

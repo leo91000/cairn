@@ -55,7 +55,10 @@ before manager namespace reuse. That proof survives temporary controller outages
 Controller deletion without an identity requires `permanentlyDeleted: true` and is
 reserved for irreversible conversation purge. Manual whole stale-disk cleanup uses
 the same durable queue and rechecks current ownership in its writer transaction.
-Explicit conversation deletion retains ADR-0041 behavior.
+Revocation also expires retained environments in legacy, restorable Trash. It
+keeps those conversations trashed and paused without extending their restoration
+deadline. New conversation deletion retains ADR-0041 behavior with no recovery
+window.
 
 After expiration, send a new message (and resume the queue if paused) to recreate
 the environment. The same conversation and run retain their history and artifacts;

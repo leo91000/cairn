@@ -1616,3 +1616,95 @@ async fn failed_manager_erasure_allows_destination_admission_and_preserves_its_n
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn revocation_expires_retained_legacy_trash_without_resuming_it() {
+    let change = Change::new(RunStatus::Succeeded).await;
+    let chat = change.chat.clone();
+    change
+        .owner
+        .service
+        .store
+        .transaction(move |db| {
+            let mut chat = db.conversation(&chat)?.unwrap();
+            chat.lifecycle = cairn_contracts::ConversationLifecycle::Trash;
+            chat.previous_lifecycle = Some(cairn_contracts::ConversationLifecycle::Active);
+            chat.paused = true;
+            chat.trashed_at = Some(now() - 86_400_000);
+            chat.purge_at = Some(now() + 29 * 86_400_000);
+            db.save_conversation(&chat)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (status, revoked) = change
+        .owner
+        .send(
+            "POST",
+            &format!("/api/nodes/{}/revoke", change.source),
+            json!({ "discardWorkingFiles":true,"releasePlacements":true }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    let retained = change
+        .owner
+        .service
+        .store
+        .conversation_boundary(&change.chat)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained["lifecycle"], "trash");
+    assert_eq!(retained["paused"], true);
+    assert_eq!(retained["environmentState"], "expired");
+    assert_eq!(
+        change.owner.run(&change.run).await["environmentExpirationCause"],
+        "node-revocation"
+    );
+    assert_ne!(
+        change.owner.run(&change.run).await["status"],
+        RunStatus::Queued
+    );
+    change
+        .owner
+        .service
+        .detach_stopped_environments()
+        .await
+        .unwrap();
+    change.owner.service.retire_environments().await.unwrap();
+    assert!(
+        change
+            .owner
+            .service
+            .store
+            .checkpoint_boundary(&change.run)
+            .await
+            .unwrap()
+            .unwrap()["prepared"]
+            .is_null()
+    );
+    assert!(change.owner.run(&change.run).await["sessionId"].is_null());
+    let (status, restored) = change
+        .owner
+        .send(
+            "POST",
+            &format!("/api/chats/{}/restore", change.chat),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["environmentState"], "expired");
+    let (status, selected) = change.move_to(json!({ "nodeId":change.destination })).await;
+    assert_eq!(status, StatusCode::OK, "{selected}");
+    let run = change.owner.run(&change.run).await;
+    let attempt = id();
+    assert_eq!(
+        placement::reserve(&change.owner.service, &run, &attempt)
+            .await
+            .unwrap()["nodeId"],
+        change.destination
+    );
+    placement::release(&change.owner.service, &attempt)
+        .await
+        .unwrap();
+}
