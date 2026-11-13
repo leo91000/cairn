@@ -22,7 +22,7 @@ pub(crate) fn from_persisted(bytes: &[u8]) -> serde_json::Result<Policy> {
     decode_policy(serde_json::from_slice(bytes)?)
 }
 
-fn decode_policy(mut value: serde_json::Value) -> serde_json::Result<Policy> {
+pub(crate) fn decode_policy(mut value: serde_json::Value) -> serde_json::Result<Policy> {
     if let Some(policy) = value.as_object_mut() {
         for removed in ["cacheMiB", "backupSeconds", "maxDirtySeconds"] {
             policy.remove(removed);
