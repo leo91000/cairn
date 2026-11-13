@@ -34,9 +34,11 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     for (id, data, updated_at) in records {
         let node = decode(&id, &data)?;
         Db(&tx).save_node(&node)?;
+        // Retain historical settings privately even though the public policy no
+        // longer exposes them. Missing values keep the existing SQL defaults.
         tx.execute(
-            "UPDATE nodes SET updated_at=?1 WHERE id=?2",
-            params![updated_at, id],
+            "UPDATE nodes SET updated_at=?1,storage_cache_mi_b=COALESCE(json_extract(?3,'$.storage.cacheMiB'),storage_cache_mi_b),storage_backup_seconds=COALESCE(json_extract(?3,'$.storage.backupSeconds'),storage_backup_seconds),storage_max_dirty_seconds=COALESCE(json_extract(?3,'$.storage.maxDirtySeconds'),storage_max_dirty_seconds) WHERE id=?2",
+            params![updated_at, id, data],
         )?;
     }
 

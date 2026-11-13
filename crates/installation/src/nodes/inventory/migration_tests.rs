@@ -173,6 +173,16 @@ async fn version11_startup_conserves_inventory_credentials_and_references() {
     }
     let node = serde_json::to_value(agent.node(NODE).await.unwrap().unwrap()).unwrap();
     assert_preserved(&legacy, &node);
+    for id in [NODE, crate::nodes::LOCAL_NODE_ID] {
+        let retired_settings = db
+            .query_row(
+                "SELECT storage_cache_mi_b,storage_backup_seconds,storage_max_dirty_seconds FROM nodes WHERE id=?1",
+                [id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            )
+            .unwrap();
+        assert_eq!(retired_settings, (20480, 30, 90));
+    }
     assert!(!node["revision"].as_str().unwrap().is_empty());
     assert_eq!(node["exclusiveAgents"], json!([AGENT]));
     let local_after = serde_json::to_value(
