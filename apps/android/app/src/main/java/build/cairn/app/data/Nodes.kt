@@ -512,7 +512,7 @@ fun nodeDiagnostics(
             "KVM indisponible : activez la virtualisation dans le BIOS et chargez le module kvm."
     if (node.capabilities.backend == NATIVE_BACKEND && !node.capabilities.ublk)
         reasons +=
-            "ublk indisponible : cette node a besoin d’un runtime natif à jour et du module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
+            "ublk indisponible : cette node a besoin d’un runtime natif à jour et du module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation locaux."
     if (node.status != "offline" && !node.executionReady)
         reasons +=
             privilegeReason(node)

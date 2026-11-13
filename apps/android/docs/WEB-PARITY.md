@@ -224,14 +224,12 @@ never supplies it and importing never changes project, skill or plugin grants.
 Owner-only UI writes and source access remain owner-only. No visual or feature
 difference between web and Android is introduced.
 
-## Direct storage and overdue synchronization (2026-10-28)
+## Local disk status (ADR-0083)
 
-Web and Android expose overdue synchronization while the agent continues on its
-durable local journal. Both keep upload failures, unsaved bytes/age and the existing
-integrity and disk-space warnings visible. The node storage setting now describes
-a warning threshold rather than a deadline that suspends execution. REST, public
-MCP and `cairn_installation` retain the same run storage payload, including
-`backupDegraded`; provider capabilities and transfer keys remain internal.
+Web and Android show durable local journal bytes awaiting consolidation and
+integrity and disk-space warnings. Healthy local work continues while journal
+segments await consolidation. HTTP, public MCP and `cairn_installation` expose
+the same local run storage payload and disk reserve controls.
 
 ## Skill suggestion frequency (2026-10-27)
 
@@ -362,10 +360,10 @@ French Material controls. Public MCP and `cairn_installation` expose the same
 generated `access.backend` and `nodePriorities` through agent create/replace.
 
 Native disk capacity: web and Android show the same `list_nodes` disk-accounting
-breakdown (local usage, unused grants, host free space and reserves, reclaimable
-acknowledged backing, and last-reported unpublished journal bytes). Android uses
-French Material text; web uses an English capacity section. Both explain overlapping
-figures and immediate safe reclamation under pressure. Older runtimes may omit it.
+breakdown of local usage, unused disk allocations, host free space, reserves and
+unconsolidated journal bytes. Android uses French Material text; web uses an
+English capacity section.
+Both explain overlapping figures. Older runtimes may omit the breakdown.
 The public MCP and built-in installation tool return the same inventory fields.
 
 | Area | Native Android implementation | Validation |
@@ -571,11 +569,11 @@ large text wraps. It is a polite live region for accessibility services. At
 normal text size the pills keep their single-line capsule look and heights.
 `pagingErrorFitsANarrowScreenWithLargeText` checks a 320 dp width at 150% text.
 
-Native ublk storage and retention: native Linux conversations use the same
-on-demand S3 block journal and synchronization status as VM conversations. The
-installation reclaims acknowledged clean native cache after one idle hour and
-reloads missing blocks on demand. Web and Android consume the same backend status;
-neither client adds a retention control. Chat and published artifact links remain.
+Native ublk storage and retention: native Linux and VM conversations use local
+journals and immutable local base blocks. Inactive environments retain their
+whole disk until expiration or deletion; same-node resume reopens it locally.
+Web and Android show storage pressure and local consolidation from the same
+backend status. History, attachments and published artifacts remain on the manager.
 
 VM nodes no longer expose a FUSE capability or diagnostic. Web removes its stale
 FUSE message; Android already has no FUSE field or message. Both use the existing
@@ -838,6 +836,7 @@ or space reclaimable by evicting an inactive environment. The node and run
 responses used by public MCP and `cairn_installation` expose the same local
 accounting (`unconsolidatedBytes`) and omit the obsolete backup view. Android
 uses native French labels; web uses its execution panel and node capacity details.
+Both apps describe missing ublk as a prerequisite for local conversation disks.
 
 ## Expiring conversation links
 

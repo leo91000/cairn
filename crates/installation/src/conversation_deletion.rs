@@ -743,8 +743,17 @@ mod retirement_tests {
                  INSERT INTO remote_deletions VALUES('existing','{}','existing-key',1,7);",
             )?;
             for run in [&retired, &retained] {
-                db.put("node-backups", &json!({ "id": run, "runId": run, "destination": "s3" }))?;
-                db.put("node-disk-grants", &json!({ "id": run, "runId": run }))?;
+                let backup = json!({
+                    "id": format!("node-backups:{run}"),
+                    "runId": run,
+                    "destination": "s3"
+                });
+                let grant = json!({
+                    "id": format!("node-disk-grants:{run}"),
+                    "runId": run
+                });
+                db.put("node-backups", &backup)?;
+                db.put("node-disk-grants", &grant)?;
                 db.0.execute("INSERT INTO shared_publications VALUES(?1,?1)", [run])?;
                 db.0.execute("INSERT INTO shared_references VALUES(?1,'shared')", [run])?;
                 db.0.execute("INSERT INTO direct_journal_acknowledgements VALUES(?1,?1,'legacy-node',0)", [run])?;
@@ -753,6 +762,15 @@ mod retirement_tests {
             db.0.execute("INSERT INTO shared_references VALUES(?1,'exclusive')", [&retired])?;
             Ok(())
         }).await.unwrap();
+        for kind in ["node-backups", "node-disk-grants"] {
+            for run in [&retired_run, &retained_run] {
+                let record = format!("{kind}:{run}");
+                assert!(
+                    service.store.get(kind, &record).await.unwrap().is_some(),
+                    "{record}"
+                );
+            }
+        }
         let remote_before = service.store.read(remote_metadata).await.unwrap();
         let staging = service.config.data_dir.join("node-backups");
         for run in [&retired_run, &retained_run] {
@@ -782,10 +800,12 @@ mod retirement_tests {
             operator_bytes
         );
         for kind in ["node-backups", "node-disk-grants"] {
+            let retired_record = format!("{kind}:{retired_run}");
+            let retained_record = format!("{kind}:{retained_run}");
             assert!(
                 service
                     .store
-                    .get(kind, &retired_run)
+                    .get(kind, &retired_record)
                     .await
                     .unwrap()
                     .is_none()
@@ -793,7 +813,7 @@ mod retirement_tests {
             assert!(
                 service
                     .store
-                    .get(kind, &retained_run)
+                    .get(kind, &retained_record)
                     .await
                     .unwrap()
                     .is_some()
