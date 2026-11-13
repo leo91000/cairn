@@ -714,6 +714,8 @@ mod retirement_tests {
 
     #[tokio::test]
     async fn expiration_retires_local_metadata_without_changing_remote_deletions() {
+        use crate::node_fixture::StoreNodeFixture;
+
         fn remote_metadata(db: &mut Db<'_>) -> Result<Value> {
             let objects = db.json_rows(
                 "SELECT json_object('id',id,'destination',destination,'hash',hash,'size',size,
@@ -733,7 +735,6 @@ mod retirement_tests {
         let service = Service::new(crate::common::config(root.path()))
             .await
             .unwrap();
-        use crate::node_fixture::StoreNodeFixture;
         let legacy_node = crate::config::id();
         service
             .store
