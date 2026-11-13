@@ -1766,3 +1766,84 @@ async fn revocation_expires_retained_legacy_trash_without_resuming_it() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn interrupted_retirement_retries_old_manager_plans_without_touching_the_replacement() {
+    let change = Change::new(RunStatus::Succeeded).await;
+    let plans = change.owner.service.config.data_dir.join("runner-plans");
+    tokio::fs::create_dir_all(&plans).await.unwrap();
+    let old = plans.join(format!("{}.json", change.run));
+    tokio::fs::create_dir(&old).await.unwrap();
+    let released = id();
+    change
+        .owner
+        .service
+        .store
+        .put_attempt_fixture(json!({
+            "id": released, "runId": change.run, "nodeId": change.destination, "released":true
+        }))
+        .await
+        .unwrap();
+    let released_plan = plans.join(format!("{released}.json"));
+    tokio::fs::write(&released_plan, b"older released credentials")
+        .await
+        .unwrap();
+    let replacement = plans.join(format!("{}.json", id()));
+    let replacement_body =
+        json!({ "runId":change.run, "credentials":"new environment plan" }).to_string();
+    tokio::fs::write(&replacement, replacement_body.as_bytes())
+        .await
+        .unwrap();
+    let (status, moved) = change
+        .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    let mut source = change
+        .owner
+        .service
+        .node_boundary(&change.source)
+        .await
+        .unwrap();
+    source["revoked"] = true.into();
+    change
+        .owner
+        .service
+        .store
+        .put_node_fixture(source)
+        .await
+        .unwrap();
+    change.owner.service.retire_environments().await.unwrap();
+    let pending = change.retirements().await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["cleaned"], true);
+    assert!(pending[0]["error"].is_string());
+    assert!(old.is_dir());
+    tokio::fs::remove_dir(&old).await.unwrap();
+    tokio::fs::write(&old, b"old private credentials")
+        .await
+        .unwrap();
+    let retirement = pending[0]["id"].as_str().unwrap().to_owned();
+    change
+        .owner
+        .service
+        .store
+        .write(move |db| {
+            let mut pending = db.get("environment-retirements", &retirement)?.unwrap();
+            pending["retryAfter"] = Value::Null;
+            db.put("environment-retirements", &pending)
+        })
+        .await
+        .unwrap();
+    let restarted = Service::new(change.owner.service.config.clone())
+        .await
+        .unwrap();
+    restarted.worker.initialize(&restarted).await.unwrap();
+    restarted.retire_environments().await.unwrap();
+    assert!(!old.exists());
+    assert!(!released_plan.exists());
+    assert_eq!(
+        tokio::fs::read(&replacement).await.unwrap(),
+        replacement_body.as_bytes()
+    );
+    assert!(change.retirements().await.is_empty());
+}

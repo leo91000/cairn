@@ -26,6 +26,24 @@ pub(crate) fn directory(s: &Service, retirement: &str) -> PathBuf {
         .join(retirement)
 }
 
+/// Attempt identities are captured before admission of the next environment.
+pub(crate) async fn erase_plans(s: &Service, attempts: &[String]) -> Result<()> {
+    let plans = s.config.data_dir.join("runner-plans");
+    for attempt in attempts {
+        crate::validation::uuid(attempt)?;
+        match tokio::fs::remove_file(plans.join(format!("{attempt}.json"))).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match tokio::fs::File::open(&plans).await {
+        Ok(directory) => directory.sync_all().await.map_err(Error::from),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn quarantine(source: &Path, target: &Path) -> Result<()> {
     match (
         tokio::fs::symlink_metadata(source).await,

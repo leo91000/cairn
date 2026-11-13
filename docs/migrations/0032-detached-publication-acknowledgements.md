@@ -20,3 +20,11 @@ publication identities; it never removes a replacement environment's files,
 account lease or recovery references. Physical cleanup errors remain retryable
 without globally blocking admission. Destination-specific retired disks still
 must acknowledge deletion before that node admits a new environment of the run.
+
+Abandoned conversion copies in the dedicated `backend-migration-staging` root
+are discovered by background cleanup and queued in `manager-staging-retirements`
+before erasure. Failures retain their error and retry deadline. Cleanup holds the
+legacy storage owners and removes only the root contents, preserving a mounted
+staging root. Environment retirement also removes the captured old manager
+attempt plans by identity, including retries after restart; replacement plans
+remain independent. These queues use existing records and add no SQL layout.

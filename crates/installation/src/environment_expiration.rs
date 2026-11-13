@@ -108,6 +108,9 @@ struct Retirement {
     /// Includes admission that materialized before checkpoint publication failed.
     #[serde(default)]
     attempts: Vec<RetiredAttempt>,
+    /// Older turns may have released capacity before their manager plan was erased.
+    #[serde(default)]
+    manager_plans: Vec<String>,
     process: Option<ProcessIdentity>,
     isolated: bool,
     account_id: Option<String>,
@@ -124,6 +127,21 @@ struct Retirement {
     cleaned: bool,
     error: Option<String>,
     retry_after: Option<i64>,
+}
+
+impl Retirement {
+    fn plan_ids(&self) -> Vec<String> {
+        let mut ids = self
+            .attempt
+            .iter()
+            .cloned()
+            .chain(self.attempts.iter().map(|attempt| attempt.id.clone()))
+            .chain(self.manager_plans.iter().cloned())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
 }
 
 /// Why the next environment of `run` cannot start yet, if it cannot.
@@ -440,8 +458,16 @@ fn detach_environment_in(
             nodes.push(node);
         }
     }
-    let attempts = db
-        .attempts()?
+    let recorded = db.attempts()?;
+    let manager_plans = recorded
+        .iter()
+        .filter(|attempt| {
+            attempt.run_id == run_id
+                && attempt.role == crate::nodes::placement::AttemptRole::Execution
+        })
+        .map(|attempt| attempt.id.clone())
+        .collect();
+    let attempts = recorded
         .into_iter()
         .filter(|attempt| {
             attempt.run_id == run_id
@@ -467,6 +493,7 @@ fn detach_environment_in(
         attempt: checkpoint.runner_id().map(str::to_owned),
         attempt_node: checkpoint.node_id.clone().flatten(),
         attempts,
+        manager_plans,
         process: checkpoint.process().cloned(),
         isolated: run["isolated"] == true || checkpoint.isolated(),
         account_id: run["accountId"].as_str().map(str::to_owned),
@@ -854,7 +881,7 @@ impl Service {
                 .await?;
         }
         self.worker.notify();
-        Ok(())
+        crate::conversation_deletion::legacy_staging::cleanup(self).await
     }
 
     /// Explicit purge still waits for every detached namespace to be erased.
@@ -862,6 +889,8 @@ impl Service {
     pub(crate) async fn purge_retired_resources(&self, run: &str) -> Result<()> {
         let owned = run.to_owned();
         for retirement in self.store.read(move |db| retirements(db, &owned)).await? {
+            crate::conversation_deletion::retired::erase_plans(self, &retirement.plan_ids())
+                .await?;
             let directory = crate::conversation_deletion::retired::directory(self, &retirement.id);
             if tokio::fs::try_exists(directory).await? {
                 crate::conversation_deletion::retired::erase(
@@ -951,6 +980,11 @@ impl Service {
             .write(move |db| db.put(RETIREMENTS, &released))
             .await?;
         self.worker.notify();
+        if let Err(error) =
+            crate::conversation_deletion::retired::erase_plans(self, &retirement.plan_ids()).await
+        {
+            failure.get_or_insert(error);
+        }
         if !retirement.cleaned {
             match crate::conversation_deletion::retired::erase(
                 self,

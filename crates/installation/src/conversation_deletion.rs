@@ -1,4 +1,5 @@
 //! Retryable conversation deletion and disk cleanup. No archival or data export.
+pub(crate) mod legacy_staging;
 pub(crate) mod retired;
 
 use crate::{
