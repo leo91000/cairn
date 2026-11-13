@@ -37,15 +37,25 @@ async function fixture() {
   const bin = path.join(root, 'bin')
   const syncCalls = path.join(root, 'sync-calls')
   const syncRelease = path.join(root, 'sync-release')
+  const syncEmptyRead = path.join(root, 'sync-empty-read')
   await mkdir(bin)
   // Exercise the real probe's synchronous subprocess without flushing the host.
   // The test controls completion and failure through this private barrier.
   await writeFile(path.join(bin, 'sync'), `#!${process.execPath}
 const fs = require('node:fs');
 fs.appendFileSync(${JSON.stringify(syncCalls)}, JSON.stringify(process.argv.slice(2)) + '\\n');
-while (!fs.existsSync(${JSON.stringify(syncRelease)}))
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-process.exit(Number(fs.readFileSync(${JSON.stringify(syncRelease)}, 'utf8')));
+// An asynchronous release can create the file before writing its exit code.
+let release = '';
+while (release === '') {
+  if (fs.existsSync(${JSON.stringify(syncRelease)})) {
+    release = fs.readFileSync(${JSON.stringify(syncRelease)}, 'utf8');
+    if (release === '')
+      fs.writeFileSync(${JSON.stringify(syncEmptyRead)}, '');
+  }
+  if (release === '')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+}
+process.exit(Number(release));
 `, { mode: 0o755 })
   return {
     root,
@@ -54,6 +64,7 @@ process.exit(Number(fs.readFileSync(${JSON.stringify(syncRelease)}, 'utf8')));
     bin,
     syncCalls,
     syncRelease,
+    syncEmptyRead,
   }
 }
 
@@ -185,6 +196,9 @@ it('fails completion when the synchronization subprocess fails', async () => {
   await writeFile(files.inbox, '[{"text":"finish"}]')
   await expect.poll(async () => readFile(files.syncCalls, 'utf8').catch(() => '')).toBe('[]\n')
   expect(guest.child.exitCode).toBeNull()
+  // Hold open the create-before-write interval of the asynchronous release.
+  await writeFile(files.syncRelease, '')
+  await expect.poll(async () => stat(files.syncEmptyRead).then(() => true).catch(() => false)).toBe(true)
   await writeFile(files.syncRelease, '7')
   expect((await guest.exited)[0]).toBe(1)
   expect(guest.errors()).toContain('Command failed: sync')
