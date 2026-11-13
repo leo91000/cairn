@@ -59,7 +59,9 @@ export async function retirementSmoke({
     command: ['/usr/local/bin/node', '-e', `
       const fs=require('node:fs'),assert=require('node:assert/strict');
       assert.equal(fs.existsSync(${JSON.stringify(`${old.cwd}/old-environment`)}),false,'old working files were discarded');
-      fs.writeFileSync(${JSON.stringify(canary)},'new incarnation');
+      const file=fs.openSync(${JSON.stringify(canary)},'w');
+      fs.writeFileSync(file,'new incarnation');fs.fsyncSync(file);fs.closeSync(file);
+      const directory=fs.openSync(${JSON.stringify(old.cwd)},'r');fs.fsyncSync(directory);fs.closeSync(directory);
       console.log('retirement.new.ready');
       setInterval(()=>console.log('retirement.new.tick '+fs.readFileSync(${JSON.stringify(canary)},'utf8')),200);
     `],
@@ -89,6 +91,25 @@ export async function retirementSmoke({
     await api(`/runs/${fresh}`, 'DELETE')
   }
 
+  await api(`/runs/${fresh}/wait`, 'POST')
+  const inactive = await (await retire()).json()
+  assert.equal(inactive.retirementId, retirementId)
+  assert.ok(exists(`/runner-state/${fresh}.log`), 'the completed replacement keeps its output')
+  assert.ok(exists(`/runner-state/${fresh}.run`), 'the completed replacement keeps its disk ownership')
+  const reopened = randomUUID()
+  await writeFile(path.join(plans, `${reopened}.json`), JSON.stringify({
+    ...plan,
+    id: reopened,
+    expires: Date.now() + 180000,
+    command: ['/usr/local/bin/node', '-e', `
+      const fs=require('node:fs'),assert=require('node:assert/strict');
+      assert.equal(fs.readFileSync(${JSON.stringify(canary)},'utf8'),'new incarnation');
+      console.log('retirement.inactive.preserved');
+    `],
+  }))
+  await api(`/runs/${reopened}`, 'POST')
+  assert.equal((await (await api(`/runs/${reopened}/wait`, 'POST')).json()).StatusCode, 0, 'an old receipt preserves the completed replacement disk')
+  await api(`/runs/${reopened}`, 'DELETE')
   await api(endpoint, 'POST', { retirementId: randomUUID() })
   process.stdout.write(`${JSON.stringify({
     mode: 'identified-vm-retirement-retry-restart',

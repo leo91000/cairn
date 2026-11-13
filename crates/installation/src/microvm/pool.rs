@@ -595,13 +595,24 @@ impl Pool {
         }
     }
 
-    /// Deletion, movement and pruning must reap the physical VM before taking its disk lock.
+    /// Reap a retained VM before taking its disk lock, preserving unpublished work.
     pub async fn evict_conversation(&self, run: &str) -> Result<()> {
+        self.evict_retained(run, false).await
+    }
+
+    /// An identified environment retirement explicitly discards unpublished work.
+    pub async fn retire_conversation(&self, run: &str) -> Result<()> {
+        self.evict_retained(run, true).await
+    }
+
+    async fn evict_retained(&self, run: &str, discard_unpublished: bool) -> Result<()> {
         let _admission = self.admission.lock().await;
         let idle = {
             let mut slots = self.slots.lock().await;
             let index = slots.retained.iter().position(|idle| idle.run == run);
-            if index.is_some_and(|index| slots.retained[index].publication_pending()) {
+            if !discard_unpublished
+                && index.is_some_and(|index| slots.retained[index].publication_pending())
+            {
                 return Err(Error::new(
                     425,
                     "Waiting for disk publication before eviction.",
@@ -1455,6 +1466,32 @@ mod tests {
             .unwrap();
         pool.evict_conversation(&run).await.unwrap();
         assert!(pool.slots.lock().await.retained.is_empty());
+        volume
+            .disk
+            .write_at(0, b"discard without publication")
+            .unwrap();
+        let reservation = pool.reserve(&cold_plan(&run)).await.unwrap();
+        pool.slots
+            .lock()
+            .await
+            .retained
+            .push_back(retained::Retained {
+                run: run.clone(),
+                reservation,
+                volume: Some(volume.clone()),
+                budget,
+                key: serde_json::Value::Null,
+                expires: Instant::now() + Duration::from_secs(60),
+            });
+        assert_eq!(pool.evict_conversation(&run).await.unwrap_err().status, 425);
+        pool.retire_conversation(&run).await.unwrap();
+        assert!(pool.slots.lock().await.retained.is_empty());
+        assert!(
+            volume.disk.accounting().unwrap()["dirtyBytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         drop((first, second));
         pool.drain().await;
     }

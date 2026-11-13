@@ -395,7 +395,11 @@ async fn disk_action(
     {
         return json_response(json!({ "deleted": true, "retirementId": retirement.id() }));
     }
-    broker.pool.evict_conversation(run).await?;
+    if retirement.is_some() {
+        broker.pool.retire_conversation(run).await?;
+    } else {
+        broker.pool.evict_conversation(run).await?;
+    }
     let active = broker.active.lock().await;
     if active.values().any(|a| a.plan.run_id() == run) {
         return Err(Error::conflict("The workspace still has an active agent."));
