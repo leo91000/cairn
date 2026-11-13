@@ -390,17 +390,27 @@ export async function observeCommand({
   signal?.addEventListener('abort', onTerm, { once: true })
   if (signal?.aborted)
     onTerm()
-  const interval = setInterval(() => {
-    persist('periodic')
-    if (!inventoryComplete || ownershipUncertain)
-      stop('ownership-incomplete')
-  }, sampleMs)
+  // Inventory collection is synchronous and can exceed its cadence under
+  // contention. Leave a full interval after each sample so immediately due
+  // timers cannot starve pipe drainage and command-completion reports.
+  let sampleTimer
+  const scheduleSample = () => {
+    sampleTimer = setTimeout(() => {
+      persist('periodic')
+      if (!inventoryComplete || ownershipUncertain)
+        stop('ownership-incomplete')
+      if (!timedOut && !interrupted)
+        scheduleSample()
+    }, sampleMs)
+  }
+
+  scheduleSample()
   const timer = setTimeout(stop, deadline - Date.now(), 'deadline')
   if (!inventoryComplete || ownershipUncertain)
     stop('ownership-incomplete')
   const result = await Promise.race([completion, stopped])
   clearTimeout(timer)
-  clearInterval(interval)
+  clearTimeout(sampleTimer)
   // Command observation has ended, but mandatory owned-process cleanup can
   // still use the evidence reserve. Stop scheduling rolling work at this
   // boundary rather than waiting for the guard's eventual return.
