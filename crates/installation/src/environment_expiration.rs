@@ -267,8 +267,11 @@ pub(crate) fn request_in(
         Some(RunStatus::Queued | RunStatus::Running)
     );
     // An active mission resumes on its own; a scheduled wait keeps its continuation.
+    let stopped = !run["cancelRequestedAt"].is_null();
     let mut expiration = expiration.clone();
-    expiration.continue_turn |= run["trigger"] != "chat" && executing && !run["wakeup"].is_object();
+    expiration.continue_turn = !stopped
+        && (expiration.continue_turn
+            || run["trigger"] != "chat" && executing && !run["wakeup"].is_object());
     if !live {
         return detach_in(db, run_id, &expiration, expired_at);
     }
@@ -299,7 +302,7 @@ pub(crate) fn request_in(
         expired_at,
         expiration: expiration.clone(),
         environment: run,
-        cancelled: false,
+        cancelled: stopped,
     };
     db.change_run(
         run_id,

@@ -1315,3 +1315,78 @@ async fn a_pending_expiration_holds_a_due_mission_wakeup_until_detachment() {
     assert_eq!(continued["missionTurnId"], wakeup["id"]);
     assert!(continued["wakeup"].is_null());
 }
+
+#[tokio::test]
+async fn a_stop_accepted_before_expiration_is_preserved_for_moves_and_revocation() {
+    for revoke in [false, true] {
+        let change = Change::new(RunStatus::Running).await;
+        let (run, chat) = (change.run.clone(), change.chat.clone());
+        change
+            .owner
+            .service
+            .store
+            .transaction(move |db| {
+                db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
+                db.change_run(
+                    &run,
+                    cairn_installation::runs::RunChanges {
+                        trigger: Some("manual".into()),
+                        ..Default::default()
+                    },
+                )?;
+                db.update_run_boundary(&run, &json!({ "chatExecution": null }))
+            })
+            .await
+            .unwrap();
+        change
+            .owner
+            .service
+            .worker
+            .active
+            .lock()
+            .await
+            .insert(change.run.clone(), CancellationToken::new());
+        change
+            .owner
+            .service
+            .worker
+            .cancel(&change.owner.service, &change.run)
+            .await
+            .unwrap();
+        let stopped_at = change.owner.run(&change.run).await["cancelRequestedAt"].clone();
+        assert!(stopped_at.is_number());
+        let (status, expired) = if revoke {
+            change
+                .owner
+                .send(
+                    "POST",
+                    &format!("/api/nodes/{}/revoke", change.source),
+                    json!({ "discardWorkingFiles": true, "releasePlacements": true }),
+                )
+                .await
+        } else {
+            change
+                .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+                .await
+        };
+        assert_eq!(status, StatusCode::OK, "{expired}");
+        change
+            .owner
+            .service
+            .worker
+            .active
+            .lock()
+            .await
+            .remove(&change.run);
+        change
+            .owner
+            .service
+            .detach_stopped_environments()
+            .await
+            .unwrap();
+        let current = change.owner.run(&change.run).await;
+        assert_eq!(current["status"], RunStatus::Cancelled);
+        assert_eq!(current["environmentState"], "expired");
+        assert_eq!(current["cancelRequestedAt"], stopped_at);
+    }
+}

@@ -1332,6 +1332,21 @@ fn launch_turn(
     if chat.agent_id != snapshot["snapshot"]["agent"]["id"] {
         return Ok(());
     }
+    // Rebuild backend-dependent preparation if an explicit choice committed
+    // while the snapshot was being prepared. The message stays queued.
+    let current = db.run(chat.run_id.as_deref().unwrap_or(""))?;
+    let same_environment = match (&run, &current) {
+        (Some(expected), Some(current)) => {
+            expected["id"] == current["id"]
+                && expected["environmentAdmissionRevision"]
+                    == current["environmentAdmissionRevision"]
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    if !same_environment {
+        return Ok(());
+    }
     let waking = message["wakeup"].is_object();
     let unchanged = if waking {
         let current = db.run(chat.run_id.as_deref().unwrap_or(""))?;
@@ -2024,6 +2039,34 @@ mod tests {
         execution: ChatExecution,
     ) -> Result<()> {
         super::continue_run(db, &fixture_chat(chat), run, snapshot, execution)
+    }
+
+    #[tokio::test]
+    async fn stale_chat_preparation_preserves_the_new_backend_and_the_queued_message() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            db.add_run_fixture(&json!({
+                "id": "run", "taskId": "chat", "createdAt": 0, "status": "succeeded",
+                "environmentState": "expired", "environmentAdmissionRevision": "old",
+                "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID, "provider": "codex", "access": { "backend": "firecracker" } } },
+            }), None)?;
+            db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": crate::config::MAIN_AGENT_ID, "environmentState": "expired" }))?;
+            let stale = db.run("run")?.unwrap();
+            let message = db.put_message(&json!({ "id": "next", "chatId": "chat", "text": "Keep queued", "status": "queued", "createdAt": 1 }))?;
+            let mut chosen = stale["snapshot"].clone();
+            chosen["agent"]["access"]["backend"] = "native".into();
+            db.change_run("run", crate::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(chosen)?),
+                boundary: Some(json!({ "environmentAdmissionRevision": "new" })),
+                ..Default::default()
+            })?;
+            let before = db.run("run")?.unwrap();
+            launch_turn(db, "chat", Some(stale.clone()), message, stale)?;
+            assert_eq!(db.run("run")?.unwrap(), before);
+            assert_eq!(db.messages("chat")?[0]["status"], "queued");
+            Ok(())
+        }).await.unwrap();
     }
 
     #[tokio::test]
