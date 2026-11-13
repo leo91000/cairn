@@ -93,12 +93,14 @@ if (phase === fault) {
 
   const started = Date.now()
   const fillOutput = `let full = false; const bytes = Buffer.alloc(64 * 1024); for (let i = 0; i < 256; i++) { try { writeSync(process.stdout.fd, bytes); } catch (error) { full = error.code === 'EAGAIN'; break; } } appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'blocked-output', pid: process.pid, full }) + '\\n');`
-  // Only deadline scenarios need a shortened work budget. Ordinary failures use
-  // the production profile: startup and bounded marker writes may exceed 150 ms.
+  // Only the fault phase needs a shortened work budget. Successful preceding
+  // phases and ordinary failures keep the production profile: startup and
+  // bounded marker writes may exceed 150 ms.
   // The independent two-second harness still rejects a stuck setup or cleanup.
   const exercisesDeadline = ['entry', 'update', 'install', 'hard-stall', 'orphan-stall', 'stalled-supervision'].includes(fault)
   const workSeconds = fault === 'controller-crash' ? 2 : interruptSignal && !cancelMarkerFailure ? 5 : exercisesDeadline ? 0.15 : undefined
-  const phaseSeconds = workSeconds === undefined ? {} : { update: workSeconds, install: workSeconds }
+  const deadlinePhase = fault === 'install' ? 'install' : 'update'
+  const phaseSeconds = workSeconds === undefined ? {} : { [deadlinePhase]: workSeconds }
   const cancelFault = cancelMarkerFailure ? `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module'; const mkdir = fs.mkdirSync; fs.mkdirSync = function(candidate, ...args) { if (candidate.endsWith('owner.sock.cancel')) throw new Error('fixture metadata refusal'); return mkdir.call(this, candidate, ...args); }; syncBuiltinESMExports();` : ''
   const driver = `${cancelFault} import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: ${JSON.stringify(phaseSeconds)}, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
   const unsupportedProfile = !['native', 'android-network'].includes(profile)
@@ -270,6 +272,19 @@ describe('native CI dependency setup', () => {
     expect(result.output).toContain(`phase=${fault === 'install' ? 'install' : 'update'} event=start`)
     expect(result.output.includes('phase=update event=apt-start')).toBe(fault !== 'entry')
     expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(fault === 'install' ? 1 : 0)
+    expect(result.elapsedMs).toBeLessThan(1800)
+  })
+
+  it('reaches the install deadline after a slow successful update', async () => {
+    const result = await executeSetup('install', { aptStartupDelayMs: 250 })
+    expect(result.harnessKilled).toBe(false)
+    expect(result.status).toBe(124)
+    expect(result.output).toContain('phase=update event=end code=0')
+    expect(result.output).toContain('phase=install event=start')
+    expect(result.output).toContain('phase=install event=end code=124')
+    expect(result.calls.filter(call => ['update', 'install'].includes(call.phase)).map(call => call.phase)).toEqual(['update', 'install'])
+    expect(result.liveAtPublicExit).toEqual([])
+    expect(result.survivingFixturePids).toEqual([])
     expect(result.elapsedMs).toBeLessThan(1800)
   })
 
