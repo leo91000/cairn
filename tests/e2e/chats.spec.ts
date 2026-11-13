@@ -2484,9 +2484,8 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
   const dialog = page.getByRole('dialog', { name: 'Rename conversation', exact: true })
   const title = dialog.getByRole('textbox', { name: 'Title', exact: true })
 
-  // The dropdown offers renaming first and says what it changes.
+  // The dropdown offers renaming and says what it changes.
   let { action } = await openChatDetails(page)
-  await expect(page.getByRole('menu', { name: 'Chat details', exact: true }).getByRole('menuitem').first()).toHaveAccessibleName('Rename conversation')
   await action('Rename conversation').click()
   await expect(dialog).toContainText('Cairn stops naming this conversation automatically')
   await expect(title).toHaveValue('Draft the release notes for the next version')
@@ -2941,6 +2940,8 @@ test('context usage shows the latest request and an explicit compaction keeps th
   // A focused action that becomes unavailable while the menu is open hands focus to the next one.
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).compaction?.available, { timeout: 15000 }).toBe(true)
   ;({ action } = await openChatDetails(page))
+  await expect(action('Share conversation')).toBeFocused()
+  await page.keyboard.press('ArrowDown')
   await expect(action('Rename conversation')).toBeFocused()
   await page.keyboard.press('ArrowDown')
   await expect(action('Compact context')).toBeFocused()
