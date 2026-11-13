@@ -181,7 +181,7 @@ pub async fn http(s: &Service, token: &str, request: Request) -> Result<Response
     Ok(response)
 }
 
-pub(super) async fn public_origin(s: &Service) -> Result<String> {
+pub(crate) async fn public_origin(s: &Service) -> Result<String> {
     let (origin, installation) = crate::relay::beacon_address(&s.config.data_dir)
         .await?
         .ok_or_else(|| {

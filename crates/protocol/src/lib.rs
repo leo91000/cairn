@@ -259,7 +259,9 @@ pub fn stream_path(path: &str) -> bool {
 /// request pools and a file-progress deadline instead of live-stream capacity.
 pub fn file_path(path: &str) -> bool {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
-    route.starts_with("/api/shared-artifacts/") || run_artifact_file(route, query)
+    route.starts_with("/api/shared-artifacts/")
+        || (route.starts_with("/api/shared-conversations/") && route.contains("/artifacts/"))
+        || run_artifact_file(route, query)
 }
 
 /// Artifact metadata and the bounded 960 px preview thumbnail remain finite.
