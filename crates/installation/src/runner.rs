@@ -594,6 +594,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disconnected_retirement_keeps_ownership_until_its_receipt_is_durable() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let run = crate::config::id();
+        let retirement = crate::config::id();
+        let state = broker.state.clone();
+        let directory = state.join("disks").join(&run);
+        private_dir(&directory).await.unwrap();
+        std::fs::write(directory.join("data.ext4"), b"old disk").unwrap();
+        let active = broker.active.lock().await;
+        let app = router(broker.clone());
+        let caller = tokio::spawn(
+            app.oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/disks/{run}/delete"))
+                    .header("authorization", format!("Bearer {SECRET}"))
+                    .body(Body::from(
+                        json!({ "retirementId": retirement }).to_string(),
+                    ))
+                    .unwrap(),
+            ),
+        );
+        let receipts = state.join("disk-retirements").join(&run);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !receipts.join("lock").exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        caller.abort();
+        let _ = caller.await;
+        assert!(directory.join("data.ext4").exists());
+        drop(active);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !receipts.join(&retirement).exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!directory.join("data.ext4").exists());
+        assert_eq!(
+            std::fs::read_to_string(receipts.join(&retirement)).unwrap(),
+            retirement
+        );
+    }
+
+    #[tokio::test]
+    async fn late_retirement_retry_preserves_the_next_vm_environment() {
+        async fn retire(app: &Router, run: &str, id: &str) -> axum::response::Response {
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/disks/{run}/delete"))
+                        .header("authorization", format!("Bearer {SECRET}"))
+                        .body(Body::from(json!({ "retirementId": id }).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let state = broker.state.clone();
+        let run = crate::config::id();
+        let retirement = crate::config::id();
+        let directory = state.join("disks").join(&run);
+        private_dir(&directory).await.unwrap();
+        std::fs::write(directory.join("data.ext4"), b"old disk").unwrap();
+        let app = router(broker);
+        let response = retire(&app, &run, &retirement).await;
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["retirementId"],
+            retirement
+        );
+        assert!(!directory.join("data.ext4").exists());
+        std::fs::write(directory.join("data.ext4"), b"new disk").unwrap();
+        let active = crate::storage::environment::lock(&state, &run, "active")
+            .await
+            .unwrap();
+        // Simulate a restarted controller: its receipt is entirely node-local.
+        let restarted = router(fixture_broker(root.path()).await);
+        assert_eq!(retire(&restarted, &run, &retirement).await.status(), 200);
+        assert_eq!(
+            std::fs::read(directory.join("data.ext4")).unwrap(),
+            b"new disk"
+        );
+        drop(active);
+        assert_eq!(
+            retire(&restarted, &run, &crate::config::id())
+                .await
+                .status(),
+            200
+        );
+        assert!(!directory.join("data.ext4").exists());
+        std::fs::write(directory.join("data.ext4"), b"third environment").unwrap();
+        assert_eq!(retire(&restarted, &run, &retirement).await.status(), 200);
+        assert_eq!(
+            std::fs::read(directory.join("data.ext4")).unwrap(),
+            b"third environment"
+        );
+    }
+
+    #[tokio::test]
     async fn deleting_an_attributed_disk_preserves_ownership_and_other_environments() {
         let root = tempfile::tempdir().unwrap();
         let broker = fixture_broker(root.path()).await;

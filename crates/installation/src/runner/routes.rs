@@ -87,7 +87,14 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
             operation @ ("storage-status" | "published" | "publication-fence"),
         ] => disk_storage(&broker, request, run, operation).await,
         ["disks", run, "restore"] => disk_restore(&broker, request, run).await,
-        ["disks", run, action] => disk_action(&broker, request, run, action).await,
+        ["disks", run, action] => {
+            let (run, action) = ((*run).to_owned(), (*action).to_owned());
+            // A disconnected manager must not release deletion ownership while
+            // filesystem work or its durable acknowledgement is still executing.
+            tokio::spawn(async move { disk_action(&broker, request, &run, &action).await })
+                .await
+                .map_err(Error::internal)?
+        }
         _ => run_route(broker, request, &segments).await,
     }
 }
@@ -376,7 +383,17 @@ async fn disk_action(
     }
     uuid(run)?;
     let bytes = body(request, 4096, "Invalid workspace request.").await?;
-    let _: serde::de::IgnoredAny = serde_json::from_slice(&bytes)?;
+    let value: Value = serde_json::from_slice(&bytes)?;
+    let retirement = if action == "delete" {
+        crate::storage::retirement::Retirement::begin(&broker.state, run, &value).await?
+    } else {
+        None
+    };
+    if let Some(retirement) = &retirement
+        && retirement.completed().await?
+    {
+        return json_response(json!({ "deleted": true, "retirementId": retirement.id() }));
+    }
     broker.pool.evict_conversation(run).await?;
     let active = broker.active.lock().await;
     if active.values().any(|a| a.plan.run_id() == run) {
@@ -404,7 +421,13 @@ async fn disk_action(
         }
         remove_entry(&entry.path(), entry.file_type().await?.is_dir()).await?;
     }
-    json_response(json!({ "deleted": true }))
+    if let Some(retirement) = &retirement {
+        retirement.commit(directory).await?;
+    }
+    json_response(json!({
+        "deleted": true,
+        "retirementId": retirement.as_ref().map(crate::storage::retirement::Retirement::id),
+    }))
 }
 
 /// Removes older copies set aside when a recovery point replaced this disk and

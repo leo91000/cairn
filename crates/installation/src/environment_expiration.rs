@@ -704,9 +704,79 @@ impl Service {
         Ok(())
     }
 
+    /// Manual whole-disk cleanup shares the durable admission barrier and request
+    /// identity of expiration. Never send an independent unqualified deletion.
+    pub(crate) async fn retire_stale_disk(&self, run: &str, node: &str) -> Result<()> {
+        let (run, node) = (run.to_owned(), node.to_owned());
+        let requested_node = node.clone();
+        let retirement = self
+            .store
+            .transaction(move |db| {
+                let current = db.run(&run)?.unwrap_or_default();
+                let checkpoint = RunCheckpoint::load_in(db, &run)?.unwrap_or_default();
+                let occupied = current["nodeId"] == node
+                    || checkpoint.node_id.as_ref().and_then(|node| node.as_deref())
+                        == Some(node.as_str())
+                    || db.attempts()?.iter().any(|attempt| {
+                        attempt.run_id == run
+                            && attempt.node_id == node
+                            && !attempt.released
+                            && attempt.role == crate::nodes::placement::AttemptRole::Execution
+                    });
+                if occupied {
+                    return Err(Error::conflict(
+                        "The conversation still owns this node's disk.",
+                    ));
+                }
+                if let Some(retirement) = retirements(db, &run)?
+                    .into_iter()
+                    .find(|retirement| retirement.nodes.contains(&node))
+                {
+                    return Ok(retirement.id);
+                }
+                let volume = format!("{run}:{node}");
+                if db.get("node-volumes", &volume)?.is_none() {
+                    return Err(Error::conflict(
+                        "The stale disk inventory changed; refresh before retrying.",
+                    ));
+                }
+                let retirement = Retirement {
+                    id: id(),
+                    run_id: run,
+                    nodes: vec![node],
+                    expired_at: now(),
+                    isolated: current["isolated"] == true,
+                    fenced: true,
+                    local: true,
+                    ..Default::default()
+                };
+                db.put(RETIREMENTS, &serde_json::to_value(&retirement)?)?;
+                Ok(retirement.id)
+            })
+            .await?;
+        self.worker.notify_retirement();
+        self.retire_environments().await?;
+        if self
+            .store
+            .get(RETIREMENTS, &retirement)
+            .await?
+            .is_some_and(|retirement| {
+                retirement["nodes"]
+                    .as_array()
+                    .is_some_and(|nodes| nodes.iter().any(|node| node == &requested_node))
+            })
+        {
+            return Err(Error::unavailable(
+                "The stale disk retirement is queued and will retry in the background.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Removes what retired environments still occupy, oldest first. A failed step
     /// retries later without delaying other retirements.
     pub async fn retire_environments(&self) -> Result<()> {
+        let _cleanup = self.worker.retirement_cleanup.lock().await;
         let mut due = self
             .store
             .list(RETIREMENTS)
@@ -789,6 +859,7 @@ impl Service {
                 &retirement.run_id,
                 &node,
                 retirement.isolated,
+                &retirement.id,
             )
             .await
             {
@@ -808,7 +879,7 @@ fn save_progress(
     done: bool,
 ) -> Result<()> {
     let run = retirement.run_id.clone();
-    if done || db.run(&run)?.is_none() {
+    if done {
         db.remove(RETIREMENTS, &retirement.id)?;
     } else {
         retirement.retry_after = error.as_ref().map(|_| now() + RETRY_MS);

@@ -35,7 +35,16 @@ choice remain available. Admission waits for the previous execution to be confir
 stopped, or for its lease to lapse if its node is unreachable. A node must delete
 the retired disk before admitting this run's next environment on that node; other
 nodes need not wait for that disk deletion. A revoked node's disk is forgotten.
-Explicit conversation deletion retains ADR-0041 behavior.
+Each disk retirement sends its durable queue identity as `retirementId`. Native
+and VM controllers serialize retries and persist a completion receipt outside the
+disk before acknowledging it. These receipts survive subsequent environments and
+controller restarts, so a delayed duplicate cannot erase a new disk of the same
+run. Manual whole stale-disk cleanup uses the same durable queue and rechecks
+current ownership in its writer transaction; it cannot bypass retirement or
+admission barriers. They are retained permanently (one small receipt per retired environment on
+that node). The manager requires the matching acknowledgement: an older controller
+must be upgraded before this run can reuse its node. Explicit conversation deletion
+retains ADR-0041 behavior.
 
 After expiration, send a new message (and resume the queue if paused) to recreate
 the environment. The same conversation and run retain their history and artifacts;

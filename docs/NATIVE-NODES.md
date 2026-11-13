@@ -140,6 +140,15 @@ written into arbitrary project files.
 
 ## Storage and recovery
 
+Expiration retirement uses a durable `retirementId`, shared by all retries for
+that detached environment. The controller stores completion receipts in
+`state/disk-retirements/<run>/<retirementId>` outside the conversation disk and
+checks them under its storage lock before deletion. Receipts must survive disk
+recreation and controller restarts: delayed requests become no-ops. A manager
+requires the matching receipt acknowledgement before admitting a new environment
+of the same run on this node. Older controllers that ignore this identity must be
+upgraded before that readmission.
+
 The native controller mounts ext4 directly on ublk, using the same local journal,
 scoped S3 block reads, encrypted immutable publications and cache as a VM. There
 is no guest kernel. Same-node resume reopens that disk and loads missing blocks on

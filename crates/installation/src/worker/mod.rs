@@ -46,6 +46,7 @@ pub struct Worker {
     wake: Notify,
     conversation_cleanup: Notify,
     retirement: Notify,
+    pub(crate) retirement_cleanup: Mutex<()>,
     initialized: OnceCell<()>,
     maintenance: AtomicI64,
     tasks: TaskTracker,

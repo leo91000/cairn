@@ -4299,7 +4299,11 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
                 .lock()
                 .unwrap()
                 .push(request.uri().path().to_owned());
-            Json(json!({}))
+            let bytes = axum::body::to_bytes(request.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            Json(json!({ "deleted": true, "retirementId": body["retirementId"] }))
         }
     });
     let (url, _runner) = common::serve_locally(runner).await;

@@ -1427,3 +1427,39 @@ async fn a_stale_capacity_check_cannot_erase_a_replacement_destination() {
         replacement
     );
 }
+
+#[tokio::test]
+async fn stale_disk_cleanup_reuses_retirement_and_refuses_a_current_environment() {
+    let change = Change::new(RunStatus::Succeeded).await;
+    let error = cairn_installation::conversation_deletion::discard_stale_disk(
+        &change.owner.service,
+        &change.run,
+        &change.source,
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.message.contains("still owns"), "{}", error.message);
+    assert!(change.retirements().await.is_empty());
+    let (status, moved) = change
+        .move_to(json!({
+            "nodeId": change.destination, "discardWorkingFiles": true,
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    let retirement = change.retirements().await[0]["id"].clone();
+    assert!(
+        cairn_installation::conversation_deletion::discard_stale_disk(
+            &change.owner.service,
+            &change.run,
+            &change.source,
+            true,
+        )
+        .await
+        .is_err()
+    );
+    let retained = change.retirements().await;
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0]["id"], retirement);
+    assert_eq!(retained[0]["nodes"], json!([change.source]));
+}

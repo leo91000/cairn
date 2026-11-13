@@ -2436,6 +2436,21 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
             let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
+            let value = input(request, 4096).await?;
+            let retirement = if *action == "delete" {
+                crate::storage::retirement::Retirement::begin(&controller.state, run, &value)
+                    .await?
+            } else {
+                None
+            };
+            if let Some(retirement) = &retirement
+                && retirement.completed().await?
+            {
+                return Ok(
+                    Json(json!({ "deleted": true, "retirementId": retirement.id() }))
+                        .into_response(),
+                );
+            }
             let root = workspace::directory(&controller.state, run)?;
             private_dir(&root).await?;
             let _owner = crate::file_lock::exclusive(
@@ -2526,7 +2541,15 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                     }
                 }
             }
-            json!({ "deleted": *action == "delete", "pruned": *action == "prune", "retiredGrants": retired_grants })
+            if let Some(retirement) = &retirement {
+                retirement.commit(&root).await?;
+            }
+            json!({
+                "deleted": *action == "delete",
+                "pruned": *action == "prune",
+                "retiredGrants": retired_grants,
+                "retirementId": retirement.as_ref().map(crate::storage::retirement::Retirement::id),
+            })
         }
         ("POST", ["runs", id, "artifact"]) => {
             let value = input(request, 16384).await?;
@@ -5295,6 +5318,47 @@ pub(crate) mod tests {
         .unwrap_err();
         assert_eq!(error.status, 409);
         assert!(!controller.leased(&attempt).await);
+    }
+
+    #[tokio::test]
+    async fn late_retirement_retry_preserves_the_next_native_environment() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let retirement = crate::config::id();
+        let root = workspace::directory(&controller.state, &run).unwrap();
+        private_dir(&root.join("data")).await.unwrap();
+        tokio::fs::write(root.join("data/old"), b"old environment")
+            .await
+            .unwrap();
+        let path = format!("/disks/{run}/delete");
+        let body = json!({ "retirementId": retirement });
+        let held = disk::lock(&controller.state).await.unwrap();
+        let mut late = Box::pin(route(controller.clone(), request(&path, &body)));
+        assert!(futures_util::poll!(&mut late).is_pending());
+        drop(held);
+        // Leave the original waiter descheduled while its retry overtakes it.
+        let acknowledged = route(controller.clone(), request(&path, &body))
+            .await
+            .unwrap();
+        assert_eq!(acknowledged.status(), 200);
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("data/new"), b"next environment").unwrap();
+        assert_eq!(late.await.unwrap().status(), 200);
+        assert_eq!(
+            std::fs::read(root.join("data/new")).unwrap(),
+            b"next environment"
+        );
+        // Reopen the durable receipt before attempting ownership of an
+        // environment that is now executing.
+        let _active = crate::file_lock::exclusive(&root.join("owner.lock"), "active").unwrap();
+        let repeated = route(controller.clone(), request(&path, &body))
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), 200);
+        assert_eq!(
+            std::fs::read(root.join("data/new")).unwrap(),
+            b"next environment"
+        );
     }
 
     #[tokio::test]

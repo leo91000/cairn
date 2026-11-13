@@ -53,7 +53,7 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
         return Ok(());
     }
     let isolated = s.store.run(run).await?["isolated"] == true;
-    disk_on(s, run, action, destination, isolated).await
+    disk_on(s, run, action, destination, isolated, None).await
 }
 
 async fn disk_on(
@@ -62,6 +62,7 @@ async fn disk_on(
     action: &str,
     destination: Option<&str>,
     isolated: bool,
+    retirement: Option<&str>,
 ) -> Result<()> {
     let base = match destination {
         Some(node) if node != crate::nodes::LOCAL_NODE_ID => format!(
@@ -72,7 +73,7 @@ async fn disk_on(
         None => crate::nodes::transport::url(s, run).await?,
     };
     if base.is_empty() {
-        if isolated {
+        if isolated || retirement.is_some() {
             return Err(Error::unavailable("The VM node is unavailable."));
         }
         return Ok(());
@@ -82,11 +83,15 @@ async fn disk_on(
     let node = destination
         .or(checkpoint["nodeId"].as_str())
         .unwrap_or(crate::nodes::LOCAL_NODE_ID);
+    let body = match retirement {
+        Some(id) => json!({ "retirementId": id }),
+        None => json!({}),
+    };
     let response = s
         .http
         .post(format!("{base}/disks/{run}/{action}"))
         .bearer_auth(&credential)
-        .json(&json!({}))
+        .json(&body)
         .timeout(std::time::Duration::from_secs(7200))
         .send()
         .await
@@ -97,6 +102,13 @@ async fn disk_on(
         ));
     }
     let value: Value = response.json().await.map_err(Error::internal)?;
+    if let Some(retirement) = retirement
+        && (value["retirementId"].as_str() != Some(retirement) || value["deleted"] != true)
+    {
+        return Err(Error::unavailable(
+            "The node did not acknowledge durable disk retirement. Upgrade the node before reusing this conversation's disk.",
+        ));
+    }
     let deleted = action == "delete";
     if deleted {
         forget_deleted_disk(s, run, node).await?;
@@ -113,22 +125,22 @@ async fn disk_on(
 /// Frees an old disk left on a node: the whole disk of a conversation that now runs
 /// elsewhere, or only the older copies kept beside a conversation's current disk.
 pub async fn discard_stale_disk(s: &Service, run: &str, node: &str, whole: bool) -> Result<()> {
-    let action = if whole { "delete" } else { "prune" };
-    disk(s, run, action, Some(node)).await?;
-    if !whole {
-        let id = format!("{run}:{node}");
-        s.store
-            .transaction(move |db| {
-                if let Some(mut volume) = db.get("node-volumes", &id)?
-                    && let Some(active) = volume["activeDiskMiB"].as_u64()
-                {
-                    volume["diskMiB"] = active.into();
-                    db.put("node-volumes", &volume)?;
-                }
-                Ok(())
-            })
-            .await?;
+    if whole {
+        return s.retire_stale_disk(run, node).await;
     }
+    disk(s, run, "prune", Some(node)).await?;
+    let id = format!("{run}:{node}");
+    s.store
+        .transaction(move |db| {
+            if let Some(mut volume) = db.get("node-volumes", &id)?
+                && let Some(active) = volume["activeDiskMiB"].as_u64()
+            {
+                volume["diskMiB"] = active.into();
+                db.put("node-volumes", &volume)?;
+            }
+            Ok(())
+        })
+        .await?;
     Ok(())
 }
 
@@ -174,20 +186,19 @@ pub(crate) async fn delete_retired_disk(
     run: &str,
     node: &str,
     isolated: bool,
+    retirement: &str,
 ) -> Result<()> {
     if forget_revoked_disk(s, run, node).await? {
         return Ok(());
     }
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        disk_on(s, run, "delete", Some(node), isolated),
+        disk_on(s, run, "delete", Some(node), isolated, Some(retirement)),
     )
     .await
     .map_err(|_| {
         Error::unavailable("The retired disk deletion will retry when its node responds.")
-    })??;
-    // A node without a VM controller confirms nothing; its references go with the disk.
-    forget_deleted_disk(s, run, node).await
+    })?
 }
 
 async fn delete_disks(s: &Service, run: &str) -> Result<()> {
@@ -486,5 +497,83 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[tokio::test]
+    async fn retired_disk_requires_the_exact_durable_acknowledgement() {
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let app = axum::Router::new().fallback(move |axum::Json(body): axum::Json<Value>| {
+            let (count, observed) = (count.clone(), observed.clone());
+            async move {
+                observed.lock().await.push(body.clone());
+                let reply = match count.fetch_add(1, Ordering::SeqCst) {
+                    0 => json!({ "deleted": true }),
+                    1 => json!({ "deleted": true, "retirementId": crate::config::id() }),
+                    2 => json!({ "deleted": false, "retirementId": body["retirementId"] }),
+                    _ => json!({ "deleted": true, "retirementId": body["retirementId"] }),
+                };
+                axum::Json(reply)
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::common::config(root.path());
+        config.runner_url = origin;
+        let service = Service::new(config).await.unwrap();
+        let run = crate::config::id();
+        let retirement = crate::config::id();
+        let node = crate::nodes::LOCAL_NODE_ID;
+        let volume = json!({ "id": format!("{run}:{node}"), "runId": run, "nodeId": node });
+        let volume_id = text(&volume, "id").to_owned();
+        service
+            .store
+            .write(move |db| db.put("node-volumes", &volume))
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            assert!(
+                delete_retired_disk(&service, &run, node, false, &retirement)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                service
+                    .store
+                    .get("node-volumes", &volume_id)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        delete_retired_disk(&service, &run, node, false, &retirement)
+            .await
+            .unwrap();
+        assert!(
+            service
+                .store
+                .get("node-volumes", &volume_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            *requests.lock().await,
+            vec![json!({ "retirementId": retirement }); 4]
+        );
+        server.abort();
+        let _ = server.await;
     }
 }
