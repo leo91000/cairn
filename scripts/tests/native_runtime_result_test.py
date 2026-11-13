@@ -76,6 +76,32 @@ class ControllerResultTest(unittest.TestCase):
                     self.read(content)
 
 
+class RunningLocalStorageTest(unittest.TestCase):
+    def test_waits_for_the_same_unpaused_snapshot_after_local_write_pressure(self):
+        ready = dict(paused=False, published=dict(local=True, generation=2))
+        samples = [dict(paused=True), dict(availability='unavailable'), ready]
+        api = Mock(side_effect=samples)
+        with patch.object(runtime.time, 'sleep'):
+            snapshot = runtime.running_local_storage(api, 'run')
+        self.assertIs(snapshot, ready)
+        self.assertIs(snapshot['paused'], False)
+        self.assertEqual(api.call_args_list, [call('/disks/run/storage-status')] * len(samples))
+
+    def test_ready_snapshot_is_not_replaced_by_a_later_pressure_observation(self):
+        ready = dict(paused=False)
+        api = Mock(side_effect=[ready, dict(paused=True)])
+        self.assertIs(runtime.running_local_storage(api, 'run'), ready)
+        api.assert_called_once_with('/disks/run/storage-status')
+
+    def test_persistent_pressure_fails_at_the_bounded_observation_deadline(self):
+        api = Mock(return_value=dict(paused=True))
+        with patch.object(runtime.time, 'monotonic', side_effect=[0, 1, 26]), \
+                patch.object(runtime.time, 'sleep'):
+            with self.assertRaisesRegex(AssertionError, 'Timed out waiting for native runtime evidence'):
+                runtime.running_local_storage(api, 'run')
+        api.assert_called_once_with('/disks/run/storage-status')
+
+
 class RetainedHealthTest(unittest.TestCase):
     def test_busy_missing_and_stale_credit_wait_for_the_same_fresh_positive_snapshot(self):
         run = 'stopped-run'
@@ -115,37 +141,30 @@ class RetainedHealthTest(unittest.TestCase):
         api.assert_called_once_with('/health', method='GET')
 
 
-class CompletedSnapshotTest(unittest.TestCase):
-    def snapshot(self, vm):
-        manifest = dict(version=1, size=4096, blockSize=4096, blocks=[], onDemand=True,
-                        runtime=dict(backend='native', storage='ublk-rootless-v1'))
-        if vm:
-            manifest['runtime'].update(disk='vm', vmRuntimeId='fixture-vm')
-        else:
-            manifest['kind'] = 'native-ext4-v1'
-        return dict(id='point', manifest=manifest)
+class CompletedLocalDiskTest(unittest.TestCase):
+    def receipt(self):
+        return dict(status=dict(dirtyBytes=0, published=dict(local=True), completedGeneration=1))
 
-    def test_native_and_vm_snapshots_keep_their_own_layout(self):
-        for vm in (False, True):
-            with self.subTest(vm=vm):
-                snapshot = self.snapshot(vm)
-                api = Mock(return_value=snapshot)
-                self.assertIs(runtime.completed_snapshot(api, 'run', vm=vm), snapshot)
-                api.assert_called_once_with('/disks/run/snapshot-completed')
+    def test_completed_local_disk_requires_a_durable_local_receipt(self):
+        receipt = self.receipt()
+        manager = Mock(return_value=receipt)
+        api = Mock(return_value=receipt['status'])
+        self.assertIs(runtime.completed_local_disk(api, manager, 'run'), receipt)
+        api.assert_called_once_with('/disks/run/storage-status')
+        manager.assert_called_once_with('consolidate', run='run')
 
-    def test_wrong_layout_and_nondemand_snapshots_remain_rejected(self):
-        for vm in (False, True):
-            for wrong in ('layout', 'runtime', 'demand'):
-                with self.subTest(vm=vm, wrong=wrong):
-                    snapshot = self.snapshot(vm)
-                    if wrong == 'layout':
-                        snapshot = self.snapshot(not vm)
-                    elif wrong == 'runtime':
-                        snapshot['manifest']['runtime']['backend'] = 'firecracker'
-                    else:
-                        snapshot['manifest']['onDemand'] = False
-                    with self.assertRaises((AssertionError, KeyError)):
-                        runtime.completed_snapshot(Mock(return_value=snapshot), 'run', vm=vm)
+    def test_remote_dirty_and_missing_completion_receipts_are_rejected(self):
+        for wrong in ('remote', 'dirty', 'completion'):
+            with self.subTest(wrong=wrong):
+                receipt = self.receipt()
+                if wrong == 'remote':
+                    receipt['status']['published'] = dict(backupId='old-remote-point')
+                elif wrong == 'dirty':
+                    receipt['status']['dirtyBytes'] = 4096
+                else:
+                    receipt['status']['completedGeneration'] = 0
+                with self.assertRaises((AssertionError, KeyError)):
+                    runtime.completed_local_disk(Mock(return_value=self.receipt()['status']), Mock(return_value=receipt), 'run')
 
 
 if __name__ == '__main__':

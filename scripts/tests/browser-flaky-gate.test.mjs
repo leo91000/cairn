@@ -19,6 +19,9 @@ const cli = require.resolve('@playwright/test/cli')
 const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
 const shard = workflow.jobs.browser.steps.find(step => step.run?.includes('pnpm test:e2e'))
 
+// Each case starts real Playwright workers alongside the parallel quality suite.
+const cliTimeout = 30000
+
 function executeShard(script, flaky) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-browser-gate-'))
   try {
@@ -51,7 +54,7 @@ process.exit(result.status ?? 1)
     const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script], {
       cwd: directory,
       encoding: 'utf8',
-      timeout: 12000,
+      timeout: cliTimeout,
       env: {
         PATH: `${bin}${path.delimiter}${process.env.PATH}`,
         HOME: home,
@@ -81,11 +84,11 @@ describe('browser qualification exit status', () => {
     const strict = executeShard(shard.run, true)
     expect(strict.report.stats).toMatchObject({ expected: 0, unexpected: 0, flaky: 1 })
     expect(strict.status).toBe(1)
-  })
+  }, 2 * cliTimeout + 5000)
 
   it('accepts a case that passes on its first attempt', () => {
     const result = executeShard(shard.run, false)
     expect(result.report.stats).toMatchObject({ expected: 1, unexpected: 0, flaky: 0 })
     expect(result.status).toBe(0)
-  })
+  }, cliTimeout + 5000)
 })

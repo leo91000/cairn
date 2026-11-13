@@ -603,10 +603,11 @@ async fn fresh_environment_cannot_reserve_materialize_or_read_after_a_back_edge(
             .body(Body::empty())
             .unwrap();
         let response = common::send(&f.router, request).await;
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = read_json(response).await;
         assert!(
-            body.to_string().contains("cyclic native authority lineage"),
+            body.to_string()
+                .contains("remote restore is no longer supported"),
             "{body}"
         );
         assert_eq!(f.service.store.attempts().await.unwrap(), attempts_before);

@@ -1,9 +1,9 @@
 use super::*;
 
 impl LazyDisk {
-    /// Append an empty, aligned tail without fetching or rewriting the base.
-    /// Old sealed manifests must be acknowledged first: their publication may
-    /// replace the base, and must never reinstall an earlier disk geometry.
+    /// Append an empty, aligned tail without reading or rewriting the base.
+    /// Old sealed generations must be consolidated first: their consolidation
+    /// replaces the base, and must never reinstall an earlier disk geometry.
     pub(crate) fn grow(&self, size: u64) -> io::Result<()> {
         let _writes = self.write_gate.write().map_err(failure)?;
         let _publication = self.publication.write().map_err(failure)?;
@@ -31,7 +31,7 @@ impl LazyDisk {
         if sealed {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "Disk growth is waiting for publication",
+                "Disk growth is waiting for journal consolidation",
             ));
         }
         let mut base = self.base.lock().map_err(failure)?;
@@ -64,7 +64,7 @@ mod tests {
 
     impl BlockSource for Empty {
         fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-            panic!("Growing a sparse disk must not fetch remote blocks")
+            panic!("A local disk never fetches remote blocks")
         }
     }
 
@@ -146,22 +146,46 @@ mod tests {
     }
 
     #[test]
-    fn growth_waits_for_old_publication_and_never_shrinks_or_changes_layout() {
+    fn growth_waits_for_consolidation_and_never_shrinks_or_changes_layout() {
         let root = tempfile::tempdir().unwrap();
         let disk = LazyDisk::create(root.path(), &manifest(), Arc::new(Empty)).unwrap();
+        disk.write_at(0, b"retained").unwrap();
         let generation = disk.seal().unwrap();
         assert_eq!(
             disk.grow(2 * BLOCK).unwrap_err().kind(),
             io::ErrorKind::WouldBlock
         );
-        disk.capture(generation).unwrap();
-        disk.commit_published(generation, "published").unwrap();
+        assert_eq!(disk.consolidate().unwrap(), Some(generation));
         disk.grow(2 * BLOCK).unwrap();
-        // An acknowledgement replay must not reinstall the old geometry.
-        disk.commit_published(generation, "published").unwrap();
         assert_eq!(disk.size(), 2 * BLOCK);
         assert!(disk.grow(BLOCK).is_err());
         assert!(disk.grow(2 * BLOCK + 512).is_err());
         assert_eq!(disk.size(), 2 * BLOCK);
+    }
+
+    #[test]
+    fn consolidated_disk_grows_and_consolidates_without_any_remote_base() {
+        let root = tempfile::tempdir().unwrap();
+        let disk = LazyDisk::create(root.path(), &manifest(), Arc::new(Empty)).unwrap();
+        disk.write_at(0, b"base").unwrap();
+        let first = disk.seal().unwrap();
+        assert_eq!(disk.consolidate().unwrap(), Some(first));
+        disk.grow(3 * BLOCK).unwrap();
+        disk.write_at(2 * BLOCK + 9, b"grown").unwrap();
+        let second = disk.seal().unwrap();
+        assert_eq!(disk.consolidate().unwrap(), Some(second));
+        assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0);
+        drop(disk);
+
+        let disk = LazyDisk::open(root.path(), Arc::new(Empty)).unwrap();
+        assert_eq!(disk.size(), 3 * BLOCK);
+        let base = disk.base.lock().unwrap().clone();
+        assert_eq!(base["blocks"].as_array().unwrap().len(), 3);
+        assert!(base["blocks"][1]["hash"].is_null());
+        for (offset, expected) in [(0, &b"base"[..]), (2 * BLOCK + 9, b"grown")] {
+            let mut bytes = vec![0; expected.len()];
+            disk.read_at(offset, &mut bytes).unwrap();
+            assert_eq!(bytes, expected);
+        }
     }
 }

@@ -148,7 +148,7 @@ blocked_file_operation()
         source = Path(__file__).with_name('native_runtime_test.py').read_text()
         for role in ('reference', 'candidate'):
             observed = instrument(source, role)
-            self.assertIn('post-eviction-resume-complete', observed)
+            self.assertIn('post-local-resume-complete', observed)
             self.assertIn('restored-measure-read', observed)
             self.assertIn('namespace-check-before', observed)
             with self.assertRaises(ValueError):

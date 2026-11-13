@@ -387,23 +387,6 @@ impl Db<'_> {
             .flatten())
     }
 
-    /// Node storage eligibility uses lifecycle flags and the unconverted storage
-    /// boundary, never frozen prompts or display summaries. Keep this projection
-    /// on the run owner so inventory and eviction use the same current fields.
-    pub(crate) fn node_storage_run(&self, id: &str) -> Result<Option<Value>> {
-        Ok(self
-            .json_rows(
-                "SELECT json_set(boundary,
-                '$.id',id, '$.status',status, '$.finishedAt',finished_at,
-                '$.recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END),
-                '$.nodeId',placement_node_id, '$.nodeState',placement_node_state,
-                '$.moveRequest',json(placement_move_request), '$.moveReservation',placement_move_reservation
-             ) FROM runs WHERE id=?",
-                [id],
-            )?
-            .pop())
-    }
-
     pub(crate) fn queued_run_records(&self) -> Result<Vec<RunRecord>> {
         self.run_records(RunStatus::Queued)
     }
@@ -645,6 +628,7 @@ impl Db<'_> {
 }
 
 impl Store {
+    #[cfg(test)]
     pub(crate) async fn run_record(&self, id: &str) -> Result<RunRecord> {
         let id = id.to_owned();
         self.read(move |db| required(db.run_record(&id)?, "Run not found"))
@@ -688,6 +672,3 @@ pub(crate) fn admit_prepared(db: &Db<'_>, document: &Value, dedupe: Option<&str>
     }
     db.admit_run(&state, Some(&snapshot), &payload, dedupe)
 }
-
-#[cfg(test)]
-mod storage_tests;

@@ -108,7 +108,11 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route("/internal/nodes/{*path}", any(crate::nodes::internal))
         .route(
             "/internal/node-restore/{*path}",
-            any(crate::nodes::restore::handle),
+            any(|| async {
+                Err::<axum::response::Response, _>(Error::conflict(
+                    "Conversation disks are local; remote restore is no longer supported.",
+                ))
+            }),
         )
         .route(
             "/internal/node-workspace/{*path}",

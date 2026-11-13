@@ -527,20 +527,6 @@ async fn release(
         s.store.audit("account.release_failed", detail).await?;
     }
     s.mcps.revoke_run(s, run_id).await?;
-    if fenced && saved.managed() {
-        let run = s.store.run_record(run_id).await?;
-        let native = saved
-            .prepared()
-            .is_some_and(|prepared| prepared["backend"] == "native");
-        let status = run.state.status;
-        if crate::nodes::publication::protected(&run.wire()?)
-            && (native || matches!(status, RunStatus::Succeeded | RunStatus::Waiting))
-        {
-            // Native work can only be captured after fencing, including failed,
-            // cancelled and paused turns. Durable demand survives upload errors.
-            crate::nodes::publication::request(s, run_id).await?;
-        }
-    }
     if fenced {
         clear_credentials(s, run_id).await;
     }
@@ -1881,7 +1867,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_native_turns_retain_final_publication_demand_for_every_outcome() {
+    async fn completed_turns_never_request_remote_publication() {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
             data_dir: root.path().join("data"),
@@ -1901,15 +1887,15 @@ mod tests {
         })
         .await
         .unwrap();
-        for (backend, status, fenced, expected) in [
-            ("native", "succeeded", true, true),
-            ("native", "failed", true, true),
-            ("native", "cancelled", true, true),
-            ("native", "queued", true, true),
-            ("firecracker", "waiting", true, true),
-            ("native", "failed", false, false),
-            ("firecracker", "failed", true, false),
-            ("firecracker", "cancelled", true, false),
+        for (backend, status, fenced) in [
+            ("native", "succeeded", true),
+            ("native", "failed", true),
+            ("native", "cancelled", true),
+            ("native", "queued", true),
+            ("firecracker", "waiting", true),
+            ("native", "failed", false),
+            ("firecracker", "failed", true),
+            ("firecracker", "cancelled", true),
         ] {
             let run = crate::config::id();
             service
@@ -1942,18 +1928,11 @@ mod tests {
             checkpoint.persist().await.unwrap();
             release(&service, &checkpoint, None, fenced).await.unwrap();
             let current = service.store.run(&run).await.unwrap();
-            assert_eq!(
-                crate::nodes::publication::requested(&current),
-                expected,
+            assert!(
+                !crate::nodes::publication::requested(&current),
                 "{backend}/{status}/fenced={fenced}: {current}",
             );
-            if expected {
-                // Every current disk retains demand for the publication scheduler.
-                assert_eq!(current["backup"]["requestedRevision"], 1);
-                assert_eq!(current["backup"]["status"], "pending");
-            } else {
-                assert!(current["backup"].is_null());
-            }
+            assert!(current["backup"].is_null());
         }
         service.shutdown.cancel();
     }
@@ -2004,15 +1983,10 @@ mod tests {
         .expect("A completed turn must release its scheduler slot before S3 acknowledgement")
         .unwrap();
         let current = service.store.run(&run).await.unwrap();
-        assert_eq!(current["backup"]["status"], "pending");
-        assert_eq!(current["backup"]["requestedRevision"], 1);
-        // Repeated completed turns coalesce to one durable demand rather than
-        // enqueueing one upload task for each response.
+        assert!(current["backup"].is_null());
+        // Repeated completion never creates obsolete publication demand.
         release(&service, &checkpoint, None, true).await.unwrap();
-        assert_eq!(
-            service.store.run(&run).await.unwrap()["backup"]["requestedRevision"],
-            2
-        );
+        assert!(service.store.run(&run).await.unwrap()["backup"].is_null());
         drop(publication);
         service.shutdown.cancel();
     }

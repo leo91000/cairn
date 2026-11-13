@@ -28,7 +28,6 @@ export async function retirementSmoke({
   const retire = () => api(endpoint, 'POST', { retirementId, attempts: [attempt] })
   const restart = async () => {
     docker('restart', name)
-    docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
     await reconnect()
   }
 

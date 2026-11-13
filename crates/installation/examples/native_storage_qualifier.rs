@@ -14,14 +14,13 @@ use cairn_installation::{
     config::{Config, id, now},
     error::{Error, Result},
     http, nodes,
-    nodes::{disk_grants, publication, restore},
+    nodes::{disk_grants, publication},
     service::Service,
     storage::{self, Disk, LazyDisk, remote::RemoteSource},
 };
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         Arc,
@@ -32,6 +31,40 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 const TRUSTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+
+struct LocalBlocks;
+
+impl storage::BlockSource for LocalBlocks {
+    fn fetch(&self, _: &str) -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::other(
+            "Remote reads are forbidden by local disk qualification.",
+        ))
+    }
+}
+
+async fn inspect_stopped_journal<T: Send + 'static>(
+    directory: PathBuf,
+    inspect: impl FnOnce(Arc<LazyDisk>) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(move || {
+        // A Volume would start a consolidation monitor and retire the very
+        // generation being audited. This stopped inspection owns only a journal,
+        // with the normal cross-process lock and no possible remote reads.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let disk = loop {
+            match LazyDisk::open(&directory.join("lazy"), Arc::new(LocalBlocks)) {
+                Ok(disk) => break disk,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        inspect(Arc::new(disk))
+    })
+    .await
+    .map_err(Error::internal)?
+}
 
 async fn authority(s: &Service) -> Result<()> {
     s.store.set("native-authority", json!({
@@ -139,6 +172,40 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                 .map_err(Error::internal)??;
             Ok(json!({ "path": target }))
         }
+        "consolidate" => {
+            let root = s.config.data_dir.parent().unwrap();
+            let directory = storage::environment::directory(&root.join("state"), run_id)?;
+            // The caller has already observed the controller's full physical
+            // close. Its detached background consolidation may still own the
+            // journal briefly; never bypass that exclusive file lock.
+            let owned = directory.clone();
+            inspect_stopped_journal(directory, move |disk| {
+                let generation = disk.seal_completed()?;
+                disk.consolidate()?;
+                let verify = disk.seal()?;
+                let manifest = disk.capture(verify)?;
+                let secret = b"synthetic-generated-secret-never-persist";
+                for block in manifest["blocks"].as_array().into_iter().flatten() {
+                    let Some(hash) = block["hash"].as_str() else {
+                        continue;
+                    };
+                    let bytes = disk.captured_block(verify, hash)?;
+                    if bytes.windows(secret.len()).any(|window| window == secret) {
+                        return Err(Error::bad("Generated secret reached a local base block."));
+                    }
+                }
+                disk.consolidate()?;
+                let mut status = disk.accounting()?;
+                status["completedGeneration"] = disk
+                    .completed()?
+                    .map_or(Value::Null, |value| value["generation"].clone());
+                Ok(json!({
+                    "generation": generation, "logicalBytes": disk.size(), "status": status,
+                    "allocatedBytes": cairn_installation::microvm::budget::allocated(&owned)?
+                }))
+            })
+            .await
+        }
         "publish" | "live-publish" => {
             if command["op"] == "live-publish" {
                 s.store
@@ -191,14 +258,9 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                 "manifestBytes": serde_json::to_vec(&manifest)?.len(), "point": point }),
             )
         }
-        "restore" => {
-            let run = s.store.run(run_id).await?;
-            let point = s
-                .get("node-backups", command["backupId"].as_str().unwrap_or(""))
-                .await?;
-            restore::start(s, &run, nodes::LOCAL_NODE_ID, &point).await?;
-            Ok(json!({ "ok": true }))
-        }
+        "restore" => Err(Error::conflict(
+            "Conversation disks are local; remote restore is no longer supported.",
+        )),
         "metrics" => Ok(json!({ "remoteRequests": requests.load(Ordering::SeqCst) })),
         "archive-hash" => {
             let path = PathBuf::from(
@@ -219,19 +281,6 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
         }
         "purge" => {
             publication::purge(s, run_id).await?;
-            // Advance only this isolated fixture's GC grace and issued PUT expiry.
-            // Production must retain objects while a capability can recreate them.
-            s.store
-                .transaction(|db| {
-                    db.0.execute(
-                        "UPDATE shared_objects SET unused_at=0 WHERE unused_at IS NOT NULL",
-                        [],
-                    )?;
-                    db.0.execute("UPDATE direct_storage_grants SET expires_at=0", [])?;
-                    Ok(())
-                })
-                .await?;
-            while nodes::shared_blocks::collect(s).await? > 0 {}
             Ok(json!({ "ok": true }))
         }
         _ => Err(Error::bad("Unknown fixture command.")),
@@ -269,20 +318,6 @@ async fn main() -> Result<()> {
     let data = root.join("manager");
     tokio::fs::create_dir_all(&data).await?;
     tokio::fs::copy(root.join("data/runner-secret"), data.join("runner-secret")).await?;
-    // The CLI transport also uses only the fixture endpoint. The hot SDK
-    // transport reads AWS_ENDPOINT_URL_S3 from the isolated parent environment.
-    let wrapper = root.join("aws-fixture");
-    let script = format!(
-        "#!/usr/bin/env python3\nimport subprocess,sys\nsys.exit(subprocess.run(['aws','--endpoint-url',{}]+sys.argv[1:]).returncode)\n",
-        serde_json::to_string(&endpoint)?
-    );
-    tokio::fs::write(&wrapper, script).await?;
-    tokio::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).await?;
-    tokio::fs::write(
-        data.join("storage-s3.json"),
-        serde_json::to_vec(&json!({ "bucket": "cairn-node-test", "awsBinary": wrapper }))?,
-    )
-    .await?;
     let s = Service::new(Config {
         data_dir: data,
         home: root.join("manager-home"),
@@ -385,3 +420,45 @@ async fn main() -> Result<()> {
 
 #[path = "../tests/common/run_fixture.rs"]
 mod run_fixture;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_inspection_keeps_its_generation_across_a_monitor_period() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/run");
+        let disk = LazyDisk::create(
+            &directory.join("lazy"),
+            &json!({
+                "version": 1, "size": 4096, "blockSize": 4194304,
+                "blocks": [{ "offset": 0, "size": 4096, "hash": null }]
+            }),
+            Arc::new(LocalBlocks),
+        )
+        .unwrap();
+        disk.set_context(&json!({
+            "master": "http://127.0.0.1:1/", "grant": "inspection",
+            "policy": { "reserveMiB": 64, "reservePercent": 1 }
+        }))
+        .unwrap();
+        disk.write_at(0, b"kept").unwrap();
+        drop(disk);
+        let inspected = inspect_stopped_journal(directory, |disk| {
+            let generation = disk.seal_completed()?;
+            let manifest = disk.capture(generation)?;
+            // Real Docker inspections exceed the Volume monitor's five-second
+            // interval. Keep the captured generation through that same window.
+            std::thread::sleep(std::time::Duration::from_secs(7));
+            let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
+            Ok(disk.captured_block(generation, hash)?)
+        })
+        .await;
+        assert!(
+            inspected.is_ok(),
+            "inspection generation was retired concurrently: {inspected:?}"
+        );
+        assert_eq!(&inspected.unwrap()[..4], b"kept");
+    }
+}

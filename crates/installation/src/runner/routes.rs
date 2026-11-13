@@ -331,12 +331,13 @@ async fn disk_storage(
     }
     let directory = crate::storage::environment::directory(&broker.state, run)?;
     if !crate::storage::runtime::exists(&directory) {
-        return Err(Error::conflict("Conversation has no S3-backed journal."));
+        return Err(Error::conflict("Conversation has no local journal."));
     }
-    let volume = crate::storage::runtime::load(&directory).await?;
     if operation == "storage-status" {
+        let volume = crate::storage::runtime::load_for_inspection(&directory).await?;
         return Ok(Json(volume.inspect().await?).into_response());
     }
+    let volume = crate::storage::runtime::load(&directory).await?;
     let bytes = body(request, 16384, "Invalid publication receipt.").await?;
     let receipt: Publication = decode(&bytes, "Missing generation.")?;
     let generation = receipt
@@ -417,6 +418,7 @@ async fn disk_action(
         crate::storage::environment::lock(&broker.state, run, "The workspace is still in use.")
             .await?;
     let directory = &lease.directory;
+    let _replacement = crate::storage::runtime::replacement(directory).await?;
     if action == "prune" {
         let retired_grants = prune_stale_disks(directory).await?;
         return json_response(json!({ "pruned": true, "retiredGrants": retired_grants }));

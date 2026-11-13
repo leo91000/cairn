@@ -58,7 +58,7 @@ class NativeRuntimeEntrypointTests(unittest.TestCase):
 
 
 class NativeS3MemoryTests(unittest.TestCase):
-    def test_fixture_clock_collects_deferred_garbage_and_retains_uncertain_tombstones(self):
+    def test_fixture_purge_preserves_old_remote_objects_and_queued_tombstones(self):
         binary = Path(os.environ.get('CAIRN_TEST_NATIVE_QUALIFIER',
                       str(Path(__file__).resolve().parents[2] / 'target/debug/examples/native_storage_qualifier')))
         self.assertTrue(binary.is_file(), 'Build/download the candidate manager fixture first.')
@@ -106,16 +106,16 @@ class NativeS3MemoryTests(unittest.TestCase):
                     db.execute('INSERT INTO direct_storage_grants VALUES(?,0,0)', (object_id,))
                 manager('purge', run=run)
                 self.assertEqual(client.list_objects_v2(Bucket='cairn-node-test')['KeyCount'], 1,
-                                 'The deferred retry must reproduce the final bucket-empty failure.')
+                                 'Local cleanup must preserve old remote objects.')
                 before = runtime.advance_fixture_garbage_clock(root)
                 self.assertEqual(before['states'][0]['deferred'], 1)
                 manager('purge', run=run)
-                self.assertEqual(client.list_objects_v2(Bucket='cairn-node-test')['KeyCount'], 0)
+                self.assertEqual(client.list_objects_v2(Bucket='cairn-node-test')['KeyCount'], 1)
                 with sqlite3.connect(database) as db:
                     state, retry, settled = db.execute('''SELECT o.state,o.retry_at,g.settled FROM shared_objects o
                         JOIN direct_storage_grants g ON g.object=o.id WHERE o.id=?''', (object_id,)).fetchone()
                     self.assertEqual((state, settled), ('deleting', 0))
-                    self.assertGreater(retry, int(time.time() * 1000))
+                    self.assertEqual(retry, 0)
         finally:
             if helper:
                 helper.stdin.close()

@@ -1100,6 +1100,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_disk_deletion_needs_neither_publication_nor_readable_base_blocks() {
+        use crate::storage::Disk;
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let state = broker.state.clone();
+        let app = router(broker);
+        for missing_base in [false, true] {
+            let run = crate::config::id();
+            let directory = state.join("disks").join(&run);
+            let lazy = directory.join("lazy");
+            let disk = crate::storage::runtime::create(
+                &lazy,
+                &json!({
+                    "version": 1, "size": 4096, "blockSize": 4194304,
+                    "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
+                }),
+                &json!({
+                    "master": "http://127.0.0.1:1/", "grant": "local-fixture",
+                    "policy": { "reserveMiB": 64, "reservePercent": 1 },
+                }),
+            )
+            .await
+            .unwrap();
+            disk.write_at(0, b"local-only work").unwrap();
+            if missing_base {
+                disk.seal().unwrap();
+                disk.consolidate().unwrap();
+                let file = std::fs::read_dir(lazy.join("cache"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap();
+                std::fs::remove_file(file.path()).unwrap();
+            } else {
+                assert_ne!(disk.accounting().unwrap()["dirtyBytes"], 0);
+            }
+            drop(disk);
+            assert_eq!(
+                request(&app, &run, "delete", &crate::config::id(), SECRET).await,
+                200
+            );
+            assert!(!lazy.exists());
+            assert!(directory.join("lock").exists());
+        }
+    }
+
+    #[tokio::test]
     async fn workspace_disk_deletion_uses_authenticated_http_and_preserves_the_lock() {
         let root = tempfile::TempDir::new().unwrap();
         let data = root.path().join("data");

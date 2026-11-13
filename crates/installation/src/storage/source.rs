@@ -53,7 +53,6 @@ impl Source {
         self.report_directory = Some(directory.to_owned());
         if let Some(bound) = self.binding.get_mut().map_err(Error::internal)?.as_mut() {
             let source = (**bound).clone().persistent(directory)?;
-            source.replay();
             *bound = Arc::new(source);
         }
         Ok(self)
@@ -125,7 +124,6 @@ impl Source {
         // Health/control probes keep seeing an unassigned source throughout
         // slow fsync. Never hold their read lock across persistent disk I/O.
         persist()?;
-        bound.replay();
         *self.binding.write().map_err(Error::internal)? = Some(bound);
         Ok(())
     }

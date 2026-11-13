@@ -9,7 +9,6 @@ pub mod connector;
 pub mod coordination;
 pub(crate) mod disk_capacity;
 pub mod disk_grants;
-pub(crate) mod eviction;
 pub mod exclusive;
 pub mod exclusive_state;
 pub mod executor;
@@ -622,9 +621,7 @@ pub(crate) async fn configure_storage_live(
             "This node was changed elsewhere. Reload it before saving.",
         ));
     }
-    crate::object_storage::Storage::configured(s)?
-        .validate_live(&authorize)
-        .await?;
+    // Disks are local to their node: saving its limits needs no S3 bucket.
     let secret = runner_secret(s).await?;
     authorize.recheck().await?;
     let response = s
