@@ -767,7 +767,7 @@ async fn all_terminal_paths_are_pruned_without_losing_the_hourly_accounting() {
             )?;
             db.0.execute("INSERT INTO hook_rule_receipts VALUES(?1,?2,?3)", rusqlite::params![id, event, at])?;
         }
-        db.0.execute("INSERT INTO hook_rule_quiet_hours VALUES(?1,?2,1)", rusqlite::params![id, at / 3_600_000 - 24 * 8])?;
+        db.0.execute("INSERT INTO hook_rule_quiet_hours(rule_id,hour,count) VALUES(?1,?2,1)", rusqlite::params![id, at / 3_600_000 - 24 * 8])?;
         Ok(())
     }).await.unwrap();
     engine::tick(&f.s).await.unwrap();
@@ -1663,7 +1663,7 @@ async fn a_short_wait_rechecks_membership_without_restarting_the_service() {
 }
 
 #[tokio::test]
-async fn a_membership_outage_backpressures_events_instead_of_failing_them_at_twenty() {
+async fn a_membership_outage_keeps_admitted_events_waiting_without_holding_the_shared_queue() {
     let f = granted().await;
     common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
     let rule = rule(
@@ -1691,7 +1691,7 @@ async fn a_membership_outage_backpressures_events_instead_of_failing_them_at_twe
     }
     engine::tick(&restarted).await.unwrap();
     let listed = history(&f, OWNER, &rule).await;
-    assert_eq!(listed["triggerings"].as_array().unwrap().len(), 20);
+    assert_eq!(listed["triggerings"].as_array().unwrap().len(), 30);
     assert!(
         listed["triggerings"]
             .as_array()
@@ -1711,7 +1711,31 @@ async fn a_membership_outage_backpressures_events_instead_of_failing_them_at_twe
             })
             .await
             .unwrap();
-    assert_eq!(queued, 10);
+    assert_eq!(queued, 0);
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+    common::relay_fixture::authority_unavailable(&f.s, false).await;
+    restarted.synchronize_task_authors().await.unwrap();
+    // A different check while these triggerings waited cannot authorize their resume.
+    common::relay_fixture::remove_member(&f.s, MEMBER).await;
+    restarted
+        .store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE hook_rule_triggerings SET next_at=0 WHERE status='waiting'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    engine::tick(&restarted).await.unwrap();
+    assert!(
+        history(&f, OWNER, &rule).await["triggerings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["status"] == "stopped")
+    );
     assert_eq!(f.posts.load(Ordering::SeqCst), 0);
 }
 
@@ -1936,4 +1960,110 @@ async fn remembered_values_are_bounded_across_rule_versions_and_can_be_reduced()
         history(&f, OWNER, &rule).await["triggerings"][0]["status"],
         "completed"
     );
+}
+
+#[tokio::test]
+async fn one_rules_waiting_limit_does_not_hold_the_instances_shared_queue() {
+    let f = granted().await;
+    let slow = rule(&f, OWNER, json!([wait_step(600), remember_seen()]), 200).await;
+    let fast = rule(&f, OWNER, json!([remember_seen()]), 200).await;
+    for (batch, events) in [(0, 50), (1, 20)] {
+        for index in 0..events {
+            emit(
+                &f,
+                &format!("shared-{batch}-{index}"),
+                json!({ "channel": "support", "author": "alice" }),
+            )
+            .await;
+        }
+        engine::tick(&f.s).await.unwrap();
+        let queued =
+            f.s.store
+                .read(|db| {
+                    Ok(db
+                        .0
+                        .query_row("SELECT count(*) FROM plugin_hook_events", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?)
+                })
+                .await
+                .unwrap();
+        assert_eq!(queued, 0);
+    }
+    let id = fast.clone();
+    let completed =
+        f.s.store
+            .read(move |db| {
+                Ok(db.0.query_row(
+                "SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=? AND status='completed'",
+                [id],
+                |row| row.get::<_, i64>(0),
+            )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(completed, 70);
+    let slow_history = history(&f, OWNER, &slow).await;
+    let id = slow.clone();
+    let waiting =
+        f.s.store
+            .read(move |db| {
+                Ok(db.0.query_row(
+                "SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=? AND status='waiting'",
+                [id],
+                |row| row.get::<_, i64>(0),
+            )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(waiting, 20);
+    assert!(
+        slow_history["triggerings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["status"] == "failed")
+    );
+}
+
+#[tokio::test]
+async fn a_full_rule_refuses_only_its_delivery_without_calling_the_resolver() {
+    let f = granted().await;
+    f.marker("resolver-unavailable").await;
+    let rule = rule(&f, OWNER, json!([remember_seen()]), 200).await;
+    let id = rule.clone();
+    f.s.store.transaction(move |db| {
+        let at = cairn_installation::config::now();
+        for index in 0..1000 {
+            db.0.execute(
+                "INSERT INTO hook_rule_triggerings(id,rule_id,version,event_id,event,status,cursor,in_flight,actions,tool_calls,verify,verify_since,next_at,created_at,updated_at) \
+                 VALUES(?1,?2,1,?3,'{}','waiting','{\"frames\":[],\"count\":0}',0,0,0,1,?4,?5,?4,?4)",
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), id, format!("pending-{index}"), at, at+3_600_000],
+            )?;
+        }
+        Ok(())
+    }).await.unwrap();
+    emit(
+        &f,
+        "capacity-refusal",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+    let result = history(&f, OWNER, &rule).await;
+    assert_eq!(result["notAdmitted"], 1);
+    assert_eq!(result["withoutEffect"], 0);
+    let queued =
+        f.s.store
+            .read(|db| {
+                Ok(db
+                    .0
+                    .query_row("SELECT count(*) FROM plugin_hook_events", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(queued, 0);
 }

@@ -8,10 +8,13 @@ import kotlinx.serialization.Serializable
 data class ListHookRuleTriggeringsOutput(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val nextCursor: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val notAdmitted: Long? = null,
     val triggerings: List<HookRuleTriggering>,
     val withoutEffect: Long,
 ) {
     init {
+        notAdmitted?.let { require(it >= 0L) }
         require(withoutEffect >= 0L)
     }
 }

@@ -90,7 +90,9 @@ CREATE TABLE IF NOT EXISTS hook_rule_values(
 CREATE TABLE IF NOT EXISTS hook_rule_quiet_hours(
  rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
  hour INTEGER NOT NULL CHECK(hour>=0),
- count INTEGER NOT NULL CHECK(count>=1),
+ count INTEGER NOT NULL CHECK(count>=0),
+ not_admitted INTEGER NOT NULL DEFAULT 0 CHECK(not_admitted>=0),
+ CHECK(count+not_admitted>=1),
  PRIMARY KEY(rule_id,hour)
 ) WITHOUT ROWID;
 ";
@@ -117,7 +119,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
 const DELIVERY_PATIENCE: i64 = 10 * 60_000;
 /// Triggerings waiting at once, per rule.
 pub(crate) const MAX_WAITING: i64 = 20;
-pub(crate) const MAX_PENDING: i64 = 20;
+pub(crate) const MAX_PENDING: i64 = 1000;
 pub(crate) const MAX_RECORDED_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_CURSOR_BYTES: usize = 512 * 1024;
 pub(crate) const MAX_RULE_VALUES_BYTES: usize = 1024 * 1024;
@@ -425,9 +427,34 @@ impl Db<'_> {
 
     fn count_quiet(&self, rule: &str) -> Result<()> {
         self.0
-            .prepare_cached("INSERT INTO hook_rule_quiet_hours VALUES(?1,?2,1) ON CONFLICT(rule_id,hour) DO UPDATE SET count=count+1")?
+            .prepare_cached("INSERT INTO hook_rule_quiet_hours(rule_id,hour,count) VALUES(?1,?2,1) ON CONFLICT(rule_id,hour) DO UPDATE SET count=count+1")?
             .execute(params![rule, now() / 3_600_000])?;
         Ok(())
+    }
+
+    /// Capacity refusal is a per-rule decision, with no payload retained and no
+    /// external resolution. Its receipt prevents recounting if another listener defers.
+    fn refuse_admission(&self, rule: &str, event: &str) -> Result<bool> {
+        let full: bool = self.0.query_row(
+            "SELECT count(*)>=?2 FROM hook_rule_triggerings WHERE rule_id=?1 \
+             AND status IN ('running','waiting','retrying')",
+            params![rule, MAX_PENDING],
+            |row| row.get(0),
+        )?;
+        if !full {
+            return Ok(false);
+        }
+        let recorded = self.0.execute(
+            "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id) VALUES(?1,?2)",
+            params![rule, event],
+        )?;
+        if recorded > 0 {
+            self.0.execute(
+                "INSERT INTO hook_rule_quiet_hours(rule_id,hour,count,not_admitted) VALUES(?1,?2,0,1) \
+                 ON CONFLICT(rule_id,hour) DO UPDATE SET not_admitted=not_admitted+1", params![rule, now()/3_600_000],
+            )?;
+        }
+        Ok(true)
     }
 
     /// Keeps the newest finished triggerings of a rule and a week of quiet hours.
@@ -580,6 +607,23 @@ async fn deliver_hook(
             Delivery::Handled(false)
         });
     }
+    let full = s.store.read({
+        let rule = row.id.clone();
+        move |db| Ok(db.0.query_row(
+            "SELECT count(*)>=?2 FROM hook_rule_triggerings WHERE rule_id=?1 AND status IN ('running','waiting','retrying')",
+            params![rule, MAX_PENDING], |row| row.get::<_, bool>(0),
+        )?)
+    }).await?;
+    if full {
+        let rule = row.id.clone();
+        let event = event.id.clone();
+        if s.store
+            .transaction(move |db| db.refuse_admission(&rule, &event))
+            .await?
+        {
+            return Ok(Delivery::Handled(false));
+        }
+    }
     let agent = version.definition.execution_agent_id.to_string();
     // Cairn never delivers an event whose payload designates a resource
     // outside the execution agent's hook grant. A resolution that failed for
@@ -619,11 +663,7 @@ async fn deliver_hook(
     let inserted = s
     .store
     .transaction(move |db| {
-        let pending: i64 = db.0.query_row(
-            "SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=? AND status IN ('running','waiting','retrying')",
-            [&rule], |row| row.get(0),
-        )?;
-        if pending >= MAX_PENDING { return Ok(None) }
+        if db.refuse_admission(&rule, &event_id)? { return Ok(None) }
         let recorded = record.to_string();
         let recorded_bytes = recorded.len() + 256;
         if recorded_bytes > MAX_RECORDED_BYTES - ERROR_RESERVE {
@@ -650,7 +690,7 @@ async fn deliver_hook(
     .await?;
     Ok(match inserted {
         Some(created) => Delivery::Handled(created),
-        None => Delivery::Deferred,
+        None => Delivery::Handled(false),
     })
 }
 
@@ -1116,7 +1156,7 @@ pub(crate) fn reset_budget(db: &Db<'_>, rule: &str) -> Result<()> {
 fn waiting_count(db: &Db<'_>, rule: &str, except: &str) -> Result<i64> {
     Ok(db.0.query_row(
         "SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=?1 \
-         AND status IN ('waiting','retrying') AND id<>?2",
+         AND (status='retrying' OR (status='waiting' AND verify_since IS NULL)) AND id<>?2",
         params![rule, except],
         |row| row.get(0),
     )?)
@@ -1584,6 +1624,7 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                 .await
         };
         if verified.is_err() {
+            triggering.verify = true;
             let since = *triggering.verify_since.get_or_insert_with(now);
             if now() - since > MEMBERSHIP_PATIENCE {
                 let error = "Its creator's membership could not be verified for seven days.";
@@ -2083,6 +2124,10 @@ pub(crate) fn list(
         triggerings,
         without_effect: u32::try_from(without_effect).unwrap_or(u32::MAX),
         next_cursor,
+        not_admitted: Some(db.0.query_row(
+            "SELECT coalesce(sum(not_admitted),0) FROM hook_rule_quiet_hours WHERE rule_id=? AND hour>=?",
+            params![rule, now()/3_600_000 - 23], |row| row.get::<_, u32>(0),
+        )?),
     })
 }
 

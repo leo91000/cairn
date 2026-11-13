@@ -907,6 +907,10 @@ pub struct ListHookRuleTriggeringsOutput {
     /// Triggerings that ended without any action in the last 24 hours. They are not
     /// kept and do not count against the hourly caps.
     pub without_effect: u32,
+    /// Events refused only for this rule's capacity in the last 24 hours. No payload is retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub not_admitted: Option<u32>,
     /// Present when older triggerings remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]

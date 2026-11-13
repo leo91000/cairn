@@ -12,6 +12,10 @@ export interface ListHookRuleTriggeringsOutput {
    */
   withoutEffect: number
   /**
+   * Events refused only for this rule's capacity in the last 24 hours. No payload is retained.
+   */
+  notAdmitted?: number | null
+  /**
    * Present when older triggerings remain.
    */
   nextCursor?: string | null

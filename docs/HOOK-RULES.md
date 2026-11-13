@@ -124,8 +124,10 @@ Actions:
   Any other error ends the triggering with its message.
 - `storeValue` with the rule scope keeps up to 64 KiB.
 - `wait` resumes the next steps later; a rule keeps at most 20 triggerings waiting,
-  including retries. Admission keeps at most 20 active triggerings per rule; later
-  events remain queued, so a membership outage does not fail them early.
+  including retries. Membership verification waits retain their seven-day deadline.
+  A rule can hold at most 1,000 active triggerings; later events are refused only
+  for that rule and counted as `notAdmitted` in its history, without retaining their
+  payloads or blocking the shared instance queue.
 - Conversation actions and conditions about conversation keys come with conversation
   keys; until then they fail the triggering with a message saying so.
 
