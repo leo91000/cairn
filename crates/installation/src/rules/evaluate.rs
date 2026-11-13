@@ -489,8 +489,11 @@ fn index_of(
         .nth(offset)
         .map_or(text.len(), |(byte, _)| byte);
     let found = if last {
-        let end = (byte + needle.len()).min(text.len());
-        text.get(..end).and_then(|head| head.rfind(needle.as_str()))
+        let mut end = (byte + needle.len()).min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text[..end].rfind(needle.as_str())
     } else {
         text[byte..].find(needle.as_str()).map(|found| byte + found)
     };
@@ -837,6 +840,23 @@ mod tests {
 
     fn value(value: &RuleValue, variables: &Variables) -> Outcome<Json> {
         Evaluator::new(variables)?.value(value, &Map::new())
+    }
+
+    #[test]
+    fn reverse_search_offsets_preserve_unicode_boundaries_and_overlapping_matches() {
+        for (source, expected) in [
+            ("'aé'.lastIndexOf('a', 1)", 0),
+            ("'aé'.lastIndexOf('é', 1)", 1),
+            ("'ababa'.lastIndexOf('aba', 3)", 2),
+            ("'hello'.lastIndexOf('llo', 3)", 2),
+            ("'aé'.lastIndexOf('', 1)", 1),
+        ] {
+            assert_eq!(
+                formula(source, &Variables::default()).unwrap(),
+                json!(expected),
+                "{source}"
+            );
+        }
     }
 
     #[test]

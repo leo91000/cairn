@@ -429,6 +429,19 @@ async fn refused_actions_retry_alone_and_interrupted_ones_never_replay() {
     assert_eq!(detail["status"], "completed", "{detail}");
     assert_eq!(f.posts.load(Ordering::SeqCst), 2);
     assert_eq!(detail["steps"][1]["attempts"], 2);
+    let triggering_id = text(&detail, "id").to_owned();
+    let calls =
+        f.s.store
+            .read(move |db| {
+                Ok(db.0.query_row(
+                    "SELECT tool_calls FROM hook_rule_triggerings WHERE id=?",
+                    [triggering_id],
+                    |row| row.get::<_, u32>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(calls, 3);
 
     // An action in flight when Cairn stopped stays ambiguous.
     emit(
@@ -942,4 +955,403 @@ async fn an_unreadable_rule_does_not_block_other_listeners() {
         history(&f, OWNER, &working).await["triggerings"][0]["status"],
         "completed"
     );
+}
+
+async fn hold_first_tool(
+    f: &Fixture,
+    event: &str,
+) -> tokio::task::JoinHandle<cairn_installation::error::Result<usize>> {
+    f.pause.store(true, Ordering::SeqCst);
+    emit(f, event, json!({ "channel": "support", "author": "alice" })).await;
+    let service = f.s.clone();
+    let worker = tokio::spawn(async move { engine::tick(&service).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+        .await
+        .unwrap();
+    worker
+}
+
+fn wait_step(seconds: u32) -> Value {
+    json!({
+        "type": "action", "id": "pause",
+        "action": { "type": "wait", "seconds": { "type": "literal", "value": seconds } },
+    })
+}
+
+#[tokio::test]
+async fn absent_optional_payload_aliases_are_null_in_conditions_and_templates() {
+    let f = granted().await;
+    let rule = rule(&f, OWNER, json!([{
+        "type": "if", "id": "noThread",
+        "condition": { "type": "compare", "left": { "type": "formula", "expression": "thread" }, "operator": "absent" },
+        "then": [post("post", &f, &json!({ "author": { "type": "template", "text": "discord:{{thread}}" } }))],
+        "otherwise": [],
+    }]), 60).await;
+    emit(
+        &f,
+        "without-thread",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    let detail = detail(&f, OWNER, &listed["triggerings"][0]).await;
+    assert_eq!(detail["status"], "completed", "{detail}");
+    assert_eq!(detail["steps"][0]["input"]["author"], "discord:");
+    emit(
+        &f,
+        "with-thread",
+        json!({ "channel": "support", "author": "alice", "thread": "support-thread" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(history(&f, OWNER, &rule).await["withoutEffect"], 1);
+}
+
+#[tokio::test]
+async fn lifting_a_non_exhausted_budget_does_not_reset_the_hourly_count() {
+    let f = granted().await;
+    let rule = rule(&f, OWNER, steps(&json!([post("post", &f, &json!({}))])), 1).await;
+    emit(
+        &f,
+        "first-budget",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let (status, _) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/hook-rules/{rule}/budget"),
+        json!({ "ruleId": rule }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    emit(
+        &f,
+        "second-budget",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+    let (_, current) = call(
+        &f,
+        OWNER,
+        "GET",
+        &format!("/api/hook-rules/{rule}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(current["blocks"][0]["kind"], "budgetExhausted");
+}
+
+#[tokio::test]
+async fn resuming_a_rule_does_not_revive_triggerings_stopped_during_a_tool_call() {
+    for (endpoint, field, blocked, resumed) in [
+        ("enabled", "enabled", false, true),
+        ("emergency-pause", "paused", true, false),
+    ] {
+        let f = granted().await;
+        let rule = rule(
+            &f,
+            OWNER,
+            steps(&json!([
+                post("first", &f, &json!({})),
+                post("second", &f, &json!({})),
+            ])),
+            60,
+        )
+        .await;
+        let worker = hold_first_tool(&f, "stop-resume").await;
+        for state in [blocked, resumed] {
+            let mut body = json!({ "ruleId": rule });
+            body[field] = json!(state);
+            let (status, response) = call(
+                &f,
+                OWNER,
+                "POST",
+                &format!("/api/hook-rules/{rule}/{endpoint}"),
+                body,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(
+                history(&f, OWNER, &rule).await["triggerings"][0]["status"],
+                "stopped"
+            );
+        }
+        f.release.notify_one();
+        worker.await.unwrap().unwrap();
+        assert_eq!(f.posts.load(Ordering::SeqCst), 1, "{endpoint}");
+        let listed = history(&f, OWNER, &rule).await;
+        let stopped = detail(&f, OWNER, &listed["triggerings"][0]).await;
+        assert_eq!(stopped["status"], "stopped");
+        assert_eq!(stopped["steps"][0]["status"], "completed");
+        emit(
+            &f,
+            "new-after-resume",
+            json!({ "channel": "support", "author": "alice" }),
+        )
+        .await;
+        engine::tick(&f.s).await.unwrap();
+        assert_eq!(f.posts.load(Ordering::SeqCst), 3);
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_rule_during_a_tool_call_removes_its_history_and_prevents_the_next_action() {
+    let f = granted().await;
+    let rule = rule(
+        &f,
+        OWNER,
+        steps(&json!([
+            post("first", &f, &json!({})),
+            post("second", &f, &json!({})),
+        ])),
+        60,
+    )
+    .await;
+    let worker = hold_first_tool(&f, "delete-running").await;
+    let (status, deleted) = call(
+        &f,
+        OWNER,
+        "DELETE",
+        &format!("/api/hook-rules/{rule}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    f.release.notify_one();
+    worker.await.unwrap().unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+    let remaining =
+        f.s.store
+            .read(|db| {
+                Ok((
+                    db.0.query_row("SELECT count(*) FROM hook_rule_triggerings", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                    db.0.query_row("SELECT count(*) FROM hook_rule_steps", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                    db.0.query_row("SELECT count(*) FROM hook_rule_receipts", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                ))
+            })
+            .await
+            .unwrap();
+    assert_eq!(remaining, (0, 0, 0));
+}
+
+#[tokio::test]
+async fn old_versions_stop_when_their_creators_access_is_lost_even_after_an_edit() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let rule = rule(
+        &f,
+        MEMBER,
+        steps(&json!([wait_step(600), post("post", &f, &json!({}))])),
+        60,
+    )
+    .await;
+    emit(
+        &f,
+        "old-version",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let old = history(&f, OWNER, &rule).await["triggerings"][0].clone();
+    assert_eq!(old["status"], "waiting");
+    let agent =
+        f.s.agent_fixture(json!({ "name": "Replacement" }), None)
+            .await
+            .unwrap();
+    let agent_id = text(&agent, "id");
+    common::relay_fixture::allow_member(&f.s, MEMBER, agent_id).await;
+    f.set_for(
+        agent_id,
+        json!([
+            contribution("hook", "message", support()),
+            contribution("tool", "grant_probe_post", support()),
+        ]),
+    )
+    .await;
+    let path = format!("/api/hook-rules/{rule}");
+    let (_, current) = call(&f, MEMBER, "GET", &path, Value::Null).await;
+    let mut definition = current["definition"].clone();
+    definition["executionAgentId"] = agent_id.into();
+    let (status, edited) = call(
+        &f,
+        MEMBER,
+        "PUT",
+        &path,
+        json!({ "ruleId": rule, "revision": current["revision"], "definition": definition }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited["version"], 2);
+    let access = format!("/api/agents/{MAIN_AGENT_ID}/accounts/{MEMBER}");
+    let (status, response) = call(&f, OWNER, "DELETE", &access, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(detail(&f, OWNER, &old).await["status"], "stopped");
+    let (status, _) = call(&f, OWNER, "PUT", &access, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(detail(&f, OWNER, &old).await["status"], "stopped");
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn the_end_of_a_creators_membership_stops_waiting_work() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let rule = rule(
+        &f,
+        MEMBER,
+        steps(&json!([wait_step(600), post("post", &f, &json!({}))])),
+        60,
+    )
+    .await;
+    emit(
+        &f,
+        "membership-end",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(
+        history(&f, OWNER, &rule).await["triggerings"][0]["status"],
+        "waiting"
+    );
+    common::relay_fixture::remove_member(&f.s, MEMBER).await;
+    f.s.synchronize_task_authors().await.unwrap();
+    assert_eq!(
+        history(&f, OWNER, &rule).await["triggerings"][0]["status"],
+        "stopped"
+    );
+    let (_, current) = call(
+        &f,
+        OWNER,
+        "GET",
+        &format!("/api/hook-rules/{rule}"),
+        Value::Null,
+    )
+    .await;
+    assert!(
+        current["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["kind"] == "membershipEnded")
+    );
+}
+
+#[tokio::test]
+async fn a_claim_error_does_not_abort_another_triggerings_in_flight_tool() {
+    let f = granted().await;
+    rule(&f, OWNER, json!([{
+        "type": "if", "id": "which",
+        "condition": { "type": "authorIn", "author": { "type": "formula", "expression": "author" }, "people": [{ "resourceType": "person", "id": "alice" }] },
+        "then": [post("slow", &f, &json!({}))],
+        "otherwise": [wait_step(1), post("afterWait", &f, &json!({}))],
+    }]), 60).await;
+    emit(
+        &f,
+        "wait-before-fault",
+        json!({ "channel": "support", "author": "bob" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let worker = hold_first_tool(&f, "slow-during-fault").await;
+    let attempted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let signal = attempted.clone();
+    f.s.store.transaction(move |db| {
+        db.0.create_scalar_function("fail_claim", 0, rusqlite::functions::FunctionFlags::SQLITE_UTF8, move |_| -> rusqlite::Result<i64> {
+            signal.store(true, Ordering::SeqCst);
+            Err(rusqlite::Error::UserFunctionError(Box::new(std::io::Error::other("synthetic claim failure"))))
+        })?;
+        db.0.execute_batch("CREATE TRIGGER fail_claim BEFORE UPDATE ON hook_rule_triggerings WHEN OLD.status='waiting' AND NEW.status='running' BEGIN SELECT fail_claim(); END;")?;
+        Ok(())
+    }).await.unwrap();
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !attempted.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    f.s.store
+        .transaction(|db| {
+            db.0.execute_batch("DROP TRIGGER fail_claim")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.release.notify_one();
+    let result = worker.await.unwrap();
+    assert!(observed.is_ok(), "The fault was not exercised.");
+    result.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 2);
+    let states =
+        f.s.store
+            .read(|db| {
+                Ok(db.0.query_row(
+                    "SELECT count(*) FROM hook_rule_triggerings WHERE status='completed'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(states, 2);
+}
+
+#[tokio::test]
+async fn conversation_actions_and_predicates_fail_explicitly_until_ticket_g() {
+    for nodes in [
+        json!([{
+            "type": "action",
+            "id": "start",
+            "action": {
+                "type": "startAgent",
+                "agentId": MAIN_AGENT_ID,
+                "prompt": { "type": "literal", "value": "hello" },
+            },
+        }]),
+        json!([{
+            "type": "if",
+            "id": "exists",
+            "condition": {
+                "type": "conversationExists",
+                "key": { "type": "literal", "value": "key" },
+            },
+            "then": [],
+            "otherwise": [],
+        }]),
+    ] {
+        let f = granted().await;
+        let rule = rule(&f, OWNER, nodes, 60).await;
+        emit(
+            &f,
+            "conversation-stub",
+            json!({ "channel": "support", "author": "alice" }),
+        )
+        .await;
+        engine::tick(&f.s).await.unwrap();
+        let listed = history(&f, OWNER, &rule).await;
+        let failed = detail(&f, OWNER, &listed["triggerings"][0]).await;
+        assert_eq!(failed["status"], "failed", "{failed}");
+        assert!(
+            failed["error"]
+                .as_str()
+                .unwrap()
+                .contains("conversation keys"),
+            "{failed}"
+        );
+    }
 }

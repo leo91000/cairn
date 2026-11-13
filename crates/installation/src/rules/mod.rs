@@ -748,8 +748,10 @@ pub(crate) async fn lift_budget(
                 "Only its creator or the installation owner can resume this rule's budget.",
             ));
         }
-        engine::reset_budget(db, &row.id)?;
-        row.budget_exhausted_at = None;
+        if row.budget_exhausted_at.is_some() {
+            engine::reset_budget(db, &row.id)?;
+            row.budget_exhausted_at = None;
+        }
         row.budget_reason = None;
         Ok("hook_rule.budget_resumed")
     })

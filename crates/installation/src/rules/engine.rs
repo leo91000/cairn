@@ -216,15 +216,22 @@ impl Db<'_> {
         next_at: Option<i64>,
         error: Option<&str>,
     ) -> Result<()> {
-        let finished = matches!(status, "completed" | "failed" | "stopped").then(now);
+        let terminal = matches!(status, "completed" | "failed" | "stopped");
+        let finished = terminal.then(now);
+        let cursor = if terminal {
+            Cursor::default()
+        } else {
+            t.cursor.clone()
+        };
+        let pending = (!terminal).then_some(t.pending.as_ref()).flatten();
         self.0
             .prepare_cached("UPDATE hook_rule_triggerings SET status=?2,cursor=?3,pending=?4,in_flight=?5,actions=?6,tool_calls=?7,counted_at=?8,verify=?9,verify_since=?10,next_at=?11,error=?12,updated_at=?13,finished_at=?14,lease_until=CASE WHEN ?2='running' THEN ?13+?15 ELSE NULL END WHERE id=?1")?
             .execute(params![
                 t.id,
                 status,
-                serde_json::to_string(&t.cursor)?,
-                t.pending.as_ref().map(serde_json::to_string).transpose()?,
-                t.in_flight,
+                serde_json::to_string(&cursor)?,
+                pending.map(serde_json::to_string).transpose()?,
+                !terminal && t.in_flight,
                 t.actions,
                 t.tool_calls,
                 t.counted_at,
@@ -236,6 +243,17 @@ impl Db<'_> {
                 finished,
                 LEASE,
             ])?;
+        if terminal {
+            self.0.execute(
+                "UPDATE hook_rule_steps SET status='failed',error=?2,finished_at=?3 \
+                 WHERE triggering_id=?1 AND status IN ('running','waiting','retrying')",
+                params![
+                    t.id,
+                    error.unwrap_or("The triggering ended before this step completed."),
+                    finished
+                ],
+            )?;
+        }
         Ok(())
     }
 
@@ -325,20 +343,31 @@ pub(crate) fn action_kind(action: &RuleAction) -> &'static str {
 /// Stops the triggerings in progress of a rule that was disabled, paused in an
 /// emergency, or whose creator left. Called in the transaction that blocks it.
 pub(crate) fn stop_rule(db: &Db<'_>, rule: &str, reason: &str) -> Result<()> {
+    stop_triggerings(db, rule, None, reason)
+}
+
+fn stop_triggerings(db: &Db<'_>, rule: &str, version: Option<u32>, reason: &str) -> Result<()> {
     let at = now();
-    db.0.prepare_cached(
-        "UPDATE hook_rule_steps SET status='failed',error=?2,finished_at=?3 \
-         WHERE status='retrying' AND triggering_id IN \
-         (SELECT id FROM hook_rule_triggerings WHERE rule_id=?1 AND status='retrying')",
-    )?
-    .execute(params![rule, reason, at])?;
-    // A triggering an executor holds stops at its next effect, which checks the rule.
-    db.0.prepare_cached(
-        "UPDATE hook_rule_triggerings SET status='stopped',error=?2,in_flight=0,lease_until=NULL,\
-         next_at=NULL,finished_at=?3,updated_at=?3 WHERE rule_id=?1 AND \
-         (status IN ('waiting','retrying') OR (status='running' AND in_flight=0 AND lease_until IS NULL))",
-    )?
-    .execute(params![rule, reason, at])?;
+    db.0.execute(
+        "UPDATE hook_rule_steps SET status='failed',error=CASE WHEN status='running' \
+         THEN ?2||' The tool may already have taken effect.' ELSE ?2 END,finished_at=?3 \
+         WHERE status IN ('running','waiting','retrying') AND triggering_id IN \
+         (SELECT id FROM hook_rule_triggerings WHERE rule_id=?1 \
+          AND (?4 IS NULL OR version=?4) AND status IN ('running','waiting','retrying'))",
+        params![rule, reason, at, version],
+    )?;
+    db.0.execute(
+        "UPDATE hook_rule_triggerings SET status='stopped',error=?2,in_flight=0,lease_until=NULL, \
+         next_at=NULL,finished_at=?3,updated_at=?3,pending=NULL,cursor=?5 WHERE rule_id=?1 \
+         AND (?4 IS NULL OR version=?4) AND status IN ('running','waiting','retrying')",
+        params![
+            rule,
+            reason,
+            at,
+            version,
+            serde_json::to_string(&Cursor::default())?
+        ],
+    )?;
     Ok(())
 }
 
@@ -358,18 +387,31 @@ fn blocked(db: &Db<'_>, row: &RuleRow, version: &VersionRow) -> Result<Option<St
 }
 
 /// The variables every formula of a triggering reads, besides steps and loop items.
+fn payload_identifier(name: &str) -> bool {
+    name.len() <= 40
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !RESERVED.contains(&name)
+}
+
 fn base(event: &Json, values: Map<String, Json>, started: i64) -> Variables {
     let mut variables = Variables::default();
     let payload = event["payload"].clone();
+    if let Some(fields) = event["payloadFields"].as_array() {
+        for name in fields
+            .iter()
+            .filter_map(Json::as_str)
+            .filter(|name| payload_identifier(name))
+        {
+            variables.insert(name, Json::Null);
+        }
+    }
     if let Some(fields) = payload.as_object() {
         for (name, value) in fields {
-            let identifier = name.len() <= 40
-                && name
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-            if identifier && !RESERVED.contains(&name.as_str()) {
+            if payload_identifier(name) {
                 variables.insert(name, value.clone());
             }
         }
@@ -482,6 +524,11 @@ async fn intake(s: &Arc<Service>) -> Result<usize> {
                     "instanceId": event.instance_id,
                     "payload": event.payload,
                     "receivedAt": event.created_at,
+                    "payloadFields": package.manifest.hook(&event.name)
+                        .and_then(|hook| hook.payload_schema.get("properties"))
+                        .and_then(Json::as_object)
+                        .map(|fields| fields.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default(),
                 });
                 let (rule, number, event_id) = (row.id.clone(), version.version, event.id.clone());
                 let inserted = s
@@ -531,10 +578,10 @@ async fn claim(s: &Service, capacity: usize) -> Result<Vec<String>> {
             .execute(params![at, interrupted])?;
             db.0.prepare_cached(
                 "UPDATE hook_rule_triggerings SET status='failed',error=?2,in_flight=0,\
-                 lease_until=NULL,finished_at=?1,updated_at=?1 \
+                 lease_until=NULL,finished_at=?1,updated_at=?1,pending=NULL,cursor=?3 \
                  WHERE status='running' AND in_flight=1 AND lease_until<?1",
             )?
-            .execute(params![at, interrupted])?;
+            .execute(params![at, interrupted, serde_json::to_string(&Cursor::default())?])?;
             let due = db.0.prepare_cached(
                 "SELECT id FROM hook_rule_triggerings WHERE (status='running' AND \
                  (lease_until IS NULL OR lease_until<?1)) OR (status IN ('waiting','retrying') \
@@ -561,6 +608,22 @@ fn sweep_rule(db: &Db<'_>, rule: &str) -> Result<()> {
         }
     } else {
         stop_rule(db, rule, "The rule version no longer exists.")?;
+    }
+    let versions =
+        db.0.prepare_cached(
+            "SELECT DISTINCT version FROM hook_rule_triggerings WHERE rule_id=? \
+         AND status IN ('running','waiting','retrying')",
+        )?
+        .query_map([rule], |row| row.get::<_, u32>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for number in versions {
+        let reason = match db.hook_rule_version(rule, number)? {
+            Some(version) => blocked(db, &row, &version)?,
+            None => Some("The triggering's rule version no longer exists.".into()),
+        };
+        if let Some(reason) = reason {
+            stop_triggerings(db, rule, Some(number), &reason)?;
+        }
     }
     db.prune_hook_triggerings(rule)
 }
@@ -612,7 +675,15 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
 
         let capacity = PARALLEL.saturating_sub(tasks.len());
         if capacity > 0 {
-            for id in claim(s, capacity).await? {
+            let due = match claim(s, capacity).await {
+                Ok(due) => due,
+                Err(error) if tasks.is_empty() => return Err(error),
+                Err(error) => {
+                    tracing::warn!(error = %error, "Rule claiming failed; existing executors continue");
+                    Vec::new()
+                }
+            };
+            for id in due {
                 ran += 1;
                 let service = s.clone();
                 tasks.spawn(async move {
@@ -636,14 +707,20 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
                 match completed {
                     Some(Ok((id, Err(error)))) => {
                         tracing::warn!(triggering = %id, error = %error, "Rule triggering failed to run");
-                        s.store
+                        let failed = id.clone();
+                        let saved = s.store
                             .transaction(move |db| {
-                                if let Some(t) = db.hook_triggering(&id)? {
+                                if let Some(t) = db.hook_triggering(&id)?
+                                    && t.status == "running"
+                                {
                                     db.save_hook_triggering(&t, "failed", None, Some(&error.message))?;
                                 }
                                 Ok(())
                             })
-                            .await?;
+                            .await;
+                        if let Err(error) = saved {
+                            tracing::warn!(triggering = %failed, error = %error, "Rule failure could not be recorded");
+                        }
                     }
                     Some(Err(error)) => tracing::warn!(error = %error, "Rule executor stopped"),
                     _ => {}
@@ -708,7 +785,10 @@ async fn finish(
 ) -> Result<()> {
     s.store
         .transaction(move |db| {
-            if db.hook_triggering(&t.id)?.is_none() {
+            let Some(current) = db.hook_triggering(&t.id)? else {
+                return Ok(());
+            };
+            if current.status != "running" {
                 return Ok(());
             }
             if status == "completed" && t.actions == 0 {
@@ -799,6 +879,7 @@ fn waiting_count(db: &Db<'_>, rule: &str, except: &str) -> Result<i64> {
 
 async fn call_tool(
     s: &Service,
+    triggering: &str,
     agent: &str,
     instance: &str,
     tool: &str,
@@ -844,6 +925,31 @@ async fn call_tool(
         "agent": { "id": agent, "name": crate::validation::text(&profile, "name") },
         "instances": scope.instances(),
     });
+    let triggering = triggering.to_owned();
+    let allowed = s
+        .store
+        .transaction(move |db| {
+            let Some(current) = db.hook_triggering(&triggering)? else {
+                return Ok(false);
+            };
+            if !current.in_flight || guard(db, &current)? {
+                return Ok(false);
+            }
+            Ok(db
+                .0
+                .query_row(
+                    "SELECT lease_until>?2 FROM hook_rule_triggerings WHERE id=?1",
+                    params![triggering, now()],
+                    |row| row.get::<_, Option<bool>>(0),
+                )?
+                .unwrap_or(false))
+        })
+        .await?;
+    if !allowed {
+        return Err(Error::conflict(
+            "This triggering stopped before the tool could be called.",
+        ));
+    }
     tokio::time::timeout(
         TOOL_TIMEOUT,
         crate::plugins::scope::invoke(s, &package, "tool", payload, &scope),
@@ -1000,20 +1106,75 @@ fn plan(
 /// Stops a triggering whose rule must not act anymore, in the transaction that would
 /// record its next effect. Returns whether it stopped.
 fn guard(db: &Db<'_>, t: &Triggering) -> Result<bool> {
+    let Some(current) = db.hook_triggering(&t.id)? else {
+        return Ok(true);
+    };
+    if current.status != "running" {
+        return Ok(true);
+    }
     let Some(row) = db.hook_rule(&t.rule_id)? else {
         return Ok(true);
     };
-    let version = required(
-        db.hook_rule_version(&t.rule_id, row.version)?,
-        "Rule version not found",
-    )?;
-    match blocked(db, &row, &version)? {
-        Some(reason) => {
-            db.save_hook_triggering(t, "stopped", None, Some(&reason))?;
-            Ok(true)
+    for number in [row.version, t.version] {
+        let version = required(
+            db.hook_rule_version(&t.rule_id, number)?,
+            "Rule version not found",
+        )?;
+        if let Some(reason) = blocked(db, &row, &version)? {
+            db.save_hook_triggering(&current, "stopped", None, Some(&reason))?;
+            return Ok(true);
         }
-        None => Ok(false),
     }
+    Ok(false)
+}
+
+/// A late answer can complete the step's history, but never revive a triggering
+/// stopped by its creator, the owner, lost rights or an expired executor lease.
+fn record_late_tool_result(
+    db: &Db<'_>,
+    t: &Triggering,
+    node: &RuleNode,
+    position: u32,
+    attempts: u32,
+    answer: &Result<Json>,
+) -> Result<()> {
+    let record = match answer {
+        Ok(result)
+            if serde_json::to_vec(result)
+                .map_or(true, |bytes| bytes.len() > evaluate::MAX_BYTES) =>
+        {
+            StepRecord {
+                status: "failed",
+                input: None,
+                result: None,
+                error: Some("The tool's result is larger than 256 KiB."),
+            }
+        }
+        Ok(result) if retry_after(result).is_some() => StepRecord {
+            status: "failed",
+            input: None,
+            result: Some(result),
+            error: Some("The triggering stopped before this action could be retried."),
+        },
+        Ok(result) => StepRecord {
+            status: "completed",
+            input: None,
+            result: Some(result),
+            error: None,
+        },
+        Err(error) => StepRecord {
+            status: "failed",
+            input: None,
+            result: None,
+            error: Some(&error.message),
+        },
+    };
+    db.record_step(&t.id, position, node, attempts, record)?;
+    db.0.execute(
+        "UPDATE hook_rule_triggerings SET in_flight=0,pending=NULL,updated_at=?2 WHERE id=?1",
+        params![t.id, now()],
+    )?;
+    Ok(())
 }
 
 /// Fails a triggering before an effect, without recording one.
@@ -1061,6 +1222,9 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                 let note = "Waiting to verify its creator's membership.";
                 s.store
                     .transaction(move |db| {
+                        if guard(db, &triggering)? {
+                            return Ok(());
+                        }
                         if waiting_count(db, &triggering.rule_id, &triggering.id)? >= MAX_WAITING {
                             refuse(
                                 db,
@@ -1146,8 +1310,8 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
             prepared.in_flight = true;
             if attempts == 1 {
                 prepared.actions += 1;
-                prepared.tool_calls += 1;
             }
+            prepared.tool_calls += 1;
             let (record, recorded_input) = (node.clone(), input.clone());
             let go = s
                 .store
@@ -1185,10 +1349,22 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
             let Some(mut prepared) = go else {
                 return Ok(Step::Done);
             };
-            let result = call_tool(s, &agent, &instance_id.to_string(), tool, &input).await;
+            let result = call_tool(
+                s,
+                &prepared.id,
+                &agent,
+                &instance_id.to_string(),
+                tool,
+                &input,
+            )
+            .await;
             s.store
                 .transaction(move |db| {
-                    if db.hook_triggering(&prepared.id)?.is_none() {
+                    let Some(current) = db.hook_triggering(&prepared.id)? else {
+                        return Ok(Step::Done);
+                    };
+                    if current.status != "running" || !current.in_flight {
+                        record_late_tool_result(db, &current, &node, position, attempts, &result)?;
                         return Ok(Step::Done);
                     }
                     prepared.in_flight = false;
