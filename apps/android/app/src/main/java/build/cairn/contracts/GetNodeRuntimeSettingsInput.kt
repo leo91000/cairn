@@ -5,6 +5,6 @@ import kotlinx.serialization.Serializable
 
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
-class GetStorageSettingsInput() {
+class GetNodeRuntimeSettingsInput() {
     init {}
 }

@@ -294,7 +294,7 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
             "Unassigned disk must remain entirely journal-backed.",
         ));
     }
-    let policy: Policy = serde_json::from_value(context["policy"].clone()).unwrap_or_default();
+    let policy = super::policy::decode_policy(context["policy"].clone()).unwrap_or_default();
     policy.validate().map_err(Error::bad)?;
     disk.memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
     let volume = Arc::new(Volume {
@@ -880,7 +880,7 @@ impl Volume {
             .ok_or_else(|| io::Error::other("Invalid disk path"))?;
         match std::fs::read(state.join("storage-policy.json")) {
             Ok(bytes) => {
-                let policy: Policy = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                let policy = super::policy::from_persisted(&bytes).map_err(io::Error::other)?;
                 policy.validate().map_err(io::Error::other)?;
                 Ok(policy)
             }
@@ -1244,6 +1244,42 @@ mod tests {
 
     fn prepared_context() -> Value {
         json!({ "unassigned": true, "policy": { "reserveMiB": 64, "reservePercent": 1 } })
+    }
+
+    #[tokio::test]
+    async fn retained_legacy_context_preserves_local_policy_without_controller_file() {
+        let state = tempfile::tempdir().unwrap();
+        let directory = state.path().join("environments/legacy");
+        let context = json!({
+            "unassigned": true,
+            "policy": {
+                "cacheMiB": 4096,
+                "backupSeconds": 60,
+                "maxDirtySeconds": 300,
+                "memoryCacheMiB": 512,
+                "reserveMiB": 1024,
+                "reservePercent": 7,
+            },
+        });
+        let disk = create_prepared(&directory.join("lazy"), &prepared_manifest(), &context)
+            .await
+            .unwrap();
+        disk.write_at(0, b"retained").unwrap();
+        drop(disk);
+        assert!(!state.path().join("storage-policy.json").exists());
+
+        let reopened = load(&directory).await.unwrap();
+        assert_eq!(
+            reopened.policy().unwrap(),
+            Policy {
+                memory_cache_mi_b: 512,
+                reserve_mi_b: 1024,
+                reserve_percent: 7,
+            },
+        );
+        let mut bytes = [0; 8];
+        reopened.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"retained");
     }
 
     #[tokio::test]

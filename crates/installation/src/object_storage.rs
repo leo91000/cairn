@@ -11,7 +11,6 @@ use md5::{Digest, Md5};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    io::Write,
     path::Path,
     process::Stdio,
     sync::{Arc, Weak},
@@ -50,7 +49,6 @@ type DirectProbes = HashMap<(Option<String>, String), Arc<OnceCell<()>>>;
 pub struct HotS3 {
     pub(crate) block_codec: crate::storage::block_codec::BlockCodec,
     clients: Mutex<HashMap<ClientKey, aws_sdk_s3::Client>>,
-    settings_lock: Mutex<()>,
     reads: Semaphore,
     writes: Semaphore,
     pending: Mutex<HashMap<ReadKey, Weak<PendingRead>>>,
@@ -65,7 +63,6 @@ impl HotS3 {
         Self {
             block_codec: crate::storage::block_codec::BlockCodec::default(),
             clients: Mutex::new(HashMap::new()),
-            settings_lock: Mutex::new(()),
             reads: Semaphore::new(HOT_READ_CONCURRENCY),
             writes: Semaphore::new(HOT_WRITE_CONCURRENCY),
             pending: Mutex::new(HashMap::new()),
@@ -194,93 +191,6 @@ fn read_config(s: &Service) -> Result<Value> {
     } else {
         Ok(json!({}))
     }
-}
-
-/// The default storage for new disks, without its credentials.
-pub fn settings(s: &Service) -> Result<cairn_contracts::StorageSettings> {
-    let config = read_config(s)?;
-    let environment_managed = ["BUCKET", "ENDPOINT", "REGION"]
-        .iter()
-        .any(|suffix| non_empty_env(&format!("STORAGE_S3_{suffix}")).is_some());
-    Ok(cairn_contracts::StorageSettings {
-        configured: Storage::configured(s).is_ok(),
-        bucket: setting(&config, "BUCKET", "bucket"),
-        endpoint: setting(&config, "ENDPOINT", "endpoint"),
-        region: setting(&config, "REGION", "region"),
-        integrated: config["integrated"] == true,
-        environment_managed,
-    })
-}
-
-/// Checks the candidate over the network before replacing the private storage file.
-pub async fn save_settings(
-    s: &Service,
-    input: cairn_contracts::SaveStorageSettingsInput,
-) -> Result<cairn_contracts::StorageSettings> {
-    let _lock = s.hot_s3.settings_lock.lock().await;
-    if settings(s)?.environment_managed {
-        return Err(Error::conflict(
-            "Remove server S3 environment overrides before using storage settings.",
-        ));
-    }
-    let field = |name: &str, value: String, max: usize| -> Result<String> {
-        if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
-            return Err(Error::bad(format!("{name}: enter a valid value.")));
-        }
-        Ok(value)
-    };
-    let endpoint = field("endpoint", input.endpoint, 2048)?;
-    let url = url::Url::parse(&endpoint).map_err(|_| Error::bad("Use an HTTPS S3 endpoint."))?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(Error::bad(
-            "Use an HTTPS S3 endpoint without credentials, query or fragment.",
-        ));
-    }
-    let mut previous = read_config(s)?;
-    let mut next = json!({
-        "bucket": field("bucket", input.bucket, 63)?,
-        "endpoint": endpoint,
-        "region": field("region", input.region, 100)?,
-        "accessKeyId": field("accessKeyId", input.access_key_id, 256)?,
-        "secretAccessKey": field("secretAccessKey", input.secret_access_key, 256)?,
-        "privateBucketConfirmed": input.private_bucket_confirmed,
-    });
-    // Executable selection is server configuration, never user input.
-    if previous["awsBinary"].is_string() {
-        next["awsBinary"] = previous["awsBinary"].clone();
-    }
-    let candidate = Storage::from_config(s, &next)?;
-    candidate.validate().await?;
-    candidate.probe().await?;
-
-    let mut retained = previous
-        .as_object_mut()
-        .and_then(|object| object.remove("previous"))
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default();
-    retained
-        .retain(|saved| saved["endpoint"] != next["endpoint"] || saved["bucket"] != next["bucket"]);
-    if previous["bucket"].is_string()
-        && (previous["endpoint"] != next["endpoint"] || previous["bucket"] != next["bucket"])
-    {
-        retained.push(previous);
-    }
-    next["previous"] = retained.into();
-    let path = s.config.data_dir.join("storage-s3.json");
-    let mut temporary = tempfile::NamedTempFile::new_in(&s.config.data_dir)?;
-    temporary.write_all(&serde_json::to_vec(&next)?)?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(&path)
-        .map_err(|error| Error::internal(error.error))?;
-    std::fs::File::open(&s.config.data_dir)?.sync_all()?;
-    settings(s)
 }
 
 /// Missing blocks conflict; other client errors are permanent refusals; the rest retry.
@@ -554,6 +464,7 @@ impl Storage {
         cleanup
     }
 
+    #[cfg(test)]
     pub(crate) async fn probe_live(
         &self,
         authorize: crate::authorization::Authorization,

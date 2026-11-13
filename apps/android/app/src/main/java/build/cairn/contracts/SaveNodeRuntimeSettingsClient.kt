@@ -4,5 +4,5 @@ package build.cairn.contracts
 import build.cairn.app.data.CairnApi
 import kotlinx.serialization.json.encodeToJsonElement
 
-suspend fun CairnApi.saveStorageSettings(input: SaveStorageSettingsInput): StorageSettings =
-    send("PUT", "/settings/storage", contractJson.encodeToJsonElement(input))
+suspend fun CairnApi.saveNodeRuntimeSettings(input: NodeRuntimeSettings): NodeRuntimeSettings =
+    send("PUT", "/nodes/settings", contractJson.encodeToJsonElement(input))

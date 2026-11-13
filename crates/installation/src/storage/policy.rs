@@ -11,10 +11,24 @@ pub fn for_node(value: &serde_json::Value) -> Result<Policy> {
     } else {
         serde_json::Value::Object(serde_json::Map::new())
     };
-    let policy: Policy =
-        serde_json::from_value(value).map_err(|_| Error::bad("Invalid node storage limits."))?;
+    let policy = decode_policy(value).map_err(|_| Error::bad("Invalid node storage limits."))?;
     policy.validate().map_err(Error::bad)?;
     Ok(policy)
+}
+
+/// Existing controller files and retained disk contexts can still carry the
+/// retired S3 policy fields. Public mutation inputs remain strict contracts.
+pub(crate) fn from_persisted(bytes: &[u8]) -> serde_json::Result<Policy> {
+    decode_policy(serde_json::from_slice(bytes)?)
+}
+
+pub(crate) fn decode_policy(mut value: serde_json::Value) -> serde_json::Result<Policy> {
+    if let Some(policy) = value.as_object_mut() {
+        for removed in ["cacheMiB", "backupSeconds", "maxDirtySeconds"] {
+            policy.remove(removed);
+        }
+    }
+    serde_json::from_value(value)
 }
 
 /// Private controller packet. Only committed policy changes advance this generation.
@@ -57,9 +71,7 @@ impl Control {
                 let saved = tokio::fs::read(state.join("storage-policy.json"))
                     .await
                     .ok();
-                let Some(policy) =
-                    saved.and_then(|bytes| serde_json::from_slice::<Policy>(&bytes).ok())
-                else {
+                let Some(policy) = saved.and_then(|bytes| from_persisted(&bytes).ok()) else {
                     return Ok(false);
                 };
                 policy
@@ -138,16 +150,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn idle_saved_disks_do_not_pause_and_dirty_disks_resume_only_when_safe() {
+    fn persisted_decoding_keeps_validation_at_the_existing_callers() {
+        let bytes = br#"{"cacheMiB":20480,"reserveMiB":0}"#;
+        let policy = from_persisted(bytes).unwrap();
+        assert_eq!(policy.reserve_mi_b, 0);
+        assert!(policy.validate().is_err());
+        assert!(for_node(&serde_json::from_slice(bytes).unwrap()).is_err());
+    }
+
+    #[test]
+    fn persisted_s3_policy_fields_do_not_hide_the_local_reserve() {
+        let bytes = br#"{"cacheMiB":20480,"backupSeconds":30,"maxDirtySeconds":90,"memoryCacheMiB":512,"reserveMiB":1024,"reservePercent":7}"#;
+        let policy = from_persisted(bytes).unwrap();
+        assert_eq!(policy.memory_cache_mi_b, 512);
+        assert_eq!(policy.reserve_mi_b, 1024);
+        assert_eq!(policy.reserve_percent, 7);
+        assert!(serde_json::from_slice::<Policy>(bytes).is_err());
+    }
+
+    #[test]
+    fn local_disks_pause_only_when_the_free_space_reserve_is_exhausted() {
         let policy = Policy::default();
         let total = 1024_u64.pow(4);
         assert_eq!(policy.reserve(total), total / 100 * 5);
         assert_eq!(policy.pause_reason(total, total, None, i64::MAX), None);
         assert_eq!(policy.pause_reason(total, total, Some(1000), 300999), None);
-        assert_eq!(
-            policy.pause_reason(total, total, Some(1000), 301000),
-            Some("backup-lag")
-        );
+        assert_eq!(policy.pause_reason(total, total, Some(1000), 301000), None);
         assert_eq!(
             policy.pause_reason(total, 0, Some(1000), 301000),
             Some("disk-space")

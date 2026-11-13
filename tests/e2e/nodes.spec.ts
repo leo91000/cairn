@@ -75,12 +75,9 @@ test('shows disk accounting and keeps the storage draft revision through invento
     staleDisks: { count: 2, diskMiB: 3072 },
     diskAccounting: null,
     storage: {
-      cacheMiB: 102400,
       memoryCacheMiB: 256,
       reserveMiB: 10240,
       reservePercent: 5,
-      backupSeconds: 60,
-      maxDirtySeconds: 300,
     },
 
     id: randomUUID(),
@@ -200,6 +197,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
   expect(requests[1]?.revision).toBe('remote-change')
   expect(node.storage.reservePercent).toBe(10)
   expect(node.storage.memoryCacheMiB).toBe(1024)
+  expect(Object.keys(requests[1]!.storage).sort()).toEqual(['memoryCacheMiB', 'reserveMiB', 'reservePercent'])
 })
 
 test('registers, configures and revokes a node through the owner interface', async ({ page, workspace }) => {
@@ -280,7 +278,7 @@ test('registers, configures and revokes a node through the owner interface', asy
   await showSection(node, 'Storage')
   await node.getByRole('button', { name: 'Edit storage settings', exact: true }).click()
   const storage = page.getByRole('dialog', { name: 'Storage · Browser Linux' })
-  await expect(storage.getByLabel('Clean disk cache budget (MiB)')).toBeVisible()
+  await expect(storage.getByLabel('Clean disk cache budget (MiB)')).toHaveCount(0)
   await expect(storage.getByLabel('Shared memory cache (MiB)')).toHaveValue('256')
   await page.screenshot({ path: 'test-results/storage-phone.png' })
   await page.keyboard.press('Escape')
@@ -315,14 +313,16 @@ test('registers, configures and revokes a node through the owner interface', asy
   expect(configured.limits.diskMiB).toBe(98304)
   await page.keyboard.press('Escape')
   await expect(node).toHaveCount(0)
-  await page.getByRole('button', { name: 'Synchronization settings' }).click()
-  const synchronization = page.getByRole('dialog', { name: 'S3 synchronization' })
-  await synchronization.getByLabel('Synchronization target (seconds)').fill('45')
+  await page.getByRole('button', { name: 'Runtime settings' }).click()
+  const synchronization = page.getByRole('dialog', { name: 'Node runtime delays' })
+  await expect(synchronization.getByLabel('Synchronization target (seconds)')).toHaveCount(0)
+  await expect(synchronization.getByLabel('Publication cache budget (GiB)')).toHaveCount(0)
+  await expect(synchronization.getByLabel('Maximum capacity wait (seconds)')).toHaveCount(0)
   await synchronization.getByLabel('Pause after disconnection (seconds)').fill('30')
   await expect(synchronization.getByLabel('Recovery points to retain')).toHaveCount(0)
   await synchronization.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(synchronization).toHaveCount(0)
-  expect(await workspace.api('/api/nodes/settings')).toMatchObject({ intervalSeconds: 45, disconnectTimeoutSeconds: 30 })
+  expect(await workspace.api('/api/nodes/settings')).toEqual({ disconnectTimeoutSeconds: 30, shutdownTimeoutSeconds: 300 })
   await openNode(page, 'Browser Linux', 'Settings')
   await node.getByRole('button', { name: 'Revoke', exact: true }).click()
   await page.getByRole('dialog', { name: 'Revoke node' }).getByRole('button', { name: 'Revoke node' }).click()
@@ -1119,12 +1119,9 @@ test('the overview links an agent\'s privilege request to its review, and keeps 
     exclusiveAgents: [],
     staleDisks: { count: 0, diskMiB: 0 },
     storage: {
-      cacheMiB: 102400,
       memoryCacheMiB: 256,
       reserveMiB: 10240,
       reservePercent: 5,
-      backupSeconds: 60,
-      maxDirtySeconds: 300,
     },
     limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
     lastSeen: Date.now(),
@@ -1212,12 +1209,9 @@ test('a silent built-in runner needs attention, and rows open and return focus f
     exclusiveAgents: [],
     staleDisks: { count: 0, diskMiB: 0 },
     storage: {
-      cacheMiB: 102400,
       memoryCacheMiB: 256,
       reserveMiB: 10240,
       reservePercent: 5,
-      backupSeconds: 60,
-      maxDirtySeconds: 300,
     },
     limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
     capabilities: {
@@ -1291,12 +1285,9 @@ test('slow listings still show the machines, and an older answer never replaces 
     exclusiveAgents: [],
     staleDisks: { count: 0, diskMiB: 0 },
     storage: {
-      cacheMiB: 102400,
       memoryCacheMiB: 256,
       reserveMiB: 10240,
       reservePercent: 5,
-      backupSeconds: 60,
-      maxDirtySeconds: 300,
     },
     limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
     capabilities: {
@@ -1351,12 +1342,9 @@ test('a failed refresh is reported on the page and in the panel, then clears', a
     exclusiveAgents: [],
     staleDisks: { count: 1, diskMiB: 2048 },
     storage: {
-      cacheMiB: 102400,
       memoryCacheMiB: 256,
       reserveMiB: 10240,
       reservePercent: 5,
-      backupSeconds: 60,
-      maxDirtySeconds: 300,
     },
     limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
     capabilities: {

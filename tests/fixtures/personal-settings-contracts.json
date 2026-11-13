@@ -57,19 +57,5 @@
       ]
     },
     { "entries": [] }
-  ],
-  "storageViews": [
-    { "configured": true, "integrated": false, "environmentManaged": false, "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3" },
-    { "configured": false, "integrated": false, "environmentManaged": true, "bucket": "", "endpoint": "", "region": "" }
-  ],
-  "storageInputs": [
-    { "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3", "accessKeyId": "fixture-only", "secretAccessKey": "fixture-secret" },
-    { "bucket": "cairn.disks", "endpoint": "https://11111111111111111111111111111111.r2.cloudflarestorage.com", "region": "auto", "accessKeyId": "fixture-only", "secretAccessKey": "fixture-secret", "privateBucketConfirmed": true }
-  ],
-  "invalidStorageInputs": [
-    { "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3", "accessKeyId": "fixture-only" },
-    { "bucket": "Cairn_Disks", "endpoint": "https://s3.example.test", "region": "eu-west-3", "accessKeyId": "fixture-only", "secretAccessKey": "fixture-secret" },
-    { "bucket": "cairn-disks", "endpoint": "http://s3.example.test", "region": "eu-west-3", "accessKeyId": "fixture-only", "secretAccessKey": "fixture-secret" },
-    { "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3", "accessKeyId": "fixture-only", "secretAccessKey": "fixture-secret", "awsBinary": "/bin/sh" }
   ]
 }

@@ -1,5 +1,4 @@
-//! Installation settings, overview, audit and storage on HTTP and both tools. Storage
-//! views never contain credentials; configuring them requires the human owner.
+//! Installation settings, overview and audit on HTTP and both tools.
 use super::{ResumeContext, decode};
 use crate::{
     error::{Error, Result},
@@ -16,6 +15,16 @@ pub(crate) struct SettingsOperation {
 }
 
 pub(crate) const SETTINGS_OPERATIONS: &[SettingsOperation] = &[
+    SettingsOperation {
+        name: "get_node_runtime_settings",
+        scope: "read",
+        description: "Read the installation's node disconnection and shutdown deadlines. Conversation disks remain local to their node.",
+    },
+    SettingsOperation {
+        name: "save_node_runtime_settings",
+        scope: "manage",
+        description: "Save the installation's node disconnection and shutdown deadlines. S3 publication and cache settings are no longer supported.",
+    },
     SettingsOperation {
         name: "get_chat_plan_settings",
         scope: "read",
@@ -66,21 +75,6 @@ pub(crate) const SETTINGS_OPERATIONS: &[SettingsOperation] = &[
         scope: "read",
         description: "List the 100 most recent installation changes, newest first. Each detail is the JSON recorded with its action.",
     },
-    SettingsOperation {
-        name: "get_storage_settings",
-        scope: "read",
-        description: "Read the default S3 storage for new disks: bucket, endpoint, region, whether it is integrated or managed by server environment variables. Credentials are never returned.",
-    },
-    SettingsOperation {
-        name: "save_storage_settings",
-        scope: "manage",
-        description: "Configure the default S3 storage for new disks after a privacy, write, read and deletion check. Existing disks keep their storage. Storage credentials are configured only by the human installation owner in the Cairn apps; agents and MCP connections receive an explicit refusal.",
-    },
-    SettingsOperation {
-        name: "check_storage",
-        scope: "manage",
-        description: "Write, read and delete a small probe object in the configured storage. Returns only whether it succeeded; credentials are never returned.",
-    },
 ];
 
 pub(crate) fn settings_operation(name: &str) -> Option<&'static SettingsOperation> {
@@ -90,6 +84,14 @@ pub(crate) fn settings_operation(name: &str) -> Option<&'static SettingsOperatio
 impl SettingsOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let (input, output) = match self.name {
+            "get_node_runtime_settings" => (
+                schema_for::<GetNodeRuntimeSettingsInput>(Contract::Deserialize),
+                schema_for::<NodeRuntimeSettings>(Contract::Serialize),
+            ),
+            "save_node_runtime_settings" => (
+                schema_for::<NodeRuntimeSettings>(Contract::Deserialize),
+                schema_for::<NodeRuntimeSettings>(Contract::Serialize),
+            ),
             "get_chat_plan_settings" => (
                 schema_for::<GetChatPlanSettingsInput>(Contract::Deserialize),
                 schema_for::<ChatPlanSettings>(Contract::Serialize),
@@ -126,18 +128,7 @@ impl SettingsOperation {
                 schema_for::<ListAuditInput>(Contract::Deserialize),
                 schema_for::<ListAuditOutput>(Contract::Serialize),
             ),
-            "get_storage_settings" => (
-                schema_for::<GetStorageSettingsInput>(Contract::Deserialize),
-                schema_for::<StorageSettings>(Contract::Serialize),
-            ),
-            "save_storage_settings" => (
-                schema_for::<SaveStorageSettingsInput>(Contract::Deserialize),
-                schema_for::<StorageSettings>(Contract::Serialize),
-            ),
-            _ => (
-                schema_for::<CheckStorageInput>(Contract::Deserialize),
-                schema_for::<StorageCheck>(Contract::Serialize),
-            ),
+            _ => unreachable!("unknown settings operation"),
         };
         json!({
             "name": self.name,
@@ -147,7 +138,7 @@ impl SettingsOperation {
             "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": [self.scope] }] },
             "annotations": {
                 "readOnlyHint": self.scope == "read",
-                "destructiveHint": matches!(self.name, "save_storage_settings" | "save_task_storage_limits"),
+                "destructiveHint": self.name == "save_task_storage_limits",
                 "openWorldHint": self.scope != "read",
             },
         })
@@ -159,6 +150,28 @@ impl SettingsOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        if matches!(
+            self.name,
+            "get_node_runtime_settings" | "save_node_runtime_settings"
+        ) {
+            let authority =
+                super::plugin_packages::Authority::for_grants(s, context, self.scope).await?;
+            let authorize = crate::authorization::Authorization::live(s, authority);
+            let name = self.name;
+            return s
+                .store
+                .transaction(move |db| {
+                    authorize.authorize(db)?;
+                    let result = if name == "get_node_runtime_settings" {
+                        let _: GetNodeRuntimeSettingsInput = decode(input)?;
+                        crate::nodes::settings::view(db)?
+                    } else {
+                        crate::nodes::settings::save(db, decode(input)?)?
+                    };
+                    Ok(serde_json::to_value(result)?)
+                })
+                .await;
+        }
         if matches!(
             self.name,
             "get_chat_plan_settings" | "save_chat_plan_settings"
@@ -232,8 +245,8 @@ impl SettingsOperation {
                 .await;
         }
         // HTTP enforces the owner role for settings and audit before dispatch.
-        let (human, bearer) = match context {
-            ResumeContext::Human(_) => (true, None),
+        let bearer = match context {
+            ResumeContext::Human(_) => None,
             ResumeContext::Public(scopes, _) => {
                 if !scopes.iter().any(|scope| scope == self.scope) {
                     return Err(Error::forbidden(format!(
@@ -241,11 +254,11 @@ impl SettingsOperation {
                         self.scope
                     )));
                 }
-                (false, None)
+                None
             }
             ResumeContext::Installation(bearer) => {
                 crate::installation_mcp::authorize(s, &bearer).await?;
-                (false, Some(bearer))
+                Some(bearer)
             }
         };
         let authorize =
@@ -254,29 +267,6 @@ impl SettingsOperation {
             "get_installation_settings" => {
                 let _: GetInstallationSettingsInput = decode(input)?;
                 Ok(serde_json::to_value(installation_settings(s))?)
-            }
-            "get_storage_settings" => {
-                let _: GetStorageSettingsInput = decode(input)?;
-                Ok(serde_json::to_value(crate::object_storage::settings(s)?)?)
-            }
-            "save_storage_settings" => {
-                if !human {
-                    return Err(Error::forbidden(
-                        "Only the installation owner can configure storage credentials, in the Cairn apps.",
-                    ));
-                }
-                // Boxed: the S3 SDK futures would otherwise enlarge every
-                // dispatcher that can reach this capability.
-                Ok(serde_json::to_value(
-                    Box::pin(crate::object_storage::save_settings(s, decode(input)?)).await?,
-                )?)
-            }
-            "check_storage" => {
-                let _: CheckStorageInput = decode(input)?;
-                // Network I/O never runs inside a database transaction.
-                let storage = crate::object_storage::Storage::configured(s)?;
-                Box::pin(storage.probe_live(authorize)).await?;
-                Ok(serde_json::to_value(StorageCheck { ok: true })?)
             }
             name => {
                 let audit = name == "list_audit";

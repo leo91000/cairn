@@ -281,7 +281,9 @@ pub fn disk_space(path: &Path, total: u64, free: u64) -> io::Result<(u64, u64)> 
         let remaining = limit.saturating_sub(disk_bytes(state)?);
         let policy: crate::storage::policy::Policy =
             match std::fs::read(state.join("storage-policy.json")) {
-                Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+                Ok(bytes) => {
+                    crate::storage::policy::from_persisted(&bytes).map_err(io::Error::other)?
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     crate::storage::policy::Policy::default()
                 }

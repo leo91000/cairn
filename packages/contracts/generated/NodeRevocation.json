@@ -713,24 +713,6 @@
     "NodeStoragePolicy": {
       "additionalProperties": false,
       "properties": {
-        "backupSeconds": {
-          "default": 60,
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "cacheMiB": {
-          "default": 102400,
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "maxDirtySeconds": {
-          "default": 300,
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "memoryCacheMiB": {
           "default": 256,
           "format": "uint64",

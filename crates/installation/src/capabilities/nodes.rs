@@ -73,7 +73,7 @@ pub(crate) const NODE_OPERATIONS: &[NodeOperation] = &[
     NodeOperation {
         name: "update_node_storage",
         scope: "manage",
-        description: "Replace a node's storage policy at its current revision after probing the current storage configuration.",
+        description: "Replace a node's shared memory cache and disk reserve at its current revision after a local storage probe. Working disks stay on that node.",
     },
     NodeOperation {
         name: "revoke_node",

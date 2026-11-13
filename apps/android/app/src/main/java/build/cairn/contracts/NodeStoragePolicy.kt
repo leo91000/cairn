@@ -7,12 +7,6 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class NodeStoragePolicy(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val backupSeconds: Long = 60,
-    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val cacheMiB: Long = 102400,
-    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val maxDirtySeconds: Long = 300,
-    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val memoryCacheMiB: Long = 256,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val reserveMiB: Long = 10240,
@@ -20,9 +14,6 @@ data class NodeStoragePolicy(
     val reservePercent: Long = 5,
 ) {
     init {
-        require(backupSeconds >= 0L)
-        require(cacheMiB >= 0L)
-        require(maxDirtySeconds >= 0L)
         require(memoryCacheMiB >= 0L)
         require(reserveMiB >= 0L)
         require(reservePercent >= 0L)

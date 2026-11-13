@@ -3,7 +3,7 @@ import type { NodeConfiguration } from '../../../../packages/contracts/generated
 import type {
   ExecutionNode,
   NodeEnrollment,
-  NodeSyncSettings,
+  NodeRuntimeSettings,
   RunnerObservation,
   UnreadyObservations,
 } from '../../../../packages/contracts/nodes'
@@ -16,8 +16,10 @@ import {
   watch,
 } from 'vue'
 import { createNodeEnrollment } from '../../../../packages/contracts/generated/createNodeEnrollment'
+import { getNodeRuntimeSettings } from '../../../../packages/contracts/generated/getNodeRuntimeSettings'
 import { releaseNodeReservation } from '../../../../packages/contracts/generated/releaseNodeReservation'
 import { revokeNode } from '../../../../packages/contracts/generated/revokeNode'
+import { saveNodeRuntimeSettings } from '../../../../packages/contracts/generated/saveNodeRuntimeSettings'
 import {
   diskCapacity,
   fleetClock,
@@ -78,8 +80,7 @@ const enrollmentCommand = computed(() => {
 // Machines known when the code was created, to recognise the newly connected one.
 const error = ref('')
 const busy = ref(false)
-const recovery = ref<NodeSyncSettings | null>(null)
-const recoveryBudgetGiB = ref(0)
+const recovery = ref<NodeRuntimeSettings | null>(null)
 const revoking = ref<ExecutionNode | null>(null)
 const grantingId = ref<string | null>(null)
 // The page keeps polling: grants made meanwhile, as from an agent page in another window, show up
@@ -432,8 +433,7 @@ function agentNames(ids: string[]) {
 
 function configureRecovery() {
   return action(async () => {
-    recovery.value = await api<NodeSyncSettings>('/nodes/settings')
-    recoveryBudgetGiB.value = +(recovery.value.budgetMiB / 1024).toFixed(2)
+    recovery.value = await getNodeRuntimeSettings(api, {})
   })
 }
 
@@ -442,8 +442,7 @@ function saveRecovery() {
   if (!settings)
     return
   return action(async () => {
-    const { s3Configured: _, ...value } = settings
-    await api('/nodes/settings', { method: 'PUT', body: JSON.stringify({ ...value, budgetMiB: Math.round(recoveryBudgetGiB.value * 1024) }) })
+    await saveNodeRuntimeSettings(api, settings)
     recovery.value = null
   })
 }
@@ -475,8 +474,8 @@ function revoke() {
         </p>
       </div>
       <div class="flex shrink-0 gap-2 phone:flex-none!">
-        <UiButton aria-label="Synchronization settings" title="Synchronization settings" @click="configureRecovery">
-          <Icon :name="Settings2" :size="15" /><span class="phone:hidden">Synchronization</span>
+        <UiButton aria-label="Runtime settings" title="Runtime settings" @click="configureRecovery">
+          <Icon :name="Settings2" :size="15" /><span class="phone:hidden">Runtime settings</span>
         </UiButton>
         <UiButton variant="primary" aria-label="Add a machine" @click="addMachine">
           <Icon :name="Plus" :size="16" /><span class="phone:hidden">Add a machine</span>
@@ -659,27 +658,15 @@ function revoke() {
     <Modal
       v-if="recovery"
       sheet
-      title="S3 synchronization"
+      title="Node runtime delays"
       @close="recovery = null"
     >
       <form class="node-form" @submit.prevent="saveRecovery">
         <p class="text-sm text-muted">
-          How often disk changes are published to S3 and how long nodes wait before pausing. The defaults suit most setups.
-        </p>
-        <p>Changed disk blocks upload in the background after a coherent capture. Chat history is streamed separately. Each conversation shows its last completed synchronization.</p>
-        <p v-if="!recovery.s3Configured" class="text-sm text-muted">
-          Configure S3 on the server to publish disk changes.
+          How long a node may continue after losing contact, and how long it has to stop. Working files stay on their node.
         </p>
         <fieldset class="form-section">
           <legend>Timing &amp; capacity</legend><div class="form-grid">
-            <label>Synchronization target (seconds)<input
-              v-model.number="recovery.intervalSeconds"
-              class="mt-1 block"
-              type="number"
-              min="5"
-              max="3600"
-              required
-            ></label>
             <label>Pause after disconnection (seconds)<input
               v-model.number="recovery.disconnectTimeoutSeconds"
               class="mt-1 block"
@@ -696,27 +683,8 @@ function revoke() {
               max="300"
               required
             ></label>
-            <label>Maximum capacity wait (seconds)<input
-              v-model.number="recovery.maxCapacityWaitSeconds"
-              class="mt-1 block"
-              type="number"
-              min="0"
-              max="3600"
-              required
-            ></label>
-            <label>Publication cache budget (GiB)<input
-              v-model.number="recoveryBudgetGiB"
-              class="mt-1 block"
-              type="number"
-              min="0.125"
-              max="1024"
-              step="any"
-              required
-            ></label>
           </div>
-        </fieldset><p class="text-sm text-muted">
-          Synchronization can take longer than the target interval. The publication cache stays within this budget.
-        </p>
+        </fieldset>
         <UiAlert v-if="error">
           {{ error }}
         </UiAlert>

@@ -805,10 +805,9 @@ A1/A2 `project_measurement` harness; raw results stay outside Git.
 
 `personal.rs` owns read marks (`{target: {kind: chat|mission, …}, finishedAt}`) and
 set-aside commands (`dismiss`, `snooze`, `restore`); `installation_settings.rs`
-owns installation settings, the overview counts, the audit list and the redacted
-storage view and command. `mark_read`, `set_outcome_aside`,
-`get_installation_settings`, `get_installation_overview`, `list_audit`,
-`get_storage_settings`, `save_storage_settings` and `check_storage` extend the
+owns installation settings, task storage limits, the overview counts and the audit
+list. `mark_read`, `set_outcome_aside`,
+`get_installation_settings`, `get_installation_overview` and `list_audit` extend the
 existing registry for HTTP, public MCP and `cairn_installation`; both apps use the
 generated calls and models. Their handwritten Zod/TS interfaces and Kotlin data
 classes, the KV keys, the isolated read/dismissal routes and the dynamic settings
@@ -819,9 +818,12 @@ a public grant acts for the account that authorized it; an execution has no acco
 delegation, so its writes are refused explicitly and its listings (`list_chats`,
 `list_task_activity`) carry no unread, preview or set-aside state. The owner's state
 is never borrowed. Personal writes require the `manage` scope. HTTP keeps the owner
-role for settings, audit and storage. Storage views never return credentials;
-saving credentials requires the human owner in the apps, and both tools receive an
-explicit refusal. Probes run outside any database transaction.
+role for settings and audit. S3 settings and probes have been removed from both
+apps, HTTP, public MCP, `cairn_installation` and their generated contracts. Task
+storage limits remain available with their existing authorization.
+`NodeRuntimeSettings` is the shared contract for the retained disconnection and
+shutdown deadlines on HTTP, public MCP, `cairn_installation` and both apps.
+`NodeStoragePolicy` retains only memory cache and free disk reserve controls.
 
 SQLite 17 → 18 imports the KV state atomically; see
 [migration 0018](migrations/0018-personal-read-state.md). Constrained

@@ -146,41 +146,28 @@ impl NodeCapabilities {
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct NodeStoragePolicy {
     #[ts(type = "number")]
-    pub cache_mi_b: u64,
-    #[ts(type = "number")]
     pub memory_cache_mi_b: u64,
     #[ts(type = "number")]
     pub reserve_mi_b: u64,
     #[ts(type = "number")]
     pub reserve_percent: u64,
-    #[ts(type = "number")]
-    pub backup_seconds: u64,
-    #[ts(type = "number")]
-    pub max_dirty_seconds: u64,
 }
 
 impl Default for NodeStoragePolicy {
     fn default() -> Self {
         Self {
-            cache_mi_b: 102400,
             memory_cache_mi_b: 256,
             reserve_mi_b: 10240,
             reserve_percent: 5,
-            backup_seconds: 60,
-            max_dirty_seconds: 300,
         }
     }
 }
 
 impl NodeStoragePolicy {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.cache_mi_b > 16 * 1024 * 1024
-            || !(4..=4096).contains(&self.memory_cache_mi_b)
+        if !(4..=4096).contains(&self.memory_cache_mi_b)
             || !(64..=16 * 1024 * 1024).contains(&self.reserve_mi_b)
             || !(1..=50).contains(&self.reserve_percent)
-            || !(5..=3600).contains(&self.backup_seconds)
-            || self.max_dirty_seconds < self.backup_seconds
-            || self.max_dirty_seconds > 86400
         {
             return Err("Invalid storage limits.");
         }
@@ -195,16 +182,11 @@ impl NodeStoragePolicy {
         &self,
         total: u64,
         free: u64,
-        dirty_since: Option<i64>,
-        now: i64,
+        _dirty_since: Option<i64>,
+        _now: i64,
     ) -> Option<&'static str> {
         if free <= self.reserve(total) {
             return Some("disk-space");
-        }
-        if dirty_since
-            .is_some_and(|at| now.saturating_sub(at) >= (self.max_dirty_seconds * 1000) as i64)
-        {
-            return Some("backup-lag");
         }
         None
     }

@@ -4481,7 +4481,6 @@ pub(crate) mod tests {
                     reserve_mi_b: 64,
                     reserve_percent: 1,
                     memory_cache_mi_b: 128,
-                    ..storage::policy::Policy::default()
                 },
             };
             route(

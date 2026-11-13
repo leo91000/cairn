@@ -334,11 +334,14 @@ alone give it no native authority. Plugin rule templates are listed with
 `list_hook_rule_templates` (read) and installed with `install_hook_rule_template`
 (manage), which creates ordinary rules for the same owner, all or none.
 
-`get_installation_settings`, `get_installation_overview`, `list_audit` and
-`get_storage_settings` use the read scope; storage views never contain credentials.
-`check_storage` uses manage. `save_storage_settings` is listed with manage but only
-the human owner can save storage credentials, in the apps: tools receive an explicit
-refusal without an OAuth challenge. `mark_read` and `set_outcome_aside` use manage and
+`get_installation_settings`, `get_installation_overview` and `list_audit` use the
+read scope. S3 storage settings and probes are no longer exposed on HTTP, public
+MCP or `cairn_installation`. Task storage limits remain available through
+`get_task_storage_limits` and `save_task_storage_limits`. Node storage policies
+retain the shared memory cache and disk reserve, without S3 cache/synchronization
+fields. `get_node_runtime_settings` (read) and `save_node_runtime_settings` (manage)
+read or save only the installation's disconnection and shutdown deadlines.
+`mark_read` and `set_outcome_aside` use manage and
 change the read marks and set-aside outcomes of the Cairn account that authorized the
 connection; `list_chats` and `list_task_activity` report `unread`, `preview` and
 `dismissal` for that account. Executions (`cairn_installation`) have no account

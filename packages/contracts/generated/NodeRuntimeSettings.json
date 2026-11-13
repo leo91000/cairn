@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Installation-wide runtime deadlines. Working disks are local to their node.",
+  "properties": {
+    "disconnectTimeoutSeconds": {
+      "default": 60,
+      "format": "uint64",
+      "maximum": 300,
+      "minimum": 10,
+      "type": "integer"
+    },
+    "shutdownTimeoutSeconds": {
+      "default": 300,
+      "format": "uint64",
+      "maximum": 300,
+      "minimum": 30,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "disconnectTimeoutSeconds",
+    "shutdownTimeoutSeconds"
+  ],
+  "title": "NodeRuntimeSettings",
+  "type": "object"
+}
