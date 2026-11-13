@@ -269,6 +269,8 @@ jobs:
           phase: before-build
       - name: Install the pinned nextest binary without fallback
         timeout-minutes: 3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/install-nextest-ci.mjs
       - name: Acquire the existing artifact publisher at its immutable version
         if: inputs.ci-diagnostic == 'backend'

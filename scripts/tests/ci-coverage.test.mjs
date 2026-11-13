@@ -38,6 +38,10 @@ describe('parallel CI coverage', () => {
     expect(nextestArtifact.sha256).toBe('32d1d8c0567b7a80bee2bad8bb09125c846da96bc009b2de11ec08557290c770')
     expect(installer['timeout-minutes']).toBeGreaterThan(0)
     expect(installer['timeout-minutes']).toBeLessThanOrEqual(3)
+    // eslint-disable-next-line no-template-curly-in-string -- exact step-scoped GitHub expression
+    expect(installer.env).toEqual({ GITHUB_TOKEN: '${{ github.token }}' })
+    expect(backend.env.GITHUB_TOKEN).toBeUndefined()
+    expect(backend.permissions.contents).toBe('read')
     expect(installer['continue-on-error']).toBeUndefined()
     expect(installer.if).toBeUndefined()
     expect(backend['timeout-minutes']).toBe(30)
