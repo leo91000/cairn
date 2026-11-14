@@ -155,10 +155,15 @@ Actions:
 
 A triggering counts against the hourly cap when it runs its first action. Beyond the
 cap, that triggering fails, the rule becomes `budgetExhausted` and its creator receives
-a notification; the triggerings already counted finish. A triggering that ends without
+an ordinary push notification; the triggerings already counted finish. Push delivery
+respects device preferences and the usual delivery window. The lasting signal is the
+`budgetExhausted` block, exposed by list/get until the creator or owner lifts it. A triggering that ends without
 any action is not kept, including failures and stops before the first action: the
 history only counts them by hour. Each triggering runs at
-most 500 blocks and iterations, actions excluded, and 50 tool calls (retries included).
+most 500 control steps and 50 tool calls (retries included). Each `if` or `forEach`
+block counts once, and each loop iteration also counts once, including the first;
+actions do not count as control steps. A loop with only actions can therefore run
+at most 499 iterations within that limit.
 Ticket G (#516) adds the separate maximum depth for chains caused by Cairn hooks,
 together with those hooks; plugin events cannot supply or bypass a Cairn chain depth.
 

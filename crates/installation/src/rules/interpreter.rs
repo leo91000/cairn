@@ -181,6 +181,7 @@ impl Cursor {
                         ));
                     }
                     if !items.is_empty() {
+                        self.count()?;
                         self.frames.push(Frame {
                             path: [path, vec![Branch::Body(position)]].concat(),
                             next: 0,
@@ -399,7 +400,7 @@ mod tests {
 
     #[test]
     fn only_blocks_and_iterations_consume_the_step_budget() {
-        for length in [300, 500, 501] {
+        for length in [300, 499, 500] {
             let steps: Vec<RuleNode> = serde_json::from_value(json!([{
                 "type": "forEach", "id": "each", "itemName": "entry",
                 "items": { "type": "literal", "value": vec![0; length] },
@@ -417,12 +418,12 @@ mod tests {
                     Ok(Some(_)) => actions += 1,
                     Ok(None) => {
                         assert_eq!(actions, length);
-                        assert_eq!(cursor.count as usize, length);
+                        assert_eq!(cursor.count as usize, length + 1);
                         break;
                     }
                     Err(error) => {
-                        assert_eq!(length, 501);
-                        assert_eq!(actions, 500);
+                        assert_eq!(length, 500);
+                        assert_eq!(actions, 499);
                         assert!(error.contains("500 blocks and iterations"), "{error}");
                         break;
                     }

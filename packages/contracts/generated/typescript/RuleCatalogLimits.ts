@@ -7,7 +7,7 @@ export interface RuleCatalogLimits {
   maxConversationsPerHour: number
   maxWaitSeconds: number
   /**
-   * Blocks and iterations one triggering may run, actions excluded.
+   * Control-step limit: each if/forEach block and every loop iteration count; actions do not.
    */
   maxSteps: number
   maxToolCalls: number

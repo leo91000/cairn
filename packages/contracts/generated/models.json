@@ -13257,7 +13257,7 @@
           ]
         },
         "maxSteps": {
-          "description": "Blocks and iterations one triggering may run, actions excluded.",
+          "description": "Control-step limit: each if/forEach block and every loop iteration count; actions do not.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
