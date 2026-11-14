@@ -2191,3 +2191,42 @@ async fn refused_first_value_stores_leave_the_hourly_budget_available() {
     assert_eq!(listed["triggerings"][0]["status"], "completed", "{listed}");
     assert_eq!(listed["withoutEffect"], 2);
 }
+
+#[tokio::test]
+async fn three_hundred_value_actions_fit_the_block_and_iteration_budget() {
+    let f = granted().await;
+    let rule = rule(
+        &f,
+        OWNER,
+        json!([{
+            "type": "forEach", "id": "each", "itemName": "entry",
+            "items": { "type": "literal", "value": (0..300).collect::<Vec<_>>() },
+            "body": [{ "type": "action", "id": "remember", "action": {
+                "type": "storeValue", "scope": "rule", "name": "last",
+                "value": { "type": "formula", "expression": "entry" },
+            }}],
+        }]),
+        1,
+    )
+    .await;
+    emit(
+        &f,
+        "many-actions",
+        json!({
+            "channel": "support", "author": "alice",
+        }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    assert_eq!(
+        listed["triggerings"].as_array().unwrap().len(),
+        1,
+        "{listed}"
+    );
+    let completed = detail(&f, OWNER, &listed["triggerings"][0]).await;
+    assert_eq!(completed["status"], "completed", "{completed}");
+    assert_eq!(completed["actions"], 300);
+    assert_eq!(completed["steps"].as_array().unwrap().len(), 300);
+    assert_eq!(completed["steps"][299]["result"], 299);
+}

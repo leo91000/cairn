@@ -7,7 +7,7 @@ use cairn_contracts::{RuleCondition, RuleNode, RuleOperator, RuleValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json};
 
-/// Blocks and iterations one triggering may run, waits excluded.
+/// Blocks and iterations one triggering may run, actions excluded.
 pub(crate) const MAX_STEPS: u32 = super::validation::MAX_STEPS;
 /// Items one loop may iterate.
 pub(crate) const MAX_LOOP_ITEMS: usize = 1_000;
@@ -149,7 +149,9 @@ impl Cursor {
             frame.next += 1;
             let path = frame.path.clone();
             let node = &nodes[position];
-            self.count()?;
+            if !matches!(node, RuleNode::Action { .. }) {
+                self.count()?;
+            }
             match node {
                 RuleNode::If { condition, .. } => {
                     let holds = self::condition(condition, evaluator, &self.items())?;
@@ -393,6 +395,40 @@ mod tests {
             cursor.advance(&steps, &stranger).unwrap().unwrap().id(),
             "refuse"
         );
+    }
+
+    #[test]
+    fn only_blocks_and_iterations_consume_the_step_budget() {
+        for length in [300, 500, 501] {
+            let steps: Vec<RuleNode> = serde_json::from_value(json!([{
+                "type": "forEach", "id": "each", "itemName": "entry",
+                "items": { "type": "literal", "value": vec![0; length] },
+                "body": [{ "type": "action", "id": "remember", "action": {
+                    "type": "storeValue", "scope": "rule", "name": "value",
+                    "value": { "type": "formula", "expression": "entry" },
+                }}],
+            }]))
+            .unwrap();
+            let evaluator = evaluator("alice");
+            let mut cursor = Cursor::default();
+            let mut actions = 0;
+            loop {
+                match cursor.advance(&steps, &evaluator) {
+                    Ok(Some(_)) => actions += 1,
+                    Ok(None) => {
+                        assert_eq!(actions, length);
+                        assert_eq!(cursor.count as usize, length);
+                        break;
+                    }
+                    Err(error) => {
+                        assert_eq!(length, 501);
+                        assert_eq!(actions, 500);
+                        assert!(error.contains("500 blocks and iterations"), "{error}");
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     #[test]

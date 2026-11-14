@@ -70,7 +70,7 @@ is already bound, and the tree chooses to steer instead. `steerConversation`,
 wait.
 
 A rule holds at most 200 blocks nested eight levels deep. One triggering runs at most
-500 blocks and iterations, waits excluded, and 50 tool calls.
+500 blocks and iterations, actions excluded, and 50 tool calls.
 
 The catalog also publishes fixed data limits: a triggering records at most 1 MiB
 of event and step data (with room reserved for failure details), its persisted
@@ -148,7 +148,9 @@ cap, that triggering fails, the rule becomes `budgetExhausted` and its creator r
 a notification; the triggerings already counted finish. A triggering that ends without
 any action is not kept, including failures and stops before the first action: the
 history only counts them by hour. Each triggering runs at
-most 500 blocks and iterations, waits excluded, and 50 tool calls.
+most 500 blocks and iterations, actions excluded, and 50 tool calls (retries included).
+Ticket G (#516) adds the separate maximum depth for chains caused by Cairn hooks,
+together with those hooks; plugin events cannot supply or bypass a Cairn chain depth.
 
 ### History
 

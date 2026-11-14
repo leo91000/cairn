@@ -23,7 +23,7 @@ pub(crate) const MAX_DEFINITION: usize = 120_000;
 pub(crate) const MAX_WAIT_SECONDS: u32 = 7 * 86_400;
 pub(crate) const MAX_TRIGGERINGS_PER_HOUR: u32 = 600;
 pub(crate) const MAX_CONVERSATIONS_PER_HOUR: u32 = 100;
-/// Blocks and iterations of one triggering, waits excluded.
+/// Blocks and iterations of one triggering, actions excluded.
 pub(crate) const MAX_STEPS: u32 = 500;
 pub(crate) const MAX_TOOL_CALLS: u32 = 50;
 
