@@ -435,6 +435,47 @@ fn effective(
     Ok((value, defaults.value, own, Some(saved), source_revision))
 }
 
+/// The source that actually supplies instructions, before freezing a message.
+pub(crate) fn instruction_source(
+    db: &Db<'_>,
+    provider: Provider,
+    agent: &str,
+) -> Result<(crate::conversation_writers::InstructionSource, String)> {
+    use crate::conversation_writers::InstructionSource;
+    let profile = required(db.agent(agent)?, "Agent not found")?;
+    if provider != Provider::Codex
+        || Provider::from(profile.settings.provider) == provider
+            && !profile.settings.instructions.is_empty()
+    {
+        return Ok((
+            InstructionSource::Profile {
+                agent: agent.into(),
+            },
+            profile.settings.instructions,
+        ));
+    }
+    let own = record(db, provider, Some(profile.id))?;
+    if own
+        .removed
+        .iter()
+        .any(|path| path == "/developer_instructions")
+    {
+        return Ok((InstructionSource::Empty, String::new()));
+    }
+    let (scope, value) = if own.value.get("developer_instructions").is_some() {
+        (agent.to_owned(), own.value)
+    } else {
+        (String::new(), record(db, provider, None)?.value)
+    };
+    Ok((
+        InstructionSource::Native {
+            scope,
+            provider: provider.as_str().into(),
+        },
+        text(&value, "developer_instructions").into(),
+    ))
+}
+
 fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
     let mut entries = vec![
         (
@@ -1009,10 +1050,27 @@ pub(crate) fn view(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn edit(
     db: &Db<'_>,
     input: &EditCodingAgentConfigurationInput,
     save: bool,
+) -> Result<CodingAgentConfiguration> {
+    edit_by(
+        db,
+        input,
+        save,
+        &crate::conversation_writers::EntryWriter::Unknown,
+    )
+}
+
+/// Edits the configuration, recording `writer` as the author of changed agent
+/// instructions.
+pub(crate) fn edit_by(
+    db: &Db<'_>,
+    input: &EditCodingAgentConfigurationInput,
+    save: bool,
+    writer: &crate::conversation_writers::EntryWriter,
 ) -> Result<CodingAgentConfiguration> {
     if input.changes.len() > 200
         || input.inherit_paths.len() > 1000
@@ -1033,6 +1091,7 @@ pub(crate) fn edit(
         ));
     }
     let (before, inherited, own, agent, _) = effective(db, provider, input.agent_id)?;
+    let native_before = text(&own.value, "developer_instructions").to_owned();
     let mapped_profile = agent
         .as_ref()
         .is_some_and(|agent| Provider::from(agent.settings.provider) == provider);
@@ -1199,7 +1258,19 @@ pub(crate) fn edit(
     }
     capture_legacy_defaults(db, provider, input.agent_id)?;
     if let Some(agent) = changed_agent {
-        crate::agent_grants::save_profile(db, agent, false, &[])?;
+        let id = agent.id.to_string();
+        let before = db
+            .agent(&id)?
+            .map(|profile| profile.settings.instructions)
+            .unwrap_or_default();
+        let saved = crate::agent_grants::save_profile(db, agent, false, &[])?;
+        crate::conversation_writers::record_instructions(
+            db,
+            &id,
+            &before,
+            &saved.settings.instructions,
+            writer,
+        )?;
     }
     let scope = input.agent_id.map(|id| id.to_string());
     if mapped_profile {
@@ -1215,6 +1286,15 @@ pub(crate) fn edit(
     db.0.execute(
         "INSERT INTO coding_agent_configurations(scope,provider,agent_id,document,presentation,removed,revision) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(scope,provider) DO UPDATE SET document=excluded.document,presentation=excluded.presentation,removed=excluded.removed,revision=excluded.revision",
         params![scope.as_deref().unwrap_or(""), provider.as_str(), scope, stored_document, document, serde_json::to_string(&removed)?, id()],
+    )?;
+    let native_after = parse(provider, &stored_document)?;
+    crate::conversation_writers::record_native_instructions(
+        db,
+        scope.as_deref().unwrap_or(""),
+        provider.as_str(),
+        &native_before,
+        text(&native_after, "developer_instructions"),
+        writer,
     )?;
     db.audit(
         "coding-agent.configuration.saved",

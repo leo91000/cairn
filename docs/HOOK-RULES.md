@@ -288,19 +288,60 @@ owner who authorized the client.
 
 ### Agents with installation access
 
-`cairn_installation` reads rules, their versions, the catalog and the rule templates,
-and validates definitions. Installing a template writes rules and follows the same
-limits. It writes rules only for one person who remains, when it writes, the
-owner or a member with access to the conversation's agent, in a conversation that this
-person alone has written since its creation, from the web, Android or the public MCP,
-and whose turn this person launched; never in a task (scheduled, manual or delegated)
-or a mission. These provenance conditions are listed in ADR-0075. Reading another
-conversation through `cairn_installation` (`get_chat`, `read_chat_content`,
-`read_run_content`) or a delegated task's report counts as an agent entry. Project
-skills written through Cairn's skill tools (`save_skill`, `edit_skill_files`) are
-skills written by an agent, not repository content.
+`cairn_installation` reads rules, their versions, the catalog and rule templates, and
+validates definitions. It installs a template only in an eligible conversation; that
+installation creates ordinary rules and follows the same limits. It writes rules only
+for one person who remains, when it writes, the owner or a member with access to the
+conversation's agent, in a conversation that meets every provenance condition of
+ADR-0075:
 
-Until Cairn records who writes each conversation entry, no conversation meets these
-conditions: `cairn_installation` writes no rule and installs no template. It never grants a right, never lifts
-an emergency pause or exhausted budget, never touches another account's rule and never
-reduces a grant a rule of a current account uses.
+- the run belongs to a conversation, never to a task (scheduled, manual or delegated)
+  or a mission;
+- this person created the conversation from the web, Android or the public MCP, and
+  wrote every entry since: messages, steers, answers to questions and edits of a
+  queued message, which count as entries of whoever edits. An entry by a rule, an
+  agent, `cairn_installation` or another person closes the conversation for good;
+- the current turn was launched by one of this person's messages: not a resume, a
+  recovery, a wakeup, a wait completion or a rule;
+- the agent's instructions and the skills the turn follows were written by people,
+  never by an agent, and only this person changed them since the conversation
+  started. Every followed skill must have a recorded writer for its exact scope and
+  revision; unrecorded skills fail closed. Plugin instructions count as written by the
+  owner who granted them; a member's conversation closes when another person changes
+  them;
+- the conversation was never moved to another agent (an agent merge).
+
+Cairn records who writes each conversation entry, each change to an agent's
+instructions (including inherited native defaults) and each skill change through its skill tools (`save_skill`,
+`edit_skill_files`, `import_skill`, `update_skill_source`, `delete_skill`; imports count
+as written by the importer). Every message must carry an attestation of the person
+matching its current content: a write that skipped the record makes the conversation
+ineligible. Conversations, instructions and skills written before this record never
+qualify. Native instruction documents have their own writer history, and each turn
+records the source it follows. A human rewrite cannot erase earlier agent authorship
+of those instructions.
+Reading another conversation, run or task through `cairn_installation` (`list_chats`,
+`get_chat`, `read_chat_content`, `list_runs`, `get_run`, `read_run_content`, `get_task`)
+and delegating a task, whose report the conversation reads, count as agent entries.
+The dispatcher defaults every operation not on its closed list of operations that
+cannot return conversation, run or task content to an agent entry. The list includes
+hook rules, agent profiles, projects, skills, settings, MCP connections, plugins and
+nodes; a newly added operation therefore closes the conversation until it is reviewed.
+Withdrawing a queued message counts as an entry of whoever withdraws it. An agent's
+skill write is recorded before it happens, so a skill an agent ever wrote never
+qualifies.
+
+In such a conversation the agent creates, replaces, duplicates, enables, disables and
+deletes this person's rules only, saved with the source `installationAgent` and the
+conversation's identifier, and never with native authority.
+Installing a template through `cairn_installation` follows the same limits. While a
+rule of this person is paused in an emergency or out of budget, the agent only disables
+their rules. It never pauses or resumes a rule in an emergency, never resumes a budget,
+never duplicates a paused or exhausted rule and never touches another account's rule.
+When it saves a rule carrying the `openToAnyone` warning, the person receives an alert
+with that warning.
+
+`cairn_installation` never reduces a hook or tool grant used by a rule of another
+current account (the owner, or a member whose membership lasts), whatever the rule's
+state. In an eligible conversation the person's own rules no longer protect a grant;
+outside one, every current account's rules do.

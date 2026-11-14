@@ -38,7 +38,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 33;
+pub(crate) const DATABASE_VERSION: i64 = 34;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -266,6 +266,10 @@ impl Store {
         }
         if !fresh && version == 32 {
             crate::rules::engine::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 33 {
+            crate::conversation_writers::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -309,6 +313,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::missions::SCHEMA)?;
             tx.execute_batch(crate::rules::SCHEMA)?;
             tx.execute_batch(crate::rules::engine::SCHEMA)?;
+            tx.execute_batch(crate::conversation_writers::SCHEMA)?;
             tx.execute_batch(crate::chats::storage::SCHEMA)?;
             tx.execute_batch(crate::chats::question_storage::SCHEMA)?;
             tx.execute_batch(crate::attachments::sql::SCHEMA)?;
@@ -1830,7 +1835,7 @@ mod schema_tests {
     #[test]
     fn startup_steps_accept_a_database_upgraded_by_another_startup() {
         type Upgrade = fn(&mut Connection) -> Result<()>;
-        let steps: [(&str, Upgrade); 10] = [
+        let steps: [(&str, Upgrade); 11] = [
             ("accounts", crate::accounts::migration::upgrade),
             ("conversations", crate::chats::migration::upgrade),
             ("questions", crate::chats::question_migration::upgrade),
@@ -1841,6 +1846,7 @@ mod schema_tests {
             ("placement", crate::nodes::attempts_migration::upgrade),
             ("deliverables", crate::artifacts::migration::upgrade),
             ("agent access", crate::agent_access::upgrade),
+            ("conversation writers", crate::conversation_writers::upgrade),
         ];
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());

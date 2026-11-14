@@ -1085,6 +1085,7 @@ async fn automatic_creation_portrait_keeps_its_initiating_ceiling_after_the_requ
                     review: cairn_contracts::AgentReview::default(),
                 }),
                 crate::service::AgentEditor::Installation,
+                crate::conversation_writers::EntryWriter::Agent,
                 authority,
             )
             .await

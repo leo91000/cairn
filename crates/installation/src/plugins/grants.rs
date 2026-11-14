@@ -303,13 +303,17 @@ fn resources_cover(current: &[PluginResourceRef], proposed: &[PluginResourceRef]
 /// Rules are read in the same publication transaction. Until Cairn records who writes
 /// conversations, no agent writes for an eligible person: every current account's use
 /// is protected, including the owner's and disabled or blocked rules.
+/// An agent never reduces a grant that a rule of a current account uses on this agent,
+/// whatever the rule's state. In an eligible conversation, the rules of its own person
+/// are no longer protected; those of every other current account stay protected.
 pub(crate) fn protect_rule_uses(
     db: &Db<'_>,
     agent: &str,
-    _before: &AgentPluginGrants,
+    person: Option<&str>,
     after: &cairn_contracts::ReplaceAgentPluginGrantsInput,
 ) -> Result<()> {
-    for usage in rule_uses(db, agent)? {
+    // Rule state and budget never lift the protection; only an ended membership does.
+    for usage in crate::rules::grant_uses(db, agent, person)? {
         let proposed = after
             .grants
             .iter()
@@ -329,11 +333,6 @@ pub(crate) fn protect_rule_uses(
 pub(crate) struct RuleGrantUse {
     pub instance_id: PluginInstanceId,
     pub contribution: PluginContributionGrant,
-}
-
-pub(crate) fn rule_uses(db: &Db<'_>, agent: &str) -> Result<Vec<RuleGrantUse>> {
-    // Rule state and budget never lift the protection; only an ended membership does.
-    crate::rules::grant_uses(db, agent, None)
 }
 
 struct ResourceReduction {
@@ -373,6 +372,7 @@ pub(crate) async fn replace(
     input: cairn_contracts::ReplaceAgentPluginGrantsInput,
     authority: crate::capabilities::plugin_packages::Authority,
     reduce_only: bool,
+    writer: crate::conversation_writers::EntryWriter,
 ) -> Result<AgentPluginGrants> {
     use std::collections::BTreeSet;
     let id = input.agent_id.to_string();
@@ -575,6 +575,16 @@ pub(crate) async fn replace(
         }
     }
     authority.recheck(s).await?;
+    // The person of an eligible conversation, observed before publication is held.
+    let bearer = authority.bearer.clone();
+    let authors = match &bearer {
+        Some(_) if reduce_only => Some(s.missions.authors.lock().await),
+        _ => None,
+    };
+    let eligibility = match &authors {
+        Some(_) => Some(crate::conversation_writers::Eligibility::observe(s).await?),
+        None => None,
+    };
     let _publication = s.plugins.package_publication.lock().await;
     for (_, package) in packages.values() {
         let Some(package) = package else {
@@ -603,6 +613,8 @@ pub(crate) async fn replace(
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
+            let plugin_instruction_digests =
+                crate::conversation_writers::plugin_instruction_digests(db)?;
             let before = db.agent_plugin_grants(&id)?;
 
             if before.revision != input.revision {
@@ -617,7 +629,12 @@ pub(crate) async fn replace(
                 for snapshot in &reduction_snapshots {
                     snapshot.authorize(db)?;
                 }
-                protect_rule_uses(db, &id, &before, &input)?;
+                // Any doubt about the conversation keeps every account's rules protected.
+                let person = match (&eligibility, bearer.as_deref()) {
+                    (Some(eligibility), Some(bearer)) => eligibility.check(db, bearer).ok().map(|eligible| eligible.account),
+                    _ => None,
+                };
+                protect_rule_uses(db, &id, person.as_deref(), &input)?;
             }
 
             let mut agent = required(db.agent(&id)?, "Agent not found")?;
@@ -648,6 +665,12 @@ pub(crate) async fn replace(
                     }
                 }
             }
+
+            crate::conversation_writers::record_plugin_instruction_changes(
+                db,
+                &plugin_instruction_digests,
+                &writer,
+            )?;
 
             db.0.execute("UPDATE plugin_credential_suppliers SET instance_id=NULL WHERE agent_id=?", [&id])?;
             for grant in &input.grants {
@@ -1078,7 +1101,16 @@ mod migration_tests {
             });
         let publication = f.s.plugins.package_publication.lock().await;
         let service = f.s.clone();
-        let change = tokio::spawn(async move { replace(&service, input, authority, true).await });
+        let change = tokio::spawn(async move {
+            replace(
+                &service,
+                input,
+                authority,
+                true,
+                crate::conversation_writers::EntryWriter::Unknown,
+            )
+            .await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
             .await
             .unwrap();
@@ -1169,7 +1201,16 @@ mod migration_tests {
         });
         let publication = f.s.plugins.package_publication.lock().await;
         let service = f.s.clone();
-        let change = tokio::spawn(async move { replace(&service, input, authority, true).await });
+        let change = tokio::spawn(async move {
+            replace(
+                &service,
+                input,
+                authority,
+                true,
+                crate::conversation_writers::EntryWriter::Unknown,
+            )
+            .await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
             .await
             .unwrap();
@@ -1292,6 +1333,7 @@ mod migration_tests {
                     "manage",
                 ),
                 false,
+                crate::conversation_writers::EntryWriter::Unknown,
             )
             .await
         });

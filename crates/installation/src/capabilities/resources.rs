@@ -171,6 +171,7 @@ impl ResourceOperation {
             ResumeContext::Public(..) => Audience::Public,
             ResumeContext::Installation(bearer) => Audience::from_bearer(Some(bearer), false),
         };
+        let writer = crate::conversation_writers::EntryWriter::of_context(&context);
         let mut authority = Authority::new(s, context, self.scope, self.deferred()).await?;
         if self.deferred() {
             let result_authority = authority.retain_result_authority();
@@ -184,7 +185,7 @@ impl ResourceOperation {
                     let result = Box::pin(
                         resource_operation(name)
                             .unwrap()
-                            .execute(&service, input, authority),
+                            .execute(&service, input, authority, writer),
                     )
                     .await?;
                     Ok(match name {
@@ -208,7 +209,7 @@ impl ResourceOperation {
                 },
             );
         }
-        self.execute(s, input, authority).await
+        self.execute(s, input, authority, writer).await
     }
 
     async fn execute(
@@ -216,6 +217,7 @@ impl ResourceOperation {
         s: &Arc<Service>,
         input: Value,
         mut authority: Authority,
+        writer: crate::conversation_writers::EntryWriter,
     ) -> Result<Value> {
         let result = match self.name {
             "import_project" => {
@@ -275,24 +277,47 @@ impl ResourceOperation {
                 let result = match &command {
                     ImportSkillInput::Archive { upload, path, .. } => {
                         authority.recheck(s).await?;
+                        let service = s.clone();
+                        let intent_scope = scope.clone();
+                        let intent_writer = writer.clone();
                         s.skills
                             .import_archive(
                                 &scope,
                                 upload,
                                 path.as_deref(),
                                 project.as_deref(),
+                                move |name| {
+                                    let service = service.clone();
+                                    let scope = intent_scope.clone();
+                                    let writer = intent_writer.clone();
+                                    async move {
+                                        crate::conversation_writers::record_skill_intent(
+                                            &service, &scope, &name, &writer,
+                                        )
+                                        .await
+                                    }
+                                },
                                 authority.publication(s),
                             )
                             .await?
                     }
                     ImportSkillInput::Plugin { .. } => {
-                        sources::import(s, &scope, &command, project.as_deref(), authority).await?
+                        sources::import(s, &scope, &command, project.as_deref(), authority, &writer)
+                            .await?
                     }
                 };
                 if let Some(name) = result["imported"]["name"].as_str() {
                     s.store
                         .audit("skill.saved", json!({"scope": scope, "name": name}))
                         .await?;
+                    crate::conversation_writers::record_skill_write(
+                        s,
+                        &scope,
+                        name,
+                        project.as_deref(),
+                        &writer,
+                    )
+                    .await?;
                 }
                 return output::<SkillImport>(result);
             }
@@ -320,6 +345,13 @@ impl ResourceOperation {
             "save_skill" => {
                 let input: SaveSkillInput = decode(input)?;
                 let project = authority.project(s, &input.scope).await?;
+                crate::conversation_writers::record_skill_intent(
+                    s,
+                    &input.scope,
+                    &input.name,
+                    &writer,
+                )
+                .await?;
                 authority.recheck(s).await?;
                 let saved = s
                     .skills
@@ -336,12 +368,27 @@ impl ResourceOperation {
                         json!({"scope": input.scope, "name": input.name}),
                     )
                     .await?;
+                crate::conversation_writers::record_skill_write(
+                    s,
+                    &input.scope,
+                    &input.name,
+                    project.as_deref(),
+                    &writer,
+                )
+                .await?;
                 return output::<SkillMetadata>(saved);
             }
             "edit_skill_files" => {
                 let input: EditSkillFilesInput = decode(input)?;
                 let project = authority.project(s, &input.scope).await?;
                 let (changes, uploads) = s.skills.changes(input.changes).await?;
+                crate::conversation_writers::record_skill_intent(
+                    s,
+                    &input.scope,
+                    &input.name,
+                    &writer,
+                )
+                .await?;
                 authority.recheck(s).await?;
                 let saved = s
                     .skills
@@ -359,6 +406,16 @@ impl ResourceOperation {
                         "skill.saved",
                         json!({"scope": input.scope, "name": input.name}),
                     )
+                    .await?;
+                let (scope, name) = (input.scope.clone(), input.name.clone());
+                let revision = saved.revision.clone();
+                let written = writer.clone();
+                s.store
+                    .transaction(move |db| {
+                        crate::conversation_writers::record_skill(
+                            db, &scope, &name, &revision, &written,
+                        )
+                    })
                     .await?;
                 let mut bundle = skills::bundle_response(&input.scope, &input.name, &saved);
                 sources::source(s, &input.scope, &input.name, &mut bundle).await?;
@@ -385,17 +442,31 @@ impl ResourceOperation {
             "update_skill_source" => {
                 let input: UpdateSkillSourceInput = decode(input)?;
                 let project = authority.project(s, &input.scope).await?;
-                return output::<SkillBundle>(
-                    sources::update(
-                        s,
-                        &input.scope,
-                        &input.name,
-                        &input,
-                        project.as_deref(),
-                        authority,
-                    )
-                    .await?,
-                );
+                crate::conversation_writers::record_skill_intent(
+                    s,
+                    &input.scope,
+                    &input.name,
+                    &writer,
+                )
+                .await?;
+                let bundle = sources::update(
+                    s,
+                    &input.scope,
+                    &input.name,
+                    &input,
+                    project.as_deref(),
+                    authority,
+                )
+                .await?;
+                crate::conversation_writers::record_skill_write(
+                    s,
+                    &input.scope,
+                    &input.name,
+                    project.as_deref(),
+                    &writer,
+                )
+                .await?;
+                return output::<SkillBundle>(bundle);
             }
             _ => {
                 let input: SkillInput = decode(input)?;
@@ -419,6 +490,14 @@ impl ResourceOperation {
                         serde_json::to_value(ForgetSkillSourceOutput { detached: true })?
                     }
                     "delete_skill" => {
+                        authority.recheck(s).await?;
+                        crate::conversation_writers::record_skill_intent(
+                            s,
+                            &input.scope,
+                            &input.name,
+                            &writer,
+                        )
+                        .await?;
                         skills::lifecycle::remove(
                             s,
                             &input.scope,

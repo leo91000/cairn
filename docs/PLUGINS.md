@@ -1489,12 +1489,13 @@ When a rule calls a tool, a result of exactly `{ retryAfter = seconds }` (option
 with `error`) means the service did nothing yet: only that action runs again later.
 Return it for a rate limit or a refusal before processing, never after an effect.
 
-`plugins::grants::rule_uses` reads the hook rule store: the tools and hooks each
-rule of a current membership uses on its execution agent, with the resources the
-agent holds now, regardless of rule state or budget. The reduction guard protects
-those uses. Until Cairn records who writes each conversation entry, every current
-account's rule is protected; an eligible conversation may later exclude only its own
-account's rules ([hook rules](HOOK-RULES.md)).
+`rules::grant_uses` reads the hook rule store: the tools and hooks each rule of a
+current membership uses on its execution agent, with the resources the agent holds
+now, regardless of rule state or budget. The reduction guard
+(`plugins::grants::protect_rule_uses`) protects those uses. Outside a conversation
+eligible for rule writes, every current account's rule is protected; an eligible
+conversation excludes only its own person's rules
+([hook rules](HOOK-RULES.md#agents-with-installation-access)).
 
 Transfers returned by tools retain the producing contribution, resource inputs and
 transitive transfer dependencies. Every later read, attachment use or MIME

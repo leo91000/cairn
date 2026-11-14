@@ -904,7 +904,14 @@ pub(crate) fn send(
     values.chat_id = chat_id.to_owned();
     values.status = MessageStatus::Queued;
     values.created_at = now();
-    Ok(serde_json::to_value(db.save_message(&values)?)?)
+    let saved = db.save_message(&values)?;
+    crate::conversation_writers::record_message(
+        db,
+        chat_id,
+        &saved.id,
+        &crate::conversation_writers::EntryWriter::of(origin),
+    )?;
+    Ok(serde_json::to_value(saved)?)
 }
 
 /// Deletes a queued ordinary message. Submitted questionnaire answers are immutable.
@@ -944,6 +951,7 @@ pub(crate) fn parse_edit(input: Value) -> Result<Value> {
     Ok(values)
 }
 
+#[cfg(test)]
 pub(crate) fn edit(
     db: &Db<'_>,
     chat_id: &str,
@@ -977,6 +985,12 @@ pub(crate) fn edit_as(
         return Err(Error::conflict("This message is already being sent."));
     }
     let Some(mut values) = values else {
+        // Withdrawing a queued message is an entry of whoever withdraws it.
+        crate::conversation_writers::record_entry(
+            db,
+            chat_id,
+            &crate::conversation_writers::EntryWriter::of(origin),
+        )?;
         return withdraw(db, chat_id, &current);
     };
     if current.question_id.is_some() {
@@ -1011,7 +1025,15 @@ pub(crate) fn edit_as(
         crate::chat_plan_settings::require_enabled(db)?;
     }
     require_plan_support(db, &chat, &current)?;
-    Ok(serde_json::to_value(db.save_message(&current)?)?)
+    let saved = db.save_message(&current)?;
+    // An edit counts as an entry of whoever edits.
+    crate::conversation_writers::record_message(
+        db,
+        chat_id,
+        &saved.id,
+        &crate::conversation_writers::EntryWriter::of(origin),
+    )?;
+    Ok(serde_json::to_value(saved)?)
 }
 
 fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
@@ -1393,13 +1415,21 @@ fn launch_turn(
         operation: None,
         previous: None,
     };
+    // A wakeup resumes a turn; only a message launches one.
+    let launched_by = (!waking).then(|| execution.message_id.clone());
     if let Some(run) = run {
         continue_run(db, &chat, &run, &snapshot, execution)?;
+        if let Some(message) = &launched_by {
+            crate::conversation_writers::record_turn(db, text(&run, "id"), message)?;
+        }
     } else {
         crate::native::policy::apply(&mut snapshot, &serde_json::to_value(&chat)?);
         snapshot["chatExecution"] = serde_json::to_value(execution)?;
         crate::runs::admit_prepared(db, &snapshot, None)?;
         chat.run_id = Some(text(&snapshot, "id").to_owned());
+        if let Some(message) = &launched_by {
+            crate::conversation_writers::record_turn(db, text(&snapshot, "id"), message)?;
+        }
     }
     chat.cancelled_by_deletion = false;
     chat.session_restart_requested = false;
@@ -1546,7 +1576,13 @@ pub(crate) fn create_as(
     crate::native::policy::authorize_chat(db, &mut chat, origin)?;
     task_projects(&agent, &chat, &db.projects()?)?;
     let chat: Conversation = serde_json::from_value(chat)?;
-    Ok(serde_json::to_value(db.save_conversation(&chat)?)?)
+    let saved = db.save_conversation(&chat)?;
+    crate::conversation_writers::record_creation(
+        db,
+        &saved,
+        &crate::conversation_writers::EntryWriter::of(origin),
+    )?;
+    Ok(serde_json::to_value(saved)?)
 }
 
 pub(crate) fn send_as_in(
