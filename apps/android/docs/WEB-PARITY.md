@@ -1,5 +1,14 @@
 # Android 0.6.0 / web parity
 
+## Model picker during catalog loading (2026-11-14)
+
+Web keeps its model-picker button as the pointer target while catalog results
+replace a raw model ID with its display name. A click during that update opens
+the picker, including the Auto connection choice. Android retains its native
+clickable model-picker control, which has no DOM text-target replacement.
+Model, reasoning and connection selection remain the same on both platforms;
+public MCP and `cairn_installation` operations and authorization are unchanged.
+
 ## Search during workspace startup (2026-11-13)
 
 Web registers its existing workspace shortcuts before the initial resource lists

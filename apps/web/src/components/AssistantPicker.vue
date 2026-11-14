@@ -623,6 +623,8 @@ onBeforeUnmount(() => removeEventListener('resize', place))
 </template>
 
 <style scoped>
+/* Keep a catalog label update between pointer down/up on the same click target. */
+.assistant-trigger > * { pointer-events: none; }
 .assistant-picker {
   position: fixed;
   border-radius: 18px;
