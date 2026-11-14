@@ -231,11 +231,17 @@ internal fun RuleValueEditor(
                         )
                         TextButton(
                             onClick = {
+                                val fixedValue = held["value"]
+                                val typedLiteral =
+                                    mode == "literal" &&
+                                        (fixedValue !is JsonPrimitive || !fixedValue.isString)
+                                val typedSchema =
+                                    schema != null &&
+                                        schemaKind(schema, fixedValue ?: JsonNull) != "string"
                                 val typed =
-                                    expects in setOf("number", "integer", "boolean", "json") ||
-                                        (schema != null &&
-                                            schemaKind(schema, held["value"] ?: JsonNull) !=
-                                                "string")
+                                    expects in setOf("number", "integer", "boolean") ||
+                                        typedLiteral ||
+                                        typedSchema
                                 val replace = expects == "field" || (typed && mode != "formula")
                                 val nextFormula =
                                     mode == "formula" ||

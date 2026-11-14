@@ -176,7 +176,9 @@ function insert(option: VariableOption) {
   const element = field.value
   const current = text.value
   const schemaType = props.schema ? resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type : null
-  const typed = ['number', 'boolean', 'json'].includes(props.expects) || (schemaType && schemaType !== 'string')
+  const typedSchema = schemaType != null && schemaType !== 'string'
+  const typedLiteral = model.value.type === 'literal' && typeof model.value.value !== 'string'
+  const typed = ['number', 'boolean'].includes(props.expects) || typedSchema || typedLiteral
   const replace = props.expects === 'field' || (typed && mode.value !== 'formula')
   const nextMode = ['field', 'formula'].includes(props.expects) || replace ? 'formula' : mode.value === 'literal' ? 'template' : mode.value
   const insertion = nextMode === 'template' ? `{{${option.expression}}}` : option.expression

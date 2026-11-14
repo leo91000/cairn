@@ -333,4 +333,23 @@ abstract class RulesEditorCases {
                 .text("type"),
         )
     }
+
+    @Test
+    fun untypedJsonTextKeepsInterpolationAndItsPrefix() {
+        var value by mutableStateOf(literalRuleValue(JsonPrimitive("Avant ")))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor(
+                    "Valeur mémorisée",
+                    value,
+                    listOf(RuleVariable("Événement", "payload.author", "Auteur", "string", "")),
+                    { value = it },
+                    expects = "json",
+                )
+            }
+        }
+        compose.onNodeWithText("+ Insérer une variable").performClick()
+        compose.onNodeWithText("Utiliser Auteur").performClick()
+        compose.runOnIdle { assertEquals(templateValue("Avant {{payload.author}}"), value) }
+    }
 }
