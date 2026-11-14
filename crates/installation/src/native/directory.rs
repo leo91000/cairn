@@ -1235,10 +1235,10 @@ mod tests {
     use super::*;
     use std::io::Read;
 
-    fn copy_budget(state: &Path, disk_mib: u64) {
-        std::fs::write(
-            state.join(crate::microvm::budget::FILE),
-            serde_json::to_vec(&json!({
+    async fn copy_budget(state: &Path, disk_mib: u64) {
+        atomic_write(
+            &state.join(crate::microvm::budget::FILE),
+            &serde_json::to_vec(&json!({
                 "nativeModeProtocol": 1,
                 "slots": 1,
                 "limits": {
@@ -1249,6 +1249,7 @@ mod tests {
             }))
             .unwrap(),
         )
+        .await
         .unwrap();
     }
 
@@ -1293,7 +1294,7 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let policy = copy_space_fixture(state.path(), data.path());
         let required = 96 * super::super::disk::MIB;
-        copy_budget(state.path(), 128);
+        copy_budget(state.path(), 128).await;
         assert_eq!(
             check_copy_headroom(state.path(), required, &policy)
                 .await
@@ -1301,7 +1302,7 @@ mod tests {
                 .status,
             507
         );
-        copy_budget(state.path(), 256);
+        copy_budget(state.path(), 256).await;
         check_copy_headroom(state.path(), required, &policy)
             .await
             .unwrap();
@@ -1438,7 +1439,7 @@ mod tests {
             .collect();
         let data = tempfile::tempdir().unwrap();
         let policy = copy_space_fixture(&state, data.path());
-        copy_budget(&state, 512);
+        copy_budget(&state, 512).await;
         let run = crate::config::id();
         let root = workspace::directory(&state, &run).unwrap();
         private_dir(&root).await.unwrap();
@@ -1459,7 +1460,7 @@ mod tests {
             async move { rsync_status(command, &CancellationToken::new(), Some(&capacity)).await }
         });
         let handles = copy_process_handles(&marker).await;
-        copy_budget(&state, 128);
+        copy_budget(&state, 128).await;
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(5), operation)
                 .await
