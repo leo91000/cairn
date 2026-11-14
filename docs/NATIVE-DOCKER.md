@@ -92,6 +92,24 @@ task count does not distinguish kernel-blocked tasks from other remaining work.
 Container restart policies are refused: recreate/start development services in
 each new turn, after its current policy is checked. No daemon runs between turns.
 
+Administrator mode may also start a rootful Docker daemon. Its systemd cgroup
+driver can put containers in host `docker-<id>.scope` units outside the native
+workload unit. After fencing the workload/daemon, Cairn stops a scope only when
+that exact container's Docker-generated hostname, hosts or resolv.conf bind is
+on the owned conversation block device. Inherited mounts and arbitrary binds do
+not authorize stopping unrelated units. Graceful stop has a ten-second bound,
+then the attributed scope is killed and its empty cgroup is confirmed. Unknown
+external mounted consumers refuse close before filesystem flush and completed
+sealing; their processes are never killed based only on a mount reference.
+
+Recovery repeats this attribution for interrupted native attempts, including
+after the controller already unmounted its own view. Kernel device retirement
+uses asynchronous ublk deletion and retains the nonce-qualified ownership receipt
+until the kernel no longer reports that device identity. A pending deletion
+remains retryable: a namespace FD can pin a mount after every task exited, so a
+process scan alone cannot prove physical retirement. Linux 6.11 or newer is
+required; older kernels refuse admission before creating the first device.
+
 ## Persistence and compatibility
 
 Images, BuildKit cache, named volumes and stopped container metadata reside in
@@ -155,7 +173,7 @@ host state and does not claim the protected conversation isolation boundary.
 The native installer provisions verified, versioned binaries under its managed
 directory: Docker 29.9.0, RootlessKit 3.3.0, slirp4netns 1.3.6, Buildx 0.38.1 and
 Compose 5.6.1. Exact archive/executable SHA-256 pins are in `native-host.py`.
-The host needs Linux 5.12+, systemd 255+, cgroup v2, distribution `uidmap`,
+The host needs Linux 6.11+, systemd 255+, cgroup v2, distribution `uidmap`,
 `iproute2`, `iptables`, `/dev/net/tun`, root-managed `/etc/subuid` and `/etc/subgid`,
 and the existing ublk/ext4 prerequisites. Mapping helpers must be root-owned, executable and not writable by workloads,
 with setuid or the exact effective global mapping capability. Unsupported prerequisites fail explicitly.

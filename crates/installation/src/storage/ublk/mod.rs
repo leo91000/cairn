@@ -34,6 +34,23 @@ pub fn prepare_io_threads() -> std::io::Result<()> {
     io::enable_io_flusher()
 }
 
+pub(crate) fn prepare_native_io_threads() -> std::io::Result<()> {
+    let release = fs::read_to_string("/proc/sys/kernel/osrelease")?;
+    if !async_retirement_kernel(&release) {
+        return Err(stdio::Error::other(
+            "Native ublk hosts require Linux 6.11 or newer for nonblocking device retirement",
+        ));
+    }
+    io::enable_io_flusher()
+}
+
+fn async_retirement_kernel(release: &str) -> bool {
+    let mut parts = release.trim().split('.');
+    let major = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
+    matches!((major, minor), (Some(major), Some(minor)) if major > 6 || major == 6 && minor >= 11)
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Record {
@@ -276,12 +293,40 @@ fn retire(
     record: &Record,
     control: &libublk::ctrl::UblkCtrl,
     reaped: bool,
+    wait: bool,
 ) -> stdio::Result<()> {
     stop_owned(state, record, control, reaped)?;
-    control.del_dev().map_err(error).map(|_| ())
+    if wait {
+        return control.del_dev().map_err(error).map(|_| ());
+    }
+    // Synchronous DEL_DEV waits for the final kernel reference, including a
+    // task-less mount namespace retained by an FD. Queue deletion, then retain
+    // our durable receipt until GET_DEV_INFO proves this nonce is gone.
+    control.del_dev_async().map_err(error)?;
+    let id = i32::try_from(control.dev_info().dev_id).map_err(stdio::Error::other)?;
+    deletion_complete(
+        record.token,
+        UblkCtrlBuilder::default()
+            .id(id)
+            .build()
+            .map(|next| next.dev_info().ublksrv_flags)
+            .map_err(error),
+    )
 }
 
-fn cleanup(state: &Path, record: &Record, joined: bool) -> stdio::Result<()> {
+fn deletion_complete(token: u64, observed: stdio::Result<u64>) -> stdio::Result<()> {
+    match observed {
+        Ok(found) if found == token => Err(stdio::Error::new(
+            stdio::ErrorKind::WouldBlock,
+            "ublk deletion is pending; external references and ownership are retained",
+        )),
+        Ok(_) => Ok(()), // Reuse of the numeric ID proves the preceding device retired.
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn cleanup(state: &Path, record: &Record, joined: bool, wait: bool) -> stdio::Result<()> {
     record.validate()?;
     if record.boot_id != boot_id()? {
         return forget(state, record);
@@ -316,7 +361,7 @@ fn cleanup(state: &Path, record: &Record, joined: bool) -> stdio::Result<()> {
                 }
             };
             if control.dev_info().ublksrv_flags == record.token {
-                retire(state, record, &control, joined)?;
+                retire(state, record, &control, joined, wait)?;
             }
         }
         return forget(state, record);
@@ -336,7 +381,7 @@ fn cleanup(state: &Path, record: &Record, joined: bool) -> stdio::Result<()> {
         // The kernel reused this numeric ID. The new device is not ours.
         return forget(state, record);
     }
-    retire(state, record, &control, joined)?;
+    retire(state, record, &control, joined, wait)?;
     forget(state, record)
 }
 
@@ -381,6 +426,17 @@ fn records(state: &Path) -> stdio::Result<Vec<Record>> {
 /// Abort only dead, nonce-verified backends so blocked consumers can finish exiting;
 /// keep kernel devices and receipts until fencing and unmount are confirmed.
 pub(crate) fn quiesce_stale_host_disk(state: &Path, run: &str) -> stdio::Result<()> {
+    if !quiesce_if_owned_host_disk(state, run)? {
+        return Err(stdio::Error::other(
+            "Mounted native disk has no current ownership receipt",
+        ));
+    }
+    Ok(())
+}
+
+/// A persistent attachment can outlive a reboot or completed retirement. Never
+/// infer a current device's ownership from that stale major/minor alone.
+pub(crate) fn quiesce_if_owned_host_disk(state: &Path, run: &str) -> stdio::Result<bool> {
     let current_boot = boot_id()?;
     let mut owned = false;
     for record in records(state)? {
@@ -394,7 +450,6 @@ pub(crate) fn quiesce_stale_host_disk(state: &Path, run: &str) -> stdio::Result<
                 "ublk backend or VMM is still active",
             ));
         }
-        owned = true;
         let control = match UblkCtrlBuilder::default().id(id).build() {
             Ok(control) => control,
             Err(failure) => {
@@ -406,23 +461,27 @@ pub(crate) fn quiesce_stale_host_disk(state: &Path, run: &str) -> stdio::Result<
             }
         };
         if control.dev_info().ublksrv_flags != record.token {
-            return Err(stdio::Error::other("Native ublk ownership changed"));
+            continue;
         }
         stop_owned(state, &record, &control, false)?;
+        owned = true;
     }
-    if !owned {
-        return Err(stdio::Error::other(
-            "Mounted native disk has no current ownership receipt",
-        ));
-    }
-    Ok(())
+    Ok(owned)
 }
 
 /// Called only under the controller lock, after fencing consumers and unmounting
 /// host filesystems. Never retires an unrecorded owner or a live backend/VMM.
 pub fn cleanup_stale(state: &Path) -> stdio::Result<()> {
+    cleanup_stale_with(state, true)
+}
+
+pub(crate) fn cleanup_stale_native(state: &Path) -> stdio::Result<()> {
+    cleanup_stale_with(state, false)
+}
+
+fn cleanup_stale_with(state: &Path, wait: bool) -> stdio::Result<()> {
     for record in records(state)? {
-        cleanup(state, &record, false)?;
+        cleanup(state, &record, false, wait)?;
     }
     Ok(())
 }
@@ -488,13 +547,19 @@ impl MountedDisk {
     }
 
     /// Caller has already awaited its VMM exit and cancelled blocked source reads.
+    /// VM callers consume their handle and retain the existing synchronous close
+    /// contract. Native callers retain/retry close_in_place instead.
     pub fn close(mut self) -> stdio::Result<()> {
-        self.close_in_place()
+        self.close_with(true)
     }
 
     /// The caller has fenced all consumers and unmounted any host filesystem.
     /// Retaining the handle on error permits safe retry of kernel retirement.
     pub(crate) fn close_in_place(&mut self) -> stdio::Result<()> {
+        self.close_with(false)
+    }
+
+    fn close_with(&mut self, wait: bool) -> stdio::Result<()> {
         if self.thread.is_some() {
             self.stop()?;
             self.thread
@@ -503,7 +568,7 @@ impl MountedDisk {
                 .join()
                 .map_err(|_| stdio::Error::other("ublk backend panicked"))??;
         }
-        cleanup(&self.state, &self.record, true)
+        cleanup(&self.state, &self.record, true, wait)
     }
 }
 
@@ -658,7 +723,7 @@ fn mount(
         if !registered && let Some(record) = tracked {
             // The ADD guard has already removed a failed pre-start device.
             // Forget its receipt now so an in-process retry can reuse the ID.
-            if let Err(error) = cleanup(&server_state, &record, true) {
+            if let Err(error) = cleanup(&server_state, &record, true, true) {
                 tracing::warn!(%error, "Could not retire failed ublk registration");
             }
         }
@@ -721,6 +786,148 @@ fn mount(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_kernels_refuse_admission_before_the_first_device() {
+        for release in ["6.8.0-ubuntu", "6.10.12", "invalid"] {
+            assert!(!async_retirement_kernel(release));
+        }
+        for release in ["6.11.0", "6.11.0-rc1", "6.12.0-custom", "7.2.11-arch1-1"] {
+            assert!(async_retirement_kernel(release));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires disposable CAP_SYS_ADMIN/CAP_SYS_RESOURCE and a private mount namespace"]
+    fn isolated_retirement_qualification() {
+        prepare_io_threads().unwrap();
+        for namespace_reference in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = root.path().join("state");
+            let jail = state
+                .join("jails/firecracker")
+                .join(uuid::Uuid::new_v4().to_string())
+                .join("root");
+            fs::create_dir_all(&jail).unwrap();
+            let image = root.path().join("disk.img");
+            File::create(&image)
+                .unwrap()
+                .set_len(64 * 1024 * 1024)
+                .unwrap();
+            if namespace_reference {
+                assert!(
+                    std::process::Command::new("mkfs.ext4")
+                        .args(["-q", "-F"])
+                        .arg(&image)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            let disk = Arc::new(super::super::device::LocalDisk::open(&image, true).unwrap());
+            let mut mounted = mount_disk(disk, &state, &jail, unsafe { libc::geteuid() }).unwrap();
+            let reference = if namespace_reference {
+                let target = root.path().join("mounted");
+                fs::create_dir(&target).unwrap();
+                let source = CString::new(jail.join("disk.blk").as_os_str().as_bytes()).unwrap();
+                let destination = CString::new(target.as_os_str().as_bytes()).unwrap();
+                assert_eq!(
+                    unsafe {
+                        libc::mount(
+                            source.as_ptr(),
+                            destination.as_ptr(),
+                            c"ext4".as_ptr(),
+                            libc::MS_NODEV | libc::MS_NOSUID,
+                            std::ptr::null(),
+                        )
+                    },
+                    0
+                );
+                let reference = std::thread::spawn(|| {
+                    assert_eq!(unsafe { libc::unshare(libc::CLONE_FS) }, 0);
+                    private_mount_namespace(&[]).unwrap();
+                    File::open("/proc/thread-self/ns/mnt").unwrap()
+                })
+                .join()
+                .unwrap();
+                // The worker exited. Only this FD retains its filesystem mount.
+                assert_eq!(unsafe { libc::umount2(destination.as_ptr(), 0) }, 0);
+                reference
+            } else {
+                File::open(jail.join("disk.blk")).unwrap()
+            };
+            let started = std::time::Instant::now();
+            assert_eq!(
+                mounted.close_in_place().unwrap_err().kind(),
+                stdio::ErrorKind::WouldBlock
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "retirement blocked on an external reference"
+            );
+            assert!(
+                mounted.record.path(&state).exists(),
+                "pending device lost its ownership receipt"
+            );
+            assert_eq!(
+                mounted.close_in_place().unwrap_err().kind(),
+                stdio::ErrorKind::WouldBlock
+            );
+            if !namespace_reference {
+                let receipt = mounted.record.path(&state);
+                let release = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(200));
+                    drop(reference);
+                });
+                let waiting = std::time::Instant::now();
+                // This is the consuming close used by the VM transport. It must
+                // retain its receipt and caller's lease until the last FD exits.
+                mounted.close().unwrap();
+                assert!(waiting.elapsed() >= Duration::from_millis(150));
+                release.join().unwrap();
+                assert!(!receipt.exists());
+                println!(
+                    "native_retirement consuming_vm_close elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
+                continue;
+            }
+            drop(reference);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match mounted.close_in_place() {
+                    Ok(()) => break,
+                    Err(error)
+                        if error.kind() == stdio::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(error) => {
+                        panic!("retirement did not finish after reference release: {error}")
+                    }
+                }
+            }
+            assert!(!mounted.record.path(&state).exists());
+            println!(
+                "native_retirement namespace_reference={namespace_reference} elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+        }
+    }
+
+    #[test]
+    fn pending_deletion_keeps_the_receipt_until_the_owned_nonce_disappears() {
+        assert_eq!(
+            deletion_complete(42, Ok(42)).unwrap_err().kind(),
+            stdio::ErrorKind::WouldBlock
+        );
+        assert!(deletion_complete(42, Ok(43)).is_ok());
+        for errno in [libc::ENOENT, libc::ENODEV] {
+            assert!(deletion_complete(42, Err(stdio::Error::from_raw_os_error(errno))).is_ok());
+        }
+        assert!(deletion_complete(42, Err(stdio::Error::from_raw_os_error(libc::EACCES))).is_err());
+    }
 
     #[test]
     #[ignore = "requires CAP_SYS_ADMIN; uses disposable private mount namespaces"]
@@ -838,7 +1045,12 @@ mod tests {
             owner: Owner::current().unwrap(),
         };
         persist(root.path(), &record).unwrap();
+        assert!(!quiesce_if_owned_host_disk(root.path(), &record.vm_id).unwrap());
+        assert!(record.path(root.path()).exists());
         cleanup_stale(root.path()).unwrap();
         assert!(!record.path(root.path()).exists());
+        // A crash after retiring/forgetting the device but before unlinking its
+        // persistent attachment likewise has no current device to fence.
+        assert!(!quiesce_if_owned_host_disk(root.path(), &record.vm_id).unwrap());
     }
 }

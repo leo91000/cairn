@@ -118,7 +118,7 @@ pub fn prepare_storage_process() -> std::io::Result<()> {
                 "Native controller must share the system manager's mount namespace.",
             ));
         }
-        crate::storage::ublk::prepare_io_threads()
+        crate::storage::ublk::prepare_native_io_threads()
     }
 }
 

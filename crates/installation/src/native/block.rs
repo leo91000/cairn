@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     future::Future,
+    os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -300,6 +301,51 @@ async fn unmount(path: &Path) -> Result<()> {
     tokio::task::spawn_blocking(move || unmount_sync(&path))
         .await
         .map_err(Error::internal)??;
+    Ok(())
+}
+
+/// A crash during retirement can leave only a private attachment, with no host
+/// mount for recover_host_mounts to discover. Fence its attributed containers
+/// before the shared ublk registry retries the nonblocking device deletion.
+pub(super) async fn recover_disk_consumers(state: &Path, run: &str) -> Result<()> {
+    let attachment = state.join("native-block").join(run).join("root/disk.blk");
+    match tokio::fs::symlink_metadata(&attachment).await {
+        Ok(metadata) if metadata.file_type().is_block_device() => {}
+        Ok(_) => {
+            return Err(Error::conflict(
+                "Native recovery attachment is not a block device.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    let root = workspace::directory(state, run)?;
+    let workspace = crate::file_lock::exclusive(
+        &root.join("owner.lock"),
+        "Native workspace is still active.",
+    )?;
+    let owner = environment::lock(state, run, "Native disk is still owned.").await?;
+    let runtime: Value =
+        serde_json::from_slice(&tokio::fs::read(owner.directory.join("runtime.json")).await?)?;
+    if runtime["backend"] != "native"
+        || !root.join("block-initialized").exists() && !root.join("block-seeding").exists()
+    {
+        return Err(Error::conflict(
+            "Native recovery disk is not an initialized native journal.",
+        ));
+    }
+    let (state, run) = (state.to_owned(), run.to_owned());
+    let ownership = tokio::task::spawn_blocking(move || -> Result<_> {
+        let ownership = (workspace, owner);
+        let current = storage::ublk::quiesce_if_owned_host_disk(&state, &run)?;
+        Ok((ownership, current))
+    })
+    .await
+    .map_err(Error::internal)??;
+    if ownership.1 {
+        super::systemd::consumers::stop(&attachment).await?;
+    }
+    drop(ownership);
     Ok(())
 }
 
@@ -616,6 +662,9 @@ impl Mounted {
     }
 
     pub async fn close(&mut self) -> Result<Completion> {
+        if self.closing.mounted {
+            super::systemd::consumers::stop(&self.jail.join("disk.blk")).await?;
+        }
         let operations = CloseOperations {
             target: &self.target,
             quota_directory: &self.quota_directory,

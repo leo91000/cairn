@@ -44,7 +44,7 @@ PREREQUISITES = {
     'accounts': 'Native Docker requires iptables, iproute2 and account tools (useradd/groupadd/usermod/getent); install distribution packages before enrollment.',
     'subids': 'Native Docker requires root-managed /etc/subuid and /etc/subgid databases.',
     'tun': 'Native Docker requires the existing /dev/net/tun character device.',
-    'kernel': 'Native Docker bind isolation requires Linux 5.12 or newer.',
+    'kernel': 'Native storage requires Linux 6.11 or newer for nonblocking device retirement.',
     'apparmor': 'Restricted user namespaces require AppArmor tooling and a writable root-managed profile for the managed RootlessKit binary.',
     'e2fsprogs': 'Native ublk storage requires e2fsprogs (mkfs.ext4/e2fsck/resize2fs).',
     'ublk': 'Native storage requires the ublk_drv kernel module and /dev/ublk-control character device; install the matching kernel modules before enrolling.',
@@ -169,12 +169,6 @@ def require_docker_host():
         raise PrerequisiteError('tun') from error
     if not stat.S_ISCHR(tun.st_mode):
         raise PrerequisiteError('tun')
-    try:
-        kernel = tuple(int(part) for part in os.uname().release.split('.')[:2])
-    except ValueError as error:
-        raise PrerequisiteError('kernel') from error
-    if kernel < (5, 12):
-        raise PrerequisiteError('kernel')
 
 
 def prepare_docker_tools():
@@ -330,7 +324,7 @@ def validate_release(value):
     for field in ('sha256', 'toolsSha256'):
         if not re.fullmatch('[0-9a-f]{64}', value.get(field, '')):
             raise ValueError('Invalid native release digest.')
-    if value.get('os') != 'linux' or value.get('arch') != 'x86_64' or value.get('nodeProtocol') != 2:
+    if value.get('os') != 'linux' or value.get('arch') != 'x86_64' or value.get('nativeHostProtocol') != 1 or value.get('executionProtocol') != 2:
         raise ValueError('Native release platform/protocol is incompatible.')
     if value.get('binaryPath') != '/internal/nodes/native-binary' or value.get('toolsPath') != '/internal/nodes/native-tools':
         raise ValueError('Unexpected native artifact endpoint.')
@@ -516,7 +510,17 @@ def environment(directory):
             'CAIRN_NATIVE_DOCKER_TOOLS': str(INSTALL / 'docker-tools/v2')}
 
 
+def require_storage_kernel():
+    try:
+        kernel = tuple(int(part) for part in os.uname().release.split('.')[:2])
+    except ValueError as error:
+        raise PrerequisiteError('kernel') from error
+    if len(kernel) != 2 or kernel < (6, 11):
+        raise PrerequisiteError('kernel')
+
+
 def require_storage():
+    require_storage_kernel()
     for binary in ('mkfs.ext4', 'e2fsck', 'resize2fs'):
         if shutil.which(binary) is None:
             raise PrerequisiteError('e2fsprogs')
@@ -676,6 +680,7 @@ def run():
                 same = release['sha256'] == installed['sha256'] and release['toolsSha256'] == installed['toolsSha256']
                 if not same:
                     candidate = prepare(manager, release, token=token)
+                    require_storage()
                     require_docker_host()
                     configure_docker_apparmor(prepare_docker_tools())
                     verify_workload_tools(candidate)
