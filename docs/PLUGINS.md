@@ -1316,8 +1316,10 @@ contributions do not filter the listing.
   rechecked with the instance grant before each host capability, after slow I/O, when
   the result is published and before every polling response. Removing the access,
   the member or the grant, or re-inviting the member, refuses the read and its
-  retained result. Members' reads use two dedicated workers and keep at most 16
-  results, so they cannot hold the workers or evict the results of other callers.
+  retained result. Members' reads share two dedicated workers and at most 16 retained
+  results, so they cannot hold the workers or evict the results of the owner,
+  installation agents or public MCP clients. Members still share that pool with each
+  other: one member's reads can delay another's or replace their finished results.
 - An installation agent always reads through its own grant. Naming another agent is
   refused, whatever the conversation; it never reads through the grants of the agent
   it would write a rule for.
