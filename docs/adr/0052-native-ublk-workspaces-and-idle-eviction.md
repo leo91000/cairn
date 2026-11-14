@@ -1,3 +1,5 @@
+> Format et transport remplacés par [ADR-0085](0085-native-directories-and-direct-vm-images.md). Les règles de rétention, d’autorisation et de changement de node restent applicables.
+
 > Statut : Remplacée par [ADR-0054](0054-explicit-conversation-backend-migration.md) pour l’interdiction de conversion native/VM. [ADR-0083](0083-local-conversation-disks-without-s3.md) retire cette conversion, la source S3 et l’éviction en inactivité ; le journal ublk natif, désormais entièrement local, reste applicable.
 
 # Native workspaces use the VM journal through host ublk

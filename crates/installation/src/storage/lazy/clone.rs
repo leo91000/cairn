@@ -141,32 +141,6 @@ impl LazyDisk {
         File::open(target)?.sync_all()?;
         Ok(())
     }
-
-    /// This new, still-unclaimed clone becomes a conventional authorized disk
-    /// before its existing environment pointer can make it visible to a run.
-    pub(crate) fn bind_cloned_context(target: &Path, context: &Value) -> io::Result<()> {
-        let (_lock, db) = offline(target)?;
-        base_metadata(target, &db)?;
-        drop(db);
-        crate::storage::policy::for_node(&context["policy"]).map_err(failure)?;
-        let encoded = super::state::encode_context(context)?;
-        let db = journal::metadata(target, None)?;
-        db.execute(
-            "UPDATE settings SET value=?1 WHERE key='context'",
-            [encoded],
-        )
-        .map_err(failure)?;
-        let busy: i64 = db
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
-            .map_err(failure)?;
-        if busy != 0 {
-            return Err(failure("Private clone metadata is still busy"));
-        }
-        drop(db);
-        File::open(target.join("journal-v2.sqlite"))?.sync_all()?;
-        File::open(target)?.sync_all()?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

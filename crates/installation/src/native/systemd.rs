@@ -12,6 +12,7 @@ use std::{
 use tokio::process::{Child, Command};
 
 mod diagnostics;
+pub(super) mod directory_consumers;
 
 pub struct Identity {
     pub user: String,
@@ -46,16 +47,16 @@ async fn require_controllers(root: &Path) -> Result<()> {
         .await
         .map_err(|_| {
             Error::unavailable(
-                "Native nodes require cgroup v2 with CPU, memory and PID controllers.",
+                "Native nodes require cgroup v2 with CPU, memory, PID and IO controllers.",
             )
         })?;
-    if !["cpu", "memory", "pids"].iter().all(|required| {
+    if !["cpu", "memory", "pids", "io"].iter().all(|required| {
         controllers
             .split_whitespace()
             .any(|controller| controller == *required)
     }) {
         return Err(Error::unavailable(
-            "Native nodes require cgroup v2 with CPU, memory and PID controllers.",
+            "Native nodes require cgroup v2 with CPU, memory, PID and IO controllers.",
         ));
     }
     Ok(())
@@ -154,7 +155,8 @@ pub(super) async fn apply_budget(budget: &crate::microvm::budget::Budget) -> Res
             "Shared native RAM budget is below current usage.",
         ));
     }
-    let properties = budget_properties(budget);
+    let mut properties = budget_properties(budget);
+    properties.extend(io_properties(&super::state_dir(), 256 * 1_048_576)?);
     let mut args = vec!["set-property", "--runtime", &slice];
     args.extend(properties.iter().map(String::as_str));
     if !output("/usr/bin/systemctl", &args).await?.status.success() {
@@ -203,6 +205,16 @@ pub(super) async fn wait_started(
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }).await.map_err(|_| Error::timeout("Native workload startup was not confirmed."))?
+}
+
+/// Apply rate caps to the actual backing filesystem, including buffered ext4
+/// writeback. IOWeight alone only shares contention and does not bound a rate.
+fn io_properties(path: &Path, bytes_per_second: u64) -> Result<Vec<String>> {
+    let path = path_property(path)?;
+    Ok(vec![
+        format!("IOReadBandwidthMax={path} {bytes_per_second}"),
+        format!("IOWriteBandwidthMax={path} {bytes_per_second}"),
+    ])
 }
 
 fn budget_properties(budget: &crate::microvm::budget::Budget) -> Vec<String> {
@@ -469,6 +481,9 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     ));
     property(format!("CPUQuota={}%", cpu * 100));
     property(format!("MemoryMax={}M", memory));
+    for limit in io_properties(launch.workspace, 64 * 1_048_576)? {
+        property(limit);
+    }
     property(format!("Slice={}", workload_slice()?));
     if !administrator {
         property(format!("RootDirectory={}", path_property(launch.root)?));

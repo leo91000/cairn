@@ -5,7 +5,7 @@ use crate::{
     storage::{self, Disk},
 };
 use serde_json::json;
-use std::{io::Write, os::unix::fs::MetadataExt};
+use std::{io::Write, os::unix::fs::MetadataExt, path::Path};
 use tokio_util::sync::CancellationToken;
 
 async fn fixture() -> (tempfile::TempDir, Bases, Archive, storage::policy::Policy) {
@@ -93,7 +93,7 @@ async fn preparation_pins_are_attempt_scoped_and_recovered_after_fencing() {
 }
 
 #[tokio::test]
-async fn prepared_ext4_base_adopts_private_authority_and_preserves_existing_conversations() {
+async fn prepared_directory_base_is_verified_and_private_copies_survive_cache_reclamation() {
     let (_root, bases, archive, policy) = fixture().await;
     let archives = vec![archive.clone()];
     let stop = CancellationToken::new();
@@ -103,121 +103,37 @@ async fn prepared_ext4_base_adopts_private_authority_and_preserves_existing_conv
         .unwrap();
     let ready = bases.lookup(&archives, 128).await.unwrap().unwrap();
     assert!(bases.lookup(&archives, 256).await.unwrap().is_none());
-    let other_identity = Bases {
+    let other = Bases {
         identity: (bases.identity.0 + 1, bases.identity.1),
         ..bases.clone()
     };
-    assert!(
-        other_identity
-            .lookup(&archives, 128)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(other.lookup(&archives, 128).await.unwrap().is_none());
     let source = bases.state.join("native-bases").join(&ready.key);
-    assert_eq!(
-        storage::LazyDisk::context(&source.join("lazy")).unwrap()["unassigned"],
-        true
-    );
-    let run = crate::config::id();
-    let attempt = crate::config::id();
-    let plan = json!({
-        "id": attempt,
-        "runId": run,
-        "runtimeId": "a".repeat(40),
-        "resources": { "diskMiB": 128 },
-        "nativeProjectArchives": archives,
-        "nativeProjectBase": ready.key,
-        "storage": {
-            "master": "http://127.0.0.1:1/",
-            "grant": "first-owner",
-            "policy": policy
-        }
-    });
-    private_dir(&bases.data.join("runs").join(&run))
+    assert!(!source.join("lazy").exists());
+    let private = bases.state.join("private-copy");
+    private_dir(&private).await.unwrap();
+    super::directory::copy_verified(&source.join("contents"), &private)
         .await
         .unwrap();
-    tokio::fs::hard_link(
-        source.join("pin"),
-        pin_path(&bases.data.join("runs").join(&run), &attempt).unwrap(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(bases.trim(0, u64::MAX, None).await.unwrap(), 0);
-    assert!(bases.initialize(&plan, &stop).await.unwrap());
-    let directory = storage::environment::directory(&bases.state, &run).unwrap();
-    assert_eq!(directory, bases.state.join("disks").join(&run));
-    assert!(!directory.join("environment").exists());
-    assert!(!directory.join("owner").exists());
-    assert!(!directory.join("restore.pending").exists());
-    assert!(
-        !bases
-            .data
-            .join("runs")
-            .join(&run)
-            .join(format!("native-base-{attempt}.pin"))
-            .exists()
-    );
-    let volume = storage::runtime::load(&directory).await.unwrap();
+    let relative = Path::new("workspaces")
+        .join(&archive.project_id)
+        .join("file");
     assert_eq!(
-        volume.assignment.assigned().unwrap().unwrap(),
-        crate::auth::digest("first-owner")
+        std::fs::read(private.join(&relative)).unwrap(),
+        b"initial project"
     );
-    // Read the real ext4 image through the production journal, without a mount.
-    let raw = directory.join("verify.ext4");
-    storage::export(volume.disk.as_ref(), &raw).unwrap();
-    let result = tokio::process::Command::new("debugfs")
-        .arg("-R")
-        .arg(format!("cat /workspaces/{}/file", archive.project_id))
-        .arg(&raw)
-        .output()
-        .await
-        .unwrap();
-    assert!(result.status.success());
-    assert_eq!(result.stdout, b"initial project");
-    tokio::fs::remove_file(raw).await.unwrap();
-    let segment = std::fs::read_dir(source.join("lazy"))
-        .unwrap()
-        .map(Result::unwrap)
-        .find(|entry| entry.file_name().to_string_lossy().starts_with("payload-"))
-        .unwrap()
-        .file_name();
-    assert_eq!(
-        std::fs::metadata(source.join("lazy").join(&segment))
+    assert_ne!(
+        std::fs::metadata(source.join("contents").join(&relative))
             .unwrap()
             .ino(),
-        std::fs::metadata(directory.join("lazy").join(&segment))
-            .unwrap()
-            .ino()
+        std::fs::metadata(private.join(&relative)).unwrap().ino()
     );
-    assert!(!bases.initialize(&plan, &stop).await.unwrap());
-    // A conventional committed disk is readable without running environment
-    // claim recovery, including when interrupted before the ownership hint.
-    tokio::fs::remove_file(
-        bases
-            .state
-            .join("native")
-            .join(&run)
-            .join("file-owner.json"),
-    )
-    .await
-    .unwrap();
     bases.trim(0, u64::MAX, None).await.unwrap();
-    let mut legacy_plan = plan.clone();
-    legacy_plan
-        .as_object_mut()
-        .unwrap()
-        .remove("nativeProjectArchives");
-    legacy_plan
-        .as_object_mut()
-        .unwrap()
-        .remove("nativeProjectBase");
-    assert!(!bases.initialize(&legacy_plan, &stop).await.unwrap());
-    assert!(!directory.join("restore.pending").exists());
     assert!(!source.exists());
-    let mut magic = [0; 2];
-    volume.disk.read_at(1080, &mut magic).unwrap();
-    assert_eq!(magic, [0x53, 0xef]);
+    assert_eq!(
+        std::fs::read(private.join(relative)).unwrap(),
+        b"initial project"
+    );
 }
 
 #[tokio::test]
@@ -254,12 +170,12 @@ async fn tiny_file_archives_reserve_allocated_blocks_before_extraction() {
     .await
     .unwrap();
     let limit = 4 * 1024 * disk::MIB;
-    // Logical bytes alone would admit a 520 MiB temporary reservation. Rounded
-    // entry allocation requires more than the remaining 600 MiB, before mkfs.
+    // Logical text bytes fit, but 8192 separately allocated files need at
+    // least 32 MiB. Admission must use that allocation before extracting.
     let occupied = tokio::fs::File::create(bases.data.join("other-retained-work"))
         .await
         .unwrap();
-    occupied.set_len(limit - 600 * disk::MIB).await.unwrap();
+    occupied.set_len(limit - 16 * disk::MIB).await.unwrap();
     let stop = CancellationToken::new();
     bases
         .warm(&[archive.clone()], 128, limit, &policy, &stop)
@@ -286,12 +202,10 @@ async fn changed_cache_payload_is_rejected_before_a_conversation_can_claim_it() 
         .unwrap();
     let ready = bases.lookup(&archives, 128).await.unwrap().unwrap();
     let source = bases.state.join("native-bases").join(ready.key);
-    let payload = std::fs::read_dir(source.join("lazy"))
-        .unwrap()
-        .map(Result::unwrap)
-        .find(|entry| entry.file_name().to_string_lossy().starts_with("payload-"))
-        .unwrap()
-        .path();
+    let payload = source
+        .join("contents/workspaces")
+        .join(&archives[0].project_id)
+        .join("file");
     let mut bytes = std::fs::read(&payload).unwrap();
     let last = bytes.len() - 1;
     bytes[last] ^= 0xff;

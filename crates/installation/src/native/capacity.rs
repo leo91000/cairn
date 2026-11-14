@@ -192,9 +192,15 @@ impl Capacity {
             let mut requests = Vec::new();
             for (id, attempt) in attempts {
                 let directory = crate::storage::environment::directory(&state, &attempt.run)?;
-                let local = crate::storage::LazyDisk::cached_backing_bytes(&directory.join("lazy"))
-                    .unwrap_or(0);
-                let temporary = super::workspace::directory(&state, &attempt.run)?.join("tmp");
+                let root = super::workspace::directory(&state, &attempt.run)?;
+                let direct = directory.join("directory.json").exists();
+                let local = if direct {
+                    super::workspace::credit_bytes(&root.join("workload/data")).unwrap_or(0)
+                } else {
+                    crate::storage::LazyDisk::cached_backing_bytes(&directory.join("lazy"))
+                        .unwrap_or(0)
+                };
+                let temporary = root.join(if direct { "workload/tmp" } else { "tmp" });
                 // Withhold journal credit: obsolete append frames are not
                 // current backing, even below the logical consumption cap.
                 let owned = local
@@ -276,7 +282,13 @@ fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<St
         else {
             continue;
         };
-        let directory = crate::storage::environment::directory(state, &run)?.join("lazy");
+        let environment = crate::storage::environment::directory(state, &run)?;
+        let direct = environment.join("directory.json").exists();
+        let directory = if direct {
+            environment
+        } else {
+            environment.join("lazy")
+        };
         let marker = directory.join("capacity.json");
         let Ok(metadata) = std::fs::symlink_metadata(&marker) else {
             continue;
@@ -305,10 +317,16 @@ fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<St
         {
             continue;
         }
-        let owned = crate::storage::LazyDisk::cached_backing_bytes(&directory)
-            .unwrap_or(0)
-            .min(workspace)
-            .saturating_add(super::workspace::credit_bytes(&root.join("tmp")).unwrap_or(0));
+        let owned = if direct {
+            super::workspace::credit_bytes(&root.join("workload"))
+                .unwrap_or(0)
+                .min(workspace)
+        } else {
+            crate::storage::LazyDisk::cached_backing_bytes(&directory)
+                .unwrap_or(0)
+                .min(workspace)
+                .saturating_add(super::workspace::credit_bytes(&root.join("tmp")).unwrap_or(0))
+        };
         credits.insert(run, owned);
     }
     Ok(credits)

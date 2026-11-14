@@ -69,8 +69,9 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
                     continue;
                 }
                 let root = conversation.path();
-                let block =
-                    root.join("block-initialized").exists() || root.join("block-seeding").exists();
+                let block = !root.join("directory.json").exists()
+                    && (root.join("block-initialized").exists()
+                        || root.join("block-seeding").exists());
                 if block {
                     for file in std::fs::read_dir(&root)? {
                         let file = file?;
@@ -79,7 +80,11 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
                         }
                     }
                 } else {
-                    used = used.saturating_add(size(&root, false, &mut seen)?);
+                    used = used.saturating_add(size(
+                        &root,
+                        root.join("directory.json").exists(),
+                        &mut seen,
+                    )?);
                 }
             }
         } else {

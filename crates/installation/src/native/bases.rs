@@ -55,7 +55,7 @@ impl Inputs {
             return Err(Error::bad("Duplicate native base project."));
         }
         Ok(Self {
-            format: 1,
+            format: 2,
             projects,
             disk_mib,
             uid: identity.0,
@@ -76,16 +76,6 @@ pub(crate) struct Ready {
     pub key: String,
     pub metadata_bytes: u64,
     inputs: Inputs,
-}
-
-struct Unclaimed {
-    path: PathBuf,
-}
-
-impl Drop for Unclaimed {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
 }
 
 impl Bases {
@@ -125,7 +115,7 @@ impl Bases {
             || ready.metadata_bytes < CLONE_RESERVE
             || ready.metadata_bytes > 256 * disk::MIB
             || !root.join("pin").is_file()
-            || !storage::runtime::exists(&root)
+            || !root.join("contents").is_dir()
         {
             return Ok(None);
         }
@@ -136,7 +126,7 @@ impl Bases {
         let Some((root, ready)) = self.stored(archives, disk_mib).await? else {
             return Ok(None);
         };
-        let source = root.join("lazy");
+        let source = root.clone();
         let verified = tokio::task::spawn_blocking(move || verify_cached_base(&source))
             .await
             .map_err(Error::internal)?;
@@ -148,10 +138,8 @@ impl Bases {
                 return Ok(None);
             }
         }
-        let metadata_bytes = tokio::fs::metadata(root.join("lazy/journal-v2.sqlite"))
-            .await?
-            .len()
-            .saturating_add(CLONE_RESERVE);
+        let metadata_bytes =
+            workspace::measure(&root.join("contents"), true)?.saturating_add(CLONE_RESERVE);
         Ok(Some(Ready {
             metadata_bytes,
             ..ready
@@ -243,12 +231,10 @@ impl Bases {
             );
         }
         let budget = cache_limit(limit);
-        let metadata = disk_mib.saturating_mul(disk::MIB) / 32 + 256 * disk::MIB;
+        let metadata = CLONE_RESERVE;
         // Extraction, raw ext4 and imported journal coexist during building.
         // Include rounded tiny-file blocks, not only sum(st_size).
-        let required = expanded
-            .saturating_mul(3)
-            .saturating_add(metadata.saturating_mul(2));
+        let required = expanded.saturating_add(metadata);
         let estimated_base = expanded.saturating_add(metadata);
         if estimated_base > budget || stop.is_cancelled() {
             return Ok(());
@@ -289,10 +275,8 @@ impl Bases {
             tokio::fs::remove_dir_all(&temporary).await?;
             return Ok(());
         }
-        let metadata_bytes = tokio::fs::metadata(temporary.join("lazy/journal-v2.sqlite"))
-            .await?
-            .len()
-            .saturating_add(CLONE_RESERVE);
+        let metadata_bytes =
+            workspace::measure(&temporary.join("contents"), true)?.saturating_add(CLONE_RESERVE);
         let ready = Ready {
             key: key.clone(),
             metadata_bytes,
@@ -309,7 +293,11 @@ impl Bases {
         tokio::fs::File::open(self.root()).await?.sync_all().await?;
         // The builder has just written and synchronized every sealed frame.
         // Later lookups invalidate this receipt on any payload/metadata change.
-        remember_verified(&target.join("lazy"), base_signature(&target.join("lazy"))?)?;
+        atomic_write(
+            &target.join("contents.digest"),
+            base_signature(&target.join("contents"))?.as_bytes(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -336,16 +324,9 @@ impl Bases {
         }
         atomic_write(&contents.join(".cairn-seed-complete"), b"native-base-v1").await?;
         workspace::own_tree_with_stop(&contents, inputs.uid, inputs.gid, stop).await?;
-        storage::bootstrap::prepare_native_base(
-            temporary,
-            inputs.disk_mib * disk::MIB,
-            &contents,
-            (inputs.uid, inputs.gid),
-            policy,
-            stop,
-        )
-        .await?;
-        tokio::fs::remove_dir_all(contents).await?;
+        policy.validate().map_err(Error::bad)?;
+        super::block::sync(&contents).await?;
+
         Ok(())
     }
 
@@ -356,6 +337,7 @@ impl Bases {
         if storage::runtime::exists(&directory)
             || root.join("initialized").exists()
             || root.join("data").exists()
+            || root.join("workload/data").exists()
         {
             return Ok(false);
         }
@@ -386,79 +368,19 @@ impl Bases {
             return Err(Error::unavailable("Native base clone stopped."));
         }
         let lease = environment::lock(&self.state, run, super::block::DISK_BUSY).await?;
-        for name in [
-            "lazy",
-            "data.ext4",
-            "bootstrap.pending",
-            "resize-source",
-            "restore.pending",
-        ] {
-            if lease.directory.join(name).exists() {
-                return Ok(false);
-            }
-        }
-        let physical = self.state.join("environments").join(crate::config::id());
-        touch_pin(&self.root().join(&ready.key).join("pin"));
-        let (source, target, context) = (
-            self.root().join(&ready.key).join("lazy"),
-            physical.clone(),
-            plan["storage"].clone(),
-        );
-        let runtime = json!({
-            "backend": "native",
-            "storage": super::block::STORAGE,
-            "os": "linux",
-            "arch": "x86_64",
-            "runtimeId": plan["runtimeId"]
-        });
-        let handle = tokio::runtime::Handle::current();
-        let unclaimed = tokio::task::spawn_blocking(move || -> Result<Unclaimed> {
-            use std::os::unix::fs::DirBuilderExt;
-            std::fs::DirBuilder::new().mode(0o700).create(&target)?;
-            let guard = Unclaimed {
-                path: target.clone(),
-            };
-            handle.block_on(storage::runtime::clone_native_base(
-                &source,
-                &target.join("lazy"),
-                &context,
-            ))?;
-            std::fs::File::open(&target)?.sync_all()?;
-            std::fs::File::open(target.parent().unwrap())?.sync_all()?;
-            Ok(guard)
-        })
-        .await
-        .map_err(Error::internal)??;
-        // Publish directly into the conventional native disk.
-        // Runtime identity is durable before
-        // the journal rename commits; before then this is an ordinary empty disk.
-        let runtime_path = lease.directory.join("runtime.json");
-        match tokio::fs::read(&runtime_path).await {
-            Ok(bytes) if serde_json::from_slice::<Value>(&bytes)? != runtime => {
-                return Err(Error::conflict("Native disk runtime changed."));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        atomic_write(&runtime_path, &serde_json::to_vec(&runtime)?).await?;
-        tokio::fs::File::open(&lease.directory)
-            .await?
-            .sync_all()
-            .await?;
-        tokio::fs::File::open(lease.directory.parent().unwrap())
-            .await?
-            .sync_all()
-            .await?;
-        tokio::fs::rename(physical.join("lazy"), lease.directory.join("lazy")).await?;
-        tokio::fs::File::open(&lease.directory)
-            .await?
-            .sync_all()
-            .await?;
-        drop(unclaimed);
-        // Existing block initialization recognizes the populated filesystem's
-        // .cairn-seed-complete marker even if interrupted before these hints.
         private_dir(&root).await?;
+        let workload = root.join("workload");
+        private_dir(&workload).await?;
+        super::quota::prepare(&self.state, &workload, size * disk::MIB).await?;
+        let staging = workload.join("base.partial");
+        if staging.exists() {
+            tokio::fs::remove_dir_all(&staging).await?;
+        }
+        private_dir(&staging).await?;
+        let source = self.root().join(&ready.key).join("contents");
+        super::directory::copy_verified(&source, &staging).await?;
+        tokio::fs::rename(&staging, workload.join("data")).await?;
+        tokio::fs::File::open(&root).await?.sync_all().await?;
         atomic_write(
             &root.join("file-owner.json"),
             &serde_json::to_vec(&json!({ "uid": ready.inputs.uid, "gid": ready.inputs.gid }))?,
@@ -470,80 +392,53 @@ impl Bases {
     }
 }
 
-fn verified_receipts() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, String>> {
-    static RECEIPTS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
-    > = std::sync::OnceLock::new();
-    RECEIPTS.get_or_init(Default::default)
-}
-
 fn base_signature(root: &Path) -> std::io::Result<String> {
-    if std::fs::metadata(root.join("journal-v2.sqlite-wal"))
-        .is_ok_and(|metadata| metadata.len() != 0)
-    {
-        return Err(std::io::Error::other(
-            "Native base has an active metadata journal.",
-        ));
-    }
-    let mut paths = Vec::new();
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name == "journal-v2.sqlite" || name.starts_with("payload-") {
-            paths.push((name, entry.path()));
-        }
-    }
-    paths.sort();
+    use std::io::Read;
+    let mut pending = vec![root.to_owned()];
     let mut hash = blake3::Hasher::new();
-    for (name, path) in paths {
-        let metadata = std::fs::symlink_metadata(path)?;
-        if !metadata.is_file() {
-            return Err(std::io::Error::other("Invalid native base file."));
-        }
-        hash.update(name.as_bytes());
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
+        hash.update(relative.as_os_str().as_encoded_bytes());
         for value in [
-            metadata.dev(),
-            metadata.ino(),
-            metadata.len(),
-            metadata.mtime() as u64,
-            metadata.mtime_nsec() as u64,
             metadata.mode() as u64,
+            metadata.uid() as u64,
+            metadata.gid() as u64,
         ] {
             hash.update(&value.to_le_bytes());
+        }
+        if metadata.is_dir() {
+            let mut entries = std::fs::read_dir(&path)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort();
+            pending.extend(entries.into_iter().rev());
+        } else if metadata.is_file() {
+            let mut file = std::fs::File::open(&path)?;
+            let mut buffer = vec![0; 131072];
+            loop {
+                let length = file.read(&mut buffer)?;
+                if length == 0 {
+                    break;
+                }
+                hash.update(&buffer[..length]);
+            }
+        } else if metadata.file_type().is_symlink() {
+            hash.update(std::fs::read_link(&path)?.as_os_str().as_encoded_bytes());
+        } else {
+            return Err(std::io::Error::other("Unsupported native base entry."));
         }
     }
     Ok(hash.finalize().to_hex().to_string())
 }
 
-fn remember_verified(root: &Path, signature: String) -> std::io::Result<()> {
-    let mut receipts = verified_receipts()
-        .lock()
-        .map_err(|_| std::io::Error::other("Native base verification registry is poisoned."))?;
-    if receipts.len() >= 128 {
-        receipts.clear();
-    }
-    receipts.insert(root.to_owned(), signature);
-    Ok(())
-}
-
 fn verify_cached_base(root: &Path) -> std::io::Result<()> {
-    let signature = base_signature(root)?;
-    if verified_receipts()
-        .lock()
-        .map_err(|_| std::io::Error::other("Native base verification registry is poisoned."))?
-        .get(root)
-        == Some(&signature)
+    if std::fs::read_to_string(root.join("contents.digest"))?
+        != base_signature(&root.join("contents"))?
     {
-        return Ok(());
+        return Err(std::io::Error::other("Native base contents changed."));
     }
-    storage::LazyDisk::verify_sealed(root)?;
-    let checked = base_signature(root)?;
-    if checked != signature {
-        return Err(std::io::Error::other(
-            "Native base changed during verification.",
-        ));
-    }
-    remember_verified(root, checked)
+    Ok(())
 }
 
 pub(super) fn reclaimable_bytes(root: &Path) -> Result<u64> {

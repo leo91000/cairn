@@ -56,28 +56,6 @@ pub async fn prepare_unassigned(
     prepare_source(directory, size, &context, stop, true, false, None).await
 }
 
-/// Populate and seal an anonymous native base before it can be cloned.
-pub(crate) async fn prepare_native_base(
-    directory: &Path,
-    size: u64,
-    contents: &Path,
-    identity: (u32, u32),
-    policy: &super::policy::Policy,
-    stop: &tokio_util::sync::CancellationToken,
-) -> Result<()> {
-    let context = serde_json::json!({ "unassigned": true, "policy": policy });
-    prepare_source(
-        directory,
-        size,
-        &context,
-        stop,
-        true,
-        true,
-        Some((contents, identity)),
-    )
-    .await
-}
-
 async fn prepare_source(
     directory: &Path,
     size: u64,

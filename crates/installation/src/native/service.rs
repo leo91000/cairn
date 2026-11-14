@@ -6,7 +6,7 @@ mod health;
 #[cfg(test)]
 mod terminal_tests;
 
-use super::{atomic_write, block, bootstrap, disk, mode, systemd, workspace};
+use super::{atomic_write, bootstrap, directory as block, disk, mode, systemd, workspace};
 use crate::runner::exclusive::{Ledger, Reservations};
 use crate::{
     error::{Error, Result},
@@ -257,6 +257,7 @@ impl StorageClose {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn finish_budgeted(
         &mut self,
         volume: &Arc<storage::runtime::Volume>,
@@ -345,7 +346,6 @@ struct Controller {
     bootstrap: bootstrap::Registry,
     stop: CancellationToken,
     identity: Arc<systemd::Identity>,
-    backend_namespace: storage::ublk::BackendNamespace,
 }
 
 impl Controller {
@@ -701,9 +701,7 @@ impl Controller {
                     let mut storage_close = StorageClose::new(live_access);
                     loop {
                         let result = storage_close
-                            .finish_budgeted(&mounted.volume, async {
-                                mounted.mount.lock().await.close().await
-                            })
+                            .finish(async { mounted.mount.lock().await.close().await })
                             .await;
                         match result {
                             Ok(completion) => {
@@ -995,34 +993,7 @@ impl Controller {
                 trace.phase(Phase::FilesystemInitialize);
                 let from_base = self.bases().initialize(plan, stop).await?;
                 trace.phase(Phase::Mount);
-                let runtime_path =
-                    storage::environment::directory(&self.state, text(plan, "runId"))?
-                        .join("runtime.json");
-                let runtime = match tokio::fs::read(runtime_path).await {
-                    Ok(bytes) => serde_json::from_slice::<Value>(&bytes)?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
-                    Err(error) => return Err(error.into()),
-                };
-                let identity = if runtime["disk"] == "vm" {
-                    trace.phase(Phase::IdentityProvision);
-                    let mut identity =
-                        super::identity::provision(&self.state, text(plan, "runId")).await?;
-                    if plan["nativeMode"]["mode"] == "administrator" {
-                        identity.host_engine = Some((self.identity.uid, self.identity.gid));
-                    }
-                    Some(identity)
-                } else {
-                    None
-                };
-                let mounted = block::mount(
-                    &self.state,
-                    text(plan, "runId"),
-                    plan,
-                    stop,
-                    &self.backend_namespace,
-                    identity.as_ref(),
-                )
-                .await?;
+                let mounted = block::mount(&self.state, text(plan, "runId"), plan, stop).await?;
                 Ok((from_base, mounted))
             }
             .await;
@@ -1199,7 +1170,7 @@ impl Controller {
                 .await?;
         }
         trace.phase(Phase::TemporaryPrepare);
-        let temporary = root.join("tmp");
+        let temporary = block::temporary(&self.state, text(plan, "runId")).await?;
         if temporary.exists() {
             tokio::fs::remove_dir_all(&temporary).await?;
         }
@@ -1525,9 +1496,7 @@ impl Controller {
         if let Some(mounted) = &mounted {
             // Apply current grants even while geometry growth retries. Managed
             // /tmp shares the task allowance and cannot finance journal writes.
-            mounted
-                .volume
-                .limit_backing(allowance.saturating_sub(temporary))?;
+            mounted.volume.limit_backing(allowance)?;
         }
         if let Some(notice) = notice {
             let directory = self.data.join("runs").join(run).join("chat-input");
@@ -1729,7 +1698,6 @@ impl Controller {
             "Wrong native artifact scope.",
             move |controller, run, stop| async move {
                 let plan = controller.plan(&attempt).await?;
-                let environment = workspace::directory(&controller.state, &run)?;
                 let view = block::view(&controller.state, &run).await?;
                 let path = Path::new(text(&value, "path"));
                 let project_root = Path::new(text(&plan, "projectRoot"));
@@ -1743,7 +1711,7 @@ impl Controller {
                 ) {
                     (view.output.join(relative), view.output.clone())
                 } else if let Ok(relative) = path.strip_prefix("/tmp") {
-                    let temporary = environment.join("tmp");
+                    let temporary = block::temporary(&controller.state, &run).await?;
                     (temporary.join(relative), temporary)
                 } else {
                     return Err(Error::forbidden(
@@ -2390,6 +2358,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             if *action == "delete" {
                 for entry in [
                     "data",
+                    "workload",
                     "docker-runtime",
                     "initialized",
                     "resources.json",
@@ -2400,6 +2369,11 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                     "block-seeding",
                     "block-restore.pending.json",
                     "tmp",
+                    "directory.json",
+                    "directory-conversion",
+                    "directory-conversion-verified",
+                    "base.partial",
+                    "view.json",
                 ] {
                     let path = root.join(entry);
                     if let Ok(meta) = tokio::fs::symlink_metadata(&path).await {
@@ -2524,6 +2498,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         &serde_json::to_vec(&json!({ "data": data }))?,
     )
     .await?;
+    super::quota::require(&state)?;
     let identity = Arc::new(systemd::identity().await?);
     private_dir(&state.join("roots")).await?;
     let mut interrupted = Vec::new();
@@ -2568,7 +2543,6 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         tokio::fs::remove_file(marker).await?;
     }
     recover_preparations(&data, &state).await?;
-    let backend_namespace = storage::ublk::BackendNamespace::create(&state)?;
     let budget_path = state.join(crate::microvm::budget::FILE);
     let checked = load_budget(&budget_path).await?;
     let budget = serde_json::to_value(&checked)?;
@@ -2608,7 +2582,6 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         telemetry: health::Telemetry::default(),
         stop: stop.clone(),
         identity,
-        backend_namespace,
     };
     controller.recover_exclusive().await?;
     let exclusive_monitor = tokio::spawn(controller.clone().monitor_exclusive());
@@ -3145,7 +3118,6 @@ pub(crate) mod tests {
             log_lock: Arc::default(),
             telemetry: health::Telemetry::default(),
             stop: CancellationToken::new(),
-            backend_namespace: storage::ublk::BackendNamespace::unavailable_for_test(),
             identity: Arc::new(systemd::Identity {
                 user: "synthetic-workload".into(),
                 uid: 65534,

@@ -15,6 +15,57 @@ pub fn directory(state: &Path, run: &str) -> Result<PathBuf> {
     Ok(state.join("native").join(run))
 }
 
+pub(super) fn mount_path(path: &str) -> std::io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut bytes = Vec::new();
+    let input = path.as_bytes();
+    let mut offset = 0;
+    while offset < input.len() {
+        if input[offset] != b'\\' {
+            bytes.push(input[offset]);
+            offset += 1;
+            continue;
+        }
+        let code = input
+            .get(offset + 1..offset + 4)
+            .ok_or_else(|| std::io::Error::other("Invalid mount path"))?;
+        let byte = match code {
+            b"040" => b' ',
+            b"011" => b'\t',
+            b"012" => b'\n',
+            b"134" => b'\\',
+            _ => return Err(std::io::Error::other("Invalid mount escape")),
+        };
+        bytes.push(byte);
+        offset += 4;
+    }
+    Ok(std::ffi::OsString::from_vec(bytes).into())
+}
+
+fn has_mount(root: &Path, mounts: &str) -> std::io::Result<bool> {
+    for line in mounts.lines() {
+        let path = line
+            .split_whitespace()
+            .nth(4)
+            .ok_or_else(|| std::io::Error::other("Invalid mount inventory"))?;
+        if mount_path(path)?.starts_with(root) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// An ordinary retained tree must contain no controller-visible submounts.
+/// Never recursively erase data supplied by an unrecognized bind or filesystem.
+pub(super) fn require_no_mounts(root: &Path) -> Result<()> {
+    if has_mount(root, &std::fs::read_to_string("/proc/self/mountinfo")?)? {
+        return Err(Error::conflict(
+            "Native directory contains an unrecognized mount; ownership is retained without removing its contents.",
+        ));
+    }
+    Ok(())
+}
+
 /// A new execution invalidates restore idempotence after acquiring exclusive
 /// ownership. Retrying an old backup after later work must really restore it.
 pub async fn execution_ownership(state: &Path, run: &str) -> Result<crate::file_lock::Guard> {
@@ -254,6 +305,16 @@ pub(crate) fn filesystem(path: &Path) -> Result<libc::statvfs> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_refuses_submounts_without_confusing_sibling_paths() {
+        let line = |path: &str| format!("1 0 8:1 / {path} rw - ext4 /dev/test rw\n");
+        let root = Path::new("/native/our work");
+        assert!(has_mount(root, &line("/native/our\\040work/data/foreign")).unwrap());
+        assert!(has_mount(root, &line("/native/our\\040work")).unwrap());
+        assert!(!has_mount(root, &line("/native/our\\040work-other/data")).unwrap());
+        assert!(!has_mount(root, &line("/native")).unwrap());
+    }
 
     #[test]
     fn missing_temporary_directory_has_no_reservation_credit() {

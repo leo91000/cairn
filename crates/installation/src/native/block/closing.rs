@@ -379,7 +379,7 @@ mod tests {
             assert!(workspace::execution_ownership(&state, &run).await.is_err());
             assert!(environment::lock(&state, &run, "probe").await.is_err());
             assert!(
-                crate::native::block::action(&state, &run, true)
+                crate::native::directory::action(&state, &run, true)
                     .await
                     .is_err()
             );

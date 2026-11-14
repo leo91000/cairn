@@ -199,6 +199,9 @@ async fn disk_storage(
     uuid(run)?;
     require_post(&request)?;
     let directory = crate::storage::environment::directory(&broker.state, run)?;
+    if crate::storage::image::exists(&directory) {
+        return Ok(Json(crate::storage::image::status(&directory).await?).into_response());
+    }
     if !crate::storage::runtime::exists(&directory) {
         return Err(Error::conflict("Conversation has no local journal."));
     }

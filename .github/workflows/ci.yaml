@@ -528,6 +528,10 @@ jobs:
           done
           pnpm test:backend -p cairn-installation --test worker
           pnpm test:backend --workspace --example native_storage_qualifier stopped_inspection_keeps_its_generation_across_a_monitor_period
+      - name: Qualify native directory quotas on a private disposable ext4 filesystem
+        env:
+          CAIRN_NATIVE_DISPOSABLE_HOST: '1'
+        run: node scripts/qualify-native-quota.mjs
       - uses: ./.github/actions/observe-rust-build
         if: always()
         with:

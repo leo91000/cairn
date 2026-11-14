@@ -166,6 +166,7 @@ impl Journal {
 
     /// Shared prepared bases must be checked before they are offered to a
     /// conversation, including payloads that a normal lazy open does not read.
+    #[cfg(test)]
     pub fn open_verified(directory: &Path, db: &Connection, size: u64) -> io::Result<Self> {
         Self::recover(directory, db, size, true)
     }

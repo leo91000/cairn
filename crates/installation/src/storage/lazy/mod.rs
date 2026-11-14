@@ -18,6 +18,7 @@ const MAX_IO: usize = 8 * 1024 * 1024;
 /// Zero pages of a base block file are left as holes.
 const PAGE: usize = 4096;
 
+#[cfg(test)]
 mod growth;
 
 fn failure(error: impl std::fmt::Display) -> io::Error {
@@ -628,6 +629,7 @@ fn node_state(directory: &Path) -> Option<&Path> {
     }
 }
 
+#[cfg(test)]
 mod clone;
 mod generations;
 mod journal;

@@ -1,3 +1,5 @@
+> Format et transport remplacés par [ADR-0085](0085-native-directories-and-direct-vm-images.md). Les règles de rétention, d’autorisation et de changement de node restent applicables.
+
 > Statut : Le transport ublk reste l’unique transport. Les anciens sélecteurs Cargo/environnement, l’adaptateur FUSE, les snapshots mémoire et le layout paired sont supprimés ; le pool prêt reste applicable. [ADR-0083](0083-local-conversation-disks-without-s3.md) retire la publication des disques.
 
 # ublk as the sole VM block transport

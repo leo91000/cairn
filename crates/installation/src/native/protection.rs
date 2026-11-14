@@ -1,7 +1,7 @@
 //! Keep storage CPU protection independent of slow workspace accounting/capture.
 use super::{suspension::Suspension, systemd};
 use crate::microvm::suspension::Reason;
-use crate::{error::Result, storage::runtime::Volume};
+use crate::{error::Result, native::directory::Volume};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 

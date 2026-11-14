@@ -303,30 +303,6 @@ async fn unmount(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Keep the volume available to local consolidation even while a
-/// filesystem flush holds its lifecycle lock waiting for journal headroom.
-pub struct Handle {
-    pub volume: Arc<Volume>,
-    pub filesystem: Arc<AtomicU64>,
-    pub mount: tokio::sync::Mutex<Mounted>,
-}
-
-impl Handle {
-    pub fn new(mount: Mounted) -> Self {
-        Self {
-            volume: mount.volume.clone(),
-            filesystem: mount.filesystem.clone(),
-            mount: tokio::sync::Mutex::new(mount),
-        }
-    }
-
-    pub async fn abort_io(&self) -> Result<()> {
-        // Wake a blocked flush before waiting for its lifecycle lock.
-        self.volume.stop.cancel();
-        self.mount.lock().await.abort_io().await
-    }
-}
-
 pub struct Mounted {
     pub volume: Arc<Volume>,
     filesystem: Arc<AtomicU64>,
@@ -502,61 +478,6 @@ pub(super) async fn mount(
 }
 
 impl Mounted {
-    /// Journal -> kernel geometry -> ext4. A crash after either geometry change
-    /// leaves the journal geometry as intent for the next owned mount.
-    pub(crate) async fn grow(&mut self, bytes: u64) -> Result<bool> {
-        if self.closing.aborted || !self.closing.mounted || !storage::ublk::supports_growth() {
-            return Err(Error::unavailable(
-                "Online native disk growth is unavailable.",
-            ));
-        }
-        if bytes < self.volume.disk.size() {
-            return Err(Error::conflict(
-                "Native disk allowance cannot shrink retained geometry.",
-            ));
-        }
-        let filesystem = self.filesystem_bytes().await?;
-        if filesystem > bytes {
-            return Err(Error::conflict(
-                "Native filesystem exceeds its journal geometry.",
-            ));
-        }
-        if bytes == self.volume.disk.size() && filesystem == bytes {
-            return Ok(true);
-        }
-        if bytes > self.volume.disk.size() {
-            // Keep the mount and its leases alive through an uncancellable
-            // metadata commit; the caller owns the native lifecycle lock.
-            let disk = self.volume.disk.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                // Fold sealed generations into the base first: none may later
-                // reinstall the previous geometry. A concurrent consolidation
-                // leaves them pending, and growth retries on the next tick.
-                if disk.sealed_pending() {
-                    disk.consolidate()?;
-                }
-                disk.grow(bytes)
-            })
-            .await
-            .map_err(Error::internal)?;
-            match result {
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
-                result => result?,
-            }
-        }
-        let device = self.device.clone();
-        tokio::task::spawn_blocking(move || {
-            device
-                .lock()
-                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
-                .grow(bytes)
-        })
-        .await
-        .map_err(Error::internal)??;
-        self.finish_growth().await?;
-        Ok(true)
-    }
-
     async fn filesystem_bytes(&self) -> Result<u64> {
         let disk = self.volume.disk.clone();
         tokio::task::spawn_blocking(move || {
@@ -588,29 +509,6 @@ impl Mounted {
             return Err(Error::unavailable(
                 "Native filesystem growth is incomplete; it will retry.",
             ));
-        }
-        Ok(())
-    }
-
-    /// Keep this object owned on every error: an uncertain flush/unmount cannot
-    /// release its physical lease or terminate a backend still serving a mount.
-    pub async fn abort_io(&mut self) -> Result<()> {
-        // Abort after cancellation during preparation, a failed systemd fence,
-        // or a fenced filesystem's terminal read-only flush failure. A later
-        // non-lazy unmount remains mandatory. The journal is a crash prefix.
-        self.closing.aborted = true;
-        self.volume.stop.cancel();
-
-        {
-            let device = self.device.clone();
-            tokio::task::spawn_blocking(move || {
-                device
-                    .lock()
-                    .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
-                    .abort_io()
-            })
-            .await
-            .map_err(Error::internal)??;
         }
         Ok(())
     }
@@ -715,7 +613,7 @@ pub async fn sync(path: &Path) -> Result<()> {
     sync_io(path).await.map_err(Into::into)
 }
 
-async fn sync_io(path: &Path) -> std::io::Result<()> {
+pub(super) async fn sync_io(path: &Path) -> std::io::Result<()> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
@@ -749,7 +647,7 @@ fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
 
 pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> Result<()> {
     let root = workspace::directory(state, run)?;
-    let data = root.join("data");
+    let data = view(state, run).await?.filesystems[0].clone();
     if root.join("block-initialized").exists() {
         return Ok(());
     }
@@ -874,9 +772,7 @@ async fn remove(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>> {
-    let lease = environment::lock(state, run, DISK_BUSY).await?;
-    let directory = &lease.directory;
+pub(super) async fn action_locked(directory: &Path, delete: bool) -> Result<Vec<String>> {
     let replacement = storage::runtime::replacement(directory).await?;
     let mut grants = Vec::new();
     let mut entries = tokio::fs::read_dir(directory).await?;

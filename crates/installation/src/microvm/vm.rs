@@ -12,7 +12,6 @@ use crate::{
     nodes::Resources,
     performance::Operation,
     skills::{atomic_write, private_dir},
-    storage::Disk,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -152,8 +151,9 @@ pub struct Vm {
     child: Option<tokio::process::Child>,
     consoles: Vec<JoinHandle<()>>,
     network: Network,
-    mounted: Option<crate::storage::transport::MountedDisk>,
-    volume: Option<Arc<crate::storage::runtime::Volume>>,
+    image: PathBuf,
+    disk_bytes: u64,
+    anonymous: bool,
     uid: u32,
     warmed: bool,
     idle: bool,
@@ -162,12 +162,6 @@ pub struct Vm {
 
 impl Drop for Vm {
     fn drop(&mut self) {
-        // Mounted transports also own the Volume. Cancelling before dropping
-        // them releases remote reads even when boot/run was cancelled before
-        // shutdown could await the VMM and close the backend normally.
-        if let Some(volume) = &self.volume {
-            volume.stop.cancel();
-        }
         if let Some(child) = &mut self.child {
             let _ = child.start_kill();
         }
@@ -358,8 +352,8 @@ fn auth_relay(
 
 impl Vm {
     pub(super) fn bind_stop(&self, stop: &crate::storage::runtime::AttemptStop) -> Result<()> {
-        if let Some(volume) = &self.volume {
-            stop.bind(volume)?;
+        if stop.execution.is_cancelled() {
+            return Err(Error::unavailable("VM preparation stopped."));
         }
         Ok(())
     }
@@ -389,14 +383,10 @@ impl Vm {
             return Err(Error::conflict("VM restore is incomplete."));
         }
 
-        timing.next("open_journal");
-        let volume = crate::storage::runtime::load(&disk_dir).await?;
-        if volume.disk.size() != resources.disk_mi_b * 1024 * 1024 {
-            return Err(Error::conflict(
-                "VM disk size does not match its local journal.",
-            ));
-        }
-        volume.limit_backing(resources.disk_mi_b * 1024 * 1024)?;
+        timing.next("open_image");
+        let disk_bytes = resources.disk_mi_b * 1024 * 1024;
+        let image_path = crate::storage::image::path_for_boot(&disk_dir, disk_bytes).await?;
+        let anonymous = crate::storage::image::unassigned(&disk_dir).await?;
         let jail = state.join("jails/firecracker").join(&id).join("root");
         let mut vm = Self {
             socket: jail.join("v.sock"),
@@ -405,8 +395,9 @@ impl Vm {
             child: None,
             consoles: Vec::new(),
             network,
-            mounted: None,
-            volume: Some(volume),
+            image: image_path,
+            disk_bytes,
+            anonymous,
             uid: 40000 + slot as u32,
             warmed: false,
             idle: false,
@@ -439,29 +430,30 @@ impl Vm {
         timing.next("mount_and_network");
         let jail = &self.jail;
         private_dir(jail).await?;
-        self.mounted = Some(
-            crate::storage::transport::mount(
-                self.volume.as_ref().unwrap().clone(),
-                state,
-                jail,
-                self.uid,
-            )
-            .await?,
-        );
+        tokio::fs::hard_link(&self.image, jail.join("data.ext4")).await?;
+        std::os::unix::fs::chown(jail.join("data.ext4"), Some(self.uid), Some(self.uid))?;
         tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
         tokio::fs::copy(kernel, jail.join("vmlinux")).await?;
         tokio::fs::hard_link(control, jail.join("control.squashfs")).await?;
         self.network.create(self.uid).await?;
 
         timing.next("spawn_and_guest_ready");
-        let mounted = self.mounted.as_ref().unwrap();
-        let config = firecracker_config(&self.network, resources, slot, &mounted.drives());
+        let drive = json!({
+            "drive_id": "data",
+            "path_on_host": "data.ext4",
+            "is_root_device": false,
+            "is_read_only": false,
+            "cache_type": "Writeback",
+            "io_engine": "Async",
+            "discard": true
+        });
+        let config = firecracker_config(&self.network, resources, slot, &[drive]);
         atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
         std::os::unix::fs::chown(jail.join("config.json"), Some(self.uid), Some(self.uid))?;
-        let disk_bytes = self.volume.as_ref().unwrap().disk.size();
+        let disk_bytes = self.disk_bytes;
         tracing::info!(target: "cairn_performance", operation = "vm_configuration", id,
             cpu = resources.cpu, memory_mib = resources.memory_mi_b, disk_bytes,
-            file_limit_bytes = disk_bytes, transport = "ublk");
+            file_limit_bytes = disk_bytes, transport = "local-image");
         let child = self
             .child
             .insert(jailer(id, self.uid, state, disk_bytes).spawn()?);
@@ -480,13 +472,6 @@ impl Vm {
     async fn wait_for_guest(&mut self) -> Result<GuestStatus> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
-            if self
-                .mounted
-                .as_ref()
-                .is_some_and(crate::storage::transport::MountedDisk::failed)
-            {
-                return Err(Error::unavailable("VM block backend stopped."));
-            }
             if self.child.as_mut().unwrap().try_wait()?.is_some() {
                 return Err(Error::unavailable(
                     "Firecracker exited before the guest was ready. Check the VM boot log.",
@@ -524,12 +509,11 @@ impl Vm {
     pub async fn shutdown(&mut self) {
         let id = self.id().to_owned();
         let mut timing = Operation::new("vm_shutdown", &id, "guest_shutdown");
-        let blocked = self.volume.as_ref().is_some_and(|volume| volume.paused())
-            || super::suspension::inspect_jail(&self.jail)
-                .await
-                .map_or(true, |status| {
-                    status.is_some_and(|status| status.paused || !status.acknowledged)
-                });
+        let blocked = super::suspension::inspect_jail(&self.jail)
+            .await
+            .map_or(true, |status| {
+                status.is_some_and(|status| status.paused || !status.acknowledged)
+            });
         let mut acknowledged = false;
         if !blocked && !self.idle {
             // Healthy guests get a bounded graceful stop.
@@ -538,31 +522,15 @@ impl Vm {
                 acknowledged = reply.succeeded();
             }
         }
-        // A VMM blocked on disk I/O may not exit even after SIGKILL until its read
-        // returns. Release remote reads and reserve waits before awaiting it.
-        // All previously acknowledged disk writes remain in the durable journal.
-        let volume = self.volume.take();
-        if let Some(volume) = &volume {
-            tracing::info!(target: "cairn_performance", operation = "disk_io", id = id.as_str(),
-                metrics = %volume.disk.performance(), blocked, acknowledged);
-        }
-
         timing.next("wait_vmm");
-        let cancel_reads = || {
-            if let Some(volume) = &volume {
-                volume.stop.cancel();
-            }
-        };
         if let Some(mut child) = self.child.take() {
             if !acknowledged {
-                cancel_reads();
                 let _ = child.start_kill();
             }
             if tokio::time::timeout(Duration::from_secs(8), child.wait())
                 .await
                 .is_err()
             {
-                cancel_reads();
                 let _ = child.kill().await;
                 let _ = child.wait().await;
             }
@@ -570,34 +538,14 @@ impl Vm {
         if let Err(error) = super::suspension::finish_jail(&self.jail).await {
             tracing::warn!(vm_id = id, message = %error.message, "Could not finalize VM suspension accounting");
         }
-        cancel_reads();
         for console in self.consoles.drain(..) {
             let _ = console.await;
         }
 
-        timing.next("unmount");
-        let drained = if let Some(mounted) = self.mounted.take() {
-            match tokio::task::spawn_blocking(move || mounted.close()).await {
-                Ok(Ok(())) => true,
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "Could not close VM block backend");
-                    false
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "Could not join VM block backend cleanup");
-                    false
-                }
-            }
-        } else {
-            true
-        };
-        if drained
-            && let Some(volume) = &volume
-            && let Err(error) = volume.seal_stopped().await
-        {
-            tracing::warn!(%error, "Could not seal stopped VM journal; its durable tail is retained");
+        timing.next("sync_image");
+        if let Err(error) = crate::storage::image::sync(&self.image).await {
+            tracing::error!(%error, "Could not sync stopped VM image");
         }
-        drop(volume);
 
         timing.next("network_cleanup");
         self.network.remove().await;
@@ -748,7 +696,6 @@ impl Vm {
         let result = tokio::select! {
             result = operation => result,
             () = stop.cancelled() => Ok(STOPPED),
-            result = watch_backend(self.mounted.as_ref()) => result,
         };
         let result = if finalization_failed.load(Ordering::SeqCst) {
             Ok(crate::runner::FINALIZATION_FAILED_SENTINEL)
@@ -767,14 +714,7 @@ impl Vm {
     /// Warm only an anonymous local disk. A live native process must never be
     /// initialized over a previous conversation or a borrowed storage grant.
     pub async fn warm_codex(&mut self, stop: &CancellationToken) -> Result<bool> {
-        if self
-            .volume
-            .as_ref()
-            .unwrap()
-            .assignment
-            .assigned()?
-            .is_some()
-        {
+        if !self.anonymous {
             return Err(Error::conflict("Only an anonymous VM can prewarm Codex."));
         }
         let status = host::status(&self.socket).await?;
@@ -808,18 +748,6 @@ impl Vm {
         matches!(tokio::time::timeout(Duration::from_secs(1), host::status(&self.socket)).await,
             Ok(Ok(status)) if status.codex_ready && !status.initialized)
     }
-}
-
-async fn watch_backend(backend: Option<&crate::storage::transport::MountedDisk>) -> Result<i32> {
-    let Some(backend) = backend else {
-        return std::future::pending().await;
-    };
-    while !backend.failed() {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    Err(Error::unavailable(
-        "VM block backend stopped. Its workspace disk has been preserved.",
-    ))
 }
 
 /// First boot of a disk: copy every import into the guest.

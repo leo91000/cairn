@@ -793,10 +793,10 @@ impl Reservation {
             "diskMiB": DEFAULT_DISK_MIB,
         });
         let operation = async {
-            crate::storage::bootstrap::prepare_unassigned(
+            crate::storage::image::prepare(
                 &directory,
                 DEFAULT_DISK_MIB * 1_048_576,
-                &policy,
+                &serde_json::json!({ "unassigned": true, "policy": policy }),
                 &stop,
             )
             .await?;
@@ -955,17 +955,9 @@ impl Reservation {
             }
             let disk = self.owner.as_ref().unwrap().directory.clone();
             if !compatible {
-                crate::storage::bootstrap::prepare(&disk, size, plan.storage(), &stop).await?;
+                crate::storage::image::prepare(&disk, size, plan.storage(), &stop).await?;
             }
-            let volume = crate::storage::runtime::load(&disk).await?;
-            attempt_stop.bind(&volume)?;
-            if volume.assignment.assigned()?.is_none() {
-                // A controller crash may leave ownership durable before its
-                // authorization was attached. Bind before any user import.
-                volume
-                    .authorize(self.owner.as_ref().unwrap(), plan.storage())
-                    .await?;
-            }
+            crate::storage::image::authorize(self.owner.as_ref().unwrap(), plan.storage()).await?;
             if !compatible {
                 timing.next("boot_vm");
                 self.vm_in_flight = true;
@@ -990,14 +982,6 @@ impl Reservation {
         };
         // Do not drop boot or cleanup futures on cancellation: their resource ownership must drain.
         let result = operation.await;
-        if matches!(result, Ok(0)) {
-            let volume =
-                crate::storage::runtime::load(&self.owner.as_ref().unwrap().directory).await?;
-            // Seal the synced response before releasing its execution lease.
-            // The publisher can reconstruct this prefix without pausing a
-            // following turn, including when optional VM retention is skipped.
-            volume.seal_completed().await?;
-        }
         // Retention is optional. A capture can wait for attempt cancellation
         // to settle an uncertain pause/thaw, so finalization must not wait for
         // its control lock indefinitely before signalling that cancellation.
@@ -1035,8 +1019,6 @@ impl Reservation {
         };
         if retain {
             let pool = self.pool.clone();
-            let directory = &self.owner.as_ref().unwrap().directory;
-            let volume = crate::storage::runtime::load(directory).await?;
             let _admission = pool.admission.lock().await;
             if let Some(budget) = pool.retention_budget(execution_budget.as_ref()).await
                 && let Some(bytes) = self.vm.as_ref().and_then(Vm::resident_bytes)
@@ -1087,7 +1069,7 @@ impl Reservation {
                     key: retained::key(&plan),
                     expires: Instant::now() + pool.retention,
                     reservation: self,
-                    _volume: Some(volume),
+                    _volume: None,
                 };
                 pool.slots.lock().await.retained.push_back(idle);
                 stop.cancel();
