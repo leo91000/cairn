@@ -148,10 +148,12 @@ fn legacy_storage_present(state: &std::path::Path) -> std::io::Result<bool> {
                 return Ok(true);
             }
             if entry.file_type()?.is_dir() {
-                match std::fs::symlink_metadata(entry.path().join("lazy/journal-v2.sqlite")) {
-                    Ok(_) => return Ok(true),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
+                for journal in ["lazy/journal-v2.sqlite", "resize-source/journal-v2.sqlite"] {
+                    match std::fs::symlink_metadata(entry.path().join(journal)) {
+                        Ok(_) => return Ok(true),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
                 }
             }
         }

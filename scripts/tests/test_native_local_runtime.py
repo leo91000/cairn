@@ -19,14 +19,11 @@ class NativeRuntimeEntrypointTests(unittest.TestCase):
         temporary_directory = tempfile.TemporaryDirectory
         environment = dict(CAIRN_NATIVE_DISPOSABLE_HOST='1')
         with temporary_directory(prefix='native-entrypoint-test-') as root:
-            def isolated_directory(**options):
-                return temporary_directory(**dict(options, dir=root))
-
             with patch.dict(os.environ, environment), \
                     patch.object(runtime, 'host', host_stub), \
                     patch.object(runtime.os, 'geteuid', return_value=0), \
-                    patch.object(sys, 'argv', ['native_runtime_test.py', sys.executable, sys.executable]), \
-                    patch.object(runtime.tempfile, 'TemporaryDirectory', side_effect=isolated_directory), \
+                    patch.object(sys, 'argv', ['native_runtime_test.py', sys.executable, sys.executable, sys.executable]), \
+                    patch.object(runtime, 'native_fixture', side_effect=AssertionError('Unexpected host fixture.')), \
                     patch.object(runtime, 'command', side_effect=AssertionError('Unexpected host command.')), \
                     patch('builtins.print'):
                 with self.assertRaises(PrerequisitesReached):

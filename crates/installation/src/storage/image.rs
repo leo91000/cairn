@@ -153,11 +153,21 @@ pub(crate) async fn prepare_locked(
     if stop.is_cancelled() {
         return Err(Error::unavailable("Local image preparation stopped."));
     }
+    if !exists(directory) {
+        if let Some(source) = super::bootstrap::resize_source(directory)?
+            && size < super::LazyDisk::geometry(&source)?
+        {
+            return Err(Error::conflict(
+                "A retained legacy image cannot be shrunk during conversion.",
+            ));
+        }
+        super::bootstrap::recover_resize_source(directory, context, "vm").await?;
+    }
     let image = directory.join("data.ext4");
     let mut record = if exists(directory) {
         read_record(directory).await?
     } else if super::runtime::exists(directory) {
-        migrate_journal(directory, context, stop).await?
+        migrate_journal(directory, size, context, stop).await?
     } else {
         let pending = directory.join("image.pending.json");
         require_fresh(directory, pending.exists())?;
@@ -320,6 +330,7 @@ async fn persist(directory: &Path, record: &Record) -> Result<()> {
 
 async fn migrate_journal(
     directory: &Path,
+    requested_size: u64,
     requested: &Value,
     stop: &CancellationToken,
 ) -> Result<Record> {
@@ -339,6 +350,11 @@ async fn migrate_journal(
     let root = directory.join("lazy");
     let context = super::LazyDisk::context(&root)?;
     compatible_owner(&context, requested)?;
+    if requested_size < super::LazyDisk::geometry(&root)? {
+        return Err(Error::conflict(
+            "A retained legacy image cannot be shrunk during conversion.",
+        ));
+    }
     let temporary = directory.join("image.partial");
     match tokio::fs::remove_file(&temporary).await {
         Ok(()) => {}
@@ -386,11 +402,24 @@ async fn migrate_journal(
 }
 
 async fn cleanup_legacy(directory: &Path) -> Result<()> {
-    if directory.join("lazy").exists() {
-        let _replacement = super::runtime::replacement(directory).await?;
-        tokio::fs::remove_dir_all(directory.join("lazy")).await?;
-        tokio::fs::File::open(directory).await?.sync_all().await?;
+    let _replacement = super::runtime::replacement(directory).await?;
+    for name in ["lazy", "resize-source"] {
+        let path = directory.join(name);
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                tokio::fs::remove_dir_all(&path).await?;
+            }
+            Ok(_) => tokio::fs::remove_file(&path).await?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
+    match tokio::fs::remove_file(directory.join("bootstrap.pending")).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    tokio::fs::File::open(directory).await?.sync_all().await?;
     Ok(())
 }
 
@@ -675,5 +704,63 @@ mod tests {
             409
         );
         drop(lock);
+    }
+}
+
+#[cfg(test)]
+mod legacy_resize_tests {
+    use super::*;
+    use crate::storage::{Disk, runtime};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn interrupted_legacy_resize_converts_its_original_source_and_preserves_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let stop = CancellationToken::new();
+        let size = 128 * 1024 * 1024;
+        let context = json!({ "owner": crate::config::id(), "policy": {
+            "memoryCacheMiB": 4, "reserveMiB": 64, "reservePercent": 1
+        } });
+        crate::storage::bootstrap::prepare(root.path(), size, &context, &stop)
+            .await
+            .unwrap();
+        let volume = runtime::load(root.path()).await.unwrap();
+        let retained = b"retained-resize-canary";
+        volume.write_at(96 * 1024 * 1024, retained).unwrap();
+        volume.sync().unwrap();
+        drop(volume);
+        atomic_write(&root.path().join("bootstrap.pending"), b"resizing")
+            .await
+            .unwrap();
+        runtime::materialize(root.path(), &stop).await.unwrap();
+        tokio::fs::write(
+            root.path().join("data.ext4"),
+            b"partly resized temporary image",
+        )
+        .await
+        .unwrap();
+        assert!(!runtime::exists(root.path()));
+        // A different owner cannot even rename the recognized retained source.
+        let wrong = json!({ "owner": crate::config::id(), "policy": context["policy"] });
+        assert!(prepare(root.path(), size * 2, &wrong, &stop).await.is_err());
+        assert!(root.path().join("resize-source/journal-v2.sqlite").exists());
+        assert!(!root.path().join("lazy").exists());
+        assert!(
+            prepare(root.path(), size / 2, &context, &stop)
+                .await
+                .is_err()
+        );
+        assert!(root.path().join("resize-source/journal-v2.sqlite").exists());
+        assert!(!root.path().join("lazy").exists());
+        let image = prepare(root.path(), size * 2, &context, &stop)
+            .await
+            .unwrap();
+        let disk = LocalDisk::open(&image, false).unwrap();
+        let mut bytes = vec![0; retained.len()];
+        disk.read_at(96 * 1024 * 1024, &mut bytes).unwrap();
+        assert_eq!(bytes, retained);
+        assert!(!root.path().join("resize-source").exists());
+        assert!(!root.path().join("bootstrap.pending").exists());
+        assert!(!root.path().join("lazy").exists());
     }
 }

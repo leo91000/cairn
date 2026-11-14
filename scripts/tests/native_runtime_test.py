@@ -214,9 +214,9 @@ def main():
         print('Native qualification: ' + json.dumps(sample), flush=True)
 
     progress('start')
+    host.require_docker_host()
     with native_fixture() as root:
         root.chmod(0o700)
-        host.require_docker_host()
         previous_install = host.INSTALL
         host.INSTALL = root / 'managed-tools'
         docker_tools = host.prepare_docker_tools()
@@ -679,6 +679,10 @@ def main():
             if not legacy_required:
                 assert api('/disks/' + run + '/storage-status')['storage'] == 'local-directory-v1', 'Unknown reference storage format.'
             command('systemctl', 'stop', supervisor)
+            if legacy_required:
+                legacy_path.rename(legacy_path.parent / 'resize-source')
+                (legacy_path.parent / 'bootstrap.pending').write_bytes(b'resizing')
+                (legacy_path.parent / 'data.ext4').write_bytes(b'partly resized temporary image')
             active_binary = binary
             legacy_phase = False
             start_controller()
@@ -686,6 +690,7 @@ def main():
             first = start(run, lease=45000, measure='nativeRetained')
             fenced(run, first)
             assert not legacy_path.exists(), 'Verified migration retained its old journal.'
+            assert not (legacy_path.parent / 'resize-source').exists(), 'Resize recovery retained its old source.'
             metrics['legacyMigration'] = dict(legacyConversionExercised=legacy_required, referenceBinarySha256=hashlib.sha256(legacy_binary.read_bytes()).hexdigest(),
                 candidateBinarySha256=hashlib.sha256(binary.read_bytes()).hexdigest(), retainedWorkspace=True,
                 retainedClaudeSession=True, legacyResourcesRemoved=True)

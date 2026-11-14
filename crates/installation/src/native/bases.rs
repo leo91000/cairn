@@ -113,7 +113,7 @@ impl Bases {
         if ready.key != key
             || ready.inputs != inputs
             || ready.metadata_bytes < CLONE_RESERVE
-            || ready.metadata_bytes > 256 * disk::MIB
+            || ready.metadata_bytes > MAX_BASE_BYTES
             || !root.join("pin").is_file()
             || !root.join("contents").is_dir()
         {
@@ -138,8 +138,7 @@ impl Bases {
                 return Ok(None);
             }
         }
-        let metadata_bytes =
-            workspace::measure(&root.join("contents"), true)?.saturating_add(CLONE_RESERVE);
+        let metadata_bytes = clone_footprint(&root.join("contents"))?.saturating_add(CLONE_RESERVE);
         Ok(Some(Ready {
             metadata_bytes,
             ..ready
@@ -282,7 +281,11 @@ impl Bases {
             return Ok(());
         }
         let metadata_bytes =
-            workspace::measure(&temporary.join("contents"), true)?.saturating_add(CLONE_RESERVE);
+            clone_footprint(&temporary.join("contents"))?.saturating_add(CLONE_RESERVE);
+        if metadata_bytes > budget {
+            tokio::fs::remove_dir_all(&temporary).await?;
+            return Ok(());
+        }
         let ready = Ready {
             key: key.clone(),
             metadata_bytes,
@@ -368,6 +371,7 @@ impl Bases {
             return Ok(false);
         }
         if storage::runtime::exists(&directory)
+            || directory.join("resize-source").exists()
             || root.join("initialized").exists()
             || root.join("data").exists()
         {
@@ -582,6 +586,28 @@ async fn finish_initializing_base(
     Ok(())
 }
 
+/// Admission concerns a private copy on ext4, not compressed blocks in the
+/// controller filesystem. Keep a conservative per-entry/logical allocation bound.
+fn clone_footprint(root: &Path) -> std::io::Result<u64> {
+    let mut pending = vec![root.to_owned()];
+    let mut bytes = 0_u64;
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let required = if metadata.is_file() {
+            metadata.len().div_ceil(4096).saturating_mul(4096).max(4096)
+        } else {
+            4096
+        };
+        bytes = bytes.saturating_add(required.max(metadata.blocks().saturating_mul(512)));
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                pending.push(entry?.path());
+            }
+        }
+    }
+    Ok(bytes)
+}
+
 fn base_signature(root: &Path) -> std::io::Result<String> {
     use std::io::Read;
     let mut pending = vec![root.to_owned()];
@@ -751,4 +777,80 @@ pub(crate) async fn request(operation: &str, value: &Value) -> Result<Value> {
         return Err(Error::unavailable("Native base cache is unavailable."));
     }
     response.json().await.map_err(Error::internal)
+}
+
+#[cfg(test)]
+mod payload_size_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn large_verified_directory_payloads_remain_discoverable_and_do_not_rebuild() {
+        let fixture = tempfile::tempdir().unwrap();
+        let bases = Bases {
+            data: fixture.path().join("data"),
+            state: fixture.path().join("state"),
+            identity: (unsafe { libc::geteuid() }, unsafe { libc::getegid() }),
+        };
+        let archive = Archive {
+            project_id: crate::config::id(),
+            revision: "a".repeat(40),
+            origin_hash: None,
+            key: "b".repeat(64),
+            hash: "c".repeat(64),
+            bytes: 1,
+            logical_bytes: 300 * disk::MIB,
+        };
+        let inputs = Inputs::new(std::slice::from_ref(&archive), 512, bases.identity).unwrap();
+        let key = inputs.key().unwrap();
+        let root = bases.root().join(&key);
+        let contents = root.join("contents");
+        for name in ["home", "workspaces", "output"] {
+            private_dir(&contents.join(name)).await.unwrap();
+        }
+        let file = contents.join("workspaces/large-file");
+        let data = std::fs::File::create(&file).unwrap();
+        data.set_len(300 * disk::MIB).unwrap();
+        let inode = data.metadata().unwrap().ino();
+        drop(data);
+        atomic_write(&root.join("pin"), b"").await.unwrap();
+        atomic_write(
+            &root.join("contents.digest"),
+            base_signature(&contents).unwrap().as_bytes(),
+        )
+        .await
+        .unwrap();
+        let metadata_bytes = clone_footprint(&contents).unwrap() + CLONE_RESERVE;
+        assert!(metadata_bytes > 256 * disk::MIB);
+        assert!(metadata_bytes > workspace::measure(&contents, true).unwrap());
+        let ready = Ready {
+            key: key.clone(),
+            metadata_bytes,
+            inputs,
+        };
+        atomic_write(
+            &root.join("ready.json"),
+            &serde_json::to_vec(&ready).unwrap(),
+        )
+        .await
+        .unwrap();
+        let found = bases
+            .lookup(std::slice::from_ref(&archive), 512)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.metadata_bytes, metadata_bytes);
+        // No archive exists: warming an already supported verified base must
+        // return without attempting another extraction/build.
+        bases
+            .warm(
+                std::slice::from_ref(&archive),
+                512,
+                16 * 1024 * disk::MIB,
+                &storage::policy::Policy::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::metadata(file).unwrap().ino(), inode);
+    }
 }

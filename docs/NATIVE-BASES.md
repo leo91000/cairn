@@ -15,6 +15,11 @@ private partial tree. Renamed data is verified without overwriting it. A committ
 format wins over a leftover pin, preserving later user changes. Environment
 deletion releases unfinished pins and private data; cache reclamation follows
 its existing limits. Existing conversations retain their own files.
+The historical `metadataBytes` response now estimates the complete private
+copy, including per-entry/logical allocation and reserve, rather than only journal
+metadata or compressed cache allocation. Large templates use the bounded cache
+payload limit; a cache on a compressed controller filesystem must not understate
+admission on the uncompressed data pool.
 
 ## Reproducible measurements
 

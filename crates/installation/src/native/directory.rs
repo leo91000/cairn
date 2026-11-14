@@ -154,7 +154,9 @@ impl Mounted {
 
 pub async fn exists(state: &Path, run: &str) -> Result<bool> {
     let directory = environment::directory(state, run)?;
-    Ok(directory.join("directory.json").exists() || storage::runtime::exists(&directory))
+    Ok(directory.join("directory.json").exists()
+        || storage::runtime::exists(&directory)
+        || storage::bootstrap::resize_source(&directory)?.is_some())
 }
 
 pub async fn mount(
@@ -175,6 +177,13 @@ pub async fn mount(
     let workload = workspace::workload(state, run)?;
     workspace::require_no_mounts(&workload)?;
     let saved = environment::directory(state, run)?;
+    if !saved.join("directory.json").exists()
+        && storage::bootstrap::resize_source(&saved)?.is_some()
+    {
+        let lease = environment::lock(state, run, DISK_BUSY).await?;
+        storage::bootstrap::recover_resize_source(&lease.directory, &plan["storage"], "native")
+            .await?;
+    }
     if saved.join("directory.json").exists() && root.join("block-initialized").exists() {
         require_retained_tree(&workload)?;
     }
@@ -317,6 +326,12 @@ async fn migrate(
         let namespace = storage::ublk::BackendNamespace::create(state)?;
         let mut legacy = block::mount(state, run, plan, stop, &namespace, None).await?;
         let copied = async {
+            let requested = plan["resources"]["diskMiB"].as_u64()
+                .ok_or_else(|| Error::bad("Missing native allowance."))? * super::disk::MIB;
+            let original = storage::LazyDisk::geometry(&environment::directory(state, run)?.join("lazy"))?;
+            if requested < original {
+                return Err(Error::conflict("Native conversion cannot shrink its retained allowance."));
+            }
             quota::prepare(
                 state,
                 &workload,
@@ -429,6 +444,11 @@ pub(super) async fn verify_copy(source: &Path, target: &Path) -> Result<()> {
 pub async fn status(state: &Path, run: &str) -> Result<Value> {
     let directory = environment::directory(state, run)?;
     if !directory.join("directory.json").exists() {
+        if storage::bootstrap::resize_source(&directory)?.is_some() {
+            return Ok(json!({ "mode": "native", "availability": "available",
+                "storage": "legacy-resize-source", "paused": false,
+                "localBytes": crate::microvm::budget::allocated(&directory)? }));
+        }
         return block::status(state, run).await;
     }
     let root = workspace::directory(state, run)?;

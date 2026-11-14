@@ -96,6 +96,12 @@ Unknown formats, missing source data and mismatched ownership fail without makin
 a new blank environment. Allow room for both the retained source and its temporary
 replacement. If space is insufficient, increase available capacity or expire the
 environment explicitly under its existing policy. No remote fetch is attempted.
+A recognized interrupted legacy resize restores its authoritative `resize-source`
+journal under ownership locks before conversion. Its partially resized raw image
+is never treated as retained data. Unknown or ambiguous resize states remain
+untouched and fail explicitly. Obsolete resize markers and source data are removed
+only after the new format is durably committed.
+
 A rollback to the old format needs an operator backup. This implementation's
 qualification does not authorize a production migration or deployment.
 
