@@ -199,12 +199,6 @@ pub async fn mount(
             "Native journal is missing; recover or expire the environment explicitly before starting a new one.",
         ));
     }
-    if !owner.directory.join("directory.json").exists() {
-        // Acquire both ownership fences before classifying retained bytes. An
-        // active/preparing owner must keep the existing busy/stop semantics.
-        require_fresh(&owner.directory, &root, &workload)?;
-    }
-    private_dir(&workload).await?;
     let runtime = json!({ "backend": "native", "storage": STORAGE, "os": "linux", "arch": "x86_64", "runtimeId": plan["runtimeId"] });
     let marker = owner.directory.join("directory.json");
     if marker.exists() {
@@ -219,6 +213,12 @@ pub async fn mount(
     let policy: storage::policy::Policy =
         serde_json::from_value(plan["storage"]["policy"].clone())?;
     policy.validate().map_err(Error::bad)?;
+    if !owner.directory.join("directory.json").exists() {
+        // Acquire both ownership fences before classifying retained bytes. An
+        // active/preparing owner must keep the existing busy/stop semantics.
+        require_fresh(&owner.directory, &root, &workload)?;
+    }
+    private_dir(&workload).await?;
     let saved_limit = owner.directory.join("directory-limit");
     if let Ok(value) = tokio::fs::read_to_string(&saved_limit).await
         && value.parse::<u64>().map_err(Error::internal)? > bytes
