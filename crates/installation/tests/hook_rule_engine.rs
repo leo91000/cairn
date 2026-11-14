@@ -1535,13 +1535,15 @@ async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
         json!({ "channel": "support", "author": "alice" }),
     )
     .await;
-    let progress = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    // The resolver stays held until the test releases it, so these bounds only limit
+    // how long a loaded machine may take to process independent work.
+    let progress = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         while !has_seen(&f, &fast).await || !has_seen(&f, other_rule).await {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await;
-    let later_events = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+    let later_events = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         for batch in 0..2 {
             for index in 0..30 {
                 emit(
