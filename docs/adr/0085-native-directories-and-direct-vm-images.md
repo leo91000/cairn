@@ -64,7 +64,14 @@ d’une conversation.
 Les journaux locaux existants ne sont pas déclarés vides. Leur conversion garde
 la source jusqu’à la vérification complète et à la publication durable du format
 remplaçant. Pour une VM, les octets exportés sont comparés à la source avant
-vérification ext4 et bascule vers l’image. Pour le natif, le chemin de compatibilité
+vérification ext4 et bascule vers l’image. Tant que la source peut subsister,
+le marqueur de conversion lie le système de fichiers, l’inode et le digest complet
+de l’image vérifiée. Une reprise valide cette preuve avant tout fsck, croissance
+ou effacement de source. L’effacement devient durable avant le retrait de la
+preuve et avant de confier l’image mutable au VMM. Une preuve absente dans un
+état mixte ou un remplacement modifié est refusé en conservant la source ; ces
+formats de développement ne sont pas réparés par une perte silencieuse.
+Pour le natif, le chemin de compatibilité
 sert seulement à copier et vérifier les fichiers retenus avant de retirer l’ancien
 transport. Toute phase interrompue doit être rejouable ; les anciens fichiers ne
 sont effacés qu’après la bascule durable. Un format inconnu ou une source manquante

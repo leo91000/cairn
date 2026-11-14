@@ -18,6 +18,17 @@ struct Record {
     format: String,
     size: u64,
     context: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conversion: Option<ConversionProof>,
+}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ConversionProof {
+    version: u32,
+    filesystem: Vec<u8>,
+    inode: u64,
+    digest: String,
 }
 
 pub fn exists(directory: &Path) -> bool {
@@ -28,7 +39,11 @@ pub async fn path_for_boot(directory: &Path, size: u64) -> Result<PathBuf> {
     let record = read_record(directory).await?;
     let image = directory.join("data.ext4");
     let metadata = tokio::fs::symlink_metadata(&image).await?;
-    if !metadata.is_file() || metadata.len() != size || record.size != size {
+    if record.conversion.is_some()
+        || !metadata.is_file()
+        || metadata.len() != size
+        || record.size != size
+    {
         return Err(Error::conflict(
             "VM image geometry does not match its reservation.",
         ));
@@ -204,6 +219,7 @@ pub(crate) async fn prepare_locked(
                     format: FORMAT.into(),
                     size,
                     context: context.clone(),
+                    conversion: None,
                 };
                 atomic_write(&pending, &serde_json::to_vec(&record)?).await?;
                 tokio::fs::File::open(directory).await?.sync_all().await?;
@@ -244,6 +260,22 @@ pub(crate) async fn prepare_locked(
             "Local image geometry cannot shrink or exceed its reservation.",
         ));
     }
+    // A committed conversion may still own its original journal after a crash.
+    // Validate the untouched replacement before fsck or growth can mutate it.
+    if let Some(proof) = &record.conversion {
+        if proof.version != 1 || &conversion_proof(&image, stop).await? != proof {
+            return Err(Error::conflict(
+                "VM conversion replacement changed; legacy source retained.",
+            ));
+        }
+        cleanup_legacy(directory).await?;
+        record.conversion = None;
+        persist(directory, &record).await?;
+    } else if legacy_present(directory)? {
+        return Err(Error::conflict(
+            "VM conversion proof is missing; recover the retained legacy source before continuing.",
+        ));
+    }
     check(&image).await?;
     if size > actual.len() {
         tokio::fs::OpenOptions::new()
@@ -258,7 +290,6 @@ pub(crate) async fn prepare_locked(
         record.size = size;
     }
     persist(directory, &record).await?;
-    cleanup_legacy(directory).await?;
     match tokio::fs::remove_file(directory.join("image.pending.json")).await {
         Ok(()) => tokio::fs::File::open(directory).await?.sync_all().await?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -362,7 +393,7 @@ async fn migrate_journal(
         Err(error) => return Err(error.into()),
     }
     let output = temporary.clone();
-    let stop = stop.clone();
+    let copy_stop = stop.clone();
     let size = tokio::task::spawn_blocking(move || -> Result<u64> {
         let source = super::LazyDisk::open(&root)?;
         super::export(&source, &output)?;
@@ -373,7 +404,7 @@ async fn migrate_journal(
         let mut copied = vec![0; original.len()];
         let mut offset = 0;
         while offset < source.size() {
-            if stop.is_cancelled() {
+            if copy_stop.is_cancelled() {
                 return Err(Error::unavailable(
                     "Local image conversion stopped; journal retained.",
                 ));
@@ -393,12 +424,81 @@ async fn migrate_journal(
     .await
     .map_err(Error::internal)??;
     check(&temporary).await?;
+    if requested_size > size {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&temporary)
+            .await?
+            .set_len(requested_size)
+            .await?;
+        crate::microvm::host::command("resize2fs", &[path(&temporary)?]).await?;
+        check(&temporary).await?;
+    }
+    sync(&temporary).await?;
+    let conversion = Some(conversion_proof(&temporary, stop).await?);
     tokio::fs::rename(&temporary, directory.join("data.ext4")).await?;
-    Ok(Record {
+    let record = Record {
         format: FORMAT.into(),
-        size,
+        size: requested_size,
         context,
+        conversion,
+    };
+    persist(directory, &record).await?;
+    Ok(record)
+}
+
+fn legacy_present(directory: &Path) -> Result<bool> {
+    for name in ["lazy", "resize-source", "bootstrap.pending"] {
+        match std::fs::symlink_metadata(directory.join(name)) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(false)
+}
+
+async fn conversion_proof(image: &Path, stop: &CancellationToken) -> Result<ConversionProof> {
+    let image = image.to_owned();
+    let stop = stop.clone();
+    tokio::task::spawn_blocking(move || -> Result<ConversionProof> {
+        use std::{
+            io::Read,
+            os::unix::fs::{MetadataExt, OpenOptionsExt},
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(image)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(Error::conflict(
+                "VM conversion replacement is not a regular image.",
+            ));
+        }
+        let mut hash = blake3::Hasher::new();
+        let mut buffer = vec![0; 4 * 1024 * 1024];
+        loop {
+            if stop.is_cancelled() {
+                return Err(Error::unavailable(
+                    "VM conversion verification stopped; source retained.",
+                ));
+            }
+            let length = file.read(&mut buffer)?;
+            if length == 0 {
+                break;
+            }
+            hash.update(&buffer[..length]);
+        }
+        Ok(ConversionProof {
+            version: 1,
+            filesystem: super::policy::filesystem_id(&file)?,
+            inode: metadata.ino(),
+            digest: hash.finalize().to_hex().to_string(),
+        })
     })
+    .await
+    .map_err(Error::internal)?
 }
 
 async fn cleanup_legacy(directory: &Path) -> Result<()> {
@@ -624,6 +724,7 @@ mod tests {
             format: FORMAT.into(),
             size: SIZE,
             context: context.clone(),
+            conversion: None,
         };
         atomic_write(
             &root.path().join("image.pending.json"),
@@ -663,8 +764,12 @@ mod tests {
         let mut bytes = [0; 20];
         disk.read_at(96 * 1024 * 1024, &mut bytes).unwrap();
         assert_eq!(&bytes, b"retained-byte-canary");
+        // Recreate the committed-proof phase before partial source cleanup.
+        let mut record = read_record(root.path()).await.unwrap();
+        record.conversion = Some(conversion_proof(&image, &stop).await.unwrap());
+        persist(root.path(), &record).await.unwrap();
         // A crash midway through deleting the old format may leave an invalid
-        // journal. The committed image remains authoritative on restart.
+        // journal. The verified committed image remains authoritative on restart.
         tokio::fs::create_dir(root.path().join("lazy"))
             .await
             .unwrap();
@@ -677,6 +782,96 @@ mod tests {
         assert!(!root.path().join("lazy").exists());
         disk.read_at(96 * 1024 * 1024, &mut bytes).unwrap();
         assert_eq!(&bytes, b"retained-byte-canary");
+    }
+
+    #[tokio::test]
+    async fn committed_conversion_refuses_missing_replaced_or_changed_images_and_missing_proof() {
+        for failure in ["missing", "replacement", "contents", "proof"] {
+            let root = tempfile::tempdir().unwrap();
+            let context = context();
+            let stop = CancellationToken::new();
+            super::super::bootstrap::prepare(root.path(), SIZE, &context, &stop)
+                .await
+                .unwrap();
+            let volume = super::super::runtime::load(root.path()).await.unwrap();
+            volume
+                .write_at(96 * 1024 * 1024, b"original retained canary")
+                .unwrap();
+            volume.sync().unwrap();
+            drop(volume);
+            let mut record = migrate_journal(root.path(), SIZE, &context, &stop)
+                .await
+                .unwrap();
+            let image = root.path().join("data.ext4");
+            assert!(path_for_boot(root.path(), SIZE).await.is_err());
+            match failure {
+                "missing" => std::fs::remove_file(&image).unwrap(),
+                "replacement" => {
+                    // Retain the verified inode so the replacement cannot reuse it.
+                    std::fs::rename(&image, root.path().join("verified-image-held")).unwrap();
+                    super::super::local::prepare(root.path(), SIZE)
+                        .await
+                        .unwrap();
+                }
+                "contents" => {
+                    let disk = LocalDisk::open(&image, true).unwrap();
+                    disk.write_at(96 * 1024 * 1024, b"changed retained canary!")
+                        .unwrap();
+                    disk.sync().unwrap();
+                }
+                "proof" => {
+                    record.conversion = None;
+                    persist(root.path(), &record).await.unwrap();
+                }
+                _ => unreachable!(),
+            }
+            for _ in 0..2 {
+                assert!(
+                    prepare(root.path(), SIZE * 2, &context, &stop)
+                        .await
+                        .is_err(),
+                    "{failure}"
+                );
+                assert!(
+                    root.path().join("lazy/journal-v2.sqlite").is_file(),
+                    "{failure}"
+                );
+                let source = super::super::runtime::load(root.path()).await.unwrap();
+                let mut bytes = [0; 24];
+                source.read_at(96 * 1024 * 1024, &mut bytes).unwrap();
+                assert_eq!(&bytes, b"original retained canary");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn committed_conversion_retries_cleanup_before_further_growth_and_writable_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let context = context();
+        let stop = CancellationToken::new();
+        super::super::bootstrap::prepare(root.path(), SIZE, &context, &stop)
+            .await
+            .unwrap();
+        migrate_journal(root.path(), SIZE, &context, &stop)
+            .await
+            .unwrap();
+        let image = prepare(root.path(), SIZE * 2, &context, &stop)
+            .await
+            .unwrap();
+        assert!(!legacy_present(root.path()).unwrap());
+        assert!(read_record(root.path()).await.unwrap().conversion.is_none());
+        let disk = LocalDisk::open(&image, true).unwrap();
+        disk.write_at(96 * 1024 * 1024, b"resumed user work")
+            .unwrap();
+        disk.sync().unwrap();
+        drop(disk);
+        prepare(root.path(), SIZE * 2, &context, &stop)
+            .await
+            .unwrap();
+        let disk = LocalDisk::open(&image, false).unwrap();
+        let mut bytes = [0; 17];
+        disk.read_at(96 * 1024 * 1024, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"resumed user work");
     }
 
     #[tokio::test]
