@@ -43,6 +43,7 @@ async function executeSetup(fault = '', {
   aptEntryDelayMs = 0,
   faultStartupDelayMs = 0,
   admissionDelayMs = 0,
+  recordOwnerLimits = false,
   workSeconds: faultWorkSeconds,
   interruptSignal,
   interruptPhase = 'descendant',
@@ -55,7 +56,7 @@ async function executeSetup(fault = '', {
   const closedControl = fault === 'closed-control' ? createServer(socket => socket.end()) : undefined
   if (closedControl)
     await new Promise(resolve => closedControl.listen(closedControlPath, resolve))
-  const recordSpawn = `import childProcess from 'node:child_process';import{syncBuiltinESMExports}from'node:module';import{appendFileSync}from'node:fs';if(['stalled-supervision','controller-crash'].includes(${JSON.stringify(fault)}))appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'controller',pid:process.pid})+'\\n');const original=childProcess.spawn;childProcess.spawn=function(command,...args){const child=original.call(this,command,...args);if(command==='apt-get')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'apt-spawn',pid:process.pid})+'\\n');return child};const originalSync=childProcess.spawnSync;childProcess.spawnSync=function(command,...args){const result=originalSync.call(this,command,...args);if(${JSON.stringify(fault)}==='stalled-supervision'&&command==='/usr/bin/printf'&&args[0].some(value=>value.includes('event=apt-start')))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5000);return result};syncBuiltinESMExports();`
+  const recordSpawn = `import childProcess from 'node:child_process';import{syncBuiltinESMExports}from'node:module';import{appendFileSync}from'node:fs';if(['stalled-supervision','controller-crash'].includes(${JSON.stringify(fault)}))appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'controller',pid:process.pid})+'\\n');const original=childProcess.spawn;childProcess.spawn=function(command,...args){const child=original.call(this,command,...args);if(command==='apt-get')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'apt-spawn',pid:process.pid})+'\\n');if(command==='timeout'&&args[0].includes('cairn-native-apt-owner'))appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'owner-limit',pid:process.pid,limit:args[0].find(value=>/^[0-9.]+s$/.test(value))})+'\\n');return child};const originalSync=childProcess.spawnSync;childProcess.spawnSync=function(command,...args){const result=originalSync.call(this,command,...args);if(${JSON.stringify(fault)}==='stalled-supervision'&&command==='/usr/bin/printf'&&args[0].some(value=>value.includes('event=apt-start')))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5000);return result};syncBuiltinESMExports();`
   const fixture = `#!${process.execPath}
 const { spawn, spawnSync } = require('node:child_process')
 const { appendFileSync, readFileSync } = require('node:fs')
@@ -85,7 +86,7 @@ if (phase === 'entry' && fault === 'delayed-entry') {
   appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'entry-resumed', pid: process.pid }) + '\\n')
   args.splice(args.indexOf(process.execPath) + 1, 0, '--import', ${JSON.stringify(`data:text/javascript,${encodeURIComponent(recordSpawn)}`)})
 }
-if (phase === 'entry' && ['stalled-supervision', 'controller-crash'].includes(fault))
+if (phase === 'entry' && (['stalled-supervision', 'controller-crash'].includes(fault) || ${recordOwnerLimits}))
   args.splice(args.indexOf(process.execPath) + 1, 0, '--import', ${JSON.stringify(`data:text/javascript,${encodeURIComponent(recordSpawn)}`)})
 if (phase === 'entry' && ['closure-marker-failure', 'fail-update-without-closure'].includes(fault))
   appendFileSync(args.at(-1) + '.update.closed', 'not a closure receipt')
@@ -319,11 +320,20 @@ describe('native CI dependency setup', () => {
     ['install', admittedExpirySeconds, 1000, 0],
     ['install', admittedExpirySeconds, 0, 250],
   ])('bounds and identifies a silent %s stall without starting later work (budget %s s, command startup delay %i ms, admission delay %i ms)', async (fault, workSeconds, faultStartupDelayMs, admissionDelayMs) => {
-    const result = await executeSetup(fault, { workSeconds, faultStartupDelayMs, admissionDelayMs })
+    const result = await executeSetup(fault, {
+      workSeconds,
+      faultStartupDelayMs,
+      admissionDelayMs,
+      recordOwnerLimits: true,
+    })
     expect(result.harnessKilled).toBe(false)
     expect(result.status).toBe(124)
     expect(result.output).toContain(`phase=${fault === 'install' ? 'install' : 'update'} event=start`)
     expect(result.output.includes('phase=update event=apt-start')).toBe(fault !== 'entry')
+    // The privileged owner bounds APT with the configured limit, not the
+    // profile maximum; the outer fail-safes alone would still end in 124.
+    const ownerLimits = result.calls.filter(call => call.phase === 'owner-limit').map(call => call.limit)
+    expect(ownerLimits).toEqual({ entry: [], update: [`${workSeconds}s`], install: ['120s', `${workSeconds}s`] }[fault])
     expect(result.output.match(/phase=install event=start /g) ?? []).toHaveLength(fault === 'install' ? 1 : 0)
     const installs = result.calls.filter(call => call.phase === 'install')
     if (fault === 'install') {
@@ -379,12 +389,18 @@ describe('native CI dependency setup', () => {
   // A slow update before an install expiry, including an install command that
   // could only start after its deadline.
   it.each([0, 1000])('reaches the install deadline after a slow successful update (install startup delay %i ms)', async (faultStartupDelayMs) => {
-    const result = await executeSetup('install', { aptStartupDelayMs: 250, workSeconds: admittedExpirySeconds, faultStartupDelayMs })
+    const result = await executeSetup('install', {
+      aptStartupDelayMs: 250,
+      workSeconds: admittedExpirySeconds,
+      faultStartupDelayMs,
+      recordOwnerLimits: true,
+    })
     expect(result.harnessKilled).toBe(false)
     expect(result.status).toBe(124)
     expect(result.output).toContain('phase=update event=end code=0')
     expect(result.output.match(/phase=install event=start /g) ?? []).toHaveLength(1)
     expect(result.output.match(/phase=install event=apt-start /g) ?? []).toHaveLength(1)
+    expect(result.calls.filter(call => call.phase === 'owner-limit').map(call => call.limit)).toEqual(['120s', `${admittedExpirySeconds}s`])
     expect(result.output).toContain('phase=install event=end code=124')
     expect(result.calls.filter(call => call.phase === 'update')).toHaveLength(1)
     expect(result.calls.filter(call => call.phase === 'install').length).toBeLessThanOrEqual(faultStartupDelayMs ? 0 : 1)
