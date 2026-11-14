@@ -63,15 +63,24 @@ struct Entry {
     result_authority: Option<crate::capabilities::plugin_packages::Authority>,
 }
 
+/// Members' resource reads have their own workers and retained results, so they can
+/// neither hold every worker nor evict the results of the owner, agents and clients.
+const SLOTS: usize = 4;
+const ENTRIES: usize = 64;
+const MEMBER_SLOTS: usize = 2;
+const MEMBER_ENTRIES: usize = 16;
+
 pub struct Operations {
     slots: Arc<Semaphore>,
+    member_slots: Arc<Semaphore>,
     entries: Mutex<HashMap<String, Entry>>,
 }
 
 impl Default for Operations {
     fn default() -> Self {
         Self {
-            slots: Arc::new(Semaphore::new(4)),
+            slots: Arc::new(Semaphore::new(SLOTS)),
+            member_slots: Arc::new(Semaphore::new(MEMBER_SLOTS)),
             entries: Mutex::new(HashMap::new()),
         }
     }
@@ -115,20 +124,27 @@ impl Operations {
         result_authority: Option<crate::capabilities::plugin_packages::Authority>,
         work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
     ) -> Result<Value> {
-        let permit =
-            self.slots.clone().try_acquire_owned().map_err(|_| {
-                Error::too_many_requests("Plugin preparation is busy. Retry shortly.")
-            })?;
+        let member = matches!(audience, Audience::Member(_));
+        let (slots, limit) = if member {
+            (&self.member_slots, MEMBER_ENTRIES)
+        } else {
+            (&self.slots, ENTRIES)
+        };
+        let permit = slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::too_many_requests("Plugin preparation is busy. Retry shortly."))?;
         let id = uuid::Uuid::new_v4().to_string();
         let cancellation = tokio_util::sync::CancellationToken::new();
         #[cfg(test)]
         let (task_finished, completion) = tokio::sync::watch::channel(());
         {
             let mut entries = self.entries.lock().unwrap();
-            if entries.len() >= 64 {
+            let same = |entry: &Entry| matches!(entry.audience, Audience::Member(_)) == member;
+            if entries.values().filter(|entry| same(entry)).count() >= limit {
                 let expired = entries
                     .iter()
-                    .find(|(_, operation)| operation.operation.state != State::Running)
+                    .find(|(_, entry)| same(entry) && entry.operation.state != State::Running)
                     .map(|(id, _)| id.clone());
                 if let Some(expired) = expired {
                     entries.remove(&expired);
@@ -291,6 +307,70 @@ impl Operations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn member_reads_neither_hold_other_workers_nor_evict_other_results() {
+        let root = tempfile::TempDir::new().unwrap();
+        let s = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+        let operations = &s.plugins.operations;
+        let member = || Audience::Member("member-account".into());
+
+        let finished = operations
+            .start(s.clone(), Audience::Owner, async {
+                Err(Error::bad("Fixture refusal."))
+            })
+            .unwrap();
+        let finished = finished["operation"].as_str().unwrap().to_owned();
+        operations.wait_for_task(&finished).await.unwrap();
+
+        // As many pending member reads as there are workers fill only their own.
+        let mut pending = Vec::new();
+        for _ in 0..SLOTS {
+            match operations.start(s.clone(), member(), std::future::pending()) {
+                Ok(started) => pending.push(started["operation"].as_str().unwrap().to_owned()),
+                Err(refused) => assert_eq!(refused.status, 429),
+            }
+        }
+        let owner = operations
+            .start(s.clone(), Audience::Owner, async {
+                Err(Error::bad("Fixture refusal."))
+            })
+            .unwrap();
+        operations
+            .wait_for_task(owner["operation"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), MEMBER_SLOTS);
+        for id in &pending {
+            operations.cancel(id).unwrap();
+            operations.wait_for_task(id).await.unwrap();
+        }
+
+        // Many finished member reads replace only each other.
+        for _ in 0..ENTRIES {
+            let started = operations
+                .start(s.clone(), member(), async {
+                    Err(Error::bad("Fixture refusal."))
+                })
+                .unwrap();
+            operations
+                .wait_for_task(started["operation"].as_str().unwrap())
+                .await
+                .unwrap();
+        }
+        assert_eq!(operations.get(&finished).unwrap()["state"], "failed");
+        let entries = operations.entries.lock().unwrap();
+        let members = entries
+            .values()
+            .filter(|entry| entry.audience == member())
+            .count();
+        assert_eq!(members, MEMBER_ENTRIES);
+        drop(entries);
+
+        s.shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn task_observer_reports_terminal_failure_to_late_waiters() {

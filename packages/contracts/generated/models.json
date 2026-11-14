@@ -6325,7 +6325,7 @@
       "additionalProperties": false,
       "properties": {
         "agentId": {
-          "description": "Read through this execution agent's grant on the instance. A person needs access\nto the agent; an installation agent may name only itself. Without it, only the\ninstallation owner reads, with the instance's own access.",
+          "description": "Read through this execution agent's grant on the instance. A person needs access\nto the agent; an installation agent may name only itself. Without it, the owner\nand the owner's public MCP read with the instance's own access, and an\ninstallation agent through its own grant.",
           "format": "uuid",
           "type": [
             "string",

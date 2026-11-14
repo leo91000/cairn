@@ -10,8 +10,9 @@ export interface ListPluginResourcesInput {
   query: string
   /**
    * Read through this execution agent's grant on the instance. A person needs access
-   * to the agent; an installation agent may name only itself. Without it, only the
-   * installation owner reads, with the instance's own access.
+   * to the agent; an installation agent may name only itself. Without it, the owner
+   * and the owner's public MCP read with the instance's own access, and an
+   * installation agent through its own grant.
    */
   agentId?: AgentId | null
 }

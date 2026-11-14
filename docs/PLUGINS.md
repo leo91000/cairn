@@ -1277,14 +1277,19 @@ access refuses the retained result.
 Read surfaces share these implementations:
 
 - HTTP: `GET /api/plugins/{pluginId}/connections/{instanceId}/resources?resourceType=channel&page=1&query=`
-  and `GET .../resources/ancestors?resourceType=channel&id=200` (authenticated owner,
-  matching the existing plugin management routes).
-- HTTP polling: `GET /api/plugins/resources/operations/{operationId}`.
-  It accepts only resource-read operations, with the same owner authorization.
+  and `GET .../resources/ancestors?resourceType=channel&id=200`, with an optional
+  `agentId`. Without it, only the owner reads, with the instance's own access,
+  matching the existing plugin management routes.
+- HTTP polling: `GET /api/plugins/resources/operations/{operationId}` accepts only
+  resource-read operations; the existing `GET /api/plugins/packages/operations/{operationId}`
+  also returns them. The owner polls every operation. A member polls only their own
+  resource reads, never the owner's preparations or another member's reads, and
+  cannot cancel them.
 - Public MCP and `cairn_installation`: `list_plugin_resources`
-  (`pluginId`, `instanceId`, `resourceType`, optional `page`/`query`) and
-  `resolve_plugin_resource` (`pluginId`, `instanceId`, `resourceType`, `id`), then
-  `get_plugin_resource_operation` (`operationId`). All require public MCP `read`.
+  (`pluginId`, `instanceId`, `resourceType`, optional `page`/`query`/`agentId`) and
+  `resolve_plugin_resource` (`pluginId`, `instanceId`, `resourceType`, `id`, optional
+  `agentId`), then `get_plugin_resource_operation` (`operationId`). All require public
+  MCP `read`.
   The read polling tool cannot retrieve management preparations. Retrieving a
   resource result through the existing management poller requires both `manage`
   and `read`; it cannot bypass the read scope. Resource reads require a current
@@ -1297,6 +1302,25 @@ Read surfaces share these implementations:
   the same typed contracts; Android clients await polling automatically, and web
   callers pass the existing `pluginRequest` transport to the generated clients.
   No picker UI is introduced in this ticket.
+
+`agentId` reads through that execution agent's grant on the instance
+([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)), so rule editors can
+pick resources for a rule's execution agent. Any grant of the agent on the instance
+permits discovery, as for installation agents; resource restrictions on its
+contributions do not filter the listing.
+
+- The owner, and the owner's public MCP, may name any agent; the agent must hold a
+  grant on the instance.
+- A member may name only an agent they may use. The read is bound to the membership
+  that holds this access: the Beacon membership and the local access entry are
+  rechecked with the instance grant before each host capability, after slow I/O, when
+  the result is published and before every polling response. Removing the access,
+  the member or the grant, or re-inviting the member, refuses the read and its
+  retained result. Members' reads use two dedicated workers and keep at most 16
+  results, so they cannot hold the workers or evict the results of other callers.
+- An installation agent always reads through its own grant. Naming another agent is
+  refused, whatever the conversation; it never reads through the grants of the agent
+  it would write a rule for.
 
 Transport (`socket`) and durable `timer` handlers can emit declared hooks:
 
