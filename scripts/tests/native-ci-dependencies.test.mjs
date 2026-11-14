@@ -42,6 +42,7 @@ async function executeSetup(fault = '', {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-native-dependencies-'))
   const history = path.join(directory, 'calls.jsonl')
   writeFileSync(history, '')
+  const deadlinePhase = fault === 'install' ? 'install' : 'update'
   const closedControlPath = path.join(directory, 'closed-control.sock')
   const closedControl = fault === 'closed-control' ? createServer(socket => socket.end()) : undefined
   if (closedControl)
@@ -58,7 +59,9 @@ const phase = name === 'sudo' ? 'entry' : args.includes('update') ? 'update' : '
 // Models a faulted command that the host has not scheduled before its deadline.
 if (phase === ${JSON.stringify(fault)} && ${faultStartupDelayMs} > 0)
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${faultStartupDelayMs})
-if (phase !== 'entry' && ${aptEntryDelayMs} > 0) {
+// Entry delay applies to the deadline phase only: a preceding successful phase
+// must not consume the harness before the targeted scenario starts.
+if (phase === ${JSON.stringify(deadlinePhase)} && ${aptEntryDelayMs} > 0) {
   appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'apt-entry', pid: process.pid, uid: process.getuid() }) + '\\n')
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${aptEntryDelayMs})
 }
@@ -112,7 +115,6 @@ if (phase === fault) {
   const exercisesDeadline = ['entry', 'update', 'install', 'hard-stall', 'orphan-stall', 'stalled-supervision'].includes(fault)
   const fixtureWorkSeconds = faultWorkSeconds ?? (fault === 'entry' ? expirySeconds : startedFixtureSeconds)
   const workSeconds = fault === 'controller-crash' ? 2 : interruptSignal && !cancelMarkerFailure ? 5 : exercisesDeadline ? fixtureWorkSeconds : undefined
-  const deadlinePhase = fault === 'install' ? 'install' : 'update'
   const phaseSeconds = workSeconds === undefined ? {} : { [deadlinePhase]: workSeconds }
   const cancelFault = cancelMarkerFailure ? `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module'; const mkdir = fs.mkdirSync; fs.mkdirSync = function(candidate, ...args) { if (candidate.endsWith('owner.sock.cancel')) throw new Error('fixture metadata refusal'); return mkdir.call(this, candidate, ...args); }; syncBuiltinESMExports();` : ''
   const driver = `${cancelFault} import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: ${JSON.stringify(phaseSeconds)}, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
@@ -316,7 +318,10 @@ describe('native CI dependency setup', () => {
     const result = await executeSetup(fault, { aptEntryDelayMs: 200 })
     expect(result.harnessKilled).toBe(false)
     expect(result.status).toBe(124)
-    expect(result.calls.filter(call => call.phase === fault)).toHaveLength(1)
+    const started = result.calls.filter(call => call.phase === fault)
+    expect(started).toHaveLength(1)
+    // Only the targeted process was delayed, and it then started.
+    expect(result.calls.filter(call => call.phase === 'apt-entry').map(call => call.pid)).toEqual([started[0].pid])
     expect(result.liveAtPublicExit).toEqual([])
     expect(result.survivingFixturePids).toEqual([])
   })
