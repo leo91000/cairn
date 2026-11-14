@@ -12,7 +12,9 @@ use tokio::io::BufReader;
 
 pub fn directory(state: &Path, run: &str) -> Result<PathBuf> {
     crate::validation::uuid(run)?;
-    Ok(state.join("native").join(run))
+    let path = state.join("native").join(run);
+    require_real_directory(&path)?;
+    Ok(path)
 }
 
 pub(super) fn data_root(state: &Path) -> PathBuf {
@@ -21,7 +23,20 @@ pub(super) fn data_root(state: &Path) -> PathBuf {
 
 pub(super) fn workload(state: &Path, run: &str) -> Result<PathBuf> {
     crate::validation::uuid(run)?;
-    Ok(data_root(state).join(run))
+    let path = data_root(state).join(run);
+    require_real_directory(&path)?;
+    Ok(path)
+}
+
+fn require_real_directory(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(Error::conflict(
+            "Native environment directory cannot be an alias.",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(super) fn control_for_workload(workload: &Path) -> Result<PathBuf> {

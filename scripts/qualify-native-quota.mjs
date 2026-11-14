@@ -26,12 +26,12 @@ if (!binary)
 const target = path.resolve('target')
 mkdirSync(target, { recursive: true })
 const fixture = mkdtempSync(path.join(target, 'quota-qualification-'))
-const test = 'native::quota::tests::kernel_quota_lifecycle_qualification'
+const tests = ['native::quota::tests::kernel_quota_lifecycle_qualification', 'native::bases_tests::kernel_prepared_base_admission_and_recovery']
 const script = `
 set -euo pipefail
 binary=$1
 fixture=$2
-test_name=$3
+shift 2
 cleanup() {
   result=$?
   trap - EXIT
@@ -41,7 +41,7 @@ cleanup() {
       exit 1
     fi
   fi
-  rm -f -- "$fixture/quota.ext4"
+  rm -f -- "$fixture/quota.ext4" "$fixture/test.log"
   rm -rf -- "$fixture/state"
   rmdir -- "$fixture/home" "$fixture"
   exit "$result"
@@ -51,12 +51,15 @@ mkdir -p -- "$fixture/state/native-data" "$fixture/home"
 truncate -s 1G -- "$fixture/quota.ext4"
 mkfs.ext4 -q -F -O project,quota -E quotatype=prjquota "$fixture/quota.ext4"
 mount -o loop,prjquota -- "$fixture/quota.ext4" "$fixture/state/native-data"
+for test_name in "$@"; do
 env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME="$fixture/home" \\
   CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_QUOTA_TEST_STATE="$fixture/state" \\
   timeout --signal=TERM --kill-after=10s 180s \\
-  setpriv --bounding-set=-sys_resource "$binary" --exact "$test_name" --ignored --nocapture --test-threads=1
+  setpriv --bounding-set=-sys_resource "$binary" --exact "$test_name" --ignored --nocapture --test-threads=1 | tee "$fixture/test.log"
+grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$fixture/test.log"
+done
 `
-const result = spawnSync('sudo', ['-n', 'unshare', '--mount', '--propagation', 'private', 'bash', '-c', script, 'cairn-quota-qualification', binary, fixture, test], {
+const result = spawnSync('sudo', ['-n', 'unshare', '--mount', '--propagation', 'private', 'bash', '-c', script, 'cairn-quota-qualification', binary, fixture, ...tests], {
   stdio: 'inherit',
 })
 if (result.error)

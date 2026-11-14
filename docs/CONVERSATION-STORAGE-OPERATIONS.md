@@ -69,6 +69,13 @@ cannot retire a replacement directory. Immutable retirement receipts and small
 lock/ownership namespaces intentionally survive to reject delayed deletion requests
 after a new environment starts. Shared runtime/base caches and the native-data
 filesystem remain node resources under their existing cache/capacity rules.
+Prepared-directory initialization holds one durable environment-qualified cache
+pin until verified data and its format marker are durable. The pin also records
+its cache key and attempt identity; startup cleanup of temporary attempt pins
+cannot release this source. Interrupted copying restarts its private partial tree;
+interrupted publication verifies the already-renamed data without overwriting it.
+The pin is removed after publication or environment deletion. A committed marker
+wins over a leftover pin, preserving later user edits during cleanup.
 
 ## Local format conversion
 

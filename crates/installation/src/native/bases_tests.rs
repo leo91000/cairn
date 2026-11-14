@@ -499,3 +499,250 @@ async fn measure_prepared_native_bases() {
         })
     );
 }
+
+/// Uses the real quota pool supplied by the disposable qualification launcher.
+#[tokio::test]
+#[ignore = "requires scripts/qualify-native-quota.mjs on its dedicated disposable filesystem"]
+async fn kernel_prepared_base_admission_and_recovery() {
+    assert_eq!(
+        std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),
+        Ok("1")
+    );
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    let state =
+        std::path::PathBuf::from(std::env::var_os("CAIRN_NATIVE_QUOTA_TEST_STATE").unwrap());
+    super::quota::require(&state).unwrap();
+    let (_root, mut bases, archive, policy) = fixture().await;
+    bases.state = state.clone();
+    let stop = CancellationToken::new();
+    bases
+        .warm(
+            std::slice::from_ref(&archive),
+            128,
+            16 * 1024 * 1024 * 1024,
+            &policy,
+            &stop,
+        )
+        .await
+        .unwrap();
+    let ready = bases
+        .lookup(std::slice::from_ref(&archive), 128)
+        .await
+        .unwrap()
+        .unwrap();
+    let source = state.join("native-bases").join(&ready.key);
+    for phase in ["fresh", "copying", "renamed", "committed"] {
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        let control = super::workspace::directory(&state, &run).unwrap();
+        let workload = super::workspace::workload(&state, &run).unwrap();
+        let directory = storage::environment::directory(&state, &run).unwrap();
+        private_dir(&control).await.unwrap();
+        private_dir(&directory).await.unwrap();
+        let stage = bases.data.join("runs").join(&run);
+        private_dir(&stage).await.unwrap();
+        let plan = json!({
+            "id": attempt, "runId": run, "runtimeId": "synthetic",
+            "resources": { "diskMiB": 128 },
+            "storage": { "owner": run, "policy": policy },
+            "nativeProjectArchives": [archive], "nativeProjectBase": ready.key
+        });
+        if phase != "fresh" {
+            let intent = directory.join(format!(
+                "native-base-initializing-v1.{}.{}.pin",
+                ready.key, attempt
+            ));
+            tokio::fs::hard_link(source.join("pin"), &intent)
+                .await
+                .unwrap();
+            private_dir(&workload).await.unwrap();
+            super::quota::prepare(&state, &workload, 128 * disk::MIB)
+                .await
+                .unwrap();
+            if phase == "copying" {
+                private_dir(&workload.join("base.partial")).await.unwrap();
+                tokio::fs::write(workload.join("base.partial/interrupted"), b"partial copy")
+                    .await
+                    .unwrap();
+            } else {
+                private_dir(&workload.join("data")).await.unwrap();
+                super::directory::copy_verified(&source.join("contents"), &workload.join("data"))
+                    .await
+                    .unwrap();
+            }
+            if phase == "committed" {
+                super::directory::publish_format(&directory, &control, &plan, 128 * disk::MIB)
+                    .await
+                    .unwrap();
+                tokio::fs::write(
+                    workload.join("data/workspaces/new-work"),
+                    b"must survive recovery",
+                )
+                .await
+                .unwrap();
+            }
+            // Startup attempt-pin cleanup must preserve this environment's
+            // durable initialization pin and therefore its cache source.
+            recover_pins(&bases.data).await.unwrap();
+            assert!(intent.exists());
+        }
+        let expected_clone = phase != "committed";
+        assert_eq!(
+            bases.initialize(&plan, &stop).await.unwrap(),
+            expected_clone
+        );
+        assert!(!std::fs::read_dir(&directory).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("native-base-initializing-v1.")
+        }));
+        let mut mounted = super::directory::mount(&state, &run, &plan, &stop)
+            .await
+            .unwrap();
+        super::directory::initialize(&state, &run, &plan, 128 * disk::MIB)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(
+                workload
+                    .join("data/workspaces")
+                    .join(&archive.project_id)
+                    .join("file")
+            )
+            .unwrap(),
+            b"initial project"
+        );
+        if phase == "committed" {
+            assert_eq!(
+                std::fs::read(workload.join("data/workspaces/new-work")).unwrap(),
+                b"must survive recovery"
+            );
+        }
+        tokio::fs::write(control.join("attempt"), attempt.as_bytes())
+            .await
+            .unwrap();
+        mounted.close().await.unwrap();
+        drop(mounted);
+        super::directory::action(&state, &run, true).await.unwrap();
+        assert!(!workload.exists());
+    }
+    assert_eq!(std::fs::metadata(source.join("pin")).unwrap().nlink(), 1);
+    bases.trim(0, u64::MAX, None).await.unwrap();
+    println!(
+        "Prepared native initialization: fresh, interrupted copy, durable rename and committed work all admitted and retired."
+    );
+}
+
+#[tokio::test]
+async fn committed_prepared_intent_cleanup_preserves_later_user_work_without_cache_access() {
+    let (_root, bases, _archive, _policy) = fixture().await;
+    let run = crate::config::id();
+    let old = crate::config::id();
+    let next = crate::config::id();
+    let directory = storage::environment::directory(&bases.state, &run).unwrap();
+    let workload = super::workspace::workload(&bases.state, &run).unwrap();
+    private_dir(&directory).await.unwrap();
+    for name in ["home", "workspaces", "output"] {
+        private_dir(&workload.join("data").join(name))
+            .await
+            .unwrap();
+    }
+    let retained = workload.join("data/workspaces/saved");
+    tokio::fs::write(&retained, b"user work after format publication")
+        .await
+        .unwrap();
+    let plan = json!({ "id": next, "runId": run, "runtimeId": "current" });
+    super::atomic_write(
+        &directory.join("directory.json"),
+        &serde_json::to_vec(&super::directory::format(&plan)).unwrap(),
+    )
+    .await
+    .unwrap();
+    let intent = directory.join(format!(
+        "native-base-initializing-v1.{}.{}.pin",
+        "a".repeat(64),
+        old
+    ));
+    tokio::fs::write(&intent, b"").await.unwrap();
+    let stage = bases.data.join("runs").join(&run);
+    let blocked_pin = pin_path(&stage, &old).unwrap();
+    private_dir(&blocked_pin).await.unwrap();
+    assert!(
+        bases
+            .initialize(&plan, &CancellationToken::new())
+            .await
+            .is_err()
+    );
+    assert!(
+        intent.exists(),
+        "failed staging cleanup must preserve its retry intent"
+    );
+    assert_eq!(
+        std::fs::read(&retained).unwrap(),
+        b"user work after format publication"
+    );
+    tokio::fs::remove_dir(blocked_pin).await.unwrap();
+    assert!(
+        !bases
+            .initialize(&plan, &CancellationToken::new())
+            .await
+            .unwrap()
+    );
+    assert!(!intent.exists());
+    assert_eq!(
+        std::fs::read(retained).unwrap(),
+        b"user work after format publication"
+    );
+}
+
+#[tokio::test]
+async fn prepared_initialization_intent_does_not_authorize_unrecognized_old_payloads() {
+    let (_root, bases, archive, policy) = fixture().await;
+    let stop = CancellationToken::new();
+    bases
+        .warm(
+            std::slice::from_ref(&archive),
+            128,
+            16 * 1024 * 1024 * 1024,
+            &policy,
+            &stop,
+        )
+        .await
+        .unwrap();
+    let ready = bases
+        .lookup(std::slice::from_ref(&archive), 128)
+        .await
+        .unwrap()
+        .unwrap();
+    let run = crate::config::id();
+    let attempt = crate::config::id();
+    let directory = storage::environment::directory(&bases.state, &run).unwrap();
+    private_dir(&directory.join("lazy")).await.unwrap();
+    let payload = directory.join("lazy/retained-payload");
+    tokio::fs::write(&payload, b"old work").await.unwrap();
+    tokio::fs::hard_link(
+        bases
+            .state
+            .join("native-bases")
+            .join(&ready.key)
+            .join("pin"),
+        directory.join(format!(
+            "native-base-initializing-v1.{}.{}.pin",
+            ready.key, attempt
+        )),
+    )
+    .await
+    .unwrap();
+    let plan = json!({ "id": attempt, "runId": run, "resources": { "diskMiB": 128 },
+        "nativeProjectArchives": [archive], "nativeProjectBase": ready.key });
+    assert!(bases.initialize(&plan, &stop).await.is_err());
+    assert_eq!(std::fs::read(payload).unwrap(), b"old work");
+    assert!(!directory.join("directory.json").exists());
+    assert!(
+        !super::workspace::workload(&bases.state, &run)
+            .unwrap()
+            .exists()
+    );
+}

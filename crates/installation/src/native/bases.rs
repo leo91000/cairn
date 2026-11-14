@@ -1,5 +1,5 @@
-//! Disposable local ext4 bases. Workloads receive privately owned journals;
-//! only offline, sealed payload segments share inodes with the cache.
+//! Verified local directory templates. Each environment receives private files;
+//! a durable initialization pin retains the source through crash recovery.
 use super::{atomic_write, disk, workspace};
 use crate::{
     error::{Error, Result},
@@ -238,8 +238,8 @@ impl Bases {
         }
         let budget = cache_limit(limit);
         let metadata = CLONE_RESERVE;
-        // Extraction, raw ext4 and imported journal coexist during building.
-        // Include rounded tiny-file blocks, not only sum(st_size).
+        // Archive inputs and extracted directory templates coexist while building.
+        // Include per-entry allocation, not only sum(st_size).
         let required = expanded.saturating_add(metadata);
         let estimated_base = expanded.saturating_add(metadata);
         if estimated_base > budget || stop.is_cancelled() {
@@ -261,8 +261,8 @@ impl Bases {
             return Ok(());
         }
         private_dir(&self.state.join("environments")).await?;
-        // Old controllers already recognize and reclaim unclaimed environments;
-        // sparse raw images therefore retain correct accounting on interruption.
+        // Interrupted, unclaimed build directories use the existing environment
+        // recovery namespace; they contain only disposable cache material.
         let temporary = self.state.join("environments").join(crate::config::id());
         private_dir(&temporary).await?;
         let result = self
@@ -340,14 +340,50 @@ impl Bases {
         let run = text(plan, "runId");
         let directory = environment::directory(&self.state, run)?;
         let root = workspace::directory(&self.state, run)?;
+        let pending = initializing_base(&directory)?;
+        if directory.join("directory.json").exists() {
+            if let Some(pending) = pending {
+                let lease = environment::lock(&self.state, run, super::block::DISK_BUSY).await?;
+                let record: Value = serde_json::from_slice(
+                    &tokio::fs::read(lease.directory.join("directory.json")).await?,
+                )?;
+                let expected = super::directory::format(plan);
+                if ["backend", "storage", "os", "arch"]
+                    .iter()
+                    .any(|key| record[*key] != expected[*key])
+                {
+                    return Err(Error::conflict(
+                        "Prepared native directory platform changed.",
+                    ));
+                }
+                super::directory::require_retained_tree(&workspace::workload(&self.state, run)?)?;
+                finish_initializing_base(
+                    &lease.directory,
+                    &self.data.join("runs").join(run),
+                    &pending,
+                )
+                .await?;
+                release_pin(&self.data.join("runs").join(run), text(plan, "id")).await?;
+            }
+            return Ok(false);
+        }
         if storage::runtime::exists(&directory)
             || root.join("initialized").exists()
             || root.join("data").exists()
-            || workspace::workload(&self.state, run)?.join("data").exists()
         {
+            if pending.is_some() {
+                return Err(Error::conflict(
+                    "Prepared native initialization conflicts with retained storage.",
+                ));
+            }
             return Ok(false);
         }
         let Some(values) = plan["nativeProjectArchives"].as_array() else {
+            if pending.is_some() {
+                return Err(Error::conflict(
+                    "Prepared native base initialization needs its original inputs.",
+                ));
+            }
             return Ok(false);
         };
         let archives: Vec<Archive> = values
@@ -359,7 +395,7 @@ impl Bases {
             .as_u64()
             .ok_or_else(|| Error::bad("Missing native disk size."))?;
         let Some(ready) = self.lookup(&archives, size).await? else {
-            if plan.get("nativeProjectBase").is_some() {
+            if plan.get("nativeProjectBase").is_some() || pending.is_some() {
                 return Err(Error::conflict("Pinned native base is unavailable."));
             }
             return Ok(false);
@@ -376,28 +412,174 @@ impl Bases {
         let lease = environment::lock(&self.state, run, super::block::DISK_BUSY).await?;
         private_dir(&root).await?;
         let workload = workspace::workload(&self.state, run)?;
+        let pending = if let Some(pending) = pending {
+            for entry in std::fs::read_dir(&lease.directory)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let atomic = name
+                    .to_str()
+                    .and_then(|name| name.strip_prefix('.'))
+                    .and_then(|name| name.strip_suffix(".tmp"))
+                    .is_some_and(|name| crate::validation::uuid(name).is_ok())
+                    && entry.file_type()?.is_file();
+                if !environment::retained(&name) && name != pending.name.as_str() && !atomic {
+                    return Err(Error::conflict(
+                        "Unrecognized retained storage beside a prepared native initialization.",
+                    ));
+                }
+            }
+            if pending.key != ready.key {
+                return Err(Error::conflict(
+                    "Prepared native base initialization inputs changed.",
+                ));
+            }
+            let original = std::fs::metadata(self.root().join(&ready.key).join("pin"))?;
+            let held = std::fs::symlink_metadata(lease.directory.join(&pending.name))?;
+            if !held.is_file()
+                || held.file_type().is_symlink()
+                || (original.dev(), original.ino()) != (held.dev(), held.ino())
+            {
+                return Err(Error::conflict(
+                    "Prepared native base initialization pin changed.",
+                ));
+            }
+            pending
+        } else {
+            super::directory::require_fresh(&lease.directory, &root, &workload)?;
+            let attempt = text(plan, "id");
+            crate::validation::uuid(attempt)?;
+            let name = format!("{INITIALIZING_BASE}{}.{}.pin", ready.key, attempt);
+            // One hard link is both the durable intent and a cache pin. Startup
+            // cleanup of attempt staging cannot release this environment's source.
+            tokio::fs::hard_link(
+                self.root().join(&ready.key).join("pin"),
+                lease.directory.join(&name),
+            )
+            .await?;
+            tokio::fs::File::open(&lease.directory)
+                .await?
+                .sync_all()
+                .await?;
+            InitializingBase {
+                name,
+                key: ready.key.clone(),
+                attempt: attempt.into(),
+            }
+        };
         private_dir(&workload).await?;
+        workspace::require_no_mounts(&workload)?;
         super::quota::prepare(&self.state, &workload, size * disk::MIB).await?;
+        let data = workload.join("data");
         let staging = workload.join("base.partial");
-        if staging.exists() {
-            tokio::fs::remove_dir_all(&staging).await?;
-        }
-        private_dir(&staging).await?;
         let source = self.root().join(&ready.key).join("contents");
-        super::directory::copy_verified(&source, &staging).await?;
-        tokio::fs::rename(&staging, workload.join("data")).await?;
-        // The data pool is a different filesystem from controller metadata.
-        // Persist this rename before publishing initialization or releasing its pin.
+        let existing_data = match tokio::fs::symlink_metadata(&data).await {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,
+            Ok(_) => {
+                return Err(Error::conflict(
+                    "Prepared native data directory was replaced by an alias.",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        if existing_data && std::fs::read_dir(&data)?.next().is_some() {
+            // Rename may have completed before the format marker. Verify only;
+            // never overwrite retained files while replaying initialization.
+            super::directory::verify_copy(&source, &data).await?;
+        } else {
+            if staging.exists() {
+                tokio::fs::remove_dir_all(&staging).await?;
+            }
+            private_dir(&staging).await?;
+            super::directory::copy_verified(&source, &staging).await?;
+            tokio::fs::rename(&staging, &data).await?;
+        }
         tokio::fs::File::open(&workload).await?.sync_all().await?;
         atomic_write(
             &root.join("file-owner.json"),
-            &serde_json::to_vec(&json!({ "uid": ready.inputs.uid, "gid": ready.inputs.gid }))?,
+            &serde_json::to_vec(&json!({
+                "uid": ready.inputs.uid, "gid": ready.inputs.gid
+            }))?,
+        )
+        .await?;
+        super::directory::publish_format(&lease.directory, &root, plan, size * disk::MIB).await?;
+        finish_initializing_base(
+            &lease.directory,
+            &self.data.join("runs").join(run),
+            &pending,
         )
         .await?;
         release_pin(&self.data.join("runs").join(run), text(plan, "id")).await?;
-        drop(lease);
         Ok(true)
     }
+}
+
+const INITIALIZING_BASE: &str = "native-base-initializing-v1.";
+
+struct InitializingBase {
+    name: String,
+    key: String,
+    attempt: String,
+}
+
+fn initializing_base(directory: &Path) -> Result<Option<InitializingBase>> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut pending = None;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(value) = name.strip_prefix(INITIALIZING_BASE) else {
+            continue;
+        };
+        let Some((key, attempt)) = value
+            .strip_suffix(".pin")
+            .and_then(|value| value.split_once('.'))
+        else {
+            return Err(Error::conflict(
+                "Invalid prepared native initialization intent.",
+            ));
+        };
+        if key.len() != 64
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || crate::validation::uuid(attempt).is_err()
+            || !entry.file_type()?.is_file()
+            || pending.is_some()
+        {
+            return Err(Error::conflict(
+                "Ambiguous prepared native initialization intent.",
+            ));
+        }
+        pending = Some(InitializingBase {
+            key: key.into(),
+            attempt: attempt.into(),
+            name,
+        });
+    }
+    Ok(pending)
+}
+
+async fn finish_initializing_base(
+    directory: &Path,
+    stage: &Path,
+    pending: &InitializingBase,
+) -> Result<()> {
+    // Keep the durable intent until the old staging pin has been settled too.
+    // A failed cleanup must retain its retry identity after format publication.
+    release_pin(stage, &pending.attempt).await?;
+    match tokio::fs::File::open(stage).await {
+        Ok(stage) => stage.sync_all().await?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    tokio::fs::remove_file(directory.join(&pending.name)).await?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
+    Ok(())
 }
 
 fn base_signature(root: &Path) -> std::io::Result<String> {

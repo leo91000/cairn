@@ -199,7 +199,7 @@ pub async fn mount(
             "Native journal is missing; recover or expire the environment explicitly before starting a new one.",
         ));
     }
-    let runtime = json!({ "backend": "native", "storage": STORAGE, "os": "linux", "arch": "x86_64", "runtimeId": plan["runtimeId"] });
+    let runtime = format(plan);
     let marker = owner.directory.join("directory.json");
     if marker.exists() {
         let previous: Value = serde_json::from_slice(&tokio::fs::read(&marker).await?)?;
@@ -237,18 +237,7 @@ pub async fn mount(
         filesystems: vec![data],
     };
     atomic_write(&root.join("view.json"), &serde_json::to_vec(&view)?).await?;
-    atomic_write(&marker, &serde_json::to_vec(&runtime)?).await?;
-    atomic_write(&root.join("directory.json"), &serde_json::to_vec(&runtime)?).await?;
-    atomic_write(
-        &owner.directory.join("runtime.json"),
-        &serde_json::to_vec(&runtime)?,
-    )
-    .await?;
-    atomic_write(
-        &owner.directory.join("directory-limit"),
-        bytes.to_string().as_bytes(),
-    )
-    .await?;
+    publish_format(&owner.directory, &root, plan, bytes).await?;
     if !root.join("block-initialized").exists() {
         atomic_write(&root.join("block-seeding"), b"1").await?;
     }
@@ -266,6 +255,49 @@ pub async fn mount(
         _physical: physical,
         aborted: false,
     })
+}
+
+pub(super) fn format(plan: &Value) -> Value {
+    json!({
+        "backend": "native",
+        "storage": STORAGE,
+        "os": "linux",
+        "arch": "x86_64",
+        "runtimeId": plan["runtimeId"]
+    })
+}
+
+/// Caller owns the environment lease, and data publication is already durable.
+/// The authoritative marker is synced before secondary records, so interrupted
+/// publication is recognized as this format and can reconstruct those records.
+pub(super) async fn publish_format(
+    directory: &Path,
+    root: &Path,
+    plan: &Value,
+    bytes: u64,
+) -> Result<()> {
+    let encoded = serde_json::to_vec(&format(plan))?;
+    tokio::fs::File::open(root).await?.sync_all().await?;
+    tokio::fs::File::open(root.parent().unwrap())
+        .await?
+        .sync_all()
+        .await?;
+    atomic_write(&directory.join("directory.json"), &encoded).await?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
+    tokio::fs::File::open(directory.parent().unwrap())
+        .await?
+        .sync_all()
+        .await?;
+    atomic_write(&directory.join("runtime.json"), &encoded).await?;
+    atomic_write(
+        &directory.join("directory-limit"),
+        bytes.to_string().as_bytes(),
+    )
+    .await?;
+    atomic_write(&root.join("directory.json"), &encoded).await?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
+    tokio::fs::File::open(root).await?.sync_all().await?;
+    Ok(())
 }
 
 async fn migrate(
@@ -367,6 +399,12 @@ pub(super) async fn copy_verified(source: &Path, target: &Path) -> Result<()> {
     if !result.status.success() {
         return Err(Error::unavailable("Native copy failed; source retained."));
     }
+    verify_copy(Path::new(source.trim_end_matches('/')), target).await?;
+    block::sync(target).await
+}
+
+pub(super) async fn verify_copy(source: &Path, target: &Path) -> Result<()> {
+    let source = format!("{}/", source.display());
     let verify = tokio::process::Command::new("rsync")
         .args([
             "-aHAXnc",
@@ -385,7 +423,7 @@ pub(super) async fn copy_verified(source: &Path, target: &Path) -> Result<()> {
             "Native copy verification failed; source retained.",
         ));
     }
-    block::sync(target).await
+    Ok(())
 }
 
 pub async fn status(state: &Path, run: &str) -> Result<Value> {
@@ -526,7 +564,7 @@ async fn remove_temporary(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn require_fresh(saved: &Path, control: &Path, workload: &Path) -> Result<()> {
+pub(super) fn require_fresh(saved: &Path, control: &Path, workload: &Path) -> Result<()> {
     let entries = match std::fs::read_dir(saved) {
         Ok(entries) => Some(entries),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -593,7 +631,7 @@ fn require_fresh(saved: &Path, control: &Path, workload: &Path) -> Result<()> {
     Ok(())
 }
 
-fn require_retained_tree(workload: &Path) -> Result<()> {
+pub(super) fn require_retained_tree(workload: &Path) -> Result<()> {
     for name in ["", "data", "data/home", "data/workspaces", "data/output"] {
         let path = workload.join(name);
         match std::fs::symlink_metadata(&path) {
