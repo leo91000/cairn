@@ -38,7 +38,16 @@ refreshed while preserving the draft; a newer saved definition can be reviewed,
 adopted or explicitly replaced by the draft as the next version.
 Comparison values follow the selected field's number or boolean type. Both
 pickers expose the catalog's variables and formula functions, with signatures,
-descriptions and examples. Validation failures retain the draft and offer retry.
+descriptions and examples. Inserting a variable into a typed value produces a
+formula; insertion into an existing formula preserves its cursor and surrounding
+expression. Numeric and boolean membership lists retain their item types. Both
+editors preserve the agent selected at their entry point, require nonempty
+condition groups and omit waits inside loops. Validation and catalog-load
+failures offer retry.
+
+If edit rights disappear while saving, both retain the unsaved definition for
+recovery. Android shows it read-only and offers a sensitive clipboard copy of
+the complete draft; web keeps its fields accessible for copying.
 
 Web uses an adjacent step inspector on wide screens and a sheet on phones.
 Android uses native Compose cards and bottom sheets, with a two-pane list on

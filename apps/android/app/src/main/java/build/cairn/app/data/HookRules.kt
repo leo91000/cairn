@@ -177,7 +177,7 @@ fun describeCondition(condition: JsonElement?): String =
             val parts =
                 condition.list("conditions").map(::describeCondition).filter { it.isNotBlank() }
             when {
-                parts.isEmpty() -> if (condition.text("type") == "all") "Toujours" else "Jamais"
+                parts.isEmpty() -> "Ajouter une condition"
                 parts.size == 1 -> parts.first()
                 else ->
                     parts.joinToString(if (condition.text("type") == "all") " et " else " ou ") {
@@ -796,6 +796,15 @@ fun comparisonExpects(left: JsonElement?, operator: String, variables: List<Rule
         "number" -> "number"
         "boolean" -> "boolean"
         else -> "text"
+    }
+}
+
+fun comparisonListSchema(left: JsonElement?, variables: List<RuleVariable>): JsonObject {
+    val expects = comparisonExpects(left, "equals", variables)
+    val itemType = if (expects == "text") "string" else expects
+    return buildJsonObject {
+        put("type", "array")
+        put("items", buildJsonObject { put("type", itemType) })
     }
 }
 

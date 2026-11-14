@@ -208,11 +208,7 @@ internal fun RuleConditionEditor(
                                         ),
                                     schema =
                                         if (condition.text("operator") == "in")
-                                            ruleObject(
-                                                "type" to JsonPrimitive("array"),
-                                                "items" to
-                                                    ruleObject("type" to JsonPrimitive("string")),
-                                            )
+                                            comparisonListSchema(condition["left"], variables)
                                         else null,
                                 )
                         }
@@ -358,7 +354,7 @@ internal fun RuleConditionEditor(
         }
         if (conditions.isEmpty())
             Text(
-                "Aucune condition : le chemin « alors » est toujours choisi.",
+                "Ajoutez une condition à ce groupe.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -374,7 +370,9 @@ internal fun RuleConditionEditor(
                         "authorQuota" to "Quota par auteur",
                         "formula" to "Formule CEL",
                     ) +
-                        if (depth < 6) listOf("all" to "Groupe ET", "any" to "Groupe OU")
+                        // The server counts the root at level 1; a new group must still fit its
+                        // leaf.
+                        if (depth + 3 <= 6) listOf("all" to "Groupe ET", "any" to "Groupe OU")
                         else emptyList()
                 choices.forEach { (kind, title) ->
                     DropdownMenuItem(text = { Text(title) }, onClick = { add(kind) })

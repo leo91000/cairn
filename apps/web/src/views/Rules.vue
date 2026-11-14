@@ -33,6 +33,8 @@ const catalog = ref<HookRuleCatalog | null>(null)
 const shownRule = ref<HookRule | null>(null)
 const loading = ref(true)
 const error = ref('')
+const catalogError = ref('')
+const catalogLoading = ref(false)
 const query = ref('')
 const filter = ref<'all' | 'mine' | 'blocked'>('all')
 const wideQuery = window.matchMedia('(width > 900px)')
@@ -123,6 +125,25 @@ watch(shownId, () => {
   shownRule.value = null
   void loadShown()
 }, { immediate: true })
+
+async function loadCatalog() {
+  catalogLoading.value = true
+  catalogError.value = ''
+  try {
+    const value = await getHookRuleCatalog(api, {})
+    if (!disposed)
+      catalog.value = value
+  }
+  catch (e) {
+    if (!disposed)
+      catalogError.value = (e as Error).message || 'The rule catalog could not be loaded.'
+  }
+  finally {
+    if (!disposed)
+      catalogLoading.value = false
+  }
+}
+
 onMounted(() => {
   wideQuery.addEventListener('change', onWide)
   void load()
@@ -137,7 +158,7 @@ onMounted(() => {
       .catch(() => {})
   }
 
-  void getHookRuleCatalog(api, {}).then(value => catalog.value = value).catch(() => {})
+  void loadCatalog()
   timer = setInterval(() => {
     if (!document.hidden) {
       void load()
@@ -176,6 +197,19 @@ onBeforeUnmount(() => {
           <Icon :name="Plus" :size="20" />
         </button>
       </header>
+      <div v-if="catalogError" class="mt-3 rounded-xl bg-coral/8 p-3 text-sm" role="alert">
+        <p class="m-0!">
+          The rule catalog could not be loaded. {{ catalogError }}
+        </p>
+        <button
+          type="button"
+          class="mt-2 font-semibold text-accent"
+          :disabled="catalogLoading"
+          @click="loadCatalog"
+        >
+          Retry loading the catalog
+        </button>
+      </div>
       <div v-if="route.query.agent || route.query.instance" class="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-accent/8 px-3 py-2 text-xs" role="status">
         <span v-if="typeof route.query.agent === 'string'">Agent: {{ agentName(route.query.agent) }}</span>
         <span v-if="typeof route.query.instance === 'string'">Plugin: {{ catalog?.hooks.find(entry => entry.trigger.type === 'plugin' && entry.trigger.instanceId === route.query.instance)?.instanceName ?? 'selected instance' }}</span>

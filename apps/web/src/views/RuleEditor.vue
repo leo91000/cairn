@@ -108,7 +108,9 @@ async function load() {
       definition.value = structuredClone(loadedRule.definition)
     }
     else {
-      const hook = loadedCatalog.hooks.find(entry => entry.trigger.type === 'plugin' && entry.trigger.instanceId === route.query.instance) ?? loadedCatalog.hooks.find(entry => entry.trigger.type === 'plugin') ?? loadedCatalog.hooks[0]
+      const requestedAgent = typeof route.query.agent === 'string' ? route.query.agent : ''
+      const availableHooks = requestedAgent ? loadedCatalog.hooks.filter(entry => entry.agentIds.includes(requestedAgent)) : loadedCatalog.hooks
+      const hook = availableHooks.find(entry => entry.trigger.type === 'plugin' && entry.trigger.instanceId === route.query.instance) ?? availableHooks.find(entry => entry.trigger.type === 'plugin') ?? availableHooks[0]
       const agent = typeof route.query.agent === 'string' && hook?.agentIds.includes(route.query.agent) ? route.query.agent : hook?.agentIds[0] ?? loadedCatalog.agents[0]?.agentId ?? ''
       definition.value = emptyDefinition(hook?.trigger ?? { type: 'cairn', hook: 'replyReady' }, agent, loadedCatalog.limits.defaultLimits)
     }

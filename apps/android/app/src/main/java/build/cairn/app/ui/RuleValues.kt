@@ -12,7 +12,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import kotlinx.coroutines.CancellationException
@@ -52,6 +54,10 @@ internal fun RuleValueEditor(
                 (held["value"] as? JsonPrimitive)?.contentOrNull ?: held["value"].toString()
             else -> held.text("text")
         }
+    var editorInput by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
+    LaunchedEffect(text) {
+        if (editorInput.text != text) editorInput = TextFieldValue(text, TextRange(text.length))
+    }
     val modes =
         if (expects in setOf("field", "formula")) listOf("formula" to "Variable ou formule")
         else if (expects in setOf("number", "integer", "boolean"))
@@ -73,6 +79,8 @@ internal fun RuleValueEditor(
                                             when (expects) {
                                                 "number" ->
                                                     JsonPrimitive(text.toDoubleOrNull() ?: 0.0)
+                                                "integer" ->
+                                                    JsonPrimitive(text.toLongOrNull() ?: 0L)
                                                 "boolean" -> JsonPrimitive(true)
                                                 "json" ->
                                                     if (
@@ -125,21 +133,22 @@ internal fun RuleValueEditor(
             }
         else
             OutlinedTextField(
-                text,
+                editorInput,
                 { input ->
+                    editorInput = input
                     change(
                         when (mode) {
-                            "formula" -> formulaRuleValue(input)
+                            "formula" -> formulaRuleValue(input.text)
                             "literal" ->
                                 literalRuleValue(
                                     if (expects in setOf("number", "integer"))
-                                        ruleNumber(input, expects == "integer")
+                                        ruleNumber(input.text, expects == "integer")
                                     else if (expects == "json")
-                                        runCatching { wireJson.parseToJsonElement(input) }
-                                            .getOrElse { JsonPrimitive(input) }
-                                    else JsonPrimitive(input)
+                                        runCatching { wireJson.parseToJsonElement(input.text) }
+                                            .getOrElse { JsonPrimitive(input.text) }
+                                    else JsonPrimitive(input.text)
                                 )
-                            else -> templateValue(input)
+                            else -> templateValue(input.text)
                         }
                     )
                 },
@@ -222,13 +231,27 @@ internal fun RuleValueEditor(
                         )
                         TextButton(
                             onClick = {
+                                val typed =
+                                    expects in setOf("number", "integer", "boolean", "json") ||
+                                        (schema != null &&
+                                            schemaKind(schema, held["value"] ?: JsonNull) !=
+                                                "string")
+                                val replace = expects == "field" || (typed && mode != "formula")
+                                val nextFormula =
+                                    mode == "formula" ||
+                                        expects in setOf("field", "formula") ||
+                                        replace
+                                val insertion =
+                                    if (nextFormula) variable.expression
+                                    else "{{${variable.expression}}}"
+                                val start = if (replace) 0 else editorInput.selection.min
+                                val end = if (replace) text.length else editorInput.selection.max
+                                val nextText = text.take(start) + insertion + text.drop(end)
+                                editorInput =
+                                    TextFieldValue(nextText, TextRange(start + insertion.length))
                                 change(
-                                    if (mode == "formula" || expects == "field")
-                                        formulaRuleValue(
-                                            if (expects == "field") variable.expression
-                                            else text + variable.expression
-                                        )
-                                    else templateValue(text + "{{${variable.expression}}}")
+                                    if (nextFormula) formulaRuleValue(nextText)
+                                    else templateValue(nextText)
                                 )
                                 picking = false
                             }

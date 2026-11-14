@@ -30,15 +30,17 @@ private fun emptyRuleDefinition(
     agent: String,
     instance: String,
 ): JsonObject {
+    val availableHooks =
+        if (agent.isNotBlank()) catalog.hooks.filter { agent in it.agentIds } else catalog.hooks
     val hook =
-        catalog.hooks.firstOrNull {
+        availableHooks.firstOrNull {
             wireJson.encodeToJsonElement(it.trigger).text("instanceId") == instance &&
                 instance.isNotBlank()
         }
-            ?: catalog.hooks.firstOrNull {
+            ?: availableHooks.firstOrNull {
                 wireJson.encodeToJsonElement(it.trigger).text("type") == "plugin"
             }
-            ?: catalog.hooks.firstOrNull()
+            ?: availableHooks.firstOrNull()
     val chosen =
         if (agent.isNotBlank() && hook?.agentIds?.contains(agent) == true) agent
         else hook?.agentIds?.firstOrNull() ?: catalog.agents.firstOrNull()?.agentId.orEmpty()
@@ -131,7 +133,7 @@ fun RuleEditorScreen(
     LaunchedEffect(draft, loading, validationAttempt) {
         checked = false
         validationError = ""
-        if (loading || definition == null) return@LaunchedEffect
+        if (loading || definition == null || !canEdit) return@LaunchedEffect
         checking = true
         delay(350)
         try {
@@ -156,6 +158,7 @@ fun RuleEditorScreen(
         }
     }
     fun update(next: JsonElement) {
+        if (!canEdit) return
         draft = next.toString()
         checked = false
     }
@@ -194,6 +197,7 @@ fun RuleEditorScreen(
                         val latest: JsonObject = vm.api.get("/hook-rules/${segment(ruleId)}")
                         if (!latest.allowed("edit")) {
                             canEdit = false
+                            selected = ""
                             error =
                                 "Vous ne pouvez plus modifier cette règle. Votre brouillon est conservé."
                             return@launch
@@ -294,7 +298,7 @@ fun RuleEditorScreen(
                 }
             }
         }
-        if (definition != null && catalog != null && canEdit) {
+        if (definition != null && catalog != null) {
             val currentCatalog = catalog!!
             val hook =
                 currentCatalog.hooks.firstOrNull {
@@ -318,9 +322,12 @@ fun RuleEditorScreen(
                     "Nom de la règle",
                     definition.text("name"),
                     { update(definition.patch("name" to JsonPrimitive(it))) },
+                    enabled = canEdit,
                 )
+                if (!canEdit) CopyButton("Copier le brouillon", draft, sensitive = true)
                 Text(
-                    if (validationError.isNotEmpty()) "Vérification impossible"
+                    if (!canEdit) "Brouillon conservé en lecture seule"
+                    else if (validationError.isNotEmpty()) "Vérification impossible"
                     else if (checking || !checked) "Vérification…"
                     else if (problems.isEmpty()) "● Prête à être enregistrée"
                     else "${problems.size} points à corriger",
@@ -354,6 +361,7 @@ fun RuleEditorScreen(
                                 triggerKey(definition.obj("trigger")),
                                 definition.obj("trigger").text("hook"),
                             ),
+                            enabled = canEdit,
                         ) { key ->
                             val next =
                                 currentCatalog.hooks.firstOrNull {
@@ -379,6 +387,7 @@ fun RuleEditorScreen(
                                 definition.text("executionAgentId"),
                                 ruleAgentName(state, definition.text("executionAgentId")),
                             ),
+                            enabled = canEdit,
                         ) {
                             update(definition.patch("executionAgentId" to JsonPrimitive(it)))
                         }
@@ -421,6 +430,7 @@ fun RuleEditorScreen(
                     definition.text("description"),
                     { update(definition.patch("description" to JsonPrimitive(it))) },
                     lines = 2,
+                    enabled = canEdit,
                 )
                 val limits = definition.obj("limits").orEmpty()
                 Field(
@@ -438,6 +448,7 @@ fun RuleEditorScreen(
                             )
                         )
                     },
+                    enabled = canEdit,
                 )
                 Field(
                     "Conversations démarrées ou orientées par heure",
@@ -454,6 +465,7 @@ fun RuleEditorScreen(
                             )
                         )
                     },
+                    enabled = canEdit,
                 )
                 Text(
                     "Au dépassement, la règle s’arrête et son créateur est prévenu. Les déclenchements déjà comptés peuvent finir.",

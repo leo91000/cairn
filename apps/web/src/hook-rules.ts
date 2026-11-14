@@ -204,7 +204,7 @@ export function describeCondition(condition: RuleCondition): string {
     case 'any': {
       const parts = condition.conditions.map(describeCondition).filter(Boolean)
       if (parts.length === 0)
-        return condition.type === 'all' ? 'Always' : 'Never'
+        return 'Add a condition'
       return parts.length === 1 ? parts[0] : parts.map(part => part.includes(' and ') || part.includes(' or ') ? `(${part})` : part).join(condition.type === 'all' ? ' and ' : ' or ')
     }
 

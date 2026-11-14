@@ -400,3 +400,136 @@ test('the step menu hides plugin actions when the execution agent has no tool', 
   await page.getByRole('button', { name: 'Add a step here', exact: true }).first().click()
   await expect(page.getByRole('menuitem', { name: /Call a plugin tool/ })).toHaveCount(0)
 })
+
+test('variable insertion keeps numeric and boolean comparisons as formulas', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const rule = await workspace.api('/api/hook-rules', 'POST', {
+    definition: {
+      ...fixture.definition,
+      steps: [{
+        type: 'if',
+        id: 'typed',
+        condition: {
+          type: 'all',
+          conditions: [
+            {
+              type: 'compare',
+              left: { type: 'formula', expression: 'payload.count' },
+              operator: 'equals',
+              right: { type: 'literal', value: 0 },
+            },
+            {
+              type: 'compare',
+              left: { type: 'formula', expression: 'payload.approved' },
+              operator: 'equals',
+              right: { type: 'literal', value: false },
+            },
+          ],
+        },
+        then: fixture.definition.steps,
+        otherwise: [],
+      }],
+    },
+    enabled: true,
+  })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit typed', exact: true }).click()
+  for (const [index, name] of ['count', 'approved'].entries()) {
+    await page.getByRole('button', { name: 'Insert a variable into Value', exact: true }).nth(index).click()
+    await page.getByRole('dialog', { name: 'Variables for Value', exact: true }).getByRole('button').filter({ has: page.getByText(name, { exact: true }) }).click()
+  }
+
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
+  expect(saved.definition.steps[0].condition.conditions.map((entry: any) => entry.right)).toEqual([
+    { type: 'formula', expression: 'payload.count' },
+    { type: 'formula', expression: 'payload.approved' },
+  ])
+  workspace.service.emitHook(fixture.instanceId, 'message', {
+    count: 8,
+    approved: true,
+    author: 'alice',
+    channel: 'support',
+    content: 'Typed variables',
+  }, 'typed-variables')
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]?.status).toBe('completed')
+})
+
+test('formula conditions insert a variable at the caret and keep surrounding expression', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const rule = await workspace.api('/api/hook-rules', 'POST', {
+    definition: {
+      ...fixture.definition,
+      steps: [{
+        type: 'if',
+        id: 'formula',
+        condition: { type: 'formula', expression: 'payload.count > 0 && true' },
+        then: [],
+        otherwise: [],
+      }],
+    },
+    enabled: false,
+  })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit formula', exact: true }).click()
+  const expression = page.getByRole('textbox', { name: 'Formula (true or false)', exact: true })
+  await expression.fill('payload.count >  && true')
+  await expression.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(16, 16))
+  await page.getByRole('button', { name: 'Insert a variable into Formula (true or false)', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Variables for Formula (true or false)', exact: true }).getByRole('button').filter({ has: page.getByText('count', { exact: true }) }).click()
+  await expect(expression).toHaveValue('payload.count > payload.count && true')
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  expect((await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0].condition.expression).toBe('payload.count > payload.count && true')
+})
+
+test('new rules keep the agent whose page requested them', async ({ page, workspace }) => {
+  await rulesFixture(workspace)
+  const agent = workspace.service.agent({ name: 'Requested assistant without plugin access' })
+  await page.goto(workspacePath(`/rules/new?agent=${agent.id}`))
+  await signIn(page)
+  await expect(page.getByRole('combobox', { name: 'Execution agent', exact: true })).toHaveValue(agent.id)
+  await expect(page.getByRole('combobox', { name: 'Hook', exact: true })).toHaveValue(/^cairn:/)
+})
+
+test('a catalog load failure explains disabled creation and can be retried', async ({ page, workspace }) => {
+  await rulesFixture(workspace)
+  await page.goto(workspacePath('/rules'))
+  await signIn(page)
+  await useRelayForHttpMocks(page)
+  await page.route('**/api/hook-rules/catalog*', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Catalog temporarily unavailable' }) }))
+  await page.reload()
+  await expect(page.getByRole('alert').filter({ hasText: 'The rule catalog could not be loaded' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'New rule', exact: true })).toBeDisabled()
+  await page.unroute('**/api/hook-rules/catalog*')
+  await page.getByRole('button', { name: 'Retry loading the catalog', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'New rule', exact: true })).toBeEnabled()
+  await expect(page.getByRole('alert').filter({ hasText: 'The rule catalog could not be loaded' })).toHaveCount(0)
+})
+
+test('loop insertion does not offer an unsupported wait', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const rule = await workspace.api('/api/hook-rules', 'POST', {
+    definition: {
+      ...fixture.definition,
+      steps: [{
+        type: 'forEach',
+        id: 'loop',
+        items: { type: 'literal', value: [1] },
+        itemName: 'entry',
+        body: [],
+      }],
+    },
+    enabled: false,
+  })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('region', { name: 'For each entry', exact: true }).getByRole('button', { name: 'Add the first step', exact: true }).click()
+  await expect(page.getByRole('menuitem', { name: /^Wait/ })).toHaveCount(0)
+  await expect(page.getByRole('menuitem', { name: /Remember a value/ })).toBeVisible()
+})

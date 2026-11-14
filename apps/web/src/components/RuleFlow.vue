@@ -32,6 +32,7 @@ const props = defineProps<{
   catalog: HookRuleCatalog | null
   agentName: (id: string) => string
   editable?: boolean
+  inLoop?: boolean
   executionAgentId?: string
   selected?: string | null
   problems?: HookRuleProblem[]
@@ -46,7 +47,7 @@ const emit = defineEmits<{
 }>()
 
 const menu = ref<number | null>(null)
-const choices = computed(() => stepChoices.filter(choice => choice.kind !== 'callTool' || props.catalog?.tools.some(tool => !props.executionAgentId || tool.agentIds.includes(props.executionAgentId))))
+const choices = computed(() => stepChoices.filter(choice => (choice.kind !== 'wait' || !props.inLoop) && (choice.kind !== 'callTool' || props.catalog?.tools.some(tool => !props.executionAgentId || tool.agentIds.includes(props.executionAgentId)))))
 
 function pick(index: number, kind: StepKind) {
   menu.value = null
@@ -193,6 +194,7 @@ const ranTone: Record<string, string> = {
                 :container="`${container}/${index}/then`"
                 :catalog="catalog"
                 :agent-name="agentName"
+                :in-loop="inLoop"
                 :editable="editable"
                 :execution-agent-id="executionAgentId"
                 :selected="selected"
@@ -216,6 +218,7 @@ const ranTone: Record<string, string> = {
                 :container="`${container}/${index}/otherwise`"
                 :catalog="catalog"
                 :agent-name="agentName"
+                :in-loop="inLoop"
                 :editable="editable"
                 :execution-agent-id="executionAgentId"
                 :selected="selected"
@@ -238,6 +241,7 @@ const ranTone: Record<string, string> = {
                 :container="`${container}/${index}/body`"
                 :catalog="catalog"
                 :agent-name="agentName"
+                :in-loop="true"
                 :editable="editable"
                 :execution-agent-id="executionAgentId"
                 :selected="selected"

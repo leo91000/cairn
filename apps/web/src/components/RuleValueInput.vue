@@ -25,7 +25,7 @@ const props = withDefaults(defineProps<{
   label: string
   variables: VariableOption[]
   // What the receiving field expects; numbers and booleans also offer fixed values.
-  expects?: 'text' | 'number' | 'boolean' | 'json' | 'field'
+  expects?: 'text' | 'number' | 'boolean' | 'json' | 'field' | 'formula'
   multiline?: boolean
   placeholder?: string
   problems?: string[]
@@ -47,7 +47,7 @@ const modes = computed(() => {
     { value: 'literal', label: 'Value', title: 'A fixed value' },
     { value: 'formula', label: 'ƒ', title: 'A CEL formula' },
   ]
-  if (props.expects === 'field')
+  if (['field', 'formula'].includes(props.expects))
     return all.filter(entry => entry.value === 'formula')
   if (props.expects === 'number' || props.expects === 'boolean')
     return all.filter(entry => entry.value !== 'template')
@@ -175,13 +175,14 @@ const groups = computed(() => {
 function insert(option: VariableOption) {
   const element = field.value
   const current = text.value
-  const nextMode = props.expects === 'field' ? 'formula' : mode.value === 'literal' ? 'template' : mode.value
+  const schemaType = props.schema ? resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type : null
+  const typed = ['number', 'boolean', 'json'].includes(props.expects) || (schemaType && schemaType !== 'string')
+  const replace = props.expects === 'field' || (typed && mode.value !== 'formula')
+  const nextMode = ['field', 'formula'].includes(props.expects) || replace ? 'formula' : mode.value === 'literal' ? 'template' : mode.value
   const insertion = nextMode === 'template' ? `{{${option.expression}}}` : option.expression
-  const start = element?.selectionStart ?? current.length
-  const end = element?.selectionEnd ?? current.length
-  const value = nextMode === 'formula' && props.expects === 'field'
-    ? insertion
-    : `${current.slice(0, start)}${insertion}${current.slice(end)}`
+  const start = replace ? 0 : element?.selectionStart ?? current.length
+  const end = replace ? current.length : element?.selectionEnd ?? current.length
+  const value = `${current.slice(0, start)}${insertion}${current.slice(end)}`
   model.value = nextMode === 'formula' ? { type: 'formula', expression: value } : { type: 'template', text: value }
   picking.value = false
   query.value = ''
@@ -303,6 +304,15 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
           <Icon :name="Variable" :size="16" />
         </button>
       </div>
+      <button
+        v-if="mode === 'literal' && (schema || expects === 'boolean') && variables.length"
+        type="button"
+        class="mt-2 text-xs font-semibold text-accent"
+        :aria-label="`Insert a variable into ${label}`"
+        @click="picking = !picking"
+      >
+        Insert a variable
+      </button>
       <div
         v-if="picking"
         class="absolute right-0 z-30 mt-1.5 w-80 max-w-[calc(100vw-40px)] overflow-hidden rounded-2xl border border-line bg-raised shadow-xl"

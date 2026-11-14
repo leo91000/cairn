@@ -3,6 +3,7 @@ package build.cairn.app.ui
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.text.TextRange
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleProblem
 import kotlinx.serialization.json.*
@@ -136,7 +137,9 @@ abstract class RulesEditorCases {
             }
         }
         compose.onNode(hasSetTextAction()).performTextReplacement("900")
-        compose.runOnIdle { assertEquals("900", value["value"].toString()) }
+        compose.onNodeWithText("Formule").performClick()
+        compose.onNodeWithText("Valeur").performClick()
+        compose.runOnIdle { assertEquals(JsonPrimitive(900), value["value"]) }
     }
 
     @Test
@@ -257,5 +260,77 @@ abstract class RulesEditorCases {
         compose.onNodeWithText("Étape").performClick()
         compose.onNodeWithText("Appeler un outil").assertDoesNotExist()
         compose.onNodeWithText("Si / sinon").assertIsDisplayed()
+    }
+
+    @Test
+    fun typedVariableInsertionProducesAFormulaInsteadOfText() {
+        var count by mutableStateOf(literalRuleValue(JsonPrimitive(0)))
+        var approved by mutableStateOf(literalRuleValue(JsonPrimitive(false)))
+        val variables =
+            listOf(
+                RuleVariable("Événement", "payload.count", "Nombre", "integer", ""),
+                RuleVariable("Événement", "payload.approved", "Accord", "boolean", ""),
+            )
+        compose.setContent {
+            CairnTheme {
+                androidx.compose.foundation.layout.Column {
+                    RuleValueEditor("Nombre", count, variables, { count = it }, expects = "number")
+                    RuleValueEditor(
+                        "Accord",
+                        approved,
+                        variables,
+                        { approved = it },
+                        expects = "boolean",
+                    )
+                }
+            }
+        }
+        compose.onAllNodesWithText("+ Insérer une variable")[0].performClick()
+        compose.onNodeWithText("Utiliser Nombre").performClick()
+        compose.onAllNodesWithText("+ Insérer une variable")[1].performClick()
+        compose.onNodeWithText("Utiliser Accord").performClick()
+        compose.runOnIdle {
+            assertEquals(formulaRuleValue("payload.count"), count)
+            assertEquals(formulaRuleValue("payload.approved"), approved)
+        }
+    }
+
+    @Test
+    fun formulaInsertionUsesTheCaretAndPreservesItsSurroundings() {
+        var value by mutableStateOf(formulaRuleValue("payload.count >  && true"))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor(
+                    "Condition",
+                    value,
+                    listOf(RuleVariable("Événement", "payload.count", "Nombre", "integer", "")),
+                    { value = it },
+                    expects = "formula",
+                )
+            }
+        }
+        compose.onNode(hasSetTextAction()).performClick().performTextInputSelection(TextRange(16))
+        compose.onNodeWithText("+ Insérer une variable").performClick()
+        compose.onNodeWithText("Utiliser Nombre").performClick()
+        compose.runOnIdle {
+            assertEquals(formulaRuleValue("payload.count > payload.count && true"), value)
+        }
+    }
+
+    @Test
+    fun numberMembershipChoicesStoreNumbersInsteadOfStrings() {
+        val variables = listOf(RuleVariable("Événement", "payload.count", "Nombre", "integer", ""))
+        val schema = comparisonListSchema(formulaRuleValue("payload.count"), variables)
+        var value by mutableStateOf<JsonElement>(JsonArray(emptyList()))
+        compose.setContent { CairnTheme { RuleLiteralEditor(schema, value, { value = it }) } }
+        compose.onNodeWithText("+ Ajouter un élément").performClick()
+        compose.onNode(hasSetTextAction()).performTextReplacement("8")
+        compose.runOnIdle { assertEquals(JsonArray(listOf(JsonPrimitive(8))), value) }
+        assertEquals(
+            "boolean",
+            comparisonListSchema(literalRuleValue(JsonPrimitive(true)), emptyList())
+                .obj("items")
+                .text("type"),
+        )
     }
 }

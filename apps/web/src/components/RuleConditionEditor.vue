@@ -31,7 +31,9 @@ const props = defineProps<{
   peopleSource?: { pluginId: string, instanceId: string, resourceType: string }
 }>()
 const model = defineModel<RuleCondition>({ required: true })
+// The server counts the root at level 1; a new group must still fit its leaf.
 const depth = computed(() => props.depth ?? 0)
+const canNestGroup = computed(() => depth.value + 3 <= 6)
 const group = computed(() => model.value.type === 'all' || model.value.type === 'any' ? model.value : { type: 'all' as const, conditions: [model.value] })
 
 const operators = Object.entries(operatorTitles) as Array<[RuleOperator, string]>
@@ -140,7 +142,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
       <span class="text-muted">of these hold</span>
     </div>
     <p v-if="!group.conditions.length" class="m-0! rounded-xl bg-canvas/60 px-3 py-2.5 text-sm text-muted">
-      {{ depth ? 'Add a condition to this group.' : 'No condition yet: every event continues.' }}
+      Add a condition to this group.
     </p>
     <div v-for="(condition, index) in group.conditions" :key="index" class="condition-row relative grid gap-2">
       <div v-if="index > 0" class="-my-1 pl-3 text-2xs font-bold tracking-wide text-muted uppercase">
@@ -230,7 +232,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
           <RuleValueInput
             :model-value="{ type: 'formula', expression: condition.expression }"
             label="Formula (true or false)"
-            expects="field"
+            expects="formula"
             :variables="variables"
             :problems="problemsAt(`${conditionPath(index)}/expression`)"
             @update:model-value="value => update(index, { type: 'formula', expression: value.type === 'formula' ? value.expression : '' })"
@@ -381,7 +383,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
           {{ choice.title }}
         </button>
         <button
-          v-if="depth < 4"
+          v-if="canNestGroup"
           type="button"
           role="menuitem"
           class="px-3.5 py-2.5 text-left hover:bg-hover"
