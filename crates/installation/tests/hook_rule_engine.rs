@@ -62,6 +62,7 @@ async fn emit(f: &Fixture, external: &str, payload: Value) {
 
 async fn emit_on(f: &Fixture, instance_id: &str, external: &str, payload: Value) {
     queue_on(f, instance_id, external, payload).await;
+    f.s.rules.notify_queued();
 }
 
 /// Queues a hook event without waking the engine, as an event left by a failed intake:
@@ -95,7 +96,6 @@ async fn queue_on(f: &Fixture, instance_id: &str, external: &str, payload: Value
         })
         .await
         .unwrap();
-    f.s.rules.notify_queued();
 }
 
 fn steps(actions: &Value) -> Value {
@@ -1541,15 +1541,13 @@ async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
         json!({ "channel": "support", "author": "alice" }),
     )
     .await;
-    // The resolver stays held until the test releases it, so these bounds only limit
-    // how long a loaded machine may take to process independent work.
-    let progress = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    let progress = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while !has_seen(&f, &fast).await || !has_seen(&f, other_rule).await {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await;
-    let later_events = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    let later_events = tokio::time::timeout(std::time::Duration::from_secs(8), async {
         for batch in 0..2 {
             for index in 0..30 {
                 emit(
@@ -1645,9 +1643,11 @@ async fn a_continuous_flow_of_completions_does_not_postpone_reading_the_queues()
     // Every post waits for the test to release it, one completion at a time.
     f.hold_posts.store(true, Ordering::SeqCst);
     let flow = 20;
+    // No wakeup is left for the late event to ride on: the pass reads every queue first.
     for index in 0..flow {
-        emit(
+        queue_on(
             &f,
+            &f.instance,
             &format!("flow-{index}"),
             json!({ "channel": "support", "author": "alice" }),
         )
