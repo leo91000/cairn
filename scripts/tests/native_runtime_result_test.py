@@ -141,29 +141,27 @@ class RetainedHealthTest(unittest.TestCase):
 
 
 class CompletedLocalDiskTest(unittest.TestCase):
-    def receipt(self):
-        return dict(status=dict(dirtyBytes=0, published=dict(local=True), completedGeneration=1))
+    def status(self):
+        return dict(storage='local-directory-v1', availability='available', paused=False)
 
-    def test_completed_local_disk_requires_a_durable_local_receipt(self):
+    def receipt(self):
+        return dict(storage='local-directory-v1', logicalBytes=4096, allocatedBytes=8192, files=1)
+
+    def test_stopped_directory_requires_retained_data_and_inspection_under_lease(self):
         receipt = self.receipt()
         manager = Mock(return_value=receipt)
-        api = Mock(return_value=receipt['status'])
+        api = Mock(return_value=self.status())
         self.assertIs(runtime.completed_local_disk(api, manager, 'run'), receipt)
         api.assert_called_once_with('/disks/run/storage-status')
-        manager.assert_called_once_with('consolidate', run='run')
+        manager.assert_called_once_with('inspect', run='run')
 
-    def test_remote_dirty_and_missing_completion_receipts_are_rejected(self):
-        for wrong in ('remote', 'dirty', 'completion'):
-            with self.subTest(wrong=wrong):
-                receipt = self.receipt()
-                if wrong == 'remote':
-                    receipt['status']['published'] = dict(backupId='old-remote-point')
-                elif wrong == 'dirty':
-                    receipt['status']['dirtyBytes'] = 4096
-                else:
-                    receipt['status']['completedGeneration'] = 0
-                with self.assertRaises((AssertionError, KeyError)):
-                    runtime.completed_local_disk(Mock(return_value=self.receipt()['status']), Mock(return_value=receipt), 'run')
+    def test_legacy_missing_paused_or_unallocated_data_is_not_a_clean_close(self):
+        for change in (dict(storage='journal'), dict(availability='unavailable'), dict(paused=True)):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                runtime.completed_local_disk(Mock(return_value=self.status() | change), Mock(return_value=self.receipt()), 'run')
+        for change in (dict(storage='journal'), dict(allocatedBytes=0)):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                runtime.completed_local_disk(Mock(return_value=self.status()), Mock(return_value=self.receipt() | change), 'run')
 
 
 if __name__ == '__main__':

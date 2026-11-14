@@ -54,7 +54,7 @@ mount -o loop,prjquota -- "$fixture/quota.ext4" "$fixture/state/native-data"
 env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME="$fixture/home" \\
   CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_QUOTA_TEST_STATE="$fixture/state" \\
   timeout --signal=TERM --kill-after=10s 180s \\
-  "$binary" --exact "$test_name" --ignored --nocapture --test-threads=1
+  setpriv --bounding-set=-sys_resource "$binary" --exact "$test_name" --ignored --nocapture --test-threads=1
 `
 const result = spawnSync('sudo', ['-n', 'unshare', '--mount', '--propagation', 'private', 'bash', '-c', script, 'cairn-quota-qualification', binary, fixture, test], {
   stdio: 'inherit',

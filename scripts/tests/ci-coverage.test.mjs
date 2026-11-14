@@ -16,6 +16,18 @@ const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.
 const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
+  it('keeps opt-in VM qualification in a local Docker store without release effects', () => {
+    const image = quality.jobs.image
+    expect(image.if).toContain('inputs.vm-storage-qualification == true')
+    expect(image.env.PUBLISH).toContain('inputs.validation-only != true')
+    const guard = image.steps.find(step => step.name === 'Require the VM storage opt-in to remain local')
+    expect(guard.run).toContain('test "$VALIDATION_ONLY" = true')
+    const destination = image.steps.find(step => step.name === 'Choose the image destination').run
+    expect(destination).toContain('if [[ "$PUBLISH" != true ]]; then')
+    expect(destination.indexOf('destination=type=docker,name=cairn:test')).toBeLessThan(destination.indexOf('push-by-digest=true'))
+    expect(quality.jobs.publish.if).toContain('inputs.validation-only != true')
+  })
+
   it('runs the native controller preflight in the full workspace graph with the same installation test selection', () => {
     const steps = quality.jobs.backend.steps
     const preflight = steps.find(step => step.name === 'Qualify native controller concurrency before building every test binary')
@@ -558,8 +570,7 @@ describe('parallel CI coverage', () => {
     const steps = quality.jobs['native-runtime'].steps
     const reference = steps.find(step => step.name === 'Qualify the exact reference on the current disposable host')
     const candidate = steps.find(step => step.name === 'Qualify local disks, ublk, systemd ownership and crash recovery')
-    // eslint-disable-next-line no-template-curly-in-string -- same local harness for both exact binary pairs
-    expect(reference.run).toContain('git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py')
+    expect(reference.run).toContain('git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py')
     // eslint-disable-next-line no-template-curly-in-string -- literal shell fallback is the provenance contract
     expect(candidate.run).toContain('git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py')
     // eslint-disable-next-line no-template-curly-in-string -- literal GitHub expression is the provenance contract
@@ -661,7 +672,7 @@ describe('parallel CI coverage', () => {
     const containers = job.steps.findIndex(step => step.run?.includes('python3 tests/installation_update_containers.py'))
     expect(web).toBeGreaterThan(-1)
     expect(containers).toBeGreaterThan(web)
-    expect(job.steps[containers].run).toContain('pnpm test:backend --workspace --example native_storage_qualifier stopped_inspection_keeps_its_generation_across_a_monitor_period')
+    expect(job.steps[containers].run).toContain('pnpm test:backend --workspace --example native_storage_qualifier')
   })
 
   it('runs every network topology exactly once on independent hosts', () => {

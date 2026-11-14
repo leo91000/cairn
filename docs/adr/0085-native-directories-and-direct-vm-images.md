@@ -78,3 +78,14 @@ ENOSPC, arrêt forcé, crash, consommateurs Docker survivants et nettoyage retar
 Les mesures comparent une référence exacte aux nouveaux chemins : octets logiques
 et alloués, lectures froides/chaudes, écritures et CPU, avec commandes et conditions
 de l’hôte. Elles restent locales, sans inférence sur une latence réseau de production.
+
+Ext4 project hard limits apply to processes without `CAP_SYS_RESOURCE`.
+[Linux quota enforcement](https://raw.githubusercontent.com/torvalds/linux/v6.12/fs/quota/dquot.c)
+allows that capability to bypass hard limits, including project quotas. Protected
+workloads and ordinary containers lack it. Native administrator authority remains
+unrestricted: quota accounting and the controller's pressure/stop observations
+remain useful, but an administrator can bypass or alter those limits. Migration
+drops that capability from the copy child and checks allocated quota usage before
+committing the copy, retaining
+the legacy source when the copy exceeds its allowance. Disposable quota tests drop
+that capability explicitly; they do not claim adversarial root confinement.

@@ -289,7 +289,14 @@ async fn migrate(
             )
             .await?;
             private_dir(&staging).await?;
-            copy_verified(&root.join("data"), &staging).await
+            copy_verified(&root.join("data"), &staging).await?;
+            // Verify the final allocated total as well as the kernel-enforced
+            // copy. Keep the old journal intact if the grant is insufficient.
+            let allowance = plan["resources"]["diskMiB"].as_u64().unwrap() * super::disk::MIB;
+            if quota::usage(&workload)? > allowance {
+                return Err(Error::conflict("Legacy native data exceeds its migration allowance; increase the grant before conversion."));
+            }
+            Ok(())
         }
         .await;
         legacy.close().await?;
@@ -323,7 +330,22 @@ async fn migrate(
 
 pub(super) async fn copy_verified(source: &Path, target: &Path) -> Result<()> {
     let source = format!("{}/", source.display());
-    let result = tokio::process::Command::new("rsync")
+    let mut copy = tokio::process::Command::new("rsync");
+    // Root's CAP_SYS_RESOURCE bypasses project quotas, including inode limits.
+    // The child retains the ownership/xattr privileges needed for preservation,
+    // but its exec cannot regain the quota exemption from UID zero.
+    unsafe {
+        copy.pre_exec(|| {
+            if libc::geteuid() == 0
+                && (libc::prctl(libc::PR_CAPBSET_DROP, 24, 0, 0, 0) != 0
+                    || libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_LOWER, 24, 0, 0) != 0)
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let result = copy
         .args([
             "-aHAX",
             "--numeric-ids",

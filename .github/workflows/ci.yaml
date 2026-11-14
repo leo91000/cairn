@@ -46,6 +46,10 @@ on:
         type: choice
         options: ['1', '2']
         default: '2'
+      vm-storage-qualification:
+        description: Build and qualify a local VM image without publishing (requires validation-only)
+        type: boolean
+        default: false
       exclusive-android:
         description: Qualify live nested Android continuity on a compatible host
         type: boolean
@@ -564,7 +568,7 @@ jobs:
             pnpm test:backend --workspace --lib "$selected"
           done
           pnpm test:backend -p cairn-installation --test worker
-          pnpm test:backend --workspace --example native_storage_qualifier stopped_inspection_keeps_its_generation_across_a_monitor_period
+          pnpm test:backend --workspace --example native_storage_qualifier
       - name: Qualify native directory quotas on a private disposable ext4 filesystem
         env:
           CAIRN_NATIVE_DISPOSABLE_HOST: '1'
@@ -574,7 +578,7 @@ jobs:
         with:
           phase: after-build
   native-runtime:
-    name: Native Linux ublk storage and process ownership (CPU workload)
+    name: Native Linux directory storage and process ownership (CPU workload)
     needs: [resolve, build]
     if: always() && !cancelled() && (inputs.ci-diagnostic == 'native' || (inputs.ci-diagnostic != 'backend' && needs.resolve.result == 'success' && needs.build.result == 'success' && needs.resolve.outputs.reuse != 'true'))
     runs-on: ubuntu-24.04
@@ -604,7 +608,7 @@ jobs:
       - name: Prepare disposable host block storage
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends e2fsprogs python3-venv sudo uidmap iproute2 iptables libcap2-bin
+          sudo apt-get install -y --no-install-recommends e2fsprogs rsync python3-venv sudo uidmap iproute2 iptables libcap2-bin
           sudo modprobe tun
           sudo modprobe ip_tables
           sudo modprobe iptable_nat
@@ -727,12 +731,12 @@ jobs:
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
           DIAGNOSTIC_CANDIDATE: ${{ inputs.ci-diagnostic == 'native' && inputs.diagnostic-candidate || '' }}
         run: |
-          # Run the same local qualification workload against each exact binary pair.
-          # Use this change's local workload for both binaries; only the runtime/qualifier pair differs.
+          # Each storage format uses its own immutable lifecycle fixture. The
+          # seeded IO workload remains identical for the measured comparison.
           git fetch --no-tags origin "$REFERENCE_SHA"
           reference_fixture="$RUNNER_TEMP/cairn-native-reference-fixture"
           mkdir -p "$reference_fixture"
-          git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
+          git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
             mkdir -p "native-diagnostics/reference"
             python3 -B scripts/tests/native_admission_overlay.py "$reference_fixture" reference | tee "native-diagnostics/reference/admission-observation.json"
@@ -763,9 +767,9 @@ jobs:
             python3 -B scripts/tests/native_admission_overlay.py "$candidate_fixture" candidate
           fi
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
-            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/candidate" 90 -- node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/candidate" 90 -- node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
           else
-            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
           fi
       - uses: actions/upload-artifact@v7.0.1
         if: always()
@@ -1069,7 +1073,7 @@ jobs:
   image:
     # Compile the release image immediately; wait for fixtures only before smoke tests.
     needs: resolve
-    if: inputs.validation-only != true && needs.resolve.outputs.reuse != 'true'
+    if: (inputs.validation-only != true || inputs.vm-storage-qualification == true) && needs.resolve.outputs.reuse != 'true'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       published: ${{ env.PUBLISH }}
@@ -1082,9 +1086,14 @@ jobs:
     env:
       # A pull request from this repository can become the release, so its image
       # is published like main's. Fork images stay local.
-      PUBLISH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      PUBLISH: ${{ inputs.validation-only != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Require the VM storage opt-in to remain local
+        env:
+          VM_STORAGE_QUALIFICATION: ${{ inputs.vm-storage-qualification }}
+          VALIDATION_ONLY: ${{ inputs.validation-only }}
+        run: test "$VM_STORAGE_QUALIFICATION" != true || test "$VALIDATION_ONLY" = true
       - name: Prepare KVM build host
         run: |
           test -e /dev/kvm
@@ -1140,7 +1149,10 @@ jobs:
         id: target
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/cairn"
-          if [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then
+          if [[ "$PUBLISH" != true ]]; then
+            echo "destination=type=docker,name=cairn:test" >> "$GITHUB_OUTPUT"
+            echo "local=cairn:test" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then
             # Publish only an untagged digest. Release/latest tags wait for all checks.
             echo "destination=type=image,name=$image,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
           elif [[ "$PUBLISH" == true ]]; then
@@ -1293,14 +1305,14 @@ jobs:
           CAIRN_RETENTION_TURNS: 4
           CAIRN_RETENTION_CRASH_AFTER: 2
           CAIRN_RETENTION_ADMISSION: 'true'
-          CAIRN_RETENTION_LOCAL_CONSOLIDATION: 'true'
+          CAIRN_RETENTION_LOCAL_IMAGE_INSPECTION: 'true'
         run: node tests/runner-retention-smoke.mjs "$SMOKE_IMAGE"
       - name: Report remaining disk space
         if: always()
         run: df -h /
   beacon-image:
     needs: resolve
-    if: inputs.validation-only != true && needs.resolve.outputs.reuse != 'true'
+    if: (inputs.validation-only != true || inputs.vm-storage-qualification == true) && needs.resolve.outputs.reuse != 'true'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       published: ${{ env.PUBLISH }}
@@ -1310,7 +1322,7 @@ jobs:
       contents: read
       packages: write
     env:
-      PUBLISH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      PUBLISH: ${{ inputs.validation-only != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: docker/setup-buildx-action@v4.3.0

@@ -66,6 +66,21 @@ If the local host cannot execute a required qualification, run the appropriate
 GitHub workflow manually on the branch and wait for its result. A manual run can
 provide test evidence for the PR; it cannot supply reusable release provenance.
 
+For direct-storage development, `ci-diagnostic=storage`, `validation-only=true`
+and `backend-only=false` run the dedicated project-quota lifecycle test and image
+persistence/admission tests on a disposable runner. This does not replace the
+full native/node/VM qualifications. The quota fixture drops `CAP_SYS_RESOURCE`
+because Linux allows that capability to bypass project hard limits.
+
+To qualify VM storage in a full non-publishing run, also set
+`vm-storage-qualification=true`. The runner image is built into its local Docker
+store and runs the real KVM smoke and retention suites. This opt-in requires
+`validation-only=true`; publishing, promotion and deployment remain disabled.
+The growth scenario crosses 32 GiB with a 33 GiB image reservation. The retention
+memory scenario uses 1 GiB images, since writable direct images now reserve their
+full capacity against node/free-space admission. Missing physical capacity is a
+qualification failure, not a reason to skip the case.
+
 Full qualifications run the resolved OpenCode and Claude Code native adapters,
 plus the Plan boundary checks for the resolved Claude Code and Codex releases,
 in one separate 30-minute `cli-qualification` job after the normal backend suite.

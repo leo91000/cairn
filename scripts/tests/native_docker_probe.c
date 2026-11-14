@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -20,7 +21,14 @@ static double milliseconds(clockid_t clock) {
 }
 int main(int argc, char **argv) {
     require(argc == 3); require(chdir(argv[2]) == 0);
-    if (!strcmp(argv[1], "metadata-create")) {
+    if (!strcmp(argv[1], "hold")) {
+        signal(SIGTERM, SIG_IGN);
+        int fd = open("persisted", O_CREAT | O_WRONLY | O_TRUNC, 0600); require(fd >= 0);
+        const char *value = "container work retained";
+        require(write(fd, value, strlen(value)) == (ssize_t)strlen(value));
+        require(fsync(fd) == 0); require(close(fd) == 0);
+        for (;;) pause();
+    } else if (!strcmp(argv[1], "metadata-create")) {
         int fd = open("capability", O_CREAT | O_WRONLY | O_TRUNC, 0600); require(fd >= 0);
         require(write(fd, "fixture", 7) == 7); require(close(fd) == 0);
         require(chmod("capability", 06750) == 0);

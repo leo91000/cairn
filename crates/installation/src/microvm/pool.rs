@@ -1085,7 +1085,9 @@ impl Reservation {
                 };
                 if !fits {
                     stop.cancel();
-                    self.finish().await;
+                    if !self.finish().await {
+                        return Ok(crate::runner::FINALIZATION_FAILED_SENTINEL);
+                    }
                     return result;
                 }
                 // Anonymous eligibility ends permanently on assignment.

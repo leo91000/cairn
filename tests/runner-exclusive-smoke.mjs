@@ -14,7 +14,6 @@ import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { inspectLocalDisk, prepareLocalStorage } from './runner-storage-smoke.mjs'
-import { ublkDeviceArguments } from './ublk-devices.mjs'
 
 async function main() {
   const image = process.argv[2]
@@ -173,7 +172,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       await mkdir(path.join(root, directory), { recursive: true })
     await writeFile(path.join(root, 'data/runner-secret'), 'fixture-runner-token')
     const capabilities = ['SYS_ADMIN', 'SYS_PTRACE', 'SYS_NICE', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', ...ublkDeviceArguments(), '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${envelopeMiB}m`, '--cpus', '3', '-e', 'CONCURRENCY=4', '-e', 'CAIRN_READY_VM_POOL=false', '-e', 'RUST_LOG=warn,cairn_performance=info', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${envelopeMiB}m`, '--cpus', '3', '-e', 'CONCURRENCY=4', '-e', 'CAIRN_READY_VM_POOL=false', '-e', 'RUST_LOG=warn,cairn_performance=info', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     url = `http://${docker('port', name, '4311/tcp')}`
     await until(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false))
     const fixture = await prepareLocalStorage({
@@ -291,7 +290,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       },
       android,
       memoryRequired,
-      scope: 'Real Firecracker and ublk; same active commands, nested vCPU, guest RAM contents, local disk inspection, admission and reservation expiry. Private local journals.',
+      scope: 'Real Firecracker and direct images; same active commands, nested vCPU, guest RAM contents, local disk inspection, admission and reservation expiry. Private local image files.',
     })}\n`)
   }
   finally {

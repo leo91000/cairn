@@ -3,6 +3,15 @@
 Decision: [ADR-0072](adr/0072-fast-journal-recovery-and-receipt-reconciliation.md).
 The local disk model is defined in
 [ADR-0083](adr/0083-local-conversation-disks-without-s3.md).
+New environments use [ADR-0085](adr/0085-native-directories-and-direct-vm-images.md).
+Journal recovery remains a legacy-conversion requirement. The direct-format local
+block-interface comparison is reproducible with
+`cargo run --locked -p cairn-installation --example local_storage_measurement`;
+record its build profile, source revision and host conditions. Its three paired
+samples report encoded/allocated bytes, durable writes, cold-hint/warm reads and
+process CPU. It excludes guest ext4/VMM IO and complements the disposable native
+reference/candidate and real Firecracker qualifications; it is not a production
+network or full VM latency measurement. Keep output artifacts outside the checkout.
 
 ## Workload and measured operations
 
