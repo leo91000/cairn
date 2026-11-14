@@ -1,4 +1,4 @@
-# 0033 — Hook rule engine
+# 0034 — Hook rule engine (SQLite schema 33)
 
 Version 32 upgrades to 33 automatically in `Store::open`, before the SQL actors start
 ([ADR-0075](../adr/0075-plugin-hooks-rules-and-scoped-grants.md), « Budget du moteur de

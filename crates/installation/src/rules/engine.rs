@@ -1895,18 +1895,18 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                     if db.hook_triggering(&triggering.id)?.is_none() || guard(db, &triggering)? {
                         return Ok(Step::Done);
                     }
-                    let mut stored = triggering.clone();
-                    stored.cursor = cursor;
-                    stored.actions += 1;
-                    if !count(db, &mut stored, &row, &version)? {
-                        return refuse(db, &triggering, "The rule reached its hourly limit of triggerings.");
-                    }
                     let state_bytes: i64 = db.0.query_row(
                         "SELECT coalesce(sum(length(CAST(value AS BLOB))),0) FROM hook_rule_values WHERE rule_id=?1 AND name<>?2",
                         params![row.id, name], |row| row.get(0),
                     )?;
                     if state_bytes as usize + input.to_string().len() > MAX_RULE_VALUES_BYTES {
                         return refuse(db, &triggering, "This rule's remembered values exceed 1 MiB.");
+                    }
+                    let mut stored = triggering.clone();
+                    stored.cursor = cursor;
+                    stored.actions += 1;
+                    if !count(db, &mut stored, &row, &version)? {
+                        return refuse(db, &triggering, "The rule reached its hourly limit of triggerings.");
                     }
                     db.0.prepare_cached(
                         "INSERT INTO hook_rule_values VALUES(?1,?2,?3,?4) \

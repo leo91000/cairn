@@ -2124,3 +2124,70 @@ async fn failed_conditions_without_actions_are_counted_without_displacing_histor
     assert_eq!(listed["withoutEffect"], 1);
     assert_eq!(f.posts.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn refused_first_value_stores_leave_the_hourly_budget_available() {
+    let f = granted().await;
+    let rule = rule(&f, OWNER, json!([remember_seen()]), 1).await;
+    let id = rule.clone();
+    f.s.store
+        .transaction(move |db| {
+            let value = json!("x".repeat(65_534)).to_string();
+            for index in 0..16 {
+                db.0.execute(
+                    "INSERT INTO hook_rule_values VALUES(?1,?2,?3,0)",
+                    rusqlite::params![id, format!("slot{index}"), value],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for event in ["full-values-first", "full-values-second"] {
+        emit(
+            &f,
+            event,
+            json!({ "channel": "support", "author": "alice" }),
+        )
+        .await;
+        engine::tick(&f.s).await.unwrap();
+    }
+    let listed = history(&f, OWNER, &rule).await;
+    assert!(
+        listed["triggerings"].as_array().unwrap().is_empty(),
+        "{listed}"
+    );
+    assert_eq!(listed["withoutEffect"], 2);
+    let path = format!("/api/hook-rules/{rule}");
+    let (_, current) = call(&f, OWNER, "GET", &path, Value::Null).await;
+    assert!(
+        current["blocks"].as_array().unwrap().is_empty(),
+        "{current}"
+    );
+    assert!(f.s.store.keys("push-outbox:").await.unwrap().is_empty());
+
+    // Replacing an existing value reduces the remembered data, and can still use
+    // this hour's first action: the refused stores consumed no hourly allowance.
+    let mut definition = current["definition"].clone();
+    definition["steps"][0]["action"]["name"] = "slot0".into();
+    let (status, edited) = call(
+        &f,
+        OWNER,
+        "PUT",
+        &path,
+        json!({ "ruleId": rule, "revision": current["revision"], "definition": definition }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    emit(
+        &f,
+        "reduced-values",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    assert_eq!(listed["triggerings"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["triggerings"][0]["status"], "completed", "{listed}");
+    assert_eq!(listed["withoutEffect"], 2);
+}
