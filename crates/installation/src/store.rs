@@ -1852,6 +1852,10 @@ mod schema_tests {
             ("deliverables", crate::artifacts::migration::upgrade),
             ("agent access", crate::agent_access::upgrade),
             ("conversation writers", crate::conversation_writers::upgrade),
+            (
+                "rule conversations",
+                crate::rules::engine::conversations::upgrade,
+            ),
         ];
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());
