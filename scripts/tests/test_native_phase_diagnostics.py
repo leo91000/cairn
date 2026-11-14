@@ -13,10 +13,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import native_runtime_test as runtime
 from native_phase_overlay import OBSERVER, instrument
 
 
-def replay_readiness_boundary(source, role, observed=True, failed=False):
+def replay_readiness_boundary(source, role, observed=True, failed=False, local=False):
     """Execute the real nested readiness/failure block; replace only its I/O.
 
     The full helper's symbol table is retained separately below. This slice
@@ -41,19 +42,22 @@ def replay_readiness_boundary(source, role, observed=True, failed=False):
     main.body += [start, ast.Return(value=ast.Name(id='start', ctx=ast.Load()))]
     module = ast.fix_missing_locations(ast.Module(body=[main], type_ignores=[]))
     observer = SimpleNamespace(watch=Mock())
-    commands = Mock(return_value=SimpleNamespace(stdout='test-private-secret test-private-token test-private-grant', stderr=''))
+    context = dict(owner='run', policy={}) if local else dict(grant='test-private-grant')
+    private_text = runtime.SECRET + ' test-private-token ' + ('local failure' if local else 'test-private-grant')
+    commands = Mock(return_value=SimpleNamespace(stdout=private_text, stderr=''))
     stderr = io.StringIO()
     phases = []
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         if failed:
             (root / 'attempt.exit').write_text('{"StatusCode": 9}')
-            (root / 'attempt.log').write_text(json.dumps(dict(data=base64.b64encode(b'test-private-secret failure').decode())) + '\n')
+            (root / 'attempt.log').write_text(json.dumps(dict(data=base64.b64encode((private_text + ' failure').encode()).decode())) + '\n')
         namespace = dict(start_diagnostics=lambda selected: observer, progress=phases.append,
                          supervisor='fixture-supervisor.service', attempt='attempt', state=root,
                          read_controller_result=lambda path: json.loads(path.read_text()),
-                         base64=base64, json=json, SECRET='test-private-secret', token='test-private-token',
-                         contexts={'run': {'grant': 'test-private-grant'}}, run='run', subprocess=SimpleNamespace(run=commands),
+                         base64=base64, json=json, SECRET=runtime.SECRET, token='test-private-token',
+                         redact_fixture_diagnostics=runtime.redact_fixture_diagnostics,
+                         contexts={'run': context}, run='run', subprocess=SimpleNamespace(run=commands),
                          sys=SimpleNamespace(stderr=stderr), Path=Path, os=SimpleNamespace(environ={}), root=root)
         exec(compile(module, '<native-readiness-boundary>', 'exec'), namespace)
         try:
@@ -77,7 +81,7 @@ class NativePhaseTests(unittest.TestCase):
                 self.assertEqual(observed['outcome'], ('AssertionError', 'Synthetic workload failed before readiness.'))
                 self.assertEqual(len(observed['commands']), 4)
                 self.assertIn('Synthetic workload exit code:', observed['evidence'])
-                for secret in ('test-private-secret', 'test-private-token', 'test-private-grant'):
+                for secret in (runtime.SECRET, 'test-private-token', 'test-private-grant'):
                     self.assertNotIn(secret, observed['stderr'])
                     self.assertNotIn(secret, observed['evidence'])
             else:
@@ -89,6 +93,19 @@ class NativePhaseTests(unittest.TestCase):
         for role in ('reference', 'candidate'):
             with self.subTest(role=role):
                 self.assert_readiness_binding(source, role)
+
+    def test_owner_only_failure_context_preserves_original_failure_and_redacts_all_outputs(self):
+        source = Path(__file__).with_name('native_runtime_test.py').read_text()
+        for role in ('reference', 'candidate'):
+            for observed in (False, True):
+                with self.subTest(role=role, observed=observed):
+                    result = replay_readiness_boundary(source, role, observed=observed, failed=True, local=True)
+                    self.assertEqual(result['outcome'], ('AssertionError', 'Synthetic workload failed before readiness.'))
+                    self.assertEqual(len(result['commands']), 4)
+                    self.assertIn('local failure', result['evidence'])
+                    for secret in (runtime.SECRET, 'test-private-token'):
+                        self.assertNotIn(secret, result['stderr'])
+                        self.assertNotIn(secret, result['evidence'])
 
     def test_entire_fixture_closes_over_observer_and_keeps_failure_diagnostics_local(self):
         source = Path(__file__).with_name('native_runtime_test.py').read_text()

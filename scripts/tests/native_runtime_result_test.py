@@ -14,6 +14,36 @@ runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
 
 
+class FixtureDiskReservationsTest(unittest.TestCase):
+    def test_online_grant_and_stale_replay_keep_future_resume_reservations(self):
+        reservations = runtime.FixtureDiskReservations()
+        api = Mock()
+        self.assertEqual(reservations.reserve('run', 256), 256)
+        reservations.grow(api, 'run', 'attempt', 384)
+        reservations.grow(api, 'run', 'attempt', 256)
+        self.assertEqual(api.call_args_list, [
+            call('/disk-growth', dict(protocol=1, grants=[dict(attemptId='attempt', allowanceMiB=384, reason='granted')])),
+            call('/disk-growth', dict(protocol=1, grants=[dict(attemptId='attempt', allowanceMiB=256, reason='granted')])),
+        ])
+        # The same fixture ledger survives controller restarts, as it does in main.
+        for _ in range(3):
+            self.assertEqual(reservations.reserve('run', 256), 384)
+        self.assertEqual(reservations.reserve('another-run', 256), 256)
+
+    def test_rejected_grant_does_not_raise_the_next_reservation(self):
+        reservations = runtime.FixtureDiskReservations()
+        reservations.reserve('run', 256)
+        with self.assertRaisesRegex(RuntimeError, 'rejected'):
+            reservations.grow(Mock(side_effect=RuntimeError('rejected')), 'run', 'attempt', 384)
+        self.assertEqual(reservations.reserve('run', 256), 256)
+
+    def test_docker_and_later_plain_turns_keep_the_largest_reservation(self):
+        reservations = runtime.FixtureDiskReservations()
+        self.assertEqual(reservations.reserve('run', 2048), 2048)
+        reservations.grow(Mock(), 'run', 'attempt', 384)
+        self.assertEqual(reservations.reserve('run', 256), 2048)
+
+
 class ControllerResultTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
