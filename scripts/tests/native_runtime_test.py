@@ -91,6 +91,29 @@ SPEC.loader.exec_module(host)
 SECRET = 'synthetic-generated-secret-never-persist'
 
 
+class FixtureDiskReservations:
+    """Remember the manager's accepted allowances across turns and restarts."""
+
+    def __init__(self):
+        self.retained = {}
+
+    def reserve(self, run, minimum_mib):
+        allowance = max(self.retained.get(run, 0), minimum_mib)
+        self.retained[run] = allowance
+        return allowance
+
+    def grow(self, api, run, attempt, allowance_mib):
+        api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=attempt, allowanceMiB=allowance_mib, reason='granted')]))
+        self.reserve(run, allowance_mib)
+
+
+def redact_fixture_diagnostics(text, token, context):
+    for secret in (SECRET, token, context.get('grant')):
+        if secret:
+            text = text.replace(secret, '[fixture-secret]')
+    return text
+
+
 def command(*args, **options):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=60, **options)
 
@@ -293,7 +316,7 @@ def main():
         contexts = {}
         started_runs = set()
         vm_runs = set()
-        retained_disk_mib = {}
+        disk_reservations = FixtureDiskReservations()
         controller_started = False
         current_mode = dict(mode="protected", generation=None)
         host_marker = Path("/etc/cairn-native-qualification-" + identifier)
@@ -469,10 +492,9 @@ def main():
             (tools / 'bin' / workload).chmod(0o555)
             (tools / 'bin/codex').write_text(Path(__file__).with_name('native_chat_fixture.py').read_text())
             (tools / 'bin/codex').chmod(0o555)
-            # Docker grows this conversation's retained disk. A later turn
-            # without Docker (including administrator mode) must not shrink it.
-            disk_mib = max(retained_disk_mib.get(run, 256), 2048 if docker_script else 256)
-            retained_disk_mib[run] = disk_mib
+            # Online grants and Docker both grow the retained disk. Later turns
+            # and controller restarts must reserve its full accepted allowance.
+            disk_mib = disk_reservations.reserve(run, 2048 if docker_script else 256)
             plan = dict(id=attempt, runId=run, backend='native', runtimeId='synthetic', nodeLeaseRequired=True, nativeMode=current_mode.copy(),
                 expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox=sandbox,
                 resources=dict(cpu=1, memoryMiB=1024 if docker_script else 512, diskMiB=disk_mib), storage=contexts[run],
@@ -512,17 +534,16 @@ def main():
                     event = json.loads(record)
                     if event.get('data'):
                         # Only the synthetic workload's errors; plans/grants never logged.
-                        print(base64.b64decode(event['data']).decode(errors='replace').replace(SECRET, '[fixture-secret]'), file=sys.stderr)
+                        text = base64.b64decode(event['data']).decode(errors='replace')
+                        print(redact_fixture_diagnostics(text, token, contexts[run]), file=sys.stderr)
                 diagnostics = ['Synthetic workload exit code: ' + (state / (attempt + '.exit')).read_text().strip()]
                 for unit in (supervisor, 'cairn-native-' + attempt + '.service'):
                     for args in [('systemctl', 'show', unit, '--property=Result,ExecMainStatus,ExecMainCode,ActiveState'),
                                  ('journalctl', '--no-pager', '--output=cat', '--lines=60', '--unit=' + unit)]:
                         result = subprocess.run(args, capture_output=True, text=True, timeout=30)
                         text = result.stdout + result.stderr
-                        for secret in (SECRET, token, contexts[run]['grant']):
-                            text = text.replace(secret, '[fixture-secret]')
                         diagnostics.append(unit + ':\n' + text)
-                diagnostic_text = '\n'.join(diagnostics)
+                diagnostic_text = redact_fixture_diagnostics('\n'.join(diagnostics), token, contexts[run])
                 print(diagnostic_text, file=sys.stderr)
                 evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
                 evidence.mkdir(parents=True, exist_ok=True)
@@ -787,7 +808,7 @@ def main():
             assert not (managed(run) / 'inbox-read-error').exists()
             before_reads = manager('metrics')['remoteRequests']
             growth_start = time.monotonic()
-            api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=384, reason='granted')]))
+            disk_reservations.grow(api, run, resumed, 384)
             eventually(lambda: os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity)
             metrics['onlineGrowth'] = dict(fromMiB=256, toMiB=384, wallMs=(time.monotonic()-growth_start)*1000,
                                           remoteRequests=manager('metrics')['remoteRequests']-before_reads)
@@ -804,7 +825,7 @@ def main():
                 stream.seek(-8, os.SEEK_END)
                 assert stream.read() == b'new-tail'
             tail.unlink()
-            api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=256, reason='granted')]))
+            disk_reservations.grow(api, run, resumed, 256)
             assert os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity, 'Grant replay shrank filesystem.'
             # The issued 384 MiB allowance also governs retained journal bytes,
             # not just ext4 usage. Repeated durable overwrites must consolidate
