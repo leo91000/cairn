@@ -41,12 +41,16 @@
     "input": "ListPluginResourcesInput",
     "method": "GET",
     "name": "listPluginResources",
+    "optionalQuery": [
+      "agentId"
+    ],
     "output": "ListPluginResourcesOutput",
     "path": "/plugins/{pluginId}/connections/{instanceId}/resources",
     "query": [
       "resourceType",
       "page",
-      "query"
+      "query",
+      "agentId"
     ]
   },
   {
@@ -54,11 +58,15 @@
     "input": "ResolvePluginResourceInput",
     "method": "GET",
     "name": "resolvePluginResource",
+    "optionalQuery": [
+      "agentId"
+    ],
     "output": "ResolvePluginResourceOutput",
     "path": "/plugins/{pluginId}/connections/{instanceId}/resources/ancestors",
     "query": [
       "resourceType",
-      "id"
+      "id",
+      "agentId"
     ]
   },
   {

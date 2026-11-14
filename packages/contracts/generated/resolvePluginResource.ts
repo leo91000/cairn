@@ -3,5 +3,6 @@ import type { ResolvePluginResourceInput } from './typescript/ResolvePluginResou
 import type { ResolvePluginResourceOutput } from './typescript/ResolvePluginResourceOutput'
 
 export function resolvePluginResource(request: <T>(path: string, options: RequestInit) => Promise<T>, input: ResolvePluginResourceInput): Promise<ResolvePluginResourceOutput> {
-  return request<ResolvePluginResourceOutput>(`/plugins/${encodeURIComponent(input.pluginId)}/connections/${encodeURIComponent(input.instanceId)}/resources/ancestors?${new URLSearchParams({ resourceType: String(input.resourceType), id: String(input.id) }).toString()}`, { method: 'GET' })
+  const query = new URLSearchParams({ resourceType: String(input.resourceType), id: String(input.id), ...(input.agentId == null ? {} : { agentId: String(input.agentId) }) }).toString()
+  return request<ResolvePluginResourceOutput>(`/plugins/${encodeURIComponent(input.pluginId)}/connections/${encodeURIComponent(input.instanceId)}/resources/ancestors${query ? `?${query}` : ''}`, { method: 'GET' })
 }

@@ -39,6 +39,8 @@ pub enum Audience {
     Owner,
     Public,
     Installation(String),
+    /// A member's own resource reads, by account.
+    Member(String),
 }
 
 impl Audience {
@@ -201,12 +203,12 @@ impl Operations {
         Ok(json!({ "operation": id }))
     }
 
-    pub(crate) fn authorize(&self, id: &str, bearer: Option<&str>, owner: bool) -> Result<()> {
+    pub(crate) fn authorize(&self, id: &str, caller: &Audience, owner: bool) -> Result<()> {
         let entries = self.entries.lock().unwrap();
         let entry = entries.get(id).ok_or_else(|| {
             Error::not_found("This operation is no longer available. Refresh the plugin.")
         })?;
-        if !owner && entry.audience != Audience::from_bearer(bearer, false) {
+        if !owner && entry.audience != *caller {
             return Err(Error::forbidden(
                 "This preparation belongs to another caller.",
             ));

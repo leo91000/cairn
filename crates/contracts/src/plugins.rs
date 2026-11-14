@@ -482,6 +482,12 @@ pub struct ListPluginResourcesInput {
     pub page: i64,
     #[serde(default)]
     pub query: String,
+    /// Read through this execution agent's grant on the instance. A person needs access
+    /// to the agent; an installation agent may name only itself. Without it, only the
+    /// installation owner reads, with the instance's own access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub agent_id: Option<AgentId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -500,6 +506,10 @@ pub struct ResolvePluginResourceInput {
     pub instance_id: PluginInstanceId,
     pub resource_type: String,
     pub id: String,
+    /// Read through this execution agent's grant, as for listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub agent_id: Option<AgentId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

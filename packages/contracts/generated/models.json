@@ -6324,6 +6324,14 @@
     "ListPluginResourcesInput": {
       "additionalProperties": false,
       "properties": {
+        "agentId": {
+          "description": "Read through this execution agent's grant on the instance. A person needs access\nto the agent; an installation agent may name only itself. Without it, only the\ninstallation owner reads, with the instance's own access.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "instanceId": {
           "format": "uuid",
           "type": "string"
@@ -12613,6 +12621,14 @@
     "ResolvePluginResourceInput": {
       "additionalProperties": false,
       "properties": {
+        "agentId": {
+          "description": "Read through this execution agent's grant, as for listing.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
         },
