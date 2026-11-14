@@ -546,7 +546,8 @@ def require_data_pool():
 
 def legacy_storage_present():
     return any((ROOT / 'state/ublk-devices').glob('*.json')) or any((ROOT / 'state/native-block').glob('*/root/disk.blk')) \
-        or any((ROOT / 'state/disks').glob('*/lazy/journal-v2.sqlite')) or any((ROOT / 'state/environments').glob('*/lazy/journal-v2.sqlite'))
+        or any(any((ROOT / 'state' / base).glob(f'*/{source}/journal-v2.sqlite'))
+               for base in ('disks', 'environments') for source in ('lazy', 'resize-source'))
 
 
 def require_storage():

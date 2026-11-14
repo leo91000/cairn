@@ -536,6 +536,15 @@ async fn kernel_prepared_base_admission_and_recovery() {
     let state =
         std::path::PathBuf::from(std::env::var_os("CAIRN_NATIVE_QUOTA_TEST_STATE").unwrap());
     super::quota::require(&state).unwrap();
+    let enrollment = state.join("different-enrollment/data/node");
+    private_dir(&enrollment).await.unwrap();
+    assert!(super::enabled());
+    let capabilities = crate::nodes::connector::capabilities(&enrollment).unwrap();
+    let total = capabilities["diskTotalMiB"].as_u64().unwrap();
+    assert!(
+        (768..=1024).contains(&total),
+        "native enrollment must sample its 1GiB data pool, not controller storage: {total}"
+    );
     let (_root, mut bases, archive, policy) = fixture().await;
     bases.state = state.clone();
     let stop = CancellationToken::new();

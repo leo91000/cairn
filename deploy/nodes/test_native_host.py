@@ -193,6 +193,19 @@ class NativeHostTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, 'character device'):
                 host.require_storage()
 
+    def test_interrupted_resize_sources_require_the_legacy_driver_after_reboot(self):
+        for base in ('disks', 'environments'):
+            with self.subTest(base=base), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                journal = root / 'state' / base / 'fixture-environment' / 'resize-source/journal-v2.sqlite'
+                journal.parent.mkdir(parents=True)
+                journal.write_bytes(b'fixture metadata presence')
+                with patch.object(host, 'ROOT', root):
+                    self.assertTrue(host.legacy_storage_present())
+                journal.unlink()
+                with patch.object(host, 'ROOT', root):
+                    self.assertFalse(host.legacy_storage_present())
+
     def test_fresh_directory_storage_never_loads_a_block_driver(self):
         with patch.object(host, 'require_data_pool'), patch.object(host, 'require_storage_kernel'), \
                 patch.object(host, 'legacy_storage_present', return_value=False), \
