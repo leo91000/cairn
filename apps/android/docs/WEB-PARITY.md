@@ -19,6 +19,30 @@ clickable model-picker control, which has no DOM text-target replacement.
 Model, reasoning and connection selection remain the same on both platforms;
 public MCP and `cairn_installation` operations and authorization are unchanged.
 
+## No-code hook rules (ADR-0075)
+
+Web and Android expose the same rules list, search, creator/stopped filters,
+agent and plugin entry points, rule detail, creator controls, owner emergency
+pause, budget reset, duplication, deletion, immutable versions and triggering
+history. Both obey the server's allowed actions and history visibility; a
+notification for an exhausted rule opens that rule in the selected installation.
+The public MCP and `cairn_installation` already expose these operations through
+the rule CRUD/catalog/history contracts, preserving their distinct authority.
+
+Both editors build nested If/otherwise and For-each branches visually, move and
+remove steps, compose AND/OR conditions and native conversation predicates, pick
+people/resources by name, fill schema-driven tool fields and insert scoped
+variables into text or formulas. The installation validates drafts and reports
+errors at their step. Saving creates a version; stale revisions preserve the
+unsaved draft for correction.
+
+Web uses an adjacent step inspector on wide screens and a sheet on phones.
+Android uses native Compose cards and bottom sheets, with a two-pane list on
+tablets. Android retains drafts across recreation; web confirms navigation or
+page exit while changes are unsaved. Existing history uses expandable data
+sections on both platforms; raw data appears only when inspecting an execution.
+
+
 ## Search during workspace startup (2026-11-13)
 
 Web registers its existing workspace shortcuts before the initial resource lists

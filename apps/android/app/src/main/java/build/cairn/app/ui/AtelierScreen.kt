@@ -70,6 +70,7 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
             Heading("Atelier", "Les ressources de cette installation partagée.")
             listOf(
                     "agents" to "Agents",
+                    "rules" to "Règles",
                     "projects" to "Projets",
                     "skills" to "Skills",
                     "runs" to "Journal des exécutions",
@@ -143,6 +144,32 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
                     }
                     SignalButton("Connexions", height = 36.dp) { navigate("connections") }
                 }
+            }
+        }
+        Surface(
+            onClick = { navigate("rules") },
+            shape = RoundedCornerShape(22.dp),
+            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                Modifier.padding(18.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                androidx.compose.material3.Icon(CairnIcons.Workflow, null, Modifier.size(28.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Règles", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Quand ceci arrive, faire cela. Sans code.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                androidx.compose.material3.Icon(
+                    CairnIcons.Right,
+                    "Ouvrir les règles",
+                    Modifier.size(18.dp),
+                )
             }
         }
         Row(

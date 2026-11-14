@@ -26,6 +26,9 @@ export function workspaceRouter(base = '/') {
       { path: '/mcps', component: () => import('./views/Mcps.vue') },
       { path: '/mcps/callback', component: () => import('./views/McpCallback.vue') },
       { path: '/tasks', component: () => import('./views/Tasks.vue') },
+      { path: '/rules', component: () => import('./views/Rules.vue') },
+      { path: '/rules/new', component: () => import('./views/RuleEditor.vue') },
+      { path: '/rules/:id/edit', component: () => import('./views/RuleEditor.vue') },
       { path: '/runs', component: () => import('./views/Runs.vue') },
       { path: '/runs/:id', component: () => import('./views/RunDetail.vue') },
       {
@@ -53,6 +56,9 @@ export function workspaceRouter(base = '/') {
     ],
   })
   router.beforeEach((to) => {
+    if (to.path === '/' && typeof to.query.rule === 'string')
+      return { path: '/rules', query: to.query }
+
     if (installationSubdomains && installationRoute && state.ready && state.authenticated) {
       if (!centralAccount && to.path === '/settings/account') {
         redirect(accountSettingsUrl(installationRoute))

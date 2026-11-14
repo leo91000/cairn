@@ -15,6 +15,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import build.cairn.app.data.CairnViewModel
 import build.cairn.app.data.INSTALLATION_NOTIFICATION_TARGET
+import build.cairn.app.data.RULE_NOTIFICATION_TARGET_PREFIX
 import build.cairn.app.diagnostics.FrameMonitor
 import build.cairn.app.ui.AppUpdatePrompt
 import build.cairn.app.ui.CairnApp
@@ -88,9 +89,14 @@ class MainActivity : ComponentActivity() {
                 intent.action == "build.cairn.app.OPEN_INSTALLATION"
         ) {
             targetChat =
-                if (intent.action == "build.cairn.app.OPEN_INSTALLATION")
-                    INSTALLATION_NOTIFICATION_TARGET
-                else
+                if (intent.action == "build.cairn.app.OPEN_INSTALLATION") {
+                    val rule =
+                        intent.data?.getQueryParameter("rule")?.takeIf {
+                            runCatching { java.util.UUID.fromString(it) }.isSuccess
+                        }
+                    if (rule == null) INSTALLATION_NOTIFICATION_TARGET
+                    else RULE_NOTIFICATION_TARGET_PREFIX + rule
+                } else
                     intent
                         .getStringExtra("chat")
                         .orEmpty()

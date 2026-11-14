@@ -1058,6 +1058,9 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
         </p>
       </div>
       <div v-if="!isNew && loaded && !loadError && !notFound" class="flex shrink-0 items-center gap-2">
+        <RouterLink :to="{ path: '/rules', query: { agent: id } }" :class="linkButton" aria-label="Rules for this agent">
+          Rules
+        </RouterLink>
         <RouterLink :to="{ path: '/chats', query: { agent: id } }" :class="linkButton" aria-label="Chat with this agent">
           <Icon :name="MessageCircle" :size="15" /><span class="phone:hidden">Chat</span>
         </RouterLink>

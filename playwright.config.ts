@@ -15,6 +15,18 @@ export default defineConfig({
   reporter: [['list'], ['html', { open: 'never' }]],
   use: { trace: 'retain-on-failure', screenshot: 'only-on-failure', ...devices['Desktop Chrome'] },
   projects: [
+    { name: 'journeys-rules', testMatch: 'rules.spec.ts', use: { serviceWorkers: 'block' } },
+    {
+      name: 'layout-webkit-rules',
+      testMatch: 'rules.spec.ts',
+      use: {
+        browserName: 'webkit',
+        isMobile: true,
+        hasTouch: true,
+        viewport: { width: 390, height: 844 },
+        serviceWorkers: 'block',
+      },
+    },
     { name: 'journeys-web-update', testMatch: 'web-update.spec.ts' },
     {
       name: 'layout-webkit-web-update',

@@ -201,8 +201,9 @@ fun PluginScreen(
     state: Workspace,
     id: String,
     openAgents: () -> Unit = {},
+    openRules: (String) -> Unit = {},
     openChat: (String) -> Unit,
-) = PluginInstances(vm, state, id, openChat, openAgents)
+) = PluginInstances(vm, state, id, openChat, openAgents, openRules)
 
 @Composable
 private fun PluginInstances(
@@ -211,6 +212,7 @@ private fun PluginInstances(
     id: String,
     openChat: (String) -> Unit,
     openAgents: () -> Unit,
+    openRules: (String) -> Unit,
 ) {
     var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
     var editing by remember { mutableStateOf<PluginConnection?>(null) }
@@ -338,6 +340,7 @@ private fun PluginInstances(
                 catalog?.grantsOf(connection.agentId).orEmpty(),
                 openChat = openChat,
                 openAgents = openAgents,
+                openRules = { openRules(connection.id) },
                 edit = {
                     vm.clearMessage()
                     editing = connection
@@ -411,6 +414,7 @@ private fun InstanceCard(
     grants: List<String>,
     openChat: (String) -> Unit,
     openAgents: () -> Unit,
+    openRules: () -> Unit,
     edit: () -> Unit,
     remove: () -> Unit,
     changed: suspend () -> Unit,
@@ -510,6 +514,7 @@ private fun InstanceCard(
                         )
                     else Fact(field.title, connection.display(field.key))
                 }
+            TextButton(onClick = openRules) { Text("Règles utilisant cette instance ›") }
             if (manifest.agentAccess != null) {
                 val names =
                     connection.agentIds.map { id ->

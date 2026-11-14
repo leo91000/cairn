@@ -1,0 +1,240 @@
+<script setup lang="ts">
+import type { HookRule } from '../../../../packages/contracts/generated/typescript/HookRule'
+import type { HookRuleCatalog } from '../../../../packages/contracts/generated/typescript/HookRuleCatalog'
+import type { HookRuleSummary } from '../../../../packages/contracts/generated/typescript/HookRuleSummary'
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { getHookRule } from '../../../../packages/contracts/generated/getHookRule'
+import { getHookRuleCatalog } from '../../../../packages/contracts/generated/getHookRuleCatalog'
+import { listHookRules } from '../../../../packages/contracts/generated/listHookRules'
+import { api, state } from '../api'
+import AgentAvatar from '../components/AgentAvatar.vue'
+import Empty from '../components/Empty.vue'
+import Icon from '../components/Icon.vue'
+import Modal from '../components/Modal.vue'
+import RuleDetail from '../components/RuleDetail.vue'
+import UiAlert from '../components/UiAlert.vue'
+import UiButton from '../components/UiButton.vue'
+import { blockTitles, describeTrigger, relativeTime } from '../hook-rules'
+import { Plus, Search, Zap } from '../icons'
+
+// Rules as missions are shown: cards on the left, one rule beside them on wide screens or
+// in a sheet on phones. Every member sees every rule and its state.
+const route = useRoute()
+const router = useRouter()
+const rules = ref<HookRuleSummary[]>([])
+const catalog = ref<HookRuleCatalog | null>(null)
+const shownRule = ref<HookRule | null>(null)
+const loading = ref(true)
+const error = ref('')
+const query = ref('')
+const filter = ref<'all' | 'mine' | 'blocked'>('all')
+const wideQuery = window.matchMedia('(width > 900px)')
+const wide = ref(wideQuery.matches)
+const onWide = () => wide.value = wideQuery.matches
+let timer: ReturnType<typeof setInterval>
+let disposed = false
+
+const filters = computed(() => [
+  { value: 'all' as const, label: 'All', count: rules.value.length },
+  { value: 'mine' as const, label: 'Mine', count: rules.value.filter(rule => rule.creatorAccountId === state.accountId).length },
+  { value: 'blocked' as const, label: 'Stopped', count: rules.value.filter(rule => rule.blocks.length).length },
+])
+const visible = computed(() => rules.value.filter(rule =>
+  (typeof route.query.agent !== 'string' || rule.executionAgentId === route.query.agent || rule.startedAgentIds.includes(route.query.agent))
+  && (typeof route.query.instance !== 'string' || (rule.trigger.type === 'plugin' && rule.trigger.instanceId === route.query.instance) || rule.toolInstanceIds.includes(route.query.instance))
+  && (filter.value === 'all' || (filter.value === 'mine' ? rule.creatorAccountId === state.accountId : rule.blocks.length > 0))
+  && `${rule.name} ${rule.description}`.toLowerCase().includes(query.value.trim().toLowerCase())))
+const chosenId = computed(() => typeof route.query.rule === 'string' ? route.query.rule : null)
+const shownId = computed(() => chosenId.value ?? (wide.value ? visible.value[0]?.id : undefined))
+const summary = computed(() => {
+  const active = rules.value.filter(rule => !rule.blocks.length).length
+  return `${active} active · ${rules.value.length - active} stopped`
+})
+const agentName = (id: string) => state.agents.find(agent => agent.id === id)?.name ?? catalog.value?.agents.find(agent => agent.agentId === id)?.name ?? 'Agent'
+
+async function load() {
+  try {
+    const output = await listHookRules(api, {})
+    if (disposed)
+      return
+    rules.value = output.rules
+    error.value = ''
+  }
+  catch (e) {
+    error.value = (e as Error).message
+  }
+  finally {
+    loading.value = false
+  }
+}
+
+async function loadShown() {
+  const id = shownId.value
+  if (!id) {
+    shownRule.value = null
+    return
+  }
+
+  try {
+    const rule = await getHookRule(api, { ruleId: id })
+    if (!disposed && shownId.value === id)
+      shownRule.value = rule
+  }
+  catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
+function select(rule: HookRuleSummary) {
+  void router.replace({ query: { ...route.query, rule: rule.id } })
+}
+
+function closeSheet() {
+  const { rule: _rule, ...rest } = route.query
+  void router.replace({ query: rest })
+}
+
+async function changed(rule: HookRule | null) {
+  if (!rule)
+    closeSheet()
+  else
+    shownRule.value = rule
+  await load()
+}
+
+watch(shownId, () => {
+  shownRule.value = null
+  void loadShown()
+}, { immediate: true })
+onMounted(() => {
+  wideQuery.addEventListener('change', onWide)
+  void load()
+  void getHookRuleCatalog(api, {}).then(value => catalog.value = value).catch(() => {})
+  timer = setInterval(() => {
+    if (!document.hidden) {
+      void load()
+      void loadShown()
+    }
+  }, 10000)
+})
+onBeforeUnmount(() => {
+  disposed = true
+  clearInterval(timer)
+  wideQuery.removeEventListener('change', onWide)
+})
+</script>
+
+<template>
+  <UiAlert v-if="error">
+    {{ error }}
+  </UiAlert>
+  <div class="rules flex min-h-0 flex-1">
+    <section class="flex min-h-0 w-111 shrink-0 flex-col pr-6 tablet:w-full tablet:pr-0" aria-label="Rule list">
+      <header class="flex items-start gap-2 pr-1">
+        <div class="min-w-0 flex-1">
+          <h1 class="m-0! font-heading text-[32px] leading-9 font-bold tracking-[-0.8px]">
+            Rules
+          </h1>
+          <p class="m-0! mt-0.5! truncate text-base text-muted">
+            {{ loading ? 'When this happens, do that' : summary }}
+          </p>
+        </div>
+        <button
+          class="grid size-11 shrink-0 place-items-center rounded-full bg-ink text-canvas hover:opacity-90"
+          aria-label="New rule"
+          @click="router.push('/rules/new')"
+        >
+          <Icon :name="Plus" :size="20" />
+        </button>
+      </header>
+      <label class="search-field mt-3 flex flex-row! min-h-11 items-center gap-2 rounded-full border border-line bg-surface px-4">
+        <Icon :name="Search" :size="16" class="text-muted" /><input
+          v-model="query"
+          class="w-full! min-w-0 flex-1 outline-none"
+          placeholder="Search rules"
+          aria-label="Search rules"
+        >
+      </label>
+      <div class="mt-2 flex shrink-0 gap-2 py-1.5" role="group" aria-label="Filter rules">
+        <button
+          v-for="option in filters"
+          :key="option.value"
+          class="flex h-9 shrink-0 items-center gap-1.75 rounded-full border px-3.5 text-sm font-semibold"
+          :class="filter === option.value ? 'border-ink bg-ink text-canvas' : 'border-line text-ink hover:bg-hover'"
+          :aria-pressed="filter === option.value"
+          @click="filter = option.value"
+        >
+          {{ option.label }}<span :class="filter === option.value ? 'text-canvas/60' : 'text-muted'">{{ option.count }}</span>
+        </button>
+      </div>
+      <ul class="m-0! mt-2! flex min-h-0 flex-1 list-none flex-col gap-2.5 overflow-y-auto overscroll-contain p-0! pb-6! [scrollbar-width:thin]" data-testid="rules">
+        <li v-for="rule in visible" :key="rule.id">
+          <article class="relative rounded-[22px] border py-3.5 pr-3.5 pl-4" :class="shownId === rule.id && wide ? 'border-accent/30 bg-soft' : rule.blocks.length ? 'border-line bg-transparent' : 'border-line bg-surface'">
+            <button class="absolute inset-0 rounded-[22px] focus-visible:outline-2 focus-visible:outline-accent" :aria-label="`Open ${rule.name}`" @click="select(rule)" />
+            <div class="pointer-events-none">
+              <div class="flex items-center gap-2">
+                <span class="inline-flex min-w-0 items-center gap-1.5 rounded-full bg-hover py-0.5 pr-2.5 pl-1.5 text-xs font-semibold text-muted">
+                  <span class="grid size-5 place-items-center rounded-full bg-ink text-canvas"><Icon :name="Zap" :size="11" /></span>
+                  <span class="truncate">{{ describeTrigger(rule.trigger, catalog).source }} · {{ describeTrigger(rule.trigger, catalog).title }}</span>
+                </span>
+                <span class="flex-1" />
+                <AgentAvatar :name="agentName(rule.executionAgentId)" :identity="rule.executionAgentId" :size="22" />
+              </div>
+              <p class="m-0! mt-2! line-clamp-2 font-heading text-base font-semibold" :class="rule.blocks.length ? 'text-muted' : 'text-ink'">
+                {{ rule.name }}
+              </p>
+              <p class="m-0! mt-1! flex items-center gap-1.5 text-xs text-muted">
+                <span class="size-1.5 rounded-full" :class="rule.blocks.length ? 'bg-coral' : 'bg-success'" />
+                <span :class="rule.blocks.length ? 'font-semibold text-coral' : ''">{{ rule.blocks.length ? blockTitles[rule.blocks[0].kind] : 'Active' }}</span>
+                <span>· v{{ rule.version }} · {{ rule.creatorAccountId === state.accountId ? 'yours' : 'shared' }} · {{ relativeTime(rule.updatedAt) }}</span>
+              </p>
+            </div>
+          </article>
+        </li>
+        <li v-if="!loading && !visible.length">
+          <Empty :title="rules.length ? 'No matching rules' : 'No rules yet'" :description="rules.length ? 'Change the search or the filters.' : 'A rule answers an event without code: when a message arrives, call a tool or start an agent.'">
+            <UiButton v-if="!rules.length" @click="router.push('/rules/new')">
+              <Icon :name="Plus" :size="16" />Create a rule
+            </UiButton>
+          </Empty>
+        </li>
+      </ul>
+    </section>
+    <section v-if="wide" class="min-h-0 min-w-0 flex-1 overflow-y-auto border-l border-line pl-6 [scrollbar-width:thin]" aria-label="Selected rule">
+      <RuleDetail
+        v-if="shownRule"
+        :key="shownRule.id"
+        class="max-w-200"
+        :rule="shownRule"
+        :catalog="catalog"
+        @changed="changed"
+      />
+      <Empty v-else-if="!loading" title="Your rules, in one place" description="Create a rule to answer events from your plugins." />
+    </section>
+  </div>
+  <Modal
+    v-if="!wide && chosenId && shownRule"
+    :title="shownRule.definition.name"
+    sheet
+    headless
+    @close="closeSheet"
+  >
+    <div class="px-5 pt-5 pb-6">
+      <RuleDetail
+        :key="shownRule.id"
+        :rule="shownRule"
+        :catalog="catalog"
+        sheet
+        @changed="changed"
+        @close="closeSheet"
+      />
+    </div>
+  </Modal>
+</template>
