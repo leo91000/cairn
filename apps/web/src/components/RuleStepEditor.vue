@@ -254,22 +254,31 @@ const agentName = (id: string) => props.catalog?.agents.find(agent => agent.agen
         <small v-for="problem in problemsAt('/action/tool').concat(problemsAt('/action/instanceId'))" :key="problem" class="text-xs font-semibold text-coral">{{ problem }}</small>
       </label>
       <div v-if="tool" class="grid gap-3 rounded-2xl border border-line bg-surface p-3.5">
-        <RuleValueInput
-          v-for="field in shownFields"
-          :key="field.name"
-          :model-value="action.input[field.name] ?? defaultValue(field)"
-          :label="field.title"
-          :expects="field.expects"
-          :schema="field.schema"
-          :schema-root="tool?.inputSchema"
-          :resource-source="resourceSource(field.name)"
-          :required="field.required"
-          :hint="field.description"
-          :multiline="field.expects === 'text' && /text|content|message|body|prompt/i.test(field.name)"
-          :variables="variables"
-          :problems="problemsAt(`/action/input/${field.name}`)"
-          @update:model-value="value => setInput(field.name, value)"
-        />
+        <div v-for="field in shownFields" :key="field.name" class="grid gap-1">
+          <RuleValueInput
+            :model-value="action.input[field.name] ?? defaultValue(field)"
+            :label="field.title"
+            :expects="field.expects"
+            :schema="field.schema"
+            :schema-root="tool?.inputSchema"
+            :resource-source="resourceSource(field.name)"
+            :required="field.required"
+            :hint="field.description"
+            :multiline="field.expects === 'text' && /text|content|message|body|prompt/i.test(field.name)"
+            :variables="variables"
+            :problems="problemsAt(`/action/input/${field.name}`)"
+            @update:model-value="value => setInput(field.name, value)"
+          />
+          <button
+            v-if="!field.required"
+            type="button"
+            class="justify-self-end text-xs text-muted hover:text-coral"
+            :aria-label="`Remove ${field.title}`"
+            @click="setInput(field.name, null)"
+          >
+            Remove this field
+          </button>
+        </div>
         <div v-if="optionalFields.length" class="flex flex-wrap gap-1.5">
           <button
             v-for="field in optionalFields"

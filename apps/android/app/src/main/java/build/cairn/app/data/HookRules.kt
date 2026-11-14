@@ -490,6 +490,7 @@ data class RuleVariable(
     val label: String,
     val type: String,
     val description: String,
+    val example: String? = null,
 )
 
 private fun schemaType(schema: JsonElement?): String {
@@ -513,7 +514,7 @@ fun schemaFields(schema: JsonElement?, prefix: String, depth: Int = 0): List<Rul
     if (depth > 3) return emptyList()
     return properties.flatMap { (name, field) ->
         val expression =
-            if (Regex("^[A-Za-z_]\\w*$").matches(name)) "$prefix.$name"
+            if (Regex("""^[A-Za-z_]\w*$""").matches(name)) "$prefix.$name"
             else "$prefix[${JsonPrimitive(name)}]"
         listOf(
             RuleVariable(
@@ -629,16 +630,32 @@ fun ruleVariablesAt(
         } +
         loops +
         remembered +
-        listOf(
+        (catalog?.variables?.map {
+            RuleVariable("Contexte", it.name, it.name, "valeur", it.description)
+        }
+            ?: listOf(
+                RuleVariable(
+                    "Contexte",
+                    "values",
+                    "Valeurs mémorisées",
+                    "valeur",
+                    "Les valeurs de cette règle.",
+                ),
+                RuleVariable("Contexte", "now", "now", "date", "Le début du déclenchement."),
+                RuleVariable("Contexte", "event", "event", "objet", "Métadonnées de l’événement."),
+            )) +
+        listOf("id", "hook", "instanceId", "receivedAt").map {
             RuleVariable(
-                "Mémorisé",
-                "values",
-                "Valeurs mémorisées",
+                "Contexte",
+                "event.$it",
+                "event.$it",
                 "valeur",
-                "Une valeur que la règle a mémorisée.",
-            ),
-            RuleVariable("Temps", "now", "now", "date", "Le début du déclenchement."),
-        )
+                "Métadonnées de l’événement.",
+            )
+        } +
+        catalog?.functions.orEmpty().map {
+            RuleVariable("Fonctions", it.example, it.signature, "ƒ", it.description, it.example)
+        }
 }
 
 /** A JSON literal's number, for amounts such as a wait. */
@@ -753,3 +770,71 @@ fun literalRuleValue(value: JsonElement): JsonObject = buildJsonObject {
     put("type", "literal")
     put("value", value)
 }
+
+fun comparisonExpects(left: JsonElement?, operator: String, variables: List<RuleVariable>): String {
+    if (operator == "in") return "json"
+    if (operator in setOf("matches", "startsWith", "endsWith", "contains")) return "text"
+    val type =
+        if (left.text("type") == "formula")
+            variables
+                .firstOrNull {
+                    it.expression == left.text("expression") ||
+                        it.expression == "payload.${left.text("expression")}"
+                }
+                ?.type
+        else if (left.text("type") == "literal")
+            when ((left as? JsonObject)?.get("value")) {
+                is JsonPrimitive ->
+                    if (((left as JsonObject)["value"] as JsonPrimitive).isString) "string"
+                    else if (left["value"].flag() != null) "boolean"
+                    else if (left["value"].number() != null) "number" else "string"
+                else -> "value"
+            }
+        else "string"
+    return when (type) {
+        "integer",
+        "number" -> "number"
+        "boolean" -> "boolean"
+        else -> "text"
+    }
+}
+
+fun typedComparisonRight(value: JsonElement?, expects: String): JsonObject {
+    val held = value as? JsonObject ?: templateValue()
+    if (held.text("type") == "formula") return held
+    if (held.text("type") == "template" && expects != "text") {
+        Regex("""^\s*\{\{([^{}]+)\}\}\s*$""").matchEntire(held.text("text"))?.let {
+            return buildJsonObject {
+                put("type", "formula")
+                put("expression", it.groupValues[1].trim())
+            }
+        }
+    }
+    val raw =
+        if (held.text("type") == "literal") held["value"] else JsonPrimitive(held.text("text"))
+    val text = (raw as? JsonPrimitive)?.contentOrNull.orEmpty()
+    return when (expects) {
+        "number" ->
+            literalRuleValue(
+                text.toLongOrNull()?.let(::JsonPrimitive)
+                    ?: text.toDoubleOrNull()?.takeIf { it.isFinite() }?.let(::JsonPrimitive)
+                    ?: JsonPrimitive(0)
+            )
+        "boolean" -> literalRuleValue(JsonPrimitive(text == "true"))
+        "json" ->
+            literalRuleValue(
+                (raw as? JsonArray)
+                    ?: (runCatching { wireJson.parseToJsonElement(text) }.getOrNull() as? JsonArray)
+                    ?: JsonArray(emptyList())
+            )
+        else -> held
+    }
+}
+
+fun ruleChoicesWithCurrent(
+    options: List<Pair<String, String>>,
+    current: String,
+    fallback: String,
+): List<Pair<String, String>> =
+    if (current.isBlank() || options.any { it.first == current }) options
+    else options + (current to "$fallback (indisponible)")

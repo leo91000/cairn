@@ -167,4 +167,95 @@ abstract class RulesEditorCases {
             .onNodeWithText("Choisissez une durée positive.", substring = true)
             .assertIsDisplayed()
     }
+
+    @Test
+    fun comparisonFieldsKeepNumbersAndBooleansTyped() {
+        val variables =
+            listOf(
+                RuleVariable("Événement", "payload.count", "count", "integer", ""),
+                RuleVariable("Événement", "payload.approved", "approved", "boolean", ""),
+            )
+        val left = formulaRuleValue("payload.count")
+        assertEquals("number", comparisonExpects(left, "greaterThan", variables))
+        assertEquals(
+            "boolean",
+            comparisonExpects(formulaRuleValue("approved"), "equals", variables),
+        )
+        var number by mutableStateOf(typedComparisonRight(templateValue(), "number"))
+        var flag by mutableStateOf(typedComparisonRight(templateValue(), "boolean"))
+        compose.setContent {
+            CairnTheme {
+                androidx.compose.foundation.layout.Column {
+                    RuleValueEditor(
+                        "Nombre",
+                        number,
+                        variables,
+                        { number = it },
+                        expects = "number",
+                    )
+                    RuleValueEditor("Accord", flag, variables, { flag = it }, expects = "boolean")
+                }
+            }
+        }
+        compose.onNode(hasSetTextAction()).performTextReplacement("5")
+        compose.onNodeWithText("Oui", useUnmergedTree = true).performClick()
+        compose.runOnIdle {
+            assertEquals(JsonPrimitive(5), number["value"])
+            assertEquals(JsonPrimitive(true), flag["value"])
+            assertEquals(
+                "formula",
+                typedComparisonRight(templateValue("{{payload.count}}"), "number").text("type"),
+            )
+        }
+    }
+
+    @Test
+    fun functionChoicesShowTheirSignatureAndExampleAndInsertAnExpression() {
+        val example = "truncate(payload.content, 80)"
+        val signature = "truncate(text: string, length: int) -> string"
+        var value by mutableStateOf(templateValue())
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor(
+                    "Message",
+                    value,
+                    listOf(
+                        RuleVariable(
+                            "Fonctions",
+                            example,
+                            signature,
+                            "ƒ",
+                            "Raccourcir le texte.",
+                            example,
+                        )
+                    ),
+                    { value = it },
+                )
+            }
+        }
+        compose.onNodeWithText("+ Insérer une variable").performClick()
+        compose.onNodeWithText(signature).assertIsDisplayed()
+        compose.onNodeWithText(example).assertIsDisplayed()
+        compose.onNodeWithText("Utiliser $signature").performClick()
+        compose.runOnIdle { assertEquals("{{$example}}", value.text("text")) }
+    }
+
+    @Test
+    fun anAgentWithoutToolsDoesNotOfferAnInvalidPluginAction() {
+        compose.setContent {
+            CairnTheme {
+                RuleFlowTree(
+                    emptyList(),
+                    "/steps",
+                    null,
+                    { "Assistant" },
+                    editable = true,
+                    executionAgentId = MAIN_AGENT_ID,
+                )
+            }
+        }
+        compose.onNodeWithText("Étape").performClick()
+        compose.onNodeWithText("Appeler un outil").assertDoesNotExist()
+        compose.onNodeWithText("Si / sinon").assertIsDisplayed()
+    }
 }

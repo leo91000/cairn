@@ -80,6 +80,8 @@ fun RuleEditorScreen(
     var loading by remember { mutableStateOf(true) }
     var checking by remember { mutableStateOf(false) }
     var checked by remember { mutableStateOf(false) }
+    var validationError by remember { mutableStateOf("") }
+    var validationAttempt by remember { mutableIntStateOf(0) }
     var saving by remember { mutableStateOf(false) }
     var canEdit by remember { mutableStateOf(true) }
     var problems by remember { mutableStateOf<List<HookRuleProblem>>(emptyList()) }
@@ -104,6 +106,11 @@ fun RuleEditorScreen(
             catalog = loaded
             val rule: JsonObject? =
                 if (ruleId.isBlank()) null else vm.api.get("/hook-rules/${segment(ruleId)}")
+            if (rule == null && loaded.agents.isEmpty()) {
+                error =
+                    "Un accès à un agent est nécessaire pour créer une règle. Demandez-le au propriétaire."
+                return@LaunchedEffect
+            }
             canEdit = rule == null || rule.allowed("edit")
             if (draft.isBlank()) {
                 draft =
@@ -121,8 +128,9 @@ fun RuleEditorScreen(
             loading = false
         }
     }
-    LaunchedEffect(draft, loading) {
+    LaunchedEffect(draft, loading, validationAttempt) {
         checked = false
+        validationError = ""
         if (loading || definition == null) return@LaunchedEffect
         checking = true
         delay(350)
@@ -144,7 +152,7 @@ fun RuleEditorScreen(
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             checking = false
-            error = e.message.orEmpty()
+            validationError = e.message.orEmpty().ifBlank { "La vérification n’a pas abouti." }
         }
     }
     fun update(next: JsonElement) {
@@ -312,7 +320,8 @@ fun RuleEditorScreen(
                     { update(definition.patch("name" to JsonPrimitive(it))) },
                 )
                 Text(
-                    if (checking || !checked) "Vérification…"
+                    if (validationError.isNotEmpty()) "Vérification impossible"
+                    else if (checking || !checked) "Vérification…"
                     else if (problems.isEmpty()) "● Prête à être enregistrée"
                     else "${problems.size} points à corriger",
                     color =
@@ -320,6 +329,12 @@ fun RuleEditorScreen(
                         else MaterialTheme.colorScheme.primary,
                     style = MaterialTheme.typography.labelMedium,
                 )
+                if (validationError.isNotEmpty()) {
+                    Text(validationError, color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = { validationAttempt++ }) {
+                        Text("Réessayer la vérification")
+                    }
+                }
                 Surface(
                     shape = RoundedCornerShape(20.dp),
                     color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
@@ -332,14 +347,18 @@ fun RuleEditorScreen(
                         Choice(
                             "Événement",
                             triggerKey(definition.obj("trigger")),
-                            currentCatalog.hooks.map {
-                                triggerKey(wireJson.encodeToJsonElement(it.trigger)) to it.title
-                            },
+                            ruleChoicesWithCurrent(
+                                currentCatalog.hooks.map {
+                                    triggerKey(wireJson.encodeToJsonElement(it.trigger)) to it.title
+                                },
+                                triggerKey(definition.obj("trigger")),
+                                definition.obj("trigger").text("hook"),
+                            ),
                         ) { key ->
                             val next =
-                                currentCatalog.hooks.first {
+                                currentCatalog.hooks.firstOrNull {
                                     triggerKey(wireJson.encodeToJsonElement(it.trigger)) == key
-                                }
+                                } ?: return@Choice
                             val agent =
                                 definition.text("executionAgentId").takeIf { it in next.agentIds }
                                     ?: next.agentIds.firstOrNull().orEmpty()
@@ -355,7 +374,11 @@ fun RuleEditorScreen(
                         Choice(
                             "Avec les droits de",
                             definition.text("executionAgentId"),
-                            agentChoices.map { it.agentId to it.name },
+                            ruleChoicesWithCurrent(
+                                agentChoices.map { it.agentId to it.name },
+                                definition.text("executionAgentId"),
+                                ruleAgentName(state, definition.text("executionAgentId")),
+                            ),
                         ) {
                             update(definition.patch("executionAgentId" to JsonPrimitive(it)))
                         }
@@ -374,6 +397,7 @@ fun RuleEditorScreen(
                     selected,
                     canEdit,
                     problems = problems,
+                    executionAgentId = definition.text("executionAgentId"),
                     select = { selected = it },
                     insert = { container, index, kind ->
                         update(

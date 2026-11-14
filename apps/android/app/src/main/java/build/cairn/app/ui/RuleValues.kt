@@ -54,6 +54,8 @@ internal fun RuleValueEditor(
         }
     val modes =
         if (expects in setOf("field", "formula")) listOf("formula" to "Variable ou formule")
+        else if (expects in setOf("number", "integer", "boolean"))
+            listOf("literal" to "Valeur", "formula" to "Formule")
         else listOf("template" to "Texte", "literal" to "Valeur", "formula" to "Formule")
     Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
         Text(label, style = MaterialTheme.typography.labelLarge)
@@ -156,6 +158,26 @@ internal fun RuleValueEditor(
                     else MaterialTheme.typography.bodyMedium,
                 shape = RoundedCornerShape(14.dp),
             )
+        val typed = expects in setOf("number", "integer", "boolean")
+        val literal = held["value"]
+        val wrongType =
+            typed &&
+                mode != "formula" &&
+                (mode != "literal" ||
+                    if (expects == "boolean")
+                        literal !is JsonPrimitive ||
+                            literal.isString ||
+                            literal.booleanOrNull == null
+                    else
+                        literal !is JsonPrimitive ||
+                            literal.isString ||
+                            literal.doubleOrNull == null)
+        if (wrongType)
+            Text(
+                "Choisissez une valeur ${if (expects == "boolean") "vraie ou fausse" else "numérique"} ou une formule de ce type.",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { picking = true }) { Text("+ Insérer une variable") }
             if (resourceSource != null && vm != null)
@@ -189,7 +211,12 @@ internal fun RuleValueEditor(
                         ListItem(
                             headlineContent = { Text(variable.label) },
                             supportingContent = {
-                                Text("${variable.group} · ${variable.description}")
+                                Column {
+                                    Text("${variable.group} · ${variable.description}")
+                                    variable.example?.let {
+                                        Text(it, fontFamily = FontFamily.Monospace)
+                                    }
+                                }
                             },
                             modifier = Modifier.fillMaxWidth(),
                         )

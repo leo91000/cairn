@@ -150,7 +150,25 @@ internal fun RuleConditionEditor(
                                 "Champ à vérifier",
                                 condition["left"],
                                 variables,
-                                { replace(index, condition.patch("left" to it)) },
+                                { left ->
+                                    replace(
+                                        index,
+                                        condition.patch(
+                                            "left" to left,
+                                            "right" to
+                                                if (binaryOperator(condition.text("operator")))
+                                                    typedComparisonRight(
+                                                        condition["right"],
+                                                        comparisonExpects(
+                                                            left,
+                                                            condition.text("operator"),
+                                                            variables,
+                                                        ),
+                                                    )
+                                                else null,
+                                        ),
+                                    )
+                                },
                                 expects = "field",
                             )
                             Choice(
@@ -164,7 +182,14 @@ internal fun RuleConditionEditor(
                                         "operator" to JsonPrimitive(operator),
                                         "right" to
                                             if (binaryOperator(operator))
-                                                condition["right"] ?: templateValue()
+                                                typedComparisonRight(
+                                                    condition["right"],
+                                                    comparisonExpects(
+                                                        condition["left"],
+                                                        operator,
+                                                        variables,
+                                                    ),
+                                                )
                                             else null,
                                     ),
                                 )
@@ -176,7 +201,11 @@ internal fun RuleConditionEditor(
                                     variables,
                                     { replace(index, condition.patch("right" to it)) },
                                     expects =
-                                        if (condition.text("operator") == "in") "json" else "text",
+                                        comparisonExpects(
+                                            condition["left"],
+                                            condition.text("operator"),
+                                            variables,
+                                        ),
                                     schema =
                                         if (condition.text("operator") == "in")
                                             ruleObject(

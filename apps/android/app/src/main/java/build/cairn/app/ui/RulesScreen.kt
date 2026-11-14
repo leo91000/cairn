@@ -54,6 +54,17 @@ fun RulesScreen(
 ) {
     var rules by remember(vm.api.cacheScope) { mutableStateOf<List<JsonObject>>(emptyList()) }
     var catalog by remember(vm.api.cacheScope) { mutableStateOf<HookRuleCatalog?>(null) }
+    var catalogError by remember(vm.api.cacheScope) { mutableStateOf("") }
+    var catalogAttempt by remember { mutableIntStateOf(0) }
+    LaunchedEffect(vm.api.cacheScope, catalogAttempt) {
+        try {
+            catalog = vm.api.get("/hook-rules/catalog")
+            catalogError = ""
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            catalogError = e.message.orEmpty()
+        }
+    }
     var selected by rememberSaveable(vm.api.cacheScope, initialRule) { mutableStateOf(initialRule) }
     var detail by remember { mutableStateOf<JsonObject?>(null) }
     var query by rememberSaveable { mutableStateOf("") }
@@ -80,7 +91,6 @@ fun RulesScreen(
         try {
             val output: JsonObject = vm.api.get("/hook-rules")
             rules = output.list("rules").map { it.jsonObject }
-            catalog = vm.api.get("/hook-rules/catalog")
             val requested = selected
             if (requested.isNotBlank()) {
                 val loaded: JsonObject = vm.api.get("/hook-rules/${segment(requested)}")
@@ -95,7 +105,7 @@ fun RulesScreen(
         }
     }
     LaunchedEffect(selected, refresh, vm.api.cacheScope) {
-        detail = null
+        if (detail.text("id") != selected) detail = null
         if (selected.isNotBlank())
             try {
                 detail = vm.api.get("/hook-rules/${segment(selected)}")
@@ -164,6 +174,12 @@ fun RulesScreen(
                                     label = { Text(title) },
                                 )
                             }
+                    }
+                    if (catalogError.isNotEmpty()) {
+                        Text(catalogError, color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = { catalogAttempt++ }) {
+                            Text("Recharger le catalogue")
+                        }
                     }
                     if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error)
                     if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())

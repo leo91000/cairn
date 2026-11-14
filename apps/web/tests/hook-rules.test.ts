@@ -3,8 +3,10 @@ import type { RuleNode } from '../../../packages/contracts/generated/typescript/
 import { describe, expect, it } from 'vitest'
 import { reactive } from 'vue'
 import {
+  comparisonExpects,
   nodeAt,
   pathOfNode,
+  typedComparisonRight,
   variablesAt,
   withInserted,
   withMoved,
@@ -75,5 +77,25 @@ describe('visual rule editing', () => {
     expect(ruleLiteralDefault({ type: 'integer', enum: [5, 10] })).toBe(5)
     expect(ruleLiteralDefault({ type: 'array' })).toEqual([])
     expect(ruleLiteralDefault({ type: 'object', required: ['options'], properties: { options: { type: 'object', required: ['notify'], properties: { notify: { type: 'boolean' } } } } })).toEqual({ options: { notify: false } })
+  })
+  it('types fixed comparison values from the chosen payload field', () => {
+    const variables = [{
+      group: 'Event' as const,
+      expression: 'payload.count',
+      label: 'count',
+      type: 'integer',
+      description: '',
+    }, {
+      group: 'Event' as const,
+      expression: 'payload.approved',
+      label: 'approved',
+      type: 'boolean',
+      description: '',
+    }]
+    expect(comparisonExpects({ type: 'formula', expression: 'payload.count' }, 'greaterThan', variables)).toBe('number')
+    expect(comparisonExpects({ type: 'formula', expression: 'approved' }, 'equals', variables)).toBe('boolean')
+    expect(typedComparisonRight({ type: 'template', text: '5' }, 'number')).toEqual({ type: 'literal', value: 5 })
+    expect(typedComparisonRight({ type: 'template', text: 'false' }, 'boolean')).toEqual({ type: 'literal', value: false })
+    expect(typedComparisonRight({ type: 'template', text: '{{payload.count}}' }, 'number')).toEqual({ type: 'formula', expression: 'payload.count' })
   })
 })

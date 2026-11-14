@@ -465,11 +465,12 @@ export function ownProblems(problems: HookRuleProblem[], path: string) {
 // ——— Variables that values can insert.
 
 export interface VariableOption {
-  group: 'Event' | 'Earlier steps' | 'Remembered' | 'Loop' | 'Time'
+  group: 'Event' | 'Earlier steps' | 'Remembered' | 'Loop' | 'Time' | 'Context' | 'Functions'
   expression: string
   label: string
   type: string
   description: string
+  example?: string
 }
 
 function typeOf(schema: any): string {
@@ -490,7 +491,7 @@ export function schemaFields(schema: any, prefix: string, depth = 0, root = sche
         group: 'Event' as const,
         expression,
         label: expression.replace(/^payload\./, ''),
-        type: typeOf(field),
+        type: typeOf(resolveRuleSchema(field, root)),
         description: field?.description ?? '',
       },
       ...schemaFields(field, expression, depth + 1, root),
@@ -579,21 +580,72 @@ export function variablesAt(definition: HookRuleDefinition, path: string, catalo
       type: 'value',
       description: `The value this rule remembers as ${name}.`,
     })),
-    {
-      group: 'Remembered',
-      expression: 'values',
-      label: 'Remembered values',
-      type: 'value',
-      description: 'A value this rule remembered.',
-    },
-    {
-      group: 'Time',
-      expression: 'now',
-      label: 'now',
-      type: 'timestamp',
-      description: 'When the triggering started.',
-    },
+    ...(catalog?.variables ?? [{ name: 'values', description: 'Remembered values.' }, { name: 'now', description: 'When the triggering started.' }, { name: 'event', description: 'Event metadata.' }]).map(variable => ({
+      group: (variable.name === 'values' ? 'Remembered' : variable.name === 'now' ? 'Time' : 'Context') as VariableOption['group'],
+      expression: variable.name,
+      label: variable.name,
+      type: variable.name === 'now' ? 'timestamp' : 'value',
+      description: variable.description,
+    })),
+    ...['id', 'hook', 'instanceId', 'receivedAt'].map(name => ({
+      group: 'Context' as const,
+      expression: `event.${name}`,
+      label: `event.${name}`,
+      type: name === 'receivedAt' ? 'timestamp' : 'string',
+      description: 'Event metadata.',
+    })),
+    ...(catalog?.functions ?? []).map(fn => ({
+      group: 'Functions' as const,
+      expression: fn.example,
+      label: fn.signature,
+      type: 'ƒ',
+      description: fn.description,
+      example: fn.example,
+    })),
   ]
+}
+
+export function comparisonExpects(left: RuleValue, operator: RuleOperator, variables: VariableOption[]): 'text' | 'number' | 'boolean' | 'json' {
+  if (operator === 'in')
+    return 'json'
+  if (['matches', 'startsWith', 'endsWith', 'contains'].includes(operator))
+    return 'text'
+  const type = left.type === 'literal'
+    ? typeof left.value
+    : left.type === 'formula'
+      ? variables.find(variable => variable.expression === left.expression || variable.expression === `payload.${left.expression}`)?.type
+      : 'string'
+  return type === 'integer' || type === 'number' ? 'number' : type === 'boolean' ? 'boolean' : 'text'
+}
+
+export function typedComparisonRight(value: RuleValue | null | undefined, expects: ReturnType<typeof comparisonExpects>): RuleValue {
+  if (value?.type === 'formula')
+    return value
+  if (value?.type === 'template') {
+    const expression = /^\s*\{\{([^{}]+)\}\}\s*$/.exec(value.text)?.[1]
+    if (expression && expects !== 'text')
+      return { type: 'formula', expression: expression.trim() }
+  }
+
+  const raw = value?.type === 'literal' ? value.value : value?.text ?? ''
+  if (expects === 'number')
+    return { type: 'literal', value: Number.isFinite(Number(raw)) ? Number(raw) : 0 }
+  if (expects === 'boolean')
+    return { type: 'literal', value: raw === true || raw === 'true' }
+  if (expects === 'json') {
+    if (Array.isArray(raw))
+      return { type: 'literal', value: raw }
+    try {
+      const list = JSON.parse(String(raw))
+      if (Array.isArray(list))
+        return { type: 'literal', value: list }
+    }
+    catch {}
+
+    return { type: 'literal', value: [] }
+  }
+
+  return value ?? { type: 'template', text: '' }
 }
 
 export function relativeTime(at: number, now = Date.now()) {

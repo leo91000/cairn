@@ -76,11 +76,18 @@ internal fun RuleStepPanel(
                         Choice(
                             "Outil",
                             "${action.text("instanceId")}:${action.text("tool")}",
-                            tools.map {
-                                "${it.instanceId}:${it.tool}" to "${it.instanceName} · ${it.tool}"
-                            },
+                            ruleChoicesWithCurrent(
+                                tools.map {
+                                    "${it.instanceId}:${it.tool}" to
+                                        "${it.instanceName} · ${it.tool}"
+                                },
+                                "${action.text("instanceId")}:${action.text("tool")}",
+                                action.text("tool").ifBlank { "Outil" },
+                            ),
                         ) { key ->
-                            val selected = tools.first { "${it.instanceId}:${it.tool}" == key }
+                            val selected =
+                                tools.firstOrNull { "${it.instanceId}:${it.tool}" == key }
+                                    ?: return@Choice
                             val schema =
                                 selected.inputSchema as? JsonObject ?: JsonObject(emptyMap())
                             val required =

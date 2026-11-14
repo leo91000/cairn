@@ -35,9 +35,10 @@ internal fun RuleFlowTree(
     move: (String, Int) -> Unit = { _, _ -> },
     depth: Int = 0,
     problems: List<HookRuleProblem> = emptyList(),
+    executionAgentId: String? = null,
 ) {
     Column(Modifier.fillMaxWidth()) {
-        if (editable) RuleInsertPoint(container, 0, depth, insert)
+        if (editable) RuleInsertPoint(container, 0, depth, insert, catalog, executionAgentId)
         nodes.forEachIndexed { index, raw ->
             val node = raw.jsonObject
             val path = "$container/$index"
@@ -200,13 +201,15 @@ internal fun RuleFlowTree(
                                     move,
                                     depth + 1,
                                     problems,
+                                    executionAgentId,
                                 )
                             }
                         }
                     }
                 }
             }
-            if (editable) RuleInsertPoint(container, index + 1, depth, insert)
+            if (editable)
+                RuleInsertPoint(container, index + 1, depth, insert, catalog, executionAgentId)
             else if (index < nodes.lastIndex)
                 Box(
                     Modifier.padding(start = 32.dp)
@@ -231,6 +234,8 @@ private fun RuleInsertPoint(
     index: Int,
     depth: Int,
     insert: (String, Int, String) -> Unit,
+    catalog: HookRuleCatalog?,
+    executionAgentId: String?,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
@@ -246,6 +251,12 @@ private fun RuleInsertPoint(
         }
         DropdownMenu(expanded, { expanded = false }) {
             ruleStepChoices
+                .filter {
+                    it.kind != "callTool" ||
+                        catalog?.tools?.any { tool ->
+                            executionAgentId == null || executionAgentId in tool.agentIds
+                        } == true
+                }
                 .filter {
                     !(it.kind == "wait" && container.contains("/body")) &&
                         !(depth >= 7 && it.kind in setOf("if", "forEach"))

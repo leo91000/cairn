@@ -170,6 +170,7 @@ onBeforeUnmount(() => {
         <button
           class="grid size-11 shrink-0 place-items-center rounded-full bg-ink text-canvas hover:opacity-90"
           aria-label="New rule"
+          :disabled="!catalog?.agents.length"
           @click="router.push(newRuleLocation)"
         >
           <Icon :name="Plus" :size="20" />
@@ -228,7 +229,7 @@ onBeforeUnmount(() => {
         </li>
         <li v-if="!loading && !visible.length">
           <Empty :title="rules.length ? 'No matching rules' : 'No rules yet'" :description="rules.length ? 'Change the search or the filters.' : 'A rule answers an event without code: when a message arrives, call a tool or start an agent.'">
-            <UiButton v-if="!rules.length" @click="router.push(newRuleLocation)">
+            <UiButton v-if="!rules.length" :disabled="!catalog?.agents.length" @click="router.push(newRuleLocation)">
               <Icon :name="Plus" :size="16" />Create a rule
             </UiButton>
           </Empty>

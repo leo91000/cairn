@@ -4,7 +4,12 @@ import type { RuleCondition } from '../../../../packages/contracts/generated/typ
 import type { RuleOperator } from '../../../../packages/contracts/generated/typescript/RuleOperator'
 import type { VariableOption } from '../hook-rules'
 import { computed, ref } from 'vue'
-import { binaryOperator, operatorTitles } from '../hook-rules'
+import {
+  binaryOperator,
+  comparisonExpects,
+  operatorTitles,
+  typedComparisonRight,
+} from '../hook-rules'
 import {
   Plus,
   Trash2,
@@ -105,7 +110,7 @@ function setOperator(condition: Extract<RuleCondition, { type: 'compare' }>, ind
   update(index, {
     ...condition,
     operator,
-    right: binaryOperator(operator) ? (condition.right ?? (operator === 'in' ? { type: 'literal', value: [] } : { type: 'template', text: '' })) : null,
+    right: binaryOperator(operator) ? typedComparisonRight(condition.right, comparisonExpects(condition.left, operator, props.variables)) : null,
   })
 }
 
@@ -150,7 +155,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
               expects="field"
               :variables="variables"
               :problems="problemsAt(`${conditionPath(index)}/left`)"
-              @update:model-value="left => update(index, { ...condition, left })"
+              @update:model-value="left => update(index, { ...condition, left, right: binaryOperator(condition.operator) ? typedComparisonRight(condition.right, comparisonExpects(left, condition.operator, variables)) : null })"
             />
             <label class="grid gap-1.5 self-start">
               <span class="text-xs font-semibold">Test</span>
@@ -163,7 +168,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
             v-if="condition.right"
             :model-value="condition.right"
             :label="condition.operator === 'in' ? 'Values (a list)' : condition.operator === 'matches' ? 'Regular expression' : 'Value'"
-            :expects="condition.operator === 'in' ? 'json' : 'text'"
+            :expects="comparisonExpects(condition.left, condition.operator, variables)"
             :variables="variables"
             :problems="problemsAt(`${conditionPath(index)}/right`)"
             :hint="condition.operator === 'in' ? 'For example [&quot;alice&quot;, &quot;bob&quot;].' : undefined"

@@ -36,6 +36,9 @@ variables into text or formulas. The installation validates drafts and reports
 errors at their step. Saving creates a version. A state-only revision change is
 refreshed while preserving the draft; a newer saved definition can be reviewed,
 adopted or explicitly replaced by the draft as the next version.
+Comparison values follow the selected field's number or boolean type. Both
+pickers expose the catalog's variables and formula functions, with signatures,
+descriptions and examples. Validation failures retain the draft and offer retry.
 
 Web uses an adjacent step inspector on wide screens and a sheet on phones.
 Android uses native Compose cards and bottom sheets, with a two-pane list on

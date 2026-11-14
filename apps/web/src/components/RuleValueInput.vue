@@ -49,6 +49,8 @@ const modes = computed(() => {
   ]
   if (props.expects === 'field')
     return all.filter(entry => entry.value === 'formula')
+  if (props.expects === 'number' || props.expects === 'boolean')
+    return all.filter(entry => entry.value !== 'template')
   return all
 })
 
@@ -198,6 +200,7 @@ function outside(event: PointerEvent) {
 document.addEventListener('pointerdown', outside)
 onBeforeUnmount(() => document.removeEventListener('pointerdown', outside))
 
+const typeMismatch = computed(() => ['number', 'boolean'].includes(props.expects) && model.value.type !== 'formula' && (model.value.type !== 'literal' || (props.expects === 'number' ? typeof model.value.value !== 'number' : typeof model.value.value !== 'boolean')))
 const invalid = computed(() => (props.problems?.length ?? 0) > 0)
 const fieldLabel = computed(() => props.variables.find(option => option.expression === text.value)?.label)
 </script>
@@ -336,7 +339,8 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
               <span class="mt-0.5 shrink-0 rounded-md bg-accent/12 px-1.5 py-0.5 font-mono text-2xs text-accent">{{ option.type }}</span>
               <span class="min-w-0 flex-1">
                 <span class="block truncate text-sm font-semibold">{{ option.label }}</span>
-                <span v-if="option.description" class="block truncate text-xs text-muted">{{ option.description }}</span>
+                <span v-if="option.description" class="block text-xs text-muted">{{ option.description }}</span>
+                <code v-if="option.example" class="mt-1 block break-all text-2xs text-accent">{{ option.example }}</code>
               </span>
             </button>
           </section>
@@ -346,6 +350,7 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
         </div>
       </div>
     </div>
+    <small v-if="typeMismatch" class="text-xs text-coral" role="alert">Use a fixed {{ expects === 'number' ? 'number' : 'boolean' }} or a formula returning one.</small>
     <small v-if="expects === 'field' && fieldLabel" class="text-xs text-muted">{{ fieldLabel }}</small>
     <small v-else-if="hint && !invalid" class="text-xs text-muted">{{ hint }}</small>
     <small

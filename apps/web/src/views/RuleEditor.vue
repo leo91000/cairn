@@ -74,6 +74,7 @@ const onWide = () => wide.value = wideQuery.matches
 const creationId = crypto.randomUUID()
 const loadedDefinition = ref('')
 const validated = ref(false)
+const validationError = ref('')
 let disposed = false
 let leavingAfterSave = false
 const pendingLeave = ref<string | null>(null)
@@ -95,6 +96,11 @@ async function load() {
       return
     if (loadedRule && !loadedRule.allowed.edit) {
       await router.replace({ path: '/rules', query: { rule: loadedRule.id } })
+      return
+    }
+
+    if (!loadedRule && !loadedCatalog.agents.length) {
+      error.value = 'You need access to an agent before creating a rule. Ask the owner to give you access.'
       return
     }
 
@@ -146,33 +152,37 @@ function chooseTrigger(key: string) {
 // Validation follows editing, a moment after the last change.
 let timer: ReturnType<typeof setTimeout> | undefined
 let generation = 0
-watch(definition, (value) => {
+
+function scheduleValidation(value: HookRuleDefinition | null, delay = 350) {
   if (!value)
     return
   clearTimeout(timer)
   const current = ++generation
   validated.value = false
+  validationError.value = ''
   checking.value = true
   timer = setTimeout(async () => {
     try {
-      const output = await validateHookRule(api, { definition: value, ruleId: id.value })
+      const output = await validateHookRule(api, { definition: value, ruleId: rule.value?.id ?? id.value })
       if (!disposed && current === generation) {
         validated.value = true
-        error.value = ''
+        validationError.value = ''
         problems.value = output.problems
         warnings.value = output.warnings
       }
     }
     catch (e) {
-      if (current === generation)
-        error.value = (e as Error).message
+      if (!disposed && current === generation)
+        validationError.value = (e as Error).message
     }
     finally {
-      if (current === generation)
+      if (!disposed && current === generation)
         checking.value = false
     }
-  }, 350)
-}, { deep: true })
+  }, delay)
+}
+
+watch(definition, value => scheduleValidation(value), { deep: true })
 
 const general = computed(() => problems.value.filter(problem => !problem.path.startsWith('/steps/')))
 const stepProblems = computed(() => problems.value.filter(problem => problem.path.startsWith('/steps')))
@@ -324,9 +334,9 @@ onBeforeUnmount(() => {
           aria-label="Rule name"
         >
       </div>
-      <span class="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold" :class="checking ? 'bg-hover text-muted' : problems.length ? 'bg-coral/12 text-coral' : 'bg-success/12 text-success'" role="status">
-        <Icon :name="checking ? LoaderCircle : problems.length ? CircleAlert : CircleCheck" :size="14" :class="checking ? 'animate-spin' : ''" />
-        {{ checking ? 'Checking…' : problems.length ? `${problems.length} to fix` : 'Ready' }}
+      <span class="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold" :class="checking || !validated && !validationError ? 'bg-hover text-muted' : validationError || problems.length ? 'bg-coral/12 text-coral' : 'bg-success/12 text-success'" role="status">
+        <Icon :name="checking ? LoaderCircle : validationError || problems.length ? CircleAlert : CircleCheck" :size="14" :class="checking ? 'animate-spin' : ''" />
+        {{ checking ? 'Checking…' : validationError ? 'Check failed' : !validated ? 'Waiting for check' : problems.length ? `${problems.length} to fix` : 'Ready' }}
       </span>
       <UiButton variant="primary" :disabled="!ready || saving || !!conflict" @click="save">
         {{ saving ? 'Saving…' : rule ? 'Save version' : 'Create rule' }}
@@ -334,6 +344,12 @@ onBeforeUnmount(() => {
     </header>
     <UiAlert v-if="error" class="mt-3">
       {{ error }}
+    </UiAlert>
+    <UiAlert v-if="validationError" class="mt-3">
+      {{ validationError }}
+      <UiButton size="small" @click="scheduleValidation(definition, 0)">
+        Retry validation
+      </UiButton>
     </UiAlert>
     <section v-if="conflict" class="mt-3 grid max-h-[35vh] shrink-0 gap-3 overflow-y-auto rounded-2xl border border-accent/30 bg-raised p-4" role="alert">
       <p class="m-0! text-sm">
@@ -456,6 +472,7 @@ onBeforeUnmount(() => {
               :agent-name="agentName"
               editable
               :selected="selected"
+              :execution-agent-id="definition.executionAgentId"
               :problems="stepProblems"
               @select="path => selected = path"
               @insert="insert"

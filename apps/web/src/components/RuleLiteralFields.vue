@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import {
+  computed,
+  ref,
+  useId,
+  watch,
+} from 'vue'
 import { Plus, Trash2 } from '../icons'
 import { resolveRuleSchema, ruleLiteralDefault } from '../rule-schema'
 import Icon from './Icon.vue'
@@ -12,6 +17,7 @@ const props = defineProps<{
   depth?: number
 }>()
 const model = defineModel<unknown>({ required: true })
+const fieldId = useId()
 const resolved = computed(() => resolveRuleSchema(props.schema, props.root ?? props.schema))
 const fields = computed(() => Object.entries<any>(resolved.value.properties ?? {}))
 const object = computed<Record<string, unknown>>(() => model.value && typeof model.value === 'object' && !Array.isArray(model.value) ? model.value as Record<string, unknown> : {})
@@ -64,8 +70,14 @@ function setItem(index: number, value: unknown) {
     </button>
   </div>
   <div v-else-if="resolved.type === 'object' && (depth ?? 0) < 8" class="grid gap-3 rounded-xl border border-line p-3">
-    <label v-for="[name, field] in fields" :key="name" class="grid gap-1.5">
-      <span class="text-xs font-semibold">{{ field.title ?? name }}</span>
+    <div
+      v-for="([name, field], index) in fields"
+      :key="name"
+      role="group"
+      :aria-labelledby="`${fieldId}-${index}`"
+      class="grid gap-1.5"
+    >
+      <span :id="`${fieldId}-${index}`" class="text-xs font-semibold">{{ field.title ?? name }}</span>
       <RuleLiteralFields
         :model-value="object[name] ?? ruleLiteralDefault(resolveRuleSchema(field, root ?? schema))"
         :schema="field"
@@ -75,7 +87,7 @@ function setItem(index: number, value: unknown) {
         @update:model-value="value => setField(name, value)"
       />
       <small v-if="field.description" class="text-2xs text-muted">{{ field.description }}</small>
-    </label>
+    </div>
   </div>
   <div v-else-if="resolved.type === 'array' && (depth ?? 0) < 8" class="grid gap-2">
     <div v-for="(item, index) in array" :key="index" class="flex items-start gap-2 rounded-xl border border-line p-3">

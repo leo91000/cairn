@@ -52,7 +52,7 @@ export class NativeFixture {
     return JSON.parse(output).result ?? undefined
   }
 
-  /** Models a transport event through the real bounded durable queue; the live engine consumes it. */
+  /** Seeds the hook queue for engine/UI journeys; plugin_hooks tests cover transport validation. */
   emitHook = (instanceId: string, hook: string, payload: Record<string, unknown>, externalId: string) => this.call('emitHook', instanceId, hook, payload, externalId)
 
   // Test-created agents explicitly grant access to the shared development runner.

@@ -3,7 +3,7 @@ import type { HookRuleCatalog } from '../../../../packages/contracts/generated/t
 import type { HookRuleProblem } from '../../../../packages/contracts/generated/typescript/HookRuleProblem'
 import type { RuleNode } from '../../../../packages/contracts/generated/typescript/RuleNode'
 import type { StepKind } from '../hook-rules'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import {
   describeAction,
   describeCondition,
@@ -32,6 +32,7 @@ const props = defineProps<{
   catalog: HookRuleCatalog | null
   agentName: (id: string) => string
   editable?: boolean
+  executionAgentId?: string
   selected?: string | null
   problems?: HookRuleProblem[]
   // Steps that ran in a triggering, for the history view.
@@ -45,6 +46,7 @@ const emit = defineEmits<{
 }>()
 
 const menu = ref<number | null>(null)
+const choices = computed(() => stepChoices.filter(choice => choice.kind !== 'callTool' || props.catalog?.tools.some(tool => !props.executionAgentId || tool.agentIds.includes(props.executionAgentId))))
 
 function pick(index: number, kind: StepKind) {
   menu.value = null
@@ -89,7 +91,7 @@ const ranTone: Record<string, string> = {
       </button>
       <div v-if="menu === 0" class="step-menu absolute top-9 z-30 grid w-80 overflow-hidden rounded-2xl border border-line bg-raised py-1 shadow-xl" role="menu">
         <button
-          v-for="choice in stepChoices"
+          v-for="choice in choices"
           :key="choice.kind"
           type="button"
           role="menuitem"
@@ -110,46 +112,48 @@ const ranTone: Record<string, string> = {
             ran?.[node.id] ? ranTone[ran[node.id]] : '',
           ]"
         >
-          <button
-            v-if="editable"
-            type="button"
-            class="absolute inset-0 rounded-[18px] focus-visible:outline-2 focus-visible:outline-accent"
-            :aria-label="`Edit ${node.type === 'action' ? (node.label || describeAction(node.action, catalog, agentName).title) : node.id}`"
-            @click="emit('select', `${container}/${index}`)"
-          />
-          <div class="pointer-events-none relative flex items-start gap-3 p-3.5">
-            <span class="grid size-9 shrink-0 place-items-center rounded-xl" :class="tone[node.type === 'action' ? node.action.type : node.type]">
-              <Icon :name="node.type === 'action' ? stepChoice(node.action.type).icon : node.type === 'if' ? Split : Repeat" :size="18" />
-            </span>
-            <div class="min-w-0 flex-1">
-              <template v-if="node.type === 'action'">
-                <p class="m-0! line-clamp-2 font-heading text-[15px] font-semibold">
-                  {{ node.label || describeAction(node.action, catalog, agentName).title }}
-                </p>
-                <p class="m-0! mt-0.5! line-clamp-2 text-xs text-muted">
-                  {{ node.label ? describeAction(node.action, catalog, agentName).title : '' }}{{ node.label && describeAction(node.action, catalog, agentName).detail ? ' · ' : '' }}{{ describeAction(node.action, catalog, agentName).detail }}
-                </p>
-              </template>
-              <template v-else-if="node.type === 'if'">
-                <p class="m-0! font-heading text-[15px] font-semibold">
-                  If
-                </p>
-                <p class="m-0! mt-0.5! line-clamp-3 text-xs text-muted">
-                  {{ describeCondition(node.condition) }}
-                </p>
-              </template>
-              <template v-else>
-                <p class="m-0! font-heading text-[15px] font-semibold">
-                  For each {{ node.itemName }}
-                </p>
-                <p class="m-0! mt-0.5! truncate text-xs text-muted">
-                  in {{ describeValue(node.items) }}
-                </p>
-              </template>
+          <div class="relative">
+            <button
+              v-if="editable"
+              type="button"
+              class="absolute inset-0 rounded-[18px] focus-visible:outline-2 focus-visible:outline-accent"
+              :aria-label="`Edit ${node.type === 'action' ? (node.label || describeAction(node.action, catalog, agentName).title) : node.id}`"
+              @click="emit('select', `${container}/${index}`)"
+            />
+            <div class="pointer-events-none relative flex items-start gap-3 p-3.5">
+              <span class="grid size-9 shrink-0 place-items-center rounded-xl" :class="tone[node.type === 'action' ? node.action.type : node.type]">
+                <Icon :name="node.type === 'action' ? stepChoice(node.action.type).icon : node.type === 'if' ? Split : Repeat" :size="18" />
+              </span>
+              <div class="min-w-0 flex-1">
+                <template v-if="node.type === 'action'">
+                  <p class="m-0! line-clamp-2 font-heading text-[15px] font-semibold">
+                    {{ node.label || describeAction(node.action, catalog, agentName).title }}
+                  </p>
+                  <p class="m-0! mt-0.5! line-clamp-2 text-xs text-muted">
+                    {{ node.label ? describeAction(node.action, catalog, agentName).title : '' }}{{ node.label && describeAction(node.action, catalog, agentName).detail ? ' · ' : '' }}{{ describeAction(node.action, catalog, agentName).detail }}
+                  </p>
+                </template>
+                <template v-else-if="node.type === 'if'">
+                  <p class="m-0! font-heading text-[15px] font-semibold">
+                    If
+                  </p>
+                  <p class="m-0! mt-0.5! line-clamp-3 text-xs text-muted">
+                    {{ describeCondition(node.condition) }}
+                  </p>
+                </template>
+                <template v-else>
+                  <p class="m-0! font-heading text-[15px] font-semibold">
+                    For each {{ node.itemName }}
+                  </p>
+                  <p class="m-0! mt-0.5! truncate text-xs text-muted">
+                    in {{ describeValue(node.items) }}
+                  </p>
+                </template>
+              </div>
+              <span v-if="hasProblems(`${container}/${index}`)" class="shrink-0 text-coral" :title="problemsUnder(problems ?? [], `${container}/${index}`)[0]?.message">
+                <Icon :name="CircleAlert" :size="17" />
+              </span>
             </div>
-            <span v-if="hasProblems(`${container}/${index}`)" class="shrink-0 text-coral" :title="problemsUnder(problems ?? [], `${container}/${index}`)[0]?.message">
-              <Icon :name="CircleAlert" :size="17" />
-            </span>
           </div>
           <div v-if="editable" class="node-tools relative z-10 mr-2 mb-2 ml-auto flex w-fit gap-0.5 rounded-lg border border-line bg-raised p-0.5">
             <button
@@ -190,6 +194,7 @@ const ranTone: Record<string, string> = {
                 :catalog="catalog"
                 :agent-name="agentName"
                 :editable="editable"
+                :execution-agent-id="executionAgentId"
                 :selected="selected"
                 :problems="problems"
                 :ran="ran"
@@ -212,6 +217,7 @@ const ranTone: Record<string, string> = {
                 :catalog="catalog"
                 :agent-name="agentName"
                 :editable="editable"
+                :execution-agent-id="executionAgentId"
                 :selected="selected"
                 :problems="problems"
                 :ran="ran"
@@ -233,6 +239,7 @@ const ranTone: Record<string, string> = {
                 :catalog="catalog"
                 :agent-name="agentName"
                 :editable="editable"
+                :execution-agent-id="executionAgentId"
                 :selected="selected"
                 :problems="problems"
                 :ran="ran"
@@ -257,7 +264,7 @@ const ranTone: Record<string, string> = {
         </button>
         <div v-if="menu === index + 1" class="step-menu absolute top-9 z-30 grid w-80 overflow-hidden rounded-2xl border border-line bg-raised py-1 shadow-xl" role="menu">
           <button
-            v-for="choice in stepChoices"
+            v-for="choice in choices"
             :key="choice.kind"
             type="button"
             role="menuitem"

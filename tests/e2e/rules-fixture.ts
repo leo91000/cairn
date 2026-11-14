@@ -44,6 +44,8 @@ async function installRulesFixture(workspace: Workspace) {
           author: { type: 'string', title: 'Author' },
           content: { type: 'string', title: 'Message text' },
           tags: { type: 'array', items: { type: 'string' } },
+          count: { type: 'integer' },
+          approved: { type: 'boolean' },
         },
       },
       resourceFields: [{ path: '/channel', resourceType: 'channel' }, { path: '/author', resourceType: 'person' }],
