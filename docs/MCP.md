@@ -294,6 +294,9 @@ OAuth scopes, trusted people, node permissions and administrator reviews still
 apply. Run-scoped installation tools retain their originating run's bounded
 delegation instead.
 
+Conversation provenance records the verified account of the public client, including
+members. A member's identity carries no native authority.
+
 The application advertises protected-resource metadata at
 `/.well-known/oauth-protected-resource/mcp` and authorization-server metadata at
 `/.well-known/oauth-authorization-server`. OAuth supports public-client dynamic

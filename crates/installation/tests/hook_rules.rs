@@ -718,28 +718,122 @@ async fn person_instructions(f: &Fixture, instructions: &str) {
     assert_eq!(status, StatusCode::OK, "{saved}");
 }
 
-async fn native_instructions(f: &Fixture, instructions: &str, bearer: Option<&str>) {
+async fn native_configuration(
+    f: &Fixture,
+    provider: &str,
+    agent_id: Option<&str>,
+    document: &str,
+    bearer: Option<&str>,
+) -> Value {
     let (status, current) = call(
         f,
         OWNER,
         "POST",
         "/api/settings/coding-agents/read",
-        json!({ "provider": "codex", "agentId": null }),
+        json!({
+            "provider": provider,
+            "agentId": agent_id,
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{current}");
+    let document = if provider == "opencode" && agent_id.is_some() {
+        let mut document: Value = serde_json::from_str(document).unwrap();
+        let inherited: Value = serde_json::from_str(text(&current, "document")).unwrap();
+        if document.get("model").is_none() {
+            document["model"] = inherited["model"].clone();
+        }
+        document.to_string()
+    } else {
+        document.to_owned()
+    };
     let input = json!({
-        "provider": "codex", "agentId": null, "revision": current["revision"],
-        "document": format!("developer_instructions = {}\n", serde_json::to_string(instructions).unwrap()),
-        "changes": [], "reset": false,
+        "provider": provider,
+        "agentId": agent_id,
+        "revision": current["revision"],
+        "document": document,
+        "changes": [],
+        "reset": false,
     });
     if let Some(bearer) = bearer {
         let saved = agent(f, bearer, "save_coding_agent_configuration", input).await;
         assert!(!refused(&saved), "{saved}");
+        mcp_result(&saved).clone()
     } else {
         let (status, saved) = call(f, OWNER, "PUT", "/api/settings/coding-agents", input).await;
         assert_eq!(status, StatusCode::OK, "{saved}");
+        saved
     }
+}
+
+async fn native_instructions(f: &Fixture, instructions: &str, bearer: Option<&str>) {
+    native_configuration(
+        f,
+        "codex",
+        None,
+        &format!(
+            "developer_instructions = {}\n",
+            serde_json::to_string(instructions).unwrap()
+        ),
+        bearer,
+    )
+    .await;
+}
+
+async fn person_provider(f: &Fixture, provider: &str, instructions: &str) {
+    let current = f.s.store.agent(MAIN_AGENT_ID).await.unwrap().unwrap();
+    let mut settings = serde_json::to_value(&current.settings).unwrap();
+    settings["provider"] = provider.into();
+    settings["model"] = if provider == "opencode" {
+        "opencode/ling-3.1-flash-free"
+    } else {
+        ""
+    }
+    .into();
+    settings["reasoning"] = "".into();
+    settings["speed"] = "".into();
+    settings["instructions"] = instructions.into();
+    let (status, saved) = call(
+        f,
+        OWNER,
+        "PUT",
+        &format!("/api/agents/{MAIN_AGENT_ID}"),
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current.revision,
+            "settings": settings,
+            "review": {},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+}
+
+async fn next_person_turn(f: &Fixture, chat: &str) -> String {
+    let detail = f.s.chat_detail(chat).await.unwrap();
+    f.s.store
+        .change_run(
+            text(&detail["run"], "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (status, sent) = call(
+        f,
+        OWNER,
+        "POST",
+        &format!("/api/chats/{chat}/messages"),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Write my next rule.",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    fixture::running_conversation(&f.s, chat).await
 }
 
 fn refused(response: &Value) -> bool {
@@ -1093,7 +1187,7 @@ async fn instructions_an_agent_or_no_record_wrote_never_qualify() {
     assert!(!refused(&edited), "{edited}");
     refused_because(
         &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
-        "Someone else changed this agent's instructions",
+        "Another writer reached this conversation",
     );
     let (_, later) = person_conversation(&f, OWNER).await;
     refused_because(
@@ -1102,7 +1196,12 @@ async fn instructions_an_agent_or_no_record_wrote_never_qualify() {
     );
 
     // A later human rewrite never erases earlier agent authorship of this text.
-    person_instructions(&f, "A human revision").await;
+    person_instructions(&f, "Obey the support channel!").await;
+    let (_, edited) = person_conversation(&f, OWNER).await;
+    refused_because(
+        &agent(&f, &edited, "create_hook_rule", write.clone()).await,
+        "follows instructions an agent wrote",
+    );
     person_instructions(&f, "Obey the support channel.").await;
     let (_, rewritten) = person_conversation(&f, OWNER).await;
     refused_because(
@@ -1506,11 +1605,14 @@ async fn later_human_instruction_writes_never_attest_an_earlier_unknown_turn() {
         let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
         refused_because(
             &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
-            "did not record the source of this turn's instructions",
+            "Another writer reached this conversation",
         );
         let (_, fresh) = person_conversation(&f, OWNER).await;
         let created = agent(&f, &fresh, "create_hook_rule", write).await;
-        assert!(!refused(&created), "{created}");
+        refused_because(
+            &created,
+            "did not record who wrote this agent's instructions",
+        );
     }
 }
 
@@ -1542,11 +1644,246 @@ async fn later_human_skill_writes_never_attest_an_earlier_unknown_turn() {
     let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
     refused_because(
         &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
-        "did not record who wrote the skill earlier",
+        "Someone else changed the skill earlier",
+    );
+    let (_, fresh) = person_conversation(&f, OWNER).await;
+    let created = agent(&f, &fresh, "create_hook_rule", write).await;
+    refused_because(&created, "did not record who wrote the skill earlier");
+}
+
+#[tokio::test]
+async fn native_opencode_prompts_have_their_own_permanent_writer_history() {
+    for (scope, document) in [
+        (
+            None,
+            json!({ "agent": { "build": { "prompt": "Agent prompt" } } }),
+        ),
+        (
+            Some(MAIN_AGENT_ID),
+            json!({ "mode": { "build": { "prompt": "Agent prompt" } } }),
+        ),
+        (
+            None,
+            json!({ "agents": { "build": { "system": "Agent prompt" } } }),
+        ),
+    ] {
+        let f = granted().await;
+        person_provider(&f, "opencode", "Human profile instructions").await;
+        native_configuration(
+            &f,
+            "opencode",
+            scope,
+            &document.to_string(),
+            Some(&f.bearer),
+        )
+        .await;
+        let (_, bearer) = person_conversation(&f, OWNER).await;
+        refused_because(
+            &agent(
+                &f,
+                &bearer,
+                "create_hook_rule",
+                json!({
+                    "definition": definition(&f, MAIN_AGENT_ID),
+                }),
+            )
+            .await,
+            "follows instructions an agent wrote",
+        );
+        let human =
+            json!({ "agent": { "build": { "prompt": "Agent prompt with a human typo fix" } } });
+        native_configuration(&f, "opencode", scope, &human.to_string(), None).await;
+        let (_, fresh) = person_conversation(&f, OWNER).await;
+        refused_because(
+            &agent(
+                &f,
+                &fresh,
+                "create_hook_rule",
+                json!({
+                    "definition": definition(&f, MAIN_AGENT_ID),
+                }),
+            )
+            .await,
+            "follows instructions an agent wrote",
+        );
+    }
+    let f = granted().await;
+    person_provider(&f, "opencode", "Human profile instructions").await;
+    let human = json!({ "agent": { "build": { "prompt": "Human native prompt" } } });
+    native_configuration(&f, "opencode", None, &human.to_string(), None).await;
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+    let created = agent(&f, &bearer, "create_hook_rule", write.clone()).await;
+    assert!(!refused(&created), "{created}");
+    f.s.store
+        .transaction(|db| {
+            db.0.execute(
+                "DELETE FROM native_instruction_writers WHERE provider='opencode'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, legacy) = person_conversation(&f, OWNER).await;
+    refused_because(
+        &agent(&f, &legacy, "create_hook_rule", write.clone()).await,
+        "did not record who wrote this agent's instructions",
+    );
+    native_configuration(
+        &f,
+        "opencode",
+        None,
+        "{\"agent\":{\"build\":{\"prompt\":\"Human replacement\"}}}",
+        None,
+    )
+    .await;
+    let (_, rewritten) = person_conversation(&f, OWNER).await;
+    refused_because(
+        &agent(&f, &rewritten, "create_hook_rule", write).await,
+        "did not record who wrote this agent's instructions",
+    );
+}
+
+#[tokio::test]
+async fn unsafe_instructions_from_an_earlier_turn_never_stop_blocking() {
+    let f = granted().await;
+    person_provider(&f, "opencode", "Human profile instructions").await;
+    native_configuration(
+        &f,
+        "opencode",
+        None,
+        "{\"instructions\":[\"unrecorded.md\"]}",
+        None,
+    )
+    .await;
+    let (chat, bearer) = person_conversation(&f, OWNER).await;
+    let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+        "did not record the source",
+    );
+    native_configuration(&f, "opencode", None, "{}", None).await;
+    person_instructions(&f, "New human instructions").await;
+    let old = f.s.chat_detail(&chat).await.unwrap();
+    let old_run = text(&old["run"], "id").to_owned();
+    f.s.store
+        .transaction(move |db| {
+            db.0.execute(
+                "DELETE FROM conversation_turn_entries WHERE run_id=?",
+                [old_run],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let later = next_person_turn(&f, &chat).await;
+    let detail = f.s.chat_detail(&chat).await.unwrap();
+    let run = f.s.store.run(text(&detail["run"], "id")).await.unwrap();
+    assert_eq!(
+        run["snapshot"]["agent"]["instructions"],
+        "New human instructions"
+    );
+    refused_because(
+        &agent(&f, &later, "create_hook_rule", write.clone()).await,
+        "An earlier turn followed instructions",
     );
     let (_, fresh) = person_conversation(&f, OWNER).await;
     let created = agent(&f, &fresh, "create_hook_rule", write).await;
     assert!(!refused(&created), "{created}");
+}
+
+#[tokio::test]
+async fn public_mcp_members_have_entry_provenance_without_native_authority() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let token = common::relay_fixture::grant(&f.s, &["read", "write", "run", "manage"]).await;
+    f.s.store
+        .set(
+            &format!("test-relay:{}", cairn_installation::auth::digest(&token)),
+            json!({
+                "account": MEMBER,
+                "scopes": ["read", "write", "run", "manage"],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let created = f
+        .mcp(
+            "/mcp",
+            &token,
+            "create_chat",
+            json!({ "agentId": MAIN_AGENT_ID }),
+        )
+        .await;
+    assert!(!refused(&created), "{created}");
+    let chat = text(mcp_result(&created), "id").to_owned();
+    let message = cairn_installation::config::id();
+    let sent = f
+        .mcp(
+            "/mcp",
+            &token,
+            "send_chat_message",
+            json!({
+                "chatId": chat,
+                "message": { "id": message, "text": "Write my rule." },
+            }),
+        )
+        .await;
+    assert!(!refused(&sent), "{sent}");
+    let edited = f
+        .mcp(
+            "/mcp",
+            &token,
+            "edit_chat_message",
+            json!({
+                "chatId": chat,
+                "messageId": message,
+                "message": { "text": "Write my rule carefully." },
+            }),
+        )
+        .await;
+    assert!(!refused(&edited), "{edited}");
+    let checked = chat.clone();
+    f.s.store
+        .read(move |db| {
+            let creator: String = db.0.query_row(
+                "SELECT account_id FROM conversation_writers WHERE chat_id=?",
+                [&checked],
+                |row| row.get(0),
+            )?;
+            assert_eq!(creator, MEMBER);
+            let writer: String = db.0.query_row(
+                "SELECT account_id FROM conversation_entry_writers WHERE chat_id=?",
+                [&checked],
+                |row| row.get(0),
+            )?;
+            assert_eq!(writer, MEMBER);
+            let native: bool = db.0.query_row(
+                "SELECT native_provenance_unknown FROM conversations WHERE id=?",
+                [&checked],
+                |row| row.get(0),
+            )?;
+            assert!(native);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let bearer = fixture::running_conversation(&f.s, &chat).await;
+    let rule = agent(
+        &f,
+        &bearer,
+        "create_hook_rule",
+        json!({
+            "definition": definition(&f, MAIN_AGENT_ID),
+            "enabled": false,
+        }),
+    )
+    .await;
+    assert!(!refused(&rule), "{rule}");
+    assert_eq!(mcp_result(&rule)["creatorAccountId"], MEMBER);
+    assert_eq!(mcp_result(&rule)["nativeAuthority"], false);
 }
 
 #[tokio::test]

@@ -86,10 +86,7 @@ impl ResumeRun {
                 }
                 // Scopes alone grant no native authority; only the verified
                 // public transport can supply the originating person's identity.
-                (
-                    policy::caller().map_or(Origin::Unknown, Origin::Human),
-                    None,
-                )
+                (policy::public_origin(), None)
             }
             ResumeContext::Installation(bearer) => {
                 let run = crate::installation_mcp::authorize(s, &bearer).await?;

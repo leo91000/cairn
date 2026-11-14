@@ -318,11 +318,15 @@ as written by the importer). Every message must carry an attestation of the pers
 matching its current content: a write that skipped the record makes the conversation
 ineligible. Conversations, instructions and skills written before this record never
 qualify. Native instruction documents have their own writer history, and each turn
-records the source it follows. A human rewrite cannot erase earlier agent authorship
-of those instructions. Skill history remains attached to the conversation when later
+records the source it follows. A human edit cannot erase an agent, rule or unknown
+writer from a source's history.
+Every earlier turn's instruction sources remain attached to the conversation, and an
+unattested turn closes it permanently. The complete native documents for Codex, Claude
+and OpenCode are attributed, including inheritance masks; unrecorded instruction-file
+references never qualify. Skill history remains attached to the conversation when later
 turns stop selecting a skill. Installation skill reads, listings and archive exports
-record their exact revisions and canonical directories; reading an unrecorded or agent-written skill closes the
-conversation immediately. Native inheritance and removal changes count as instruction
+record their exact revisions and canonical directories; reading an unrecorded or
+agent-written skill closes the conversation immediately. Native inheritance and removal changes count as instruction
 changes too.
 Reading another conversation, run or task through `cairn_installation` (`list_chats`,
 `get_chat`, `read_chat_content`, `list_runs`, `get_run`, `read_run_content`, `get_task`)

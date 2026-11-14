@@ -476,6 +476,88 @@ pub(crate) fn instruction_source(
     ))
 }
 
+/// Attribute every editable native setting: providers may introduce instruction
+/// keys outside the profile's plain instructions field.
+fn instruction_document(record: &Record) -> Result<String> {
+    if record
+        .value
+        .as_object()
+        .is_some_and(serde_json::Map::is_empty)
+        && record.removed.is_empty()
+    {
+        return Ok(String::new());
+    }
+    Ok(serde_json::to_string(&json!({
+        "document": record.value,
+        "removed": record.removed,
+    }))?)
+}
+
+pub(crate) fn instruction_sources(
+    db: &Db<'_>,
+    provider: Provider,
+    agent: &str,
+) -> Result<Vec<(crate::conversation_writers::InstructionSource, String)>> {
+    use crate::conversation_writers::InstructionSource;
+    let profile = required(db.agent(agent)?, "Agent not found")?;
+    let mut sources = vec![(
+        InstructionSource::Profile {
+            agent: agent.into(),
+        },
+        profile.settings.instructions,
+    )];
+    for scope in [None, Some(profile.id)] {
+        let record = record(db, provider, scope)?;
+        let document = instruction_document(&record)?;
+        sources.push((
+            InstructionSource::Native {
+                scope: scope.map(|id| id.to_string()).unwrap_or_default(),
+                provider: provider.as_str().into(),
+            },
+            document,
+        ));
+        // These settings load instruction files whose contents Cairn has not
+        // frozen or attributed. A human-authored path does not attest its target.
+        if instruction_references(provider, &record.value) {
+            sources.push((
+                InstructionSource::Unknown,
+                "unrecorded native instruction files".into(),
+            ));
+        }
+    }
+    Ok(sources)
+}
+
+fn instruction_references(provider: Provider, value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            let nonempty = value.as_str().is_some_and(|value| !value.is_empty())
+                || value.as_array().is_some_and(|value| !value.is_empty());
+            (nonempty
+                && matches!(
+                    key.as_str(),
+                    "instructions"
+                        | "model_instructions_file"
+                        | "experimental_instructions_file"
+                        | "config_file"
+                ))
+                || (provider == Provider::Claude
+                    && key == "outputStyle"
+                    && value.as_str().is_some_and(|style| {
+                        !matches!(
+                            style,
+                            "" | "default" | "Default" | "Explanatory" | "Learning"
+                        )
+                    }))
+                || instruction_references(provider, value)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| instruction_references(provider, value)),
+        _ => false,
+    }
+}
+
 fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
     let mut entries = vec![
         (
@@ -1091,12 +1173,7 @@ pub(crate) fn edit_by(
         ));
     }
     let (before, inherited, own, agent, _) = effective(db, provider, input.agent_id)?;
-    let native_before = text(&own.value, "developer_instructions").to_owned();
-    let native_present = own.value.get("developer_instructions").is_some();
-    let native_removed = own
-        .removed
-        .iter()
-        .any(|path| path == "/developer_instructions");
+    let native_before = instruction_document(&own)?;
     let instruction_source_before = input
         .agent_id
         .map(|agent| instruction_source(db, provider, &agent.to_string()))
@@ -1296,16 +1373,13 @@ pub(crate) fn edit_by(
         "INSERT INTO coding_agent_configurations(scope,provider,agent_id,document,presentation,removed,revision) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(scope,provider) DO UPDATE SET document=excluded.document,presentation=excluded.presentation,removed=excluded.removed,revision=excluded.revision",
         params![scope.as_deref().unwrap_or(""), provider.as_str(), scope, stored_document, document, serde_json::to_string(&removed)?, id()],
     )?;
-    let native_after = parse(provider, &stored_document)?;
+    let native_after = instruction_document(&record(db, provider, input.agent_id)?)?;
     crate::conversation_writers::record_native_instructions(
         db,
         scope.as_deref().unwrap_or(""),
         provider.as_str(),
         &native_before,
-        text(&native_after, "developer_instructions"),
-        native_before != text(&native_after, "developer_instructions")
-            || native_present != native_after.get("developer_instructions").is_some()
-            || native_removed != removed.iter().any(|path| path == "/developer_instructions"),
+        &native_after,
         writer,
     )?;
     if let (Some(agent), Some(before)) = (input.agent_id, instruction_source_before) {

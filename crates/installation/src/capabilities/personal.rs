@@ -38,7 +38,8 @@ pub(crate) async fn reader(s: &Service, context: ResumeContext, scope: &str) -> 
             if !scopes.iter().any(|granted| granted == scope) {
                 return Err(Error::forbidden(format!("The {scope} scope is required.")));
             }
-            crate::native::policy::caller()
+            crate::auth::public_account()
+                .or_else(crate::native::policy::caller)
                 .ok_or_else(|| Error::forbidden("This connection is not bound to a Cairn account."))
         }
         ResumeContext::Installation(bearer) => {
@@ -54,7 +55,9 @@ pub(crate) async fn reader(s: &Service, context: ResumeContext, scope: &str) -> 
 pub(crate) fn listing_reader(context: &ResumeContext) -> Option<String> {
     match context {
         ResumeContext::Human(account) => Some(account.clone()).filter(|a| !a.is_empty()),
-        ResumeContext::Public(..) => crate::native::policy::caller(),
+        ResumeContext::Public(..) => {
+            crate::auth::public_account().or_else(crate::native::policy::caller)
+        }
         ResumeContext::Installation(_) => None,
     }
 }
