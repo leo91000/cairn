@@ -1,5 +1,5 @@
-//! Durable hook intake. Deliberately separate from the script event pump: ticket F
-//! consumes these events as rules, never as plugin handlers or inbound messages.
+//! Durable hook intake. Deliberately separate from the script event pump: the rule
+//! engine consumes these events, never plugin handlers or inbound messages.
 use super::{capabilities::Context, connections, registry};
 use crate::{
     config::{id, now},
@@ -210,12 +210,16 @@ pub(crate) async fn emit(s: &Service, context: &Context, args: &Value) -> Result
     let external = external.to_owned();
     let name = name.to_owned();
     let payload = payload.clone();
-    s.store
+    let queued = s
+        .store
         .transaction(move |db| {
             db.enqueue_hook(&context, &digest, &external, &name, &payload, now())
-                .map(|queued| json!(queued))
         })
-        .await
+        .await?;
+    if queued {
+        s.rules.wake.notify_one();
+    }
+    Ok(json!(queued))
 }
 
 #[cfg(test)]

@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "cursor": {
+      "description": "The `nextCursor` of the previous page.",
+      "maxLength": 200,
+      "minLength": 1,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ruleId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ruleId"
+  ],
+  "title": "ListHookRuleTriggeringsInput",
+  "type": "object"
+}

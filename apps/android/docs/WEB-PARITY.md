@@ -847,3 +847,13 @@ Recipients need no account. The public read-only page includes messages and ever
 published artifact version, and disables indexing and caching. Expiration, revocation
 and conversation deletion deny both history and files. The same management operations
 are available through public MCP and cairn_installation with management authority.
+
+Rule budget alerts (ADR-0075 F): web and Android display an installation-level
+alert only for its creator. Android rechecks the active account and current rule
+state before displaying it. Both open the installation inbox; ticket I supplies
+the rules detail and editor navigation. No conversation is fabricated for alerts.
+
+Rule engine limits (ADR-0075 F): the Rust-generated web and Android catalog models
+share the 1,000-item and 16 MiB event-data limits across unresolved admissions and
+active triggerings. The server grants one action at a time per rule and shares
+executor slots between rules after each action. There is no platform difference.

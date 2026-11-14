@@ -1,0 +1,189 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "HookRuleStep": {
+      "additionalProperties": false,
+      "description": "One action a triggering ran.",
+      "properties": {
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finishedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "input": true,
+        "kind": {
+          "description": "The action kind, such as `callTool`.",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "nodeId": {
+          "type": "string"
+        },
+        "result": true,
+        "startedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "pattern": "^(running|completed|failed|retrying|waiting)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId",
+        "label",
+        "kind",
+        "status",
+        "attempts",
+        "startedAt"
+      ],
+      "type": "object"
+    },
+    "HookRuleTriggeringEvent": {
+      "additionalProperties": false,
+      "description": "The event a triggering started from.",
+      "properties": {
+        "hook": {
+          "type": "string"
+        },
+        "instanceId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payload": true,
+        "receivedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hook",
+        "payload",
+        "receivedAt"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "A triggering of a rule. Every member sees its state; the event, the actions and\nthe error are shown only to the creator, the owner and members with access to the\nexecution agent.",
+  "properties": {
+    "actions": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "createdAt": {
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "detailsVisible": {
+      "type": "boolean"
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "event": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/HookRuleTriggeringEvent"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "finishedAt": {
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "resumesAt": {
+      "description": "When a waiting or retrying triggering resumes.",
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ruleId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "status": {
+      "pattern": "^(running|waiting|retrying|completed|failed|stopped)$",
+      "type": "string"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/definitions/HookRuleStep"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "updatedAt": {
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "version": {
+      "description": "The rule version this triggering keeps.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "id",
+    "ruleId",
+    "version",
+    "status",
+    "actions",
+    "createdAt",
+    "updatedAt",
+    "detailsVisible"
+  ],
+  "title": "HookRuleTriggering",
+  "type": "object"
+}

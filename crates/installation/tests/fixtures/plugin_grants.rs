@@ -29,8 +29,10 @@ pub(crate) struct Fixture {
     pub(crate) bearer: String,
     pub(crate) run: String,
     pub(crate) instance: String,
+    pub(crate) http_origin: String,
     pub(crate) posts: Arc<AtomicUsize>,
     pub(crate) pause: Arc<AtomicBool>,
+    pub(crate) hold_posts: Arc<AtomicBool>,
     pub(crate) entered: Arc<tokio::sync::Notify>,
     pub(crate) release: Arc<tokio::sync::Notify>,
     pub(crate) moved_parent: Arc<AtomicBool>,
@@ -93,6 +95,7 @@ impl Fixture {
         let posts = Arc::new(AtomicUsize::new(0));
         let count = posts.clone();
         let pause = Arc::new(AtomicBool::new(false));
+        let hold_posts = Arc::new(AtomicBool::new(false));
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let moved_parent = Arc::new(AtomicBool::new(false));
@@ -109,22 +112,28 @@ impl Fixture {
         );
         let hold_entered = entered.clone();
         let hold_release = release.clone();
-        let (paused, arrived, resume) = (pause.clone(), entered.clone(), release.clone());
+        let (paused, held, arrived, resume) = (
+            pause.clone(),
+            hold_posts.clone(),
+            entered.clone(),
+            release.clone(),
+        );
         let (origin, _server) = common::serve_locally(
             Router::new()
                 .route(
                     "/effect",
                     any(move || {
                         let moved = remote_parent.clone();
-                        let (count, paused, arrived, resume) = (
+                        let (count, paused, held, arrived, resume) = (
                             count.clone(),
                             paused.clone(),
+                            held.clone(),
                             arrived.clone(),
                             resume.clone(),
                         );
                         async move {
                             count.fetch_add(1, Ordering::SeqCst);
-                            if paused.swap(false, Ordering::SeqCst) {
+                            if paused.swap(false, Ordering::SeqCst) || held.load(Ordering::SeqCst) {
                                 arrived.notify_one();
                                 resume.notified().await;
                             }
@@ -169,7 +178,7 @@ impl Fixture {
                 ),
         )
         .await;
-        s.plugins.route_http_to(Some(origin));
+        s.plugins.route_http_to(Some(origin.clone()));
         let shape = json!({
             "type": "object",
             "additionalProperties": false,
@@ -181,6 +190,12 @@ impl Fixture {
                 "thread": { "type": "string" },
                 "server": { "type": "string" },
                 "author": { "type": "string" },
+                "retry": { "type": "boolean" },
+                "retryAfter": { "type": "number" },
+                "delay": { "type": "number" },
+                "large": { "type": "string" },
+                "agentView": { "type": "boolean" },
+                "result": {},
                 "instance": { "type": "string" },
                 "items": {
                     "type": "array",
@@ -254,6 +269,10 @@ return {
             pcall(function() cairn.http.request({url="https://service.example.test/effect"}) end)
             return {items=cairn.array({})}
         end
+        if input.instance.settings.marker == "resolver-unavailable" then
+            cairn.http.request({url="https://service.example.test/effect"})
+            return {}
+        end
         if input.id == "unknown" then return {} end
         if input.instance.settings.marker == "resolver-effects" then
             pcall(function() cairn.http.request({url="https://service.example.test/effect"}) end)
@@ -269,6 +288,8 @@ return {
         return { resourceType=input.resourceType,id=input.id,name=input.id,parent=parent }
     end,
     tool = function(input)
+        if input.input.agentView then return input.agent end
+        if input.input.result then return input.input.result end
         if input.input.chunks then
             local destination = if input.input.target then cairn.files.read({instance=input.instances[1].id,id=input.input.target}) else cairn.files.create({instance=input.instances[1].id,name="chunks.txt",data=""})
             for _ = 1, input.input.chunks do
@@ -285,6 +306,9 @@ return {
             local original = cairn.files.read({instance=input.instances[1].id,id=input.input.consume})
             cairn.http.request({instance=input.instances[1].id,url="https://service.example.test/hold"})
             return cairn.http.request({instance=input.instances[1].id,method="POST",url="https://service.example.test/upload",body=original.data})
+        end
+        if input.input.retry and input.instances[1].settings.marker ~= "accept" then
+            return {retryAfter=input.input.retryAfter or 1}
         end
         if input.input.download then
             return cairn.http.request({instance=input.instances[1].id,url="https://service.example.test/effect",responseFile={name="private.txt"}})
@@ -363,8 +387,10 @@ return {
             bearer: text(&config["env"], "CAIRN_MCP_RUN_TOKEN").into(),
             run: text(&run, "id").into(),
             instance: text(&instance, "id").into(),
+            http_origin: origin,
             posts,
             pause,
+            hold_posts,
             entered,
             release,
             moved_parent,

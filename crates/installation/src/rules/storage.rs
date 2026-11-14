@@ -307,7 +307,7 @@ mod tests {
 
     fn tables(connection: &Connection) -> Vec<String> {
         connection
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'hook_rule%' ORDER BY name")
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('hook_rules','hook_rule_versions','hook_rule_uses') ORDER BY name")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()

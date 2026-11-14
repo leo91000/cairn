@@ -14,6 +14,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import build.cairn.app.data.CairnViewModel
+import build.cairn.app.data.INSTALLATION_NOTIFICATION_TARGET
 import build.cairn.app.diagnostics.FrameMonitor
 import build.cairn.app.ui.AppUpdatePrompt
 import build.cairn.app.ui.CairnApp
@@ -82,13 +83,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun receive(intent: Intent) {
-        if (intent.action == "build.cairn.app.OPEN_CHAT") {
+        if (
+            intent.action == "build.cairn.app.OPEN_CHAT" ||
+                intent.action == "build.cairn.app.OPEN_INSTALLATION"
+        ) {
             targetChat =
-                intent
-                    .getStringExtra("chat")
-                    .orEmpty()
-                    .takeIf { runCatching { java.util.UUID.fromString(it) }.isSuccess }
-                    .orEmpty()
+                if (intent.action == "build.cairn.app.OPEN_INSTALLATION")
+                    INSTALLATION_NOTIFICATION_TARGET
+                else
+                    intent
+                        .getStringExtra("chat")
+                        .orEmpty()
+                        .takeIf { runCatching { java.util.UUID.fromString(it) }.isSuccess }
+                        .orEmpty()
             targetCacheScope = intent.getStringExtra("origin").orEmpty()
             targetAccount = intent.getStringExtra("account").orEmpty()
         }

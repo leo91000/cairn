@@ -742,10 +742,26 @@ pub struct RuleCatalogLimits {
     pub max_triggerings_per_hour: u32,
     pub max_conversations_per_hour: u32,
     pub max_wait_seconds: u32,
-    /// Blocks and iterations one triggering may run, waits excluded.
+    /// Control-step limit: each if/forEach block and every loop iteration count; actions do not.
     pub max_steps: u32,
     pub max_tool_calls: u32,
     pub max_nodes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub max_recorded_bytes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub max_cursor_bytes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub max_rule_values_bytes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub max_pending: Option<u32>,
+    /// Event bytes retained by unresolved admissions and active triggerings, per rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub max_pending_event_bytes: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -760,6 +776,155 @@ pub struct HookRuleCatalog {
     pub variables: Vec<RuleCatalogVariable>,
     pub agents: Vec<RuleCatalogAgent>,
     pub limits: RuleCatalogLimits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum HookRuleTriggeringStatus {
+    Running,
+    /// Waiting for a wait step, or to verify its creator's membership.
+    Waiting,
+    /// Retrying an action the service confirmed it did not perform.
+    Retrying,
+    Completed,
+    Failed,
+    /// Stopped because the rule was disabled, paused or lost its rights.
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum HookRuleStepStatus {
+    Running,
+    Completed,
+    Failed,
+    Retrying,
+    Waiting,
+}
+
+/// The event a triggering started from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HookRuleTriggeringEvent {
+    pub hook: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub instance_id: Option<PluginInstanceId>,
+    #[ts(type = "any ")]
+    pub payload: serde_json::Value,
+    #[schemars(range(min = 0, max = 9007199254740991_i64))]
+    #[ts(type = "number")]
+    pub received_at: i64,
+}
+
+/// One action a triggering ran.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HookRuleStep {
+    pub node_id: String,
+    pub label: String,
+    /// The action kind, such as `callTool`.
+    pub kind: String,
+    #[schemars(
+        with = "String",
+        pattern("^(running|completed|failed|retrying|waiting)$")
+    )]
+    pub status: HookRuleStepStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "any")]
+    pub input: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "any")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub error: Option<String>,
+    pub attempts: u32,
+    #[schemars(range(min = 0, max = 9007199254740991_i64))]
+    #[ts(type = "number")]
+    pub started_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 9007199254740991_i64))]
+    #[ts(optional = nullable, type = "number")]
+    pub finished_at: Option<i64>,
+}
+
+/// A triggering of a rule. Every member sees its state; the event, the actions and
+/// the error are shown only to the creator, the owner and members with access to the
+/// execution agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HookRuleTriggering {
+    pub id: Uuid,
+    pub rule_id: HookRuleId,
+    /// The rule version this triggering keeps.
+    pub version: u32,
+    #[schemars(
+        with = "String",
+        pattern("^(running|waiting|retrying|completed|failed|stopped)$")
+    )]
+    pub status: HookRuleTriggeringStatus,
+    pub actions: u32,
+    #[schemars(range(min = 0, max = 9007199254740991_i64))]
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[schemars(range(min = 0, max = 9007199254740991_i64))]
+    #[ts(type = "number")]
+    pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 9007199254740991_i64))]
+    #[ts(optional = nullable, type = "number")]
+    pub finished_at: Option<i64>,
+    /// When a waiting or retrying triggering resumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 9007199254740991_i64))]
+    #[ts(optional = nullable, type = "number")]
+    pub resumes_at: Option<i64>,
+    pub details_visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub event: Option<HookRuleTriggeringEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub steps: Option<Vec<HookRuleStep>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListHookRuleTriggeringsInput {
+    pub rule_id: HookRuleId,
+    /// The `nextCursor` of the previous page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 200))]
+    #[ts(optional = nullable)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListHookRuleTriggeringsOutput {
+    /// Newest first, without their details.
+    pub triggerings: Vec<HookRuleTriggering>,
+    /// Triggerings that ended without any action in the last 24 hours. They are not
+    /// kept and do not count against the hourly caps.
+    pub without_effect: u32,
+    /// Events refused for this rule's capacity or admission deadline in the last 24 hours. No payload is retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub not_admitted: Option<u32>,
+    /// Present when older triggerings remain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HookRuleTriggeringInput {
+    pub triggering_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

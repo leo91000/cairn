@@ -406,6 +406,9 @@ where
         cairn_installation::plugins::runtime::load_secret_patterns(&service).await;
         service.worker.start(service.clone()).await?;
         background.push(tokio::spawn(service.plugins.clone().start(service.clone())));
+        background.push(tokio::spawn(cairn_installation::rules::engine::start(
+            service.clone(),
+        )));
         background.push(spawn_periodic(
             &service,
             "accounts",

@@ -7,9 +7,17 @@ export interface RuleCatalogLimits {
   maxConversationsPerHour: number
   maxWaitSeconds: number
   /**
-   * Blocks and iterations one triggering may run, waits excluded.
+   * Control-step limit: each if/forEach block and every loop iteration count; actions do not.
    */
   maxSteps: number
   maxToolCalls: number
   maxNodes: number
+  maxRecordedBytes?: number | null
+  maxCursorBytes?: number | null
+  maxRuleValuesBytes?: number | null
+  maxPending?: number | null
+  /**
+   * Event bytes retained by unresolved admissions and active triggerings, per rule.
+   */
+  maxPendingEventBytes?: number | null
 }
