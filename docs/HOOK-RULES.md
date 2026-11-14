@@ -87,8 +87,11 @@ instance and hook, when nothing blocks the rule and the execution agent's hook g
 covers every resource the payload designates. The triggering keeps the rule version it
 started with. Once every listening rule has its triggering, the event leaves the queue;
 an event no rule may receive is dropped, so a quiet queue never blocks later events.
-When the plugin cannot resolve the payload's resources for a moment, the event stays
-queued and is tried again for ten minutes.
+When the plugin cannot resolve the payload's resources for a moment, its admission
+waits privately for that rule and is tried again for ten minutes. The shared instance
+queue is acknowledged as soon as the admissions are durable, so other rules keep
+receiving later events. Resolution is limited to one operation per rule and eight
+in total, with a ten-second read deadline and backoff for the affected rule.
 The same event is never triggered twice for one rule.
 
 The engine walks the tree in order. Before every action it checks the rule again: a
@@ -135,7 +138,7 @@ Actions:
 - `storeValue` with the rule scope keeps up to 64 KiB.
 - `wait` resumes the next steps later; a rule keeps at most 20 triggerings waiting,
   including retries. Membership verification waits retain their seven-day deadline.
-  A rule can hold at most 1,000 active triggerings; later events are refused only
+  A rule can hold at most 1,000 active triggerings and unresolved admissions combined; later events are refused only
   for that rule and counted as `notAdmitted` in its history, without retaining their
   payloads or blocking the shared instance queue.
 - Conversation actions and conditions about conversation keys come with ticket G

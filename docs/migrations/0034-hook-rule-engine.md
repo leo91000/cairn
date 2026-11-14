@@ -4,8 +4,11 @@ Version 32 upgrades to 33 automatically in `Store::open`, before the SQL actors 
 ([ADR-0075](../adr/0075-plugin-hooks-rules-and-scoped-grants.md), « Budget du moteur de
 règles »).
 
-One immediate transaction creates five empty tables and advances `user_version`:
+One immediate transaction creates six empty tables and advances `user_version`:
 
+- `hook_rule_admissions`: private per-rule resource-resolution admissions; acknowledging
+  the shared transport event and creating these rows is atomic. They are bounded
+  together with active triggerings and never exposed as history before authorization.
 - `hook_rule_triggerings`: one row per triggering, with its pinned version, its event,
   its interpreter position, the action pending or in flight, its counters, recorded
   byte budget and state;

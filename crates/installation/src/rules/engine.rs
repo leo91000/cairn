@@ -18,7 +18,9 @@ use crate::{
     store::Db,
 };
 use cairn_contracts::{PluginContributionKind as Kind, RuleAction, RuleNode, RuleValueScope};
-use futures_util::{StreamExt, stream};
+
+mod admissions;
+
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json, json};
@@ -29,6 +31,18 @@ use std::{
 };
 
 pub(crate) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS hook_rule_admissions(
+ rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
+ event_id TEXT NOT NULL,
+ version INTEGER NOT NULL CHECK(version>=1),
+ instance_id TEXT NOT NULL REFERENCES plugin_instances(id) ON DELETE CASCADE,
+ event TEXT NOT NULL CHECK(json_valid(event) AND json_type(event)='object'),
+ fields TEXT NOT NULL CHECK(json_valid(fields) AND json_type(fields)='array'),
+ created_at INTEGER NOT NULL,
+ CHECK(length(CAST(event AS BLOB))+length(CAST(fields AS BLOB))<=983040),
+ PRIMARY KEY(rule_id,event_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS hook_rule_admissions_order ON hook_rule_admissions(created_at,event_id);
 CREATE TABLE IF NOT EXISTS hook_rule_triggerings(
  id TEXT PRIMARY KEY NOT NULL,
  rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
@@ -142,6 +156,7 @@ pub struct Engine {
     pub(crate) wake: tokio::sync::Notify,
     delivery_retries: Mutex<HashMap<(String, String), (Instant, u32)>>,
     maintenance: Mutex<Option<Instant>>,
+    last_resolution: Mutex<HashMap<String, Instant>>,
 }
 
 impl Engine {
@@ -446,9 +461,11 @@ impl Db<'_> {
     /// external resolution. Its receipt prevents recounting if another listener defers.
     fn refuse_admission(&self, rule: &str, event: &str) -> Result<bool> {
         let full: bool = self.0.query_row(
-            "SELECT count(*)>=?2 FROM hook_rule_triggerings WHERE rule_id=?1 \
-             AND status IN ('running','waiting','retrying')",
-            params![rule, MAX_PENDING],
+            "SELECT ((SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=?1 \
+             AND status IN ('running','waiting','retrying')) + \
+             (SELECT count(*) FROM hook_rule_admissions a WHERE a.rule_id=?1 AND a.event_id<>?3 \
+             AND NOT EXISTS(SELECT 1 FROM hook_rule_receipts r WHERE r.rule_id=a.rule_id AND r.event_id=a.event_id)))>=?2",
+            params![rule, MAX_PENDING, event],
             |row| row.get(0),
         )?;
         if !full {
@@ -498,6 +515,16 @@ pub(crate) fn stop_rule(db: &Db<'_>, rule: &str, reason: &str) -> Result<()> {
 
 fn stop_triggerings(db: &Db<'_>, rule: &str, version: Option<u32>, reason: &str) -> Result<()> {
     let at = now();
+    db.0.execute(
+        "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id) \
+         SELECT rule_id,event_id FROM hook_rule_admissions WHERE rule_id=?1 AND (?2 IS NULL OR version=?2)",
+        params![rule, version],
+    )?;
+    db.0.execute(
+        "DELETE FROM hook_rule_admissions WHERE rule_id=?1 AND (?2 IS NULL OR version=?2)",
+        params![rule, version],
+    )?;
+
     let quiet = db.0.execute(
         "DELETE FROM hook_rule_triggerings WHERE rule_id=?1 AND (?2 IS NULL OR version=?2) \
          AND status IN ('running','waiting','retrying') AND actions=0",
@@ -611,7 +638,18 @@ fn eligible_listener(db: &Db<'_>, rule: &str) -> Result<Option<(RuleRow, Version
 /// rule may receive is dropped, so a quiet queue never blocks later events.
 enum Delivery {
     Deferred,
-    Handled(bool),
+    Handled,
+}
+
+fn hook_record(event: &crate::plugins::hooks::HookEvent, fields: &[String]) -> Json {
+    json!({
+        "id": event.id,
+        "hook": event.name,
+        "instanceId": event.instance_id,
+        "payload": event.payload,
+        "receivedAt": event.created_at,
+        "payloadFields": fields,
+    })
 }
 
 async fn deliver_hook(
@@ -626,38 +664,35 @@ async fn deliver_hook(
         return Ok(if now() - event.created_at < DELIVERY_PATIENCE {
             Delivery::Deferred
         } else {
-            Delivery::Handled(false)
+            Delivery::Handled
         });
     }
-    let full = s.store.read({
-        let rule = row.id.clone();
-        move |db| Ok(db.0.query_row(
-            "SELECT count(*)>=?2 FROM hook_rule_triggerings WHERE rule_id=?1 AND status IN ('running','waiting','retrying')",
-            params![rule, MAX_PENDING], |row| row.get::<_, bool>(0),
-        )?)
-    }).await?;
+    let full = s
+        .store
+        .transaction({
+            let (rule, event) = (row.id.clone(), event.id.clone());
+            move |db| db.refuse_admission(&rule, &event)
+        })
+        .await?;
     if full {
-        let rule = row.id.clone();
-        let event = event.id.clone();
-        if s.store
-            .transaction(move |db| db.refuse_admission(&rule, &event))
-            .await?
-        {
-            return Ok(Delivery::Handled(false));
-        }
+        return Ok(Delivery::Handled);
     }
     let agent = version.definition.execution_agent_id.to_string();
     // Cairn never delivers an event whose payload designates a resource
     // outside the execution agent's hook grant. A resolution that failed for
     // another reason is tried again for a while.
-    let delivery = crate::plugins::grant_authorization::authorize_hook_delivery(
-        s,
-        &agent,
-        &event.instance_id,
-        &event.name,
-        &event.payload,
+    let delivery = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        crate::plugins::grant_authorization::authorize_hook_delivery(
+            s,
+            &agent,
+            &event.instance_id,
+            &event.name,
+            &event.payload,
+        ),
     )
-    .await;
+    .await
+    .unwrap_or_else(|_| Err(Error::unavailable("Hook resource resolution timed out.")));
     match delivery {
         Ok(()) => {}
         Err(error)
@@ -669,22 +704,18 @@ async fn deliver_hook(
         }
         Err(_) => {
             s.rules.clear_delivery(&key);
-            return Ok(Delivery::Handled(false));
+            return Ok(Delivery::Handled);
         }
     }
     s.rules.clear_delivery(&key);
-    let record = json!({
-        "id": event.id,
-        "hook": event.name,
-        "instanceId": event.instance_id,
-        "payload": event.payload,
-        "receivedAt": event.created_at,
-        "payloadFields": fields,
-    });
+    let record = hook_record(event, fields);
     let (rule, number, event_id) = (row.id.clone(), version.version, event.id.clone());
     let inserted = s
     .store
     .transaction(move |db| {
+        if !admissions::eligible(db, &rule, &event_id, number)? {
+            return Ok(None);
+        }
         if db.refuse_admission(&rule, &event_id)? { return Ok(None) }
         let recorded = record.to_string();
         let recorded_bytes = recorded.len() + 256;
@@ -710,49 +741,30 @@ async fn deliver_hook(
             > 0))
     })
     .await?;
-    Ok(match inserted {
-        Some(created) => Delivery::Handled(created),
-        None => Delivery::Handled(false),
-    })
+    let _ = inserted;
+    Ok(Delivery::Handled)
 }
 
+/// Copies each shared event to bounded, private admissions before acknowledging it.
+/// No resource resolver can hold the instance's transport queue here.
 async fn intake_instance(s: &Arc<Service>, instance: String) -> Result<usize> {
-    let mut created = 0;
     let Some(connection) = s.store.plugin_instance(&instance).await? else {
         return Ok(0);
     };
     let Ok(package) = crate::plugins::registry::active(s, &connection.plugin_id).await else {
         return Ok(0);
     };
-    let (revision, digest) = (connection.revision.clone(), package.digest.clone());
-    let queue = instance.clone();
+    let (revision, digest, queue) = (
+        connection.revision.clone(),
+        package.digest.clone(),
+        instance,
+    );
     let events = s
         .store
         .read(move |db| db.plugin_hooks(&queue, &revision, &digest, now()))
         .await?;
+    let mut copied = 0;
     for event in events {
-        let (instance, hook, event_id) = (instance.clone(), event.name.clone(), event.id.clone());
-        let listeners = s
-            .store
-            .read(move |db| {
-                let mut listeners = Vec::new();
-                let listeners_sql = "SELECT DISTINCT rule_id FROM hook_rule_uses u \
-                    WHERE kind='hook' AND instance_id=?1 AND name=?2 \
-                    AND NOT EXISTS(SELECT 1 FROM hook_rule_receipts r \
-                        WHERE r.rule_id=u.rule_id AND r.event_id=?3)";
-                let rules = db.0.prepare_cached(listeners_sql)?
-                    .query_map(params![instance, hook, event_id], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                for rule in rules {
-                    match eligible_listener(db, &rule) {
-                        Ok(Some(listener)) => listeners.push(listener),
-                        Ok(None) => {}
-                        Err(error) => tracing::warn!(rule = %rule, error = %error, "Rule listener is unavailable"),
-                    }
-                }
-                Ok(listeners)
-            })
-            .await?;
         let fields = package
             .manifest
             .hook(&event.name)
@@ -760,49 +772,27 @@ async fn intake_instance(s: &Arc<Service>, instance: String) -> Result<usize> {
             .and_then(Json::as_object)
             .map(|fields| fields.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        let mut deliveries = stream::iter(listeners)
-            .map(|(row, version)| deliver_hook(s, &event, &fields, row, version))
-            .buffer_unordered(PARALLEL);
-        let mut deferred = false;
-        while let Some(delivery) = deliveries.next().await {
-            match delivery? {
-                Delivery::Deferred => deferred = true,
-                Delivery::Handled(inserted) => created += usize::from(inserted),
-            }
-        }
-        if deferred {
-            continue;
-        }
-        let (instance, event) = (event.instance_id.clone(), event.id.clone());
-        s.store
-            .transaction(move |db| db.remove_plugin_hook(&instance, &event))
+        copied += s
+            .store
+            .transaction(move |db| admissions::fanout(db, &event, &fields))
             .await?;
     }
-    Ok(created)
+    Ok(copied)
 }
 
 /// Queue discovery is read-only and never waits for a plugin resource resolver.
 async fn queued_instances(s: &Service) -> Result<Vec<String>> {
-    let queued = s.store.read(|db| {
-        Ok(db.0.prepare_cached("SELECT id,instance_id FROM plugin_hook_events ORDER BY instance_id,created_at,id")?
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
-    }).await?;
-    let events = queued
-        .iter()
-        .map(|(event, _)| event.as_str())
-        .collect::<HashSet<_>>();
-    s.rules
-        .delivery_retries
-        .lock()
-        .unwrap()
-        .retain(|(event, _), _| events.contains(event.as_str()));
-    Ok(queued
-        .into_iter()
-        .map(|(_, instance)| instance)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect())
+    s.store
+        .read(|db| {
+            Ok(db
+                .0
+                .prepare_cached(
+                    "SELECT DISTINCT instance_id FROM plugin_hook_events ORDER BY instance_id",
+                )?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
 }
 
 /// Claims due triggerings. An action left in flight by an interrupted executor stays
@@ -880,8 +870,9 @@ fn sweep_rule(db: &Db<'_>, rule: &str) -> Result<()> {
     }
     let versions =
         db.0.prepare_cached(
-            "SELECT DISTINCT version FROM hook_rule_triggerings WHERE rule_id=? \
-         AND status IN ('running','waiting','retrying')",
+            "SELECT version FROM hook_rule_triggerings WHERE rule_id=?1 \
+         AND status IN ('running','waiting','retrying') \
+         UNION SELECT version FROM hook_rule_admissions WHERE rule_id=?1",
         )?
         .query_map([rule], |row| row.get::<_, u32>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -903,7 +894,8 @@ async fn sweep(s: &Service) -> Result<()> {
     let maintenance = s.rules.maintenance_due();
     let (active, retained, expired) = s.store.read(move |db| {
         let active = db.0.prepare_cached(
-            "SELECT DISTINCT rule_id FROM hook_rule_triggerings WHERE status IN ('running','waiting','retrying')",
+            "SELECT rule_id FROM hook_rule_triggerings WHERE status IN ('running','waiting','retrying') \
+             UNION SELECT rule_id FROM hook_rule_admissions",
         )?.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let retained = if maintenance {
             db.0.prepare_cached("SELECT rule_id FROM hook_rule_triggerings UNION SELECT rule_id FROM hook_rule_quiet_hours")?
@@ -937,6 +929,8 @@ async fn sweep(s: &Service) -> Result<()> {
             db.0.execute(
                 "DELETE FROM hook_rule_receipts WHERE (counted_at IS NULL OR counted_at<=?1) \
                  AND NOT EXISTS(SELECT 1 FROM plugin_hook_events e WHERE e.id=hook_rule_receipts.event_id) \
+                 AND NOT EXISTS(SELECT 1 FROM hook_rule_admissions a \
+                     WHERE a.rule_id=hook_rule_receipts.rule_id AND a.event_id=hook_rule_receipts.event_id) \
                  AND NOT EXISTS(SELECT 1 FROM hook_rule_triggerings t \
                      WHERE t.rule_id=hook_rule_receipts.rule_id AND t.event_id=hook_rule_receipts.event_id \
                      AND t.status IN ('running','waiting','retrying'))",
@@ -952,6 +946,8 @@ async fn sweep(s: &Service) -> Result<()> {
 pub async fn tick(s: &Arc<Service>) -> Result<usize> {
     let mut tasks = tokio::task::JoinSet::new();
     let mut intakes = tokio::task::JoinSet::new();
+    let mut deliveries = tokio::task::JoinSet::new();
+    let mut resolving = HashSet::new();
     let mut admitting = HashSet::new();
     let mut checked = HashSet::new();
     let mut ran = 0;
@@ -975,6 +971,30 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
             }
             Err(error) => tracing::warn!(error = %error, "Rule queue discovery failed"),
         }
+        match admissions::pending(s, &resolving).await {
+            Ok(pending) => {
+                for (rule, event) in pending
+                    .into_iter()
+                    .take(PARALLEL.saturating_sub(deliveries.len()))
+                {
+                    resolving.insert(rule.clone());
+                    s.rules
+                        .last_resolution
+                        .lock()
+                        .unwrap()
+                        .insert(rule.clone(), Instant::now());
+                    let service = s.clone();
+                    deliveries.spawn(async move {
+                        let result = admissions::deliver(&service, &rule, &event).await;
+                        if result.is_err() {
+                            service.rules.defer_delivery((event, rule.clone()));
+                        }
+                        (rule, result)
+                    });
+                }
+            }
+            Err(error) => tracing::warn!(error = %error, "Rule admission discovery failed"),
+        }
         if let Err(error) = sweep(s).await {
             tracing::warn!(error = %error, "Rule history sweep failed");
         }
@@ -983,7 +1003,9 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
         if capacity > 0 {
             let due = match claim(s, capacity).await {
                 Ok(due) => due,
-                Err(error) if tasks.is_empty() && intakes.is_empty() => return Err(error),
+                Err(error) if tasks.is_empty() && intakes.is_empty() && deliveries.is_empty() => {
+                    return Err(error);
+                }
                 Err(error) => {
                     tracing::warn!(error = %error, "Rule claiming failed; existing executors continue");
                     Vec::new()
@@ -999,7 +1021,7 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
             }
         }
 
-        if tasks.is_empty() && intakes.is_empty() {
+        if tasks.is_empty() && intakes.is_empty() && deliveries.is_empty() {
             return Ok(ran);
         }
 
@@ -1007,6 +1029,7 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
             () = s.shutdown.cancelled() => {
                 tasks.abort_all();
                 intakes.abort_all();
+                deliveries.abort_all();
                 return Ok(ran);
             }
             () = tokio::time::sleep(std::time::Duration::from_secs(2)) => { checked.clear(); }
@@ -1020,6 +1043,18 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
                         }
                     }
                     Some(Err(error)) => tracing::warn!(error = %error, "Rule intake stopped"),
+                    None => {}
+                }
+            }
+            completed = deliveries.join_next(), if !deliveries.is_empty() => {
+                match completed {
+                    Some(Ok((rule, result))) => {
+                        resolving.remove(&rule);
+                        if let Err(error) = result {
+                            tracing::warn!(rule = %rule, error = %error, "Rule admission failed");
+                        }
+                    }
+                    Some(Err(error)) => tracing::warn!(error = %error, "Rule admission stopped"),
                     None => {}
                 }
             }

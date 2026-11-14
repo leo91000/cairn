@@ -542,6 +542,7 @@ fn version_32_adds_the_engine_tables_and_reopens_without_changing_them() {
          DROP TABLE hook_rule_values;
          DROP TABLE hook_rule_quiet_hours;
          DROP TABLE hook_rule_receipts;
+         DROP TABLE hook_rule_admissions;
          PRAGMA user_version=32;",
     )
     .unwrap();
@@ -559,6 +560,7 @@ fn version_32_adds_the_engine_tables_and_reopens_without_changing_them() {
             "hook_rule_values",
             "hook_rule_quiet_hours",
             "hook_rule_receipts",
+            "hook_rule_admissions",
         ] {
             assert_eq!(
                 db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
@@ -707,7 +709,79 @@ async fn a_deferred_listener_does_not_replay_another_rules_quiet_triggering() {
             })
             .await
             .unwrap();
-    assert_eq!((queued, receipts), (1, 1));
+    assert_eq!((queued, receipts), (0, 1));
+    for batch in 0..2 {
+        for index in 0..35 {
+            emit(
+                &f,
+                &format!("outage-{batch}-{index}"),
+                json!({ "channel": "unknown", "author": "alice" }),
+            )
+            .await;
+        }
+        engine::tick(&f.s).await.unwrap();
+        let queued =
+            f.s.store
+                .read(|db| {
+                    Ok(db
+                        .0
+                        .query_row("SELECT count(*) FROM plugin_hook_events", [], |r| {
+                            r.get::<_, i64>(0)
+                        })?)
+                })
+                .await
+                .unwrap();
+        assert_eq!(queued, 0);
+    }
+    assert_eq!(history(&f, OWNER, &quiet).await["withoutEffect"], 71);
+    let restricted = text(&other, "id");
+    let pending =
+        f.s.store
+            .read(|db| {
+                Ok(db
+                    .0
+                    .query_row("SELECT count(*) FROM hook_rule_admissions", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(pending, 71);
+    call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/hook-rules/{restricted}/enabled"),
+        json!({ "ruleId": restricted, "enabled": false }),
+    )
+    .await;
+    let pending =
+        f.s.store
+            .read(|db| {
+                Ok(db
+                    .0
+                    .query_row("SELECT count(*) FROM hook_rule_admissions", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(pending, 0);
+    call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/hook-rules/{restricted}/enabled"),
+        json!({ "ruleId": restricted, "enabled": true }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert!(
+        history(&f, OWNER, restricted).await["triggerings"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1400,7 +1474,7 @@ async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
         ],
         "runCredentialInstances": [],
     })).await.unwrap();
-    let fast = rule(&f, OWNER, json!([remember_seen()]), 60).await;
+    let fast = rule(&f, OWNER, json!([remember_seen()]), 200).await;
     let agent =
         f.s.agent_fixture(json!({ "name": "Resolving" }), None)
             .await
@@ -1467,8 +1541,54 @@ async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
         }
     })
     .await;
+    let later_events = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        for batch in 0..2 {
+            for index in 0..30 {
+                emit(
+                    &f,
+                    &format!("later-{batch}-{index}"),
+                    json!({ "channel": "support", "author": "alice" }),
+                )
+                .await;
+            }
+            loop {
+                let queued =
+                    f.s.store
+                        .read(|db| {
+                            Ok(db.0.query_row(
+                                "SELECT count(*) FROM plugin_hook_events",
+                                [],
+                                |row| row.get::<_, i64>(0),
+                            )?)
+                        })
+                        .await
+                        .unwrap();
+                if queued == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+    })
+    .await;
     f.release.notify_one();
     worker.await.unwrap().unwrap();
+    let completed =
+        f.s.store
+            .read(move |db| {
+                Ok(db.0.query_row(
+                "SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=? AND status='completed'",
+                [fast],
+                |row| row.get::<_, i64>(0),
+            )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(completed, 61);
+    assert!(
+        later_events.is_ok(),
+        "A resolver held later same-instance events in the shared queue."
+    );
     assert!(
         progress.is_ok(),
         "Resource resolution held up independent rule work."
@@ -1479,7 +1599,7 @@ async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
 async fn transient_delivery_resolution_is_backed_off() {
     let f = granted().await;
     f.marker("resolver-unavailable").await;
-    rule(&f, OWNER, json!([remember_seen()]), 60).await;
+    let rule = rule(&f, OWNER, json!([remember_seen()]), 60).await;
     emit(
         &f,
         "unavailable",
@@ -1491,6 +1611,89 @@ async fn transient_delivery_resolution_is_backed_off() {
     assert!(attempts > 0);
     engine::tick(&f.s).await.unwrap();
     assert_eq!(f.posts.load(Ordering::SeqCst), attempts);
+    let waiting = history(&f, OWNER, &rule).await;
+    assert!(waiting["triggerings"].as_array().unwrap().is_empty());
+    let path = format!("/api/hook-rules/{rule}");
+    let (_, current) = call(&f, OWNER, "GET", &path, Value::Null).await;
+    let mut definition = current["definition"].clone();
+    definition["steps"][0]["action"]["name"] = "replacement".into();
+    let (status, edited) = call(
+        &f,
+        OWNER,
+        "PUT",
+        &path,
+        json!({ "ruleId": rule, "revision": current["revision"], "definition": definition }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    // Simulate remote resolver recovery while preserving the instance revision.
+    let mut connection =
+        f.s.store
+            .plugin_instance(&f.instance)
+            .await
+            .unwrap()
+            .unwrap();
+    connection.settings["marker"] = "".into();
+    f.s.store
+        .transaction(move |db| db.save_plugin_instance(&connection))
+        .await
+        .unwrap();
+    let restarted = cairn_installation::service::Service::new(f.s.config.clone())
+        .await
+        .unwrap();
+    restarted
+        .plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    restarted.plugins.route_http_to(Some(f.http_origin.clone()));
+    engine::tick(&restarted).await.unwrap();
+    assert!(has_seen(&f, &rule).await);
+    let listed = history(&f, OWNER, &rule).await;
+    assert_eq!(listed["triggerings"][0]["version"], 1);
+    let pending =
+        f.s.store
+            .read(|db| {
+                Ok(db
+                    .0
+                    .query_row("SELECT count(*) FROM hook_rule_admissions", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(pending, 0);
+    f.marker("resolver-unavailable").await;
+    emit(
+        &f,
+        "expired-admission",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let attempts = f.posts.load(Ordering::SeqCst);
+    f.s.store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE hook_rule_admissions SET created_at=?",
+                [cairn_installation::config::now() - 600_001],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), attempts);
+    let pending =
+        f.s.store
+            .read(|db| {
+                Ok(db
+                    .0
+                    .query_row("SELECT count(*) FROM hook_rule_admissions", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(pending, 0);
 }
 
 #[tokio::test]
