@@ -35,6 +35,18 @@ export default defineConfig({
         serviceWorkers: 'block',
       },
     },
+    { name: 'journeys-rule-editor', testMatch: 'rules-editor.spec.ts', use: { serviceWorkers: 'block' } },
+    {
+      name: 'layout-webkit-rule-editor',
+      testMatch: 'rules-editor.spec.ts',
+      use: {
+        browserName: 'webkit',
+        isMobile: true,
+        hasTouch: true,
+        viewport: { width: 390, height: 844 },
+        serviceWorkers: 'block',
+      },
+    },
     { name: 'journeys-web-update', testMatch: 'web-update.spec.ts' },
     {
       name: 'layout-webkit-web-update',
