@@ -49,9 +49,14 @@ insufficient evidence. Unknown consumers, replaced cgroups and incomplete waits
 remain explicit failures with ownership retained for recovery. The main systemd
 unit becoming empty alone does not establish closure.
 
-Normal stop removes execution temporary files, containers and ephemeral Docker
+Native stop removes execution temporary files, containers and ephemeral Docker
 runtime state. It preserves the workspace, provider session files and private
-Docker images, build cache and volumes needed by a retained environment. Same-node
+Docker images, build cache and volumes needed by a retained environment.
+A completed VM turn can retain its paused environment VMM and guest RAM under the
+existing slot, memory and idle-retention limits, accelerating the next turn.
+This is an owned, bounded environment resource; execution CPU remains paused.
+Explicit cancellation, VMM eviction and environment retirement close the VMM;
+retirement waits for that closure before removing its image. Same-node
 resume reuses that work; it does not reseed an initialized environment from the
 original checkout. Missing retained trees or images are refused explicitly.
 
