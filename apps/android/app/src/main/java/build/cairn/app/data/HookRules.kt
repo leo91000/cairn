@@ -557,6 +557,26 @@ private fun actionsBefore(
     return before
 }
 
+private fun rememberedRuleNames(nodes: List<JsonElement>): List<String> =
+    nodes
+        .flatMap { node ->
+            when (node.text("type")) {
+                "if" ->
+                    rememberedRuleNames(node.list("then")) +
+                        rememberedRuleNames(node.list("otherwise"))
+                "forEach" -> rememberedRuleNames(node.list("body"))
+                else ->
+                    if (
+                        node.obj("action").text("type") == "storeValue" &&
+                            node.obj("action").text("scope") == "rule"
+                    )
+                        listOf(node.obj("action").text("name"))
+                    else emptyList()
+            }
+        }
+        .filter { it.isNotBlank() }
+        .distinct()
+
 fun ruleVariablesAt(
     definition: JsonElement,
     path: String,
@@ -569,6 +589,16 @@ fun ruleVariablesAt(
         }
     val fields = schemaFields(hook?.payloadSchema, "payload")
     val earlier = actionsBefore(definition.list("steps"), "/steps", path, BooleanArray(1))
+    val remembered =
+        rememberedRuleNames(definition.list("steps")).map { name ->
+            RuleVariable(
+                "Mémorisées",
+                "values[${JsonPrimitive(name)}]",
+                name,
+                "valeur",
+                "Valeur mémorisée par cette règle.",
+            )
+        }
     val loops = mutableListOf<RuleVariable>()
     val parts = segments(path)
     var nodes: JsonElement? = (definition as? JsonObject)?.get("steps")
@@ -598,11 +628,12 @@ fun ruleVariablesAt(
             )
         } +
         loops +
+        remembered +
         listOf(
             RuleVariable(
                 "Mémorisé",
-                "values.",
-                "values.…",
+                "values",
+                "Valeurs mémorisées",
                 "valeur",
                 "Une valeur que la règle a mémorisée.",
             ),

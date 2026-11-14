@@ -33,8 +33,9 @@ Both editors build nested If/otherwise and For-each branches visually, move and
 remove steps, compose AND/OR conditions and native conversation predicates, pick
 people/resources by name, fill schema-driven tool fields and insert scoped
 variables into text or formulas. The installation validates drafts and reports
-errors at their step. Saving creates a version; stale revisions preserve the
-unsaved draft for correction.
+errors at their step. Saving creates a version. A state-only revision change is
+refreshed while preserving the draft; a newer saved definition can be reviewed,
+adopted or explicitly replaced by the draft as the next version.
 
 Web uses an adjacent step inspector on wide screens and a sheet on phones.
 Android uses native Compose cards and bottom sheets, with a two-pane list on

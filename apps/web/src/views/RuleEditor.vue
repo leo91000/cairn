@@ -20,7 +20,7 @@ import { getHookRule } from '../../../../packages/contracts/generated/getHookRul
 import { getHookRuleCatalog } from '../../../../packages/contracts/generated/getHookRuleCatalog'
 import { replaceHookRule } from '../../../../packages/contracts/generated/replaceHookRule'
 import { validateHookRule } from '../../../../packages/contracts/generated/validateHookRule'
-import { api, notify } from '../api'
+import { api, ApiError, notify } from '../api'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
@@ -77,6 +77,8 @@ const validated = ref(false)
 let disposed = false
 let leavingAfterSave = false
 const pendingLeave = ref<string | null>(null)
+const conflict = ref<HookRule | null>(null)
+const comparingConflict = ref(false)
 
 const agentName = (agent: string) => catalog.value?.agents.find(entry => entry.agentId === agent)?.name ?? 'an agent'
 
@@ -215,9 +217,30 @@ async function save() {
   saving.value = true
   error.value = ''
   try {
-    const saved = rule.value
-      ? await replaceHookRule(api, { ruleId: rule.value.id, revision: rule.value.revision, definition: definition.value })
-      : await createHookRule(api, { creationId, definition: definition.value, enabled: true })
+    let saved: HookRule
+    if (rule.value) {
+      try {
+        saved = await replaceHookRule(api, { ruleId: rule.value.id, revision: rule.value.revision, definition: definition.value })
+      }
+      catch (cause) {
+        if (!(cause instanceof ApiError) || cause.status !== 409)
+          throw cause
+        const latest = await getHookRule(api, { ruleId: rule.value.id })
+        if (!latest.allowed.edit)
+          throw new Error('You can no longer edit this rule. Your draft is still here.')
+        if (latest.version !== rule.value.version) {
+          conflict.value = latest
+          return
+        }
+
+        rule.value = latest
+        saved = await replaceHookRule(api, { ruleId: latest.id, revision: latest.revision, definition: definition.value })
+      }
+    }
+    else {
+      saved = await createHookRule(api, { creationId, definition: definition.value, enabled: true })
+    }
+
     notify(rule.value ? 'Rule saved as a new version' : 'Rule created')
     leavingAfterSave = true
     await router.push({ path: '/rules', query: { rule: saved.id } })
@@ -228,6 +251,24 @@ async function save() {
   finally {
     saving.value = false
   }
+}
+
+function useLatest() {
+  if (!conflict.value)
+    return
+  rule.value = conflict.value
+  definition.value = JSON.parse(JSON.stringify(conflict.value.definition))
+  loadedDefinition.value = JSON.stringify(definition.value)
+  conflict.value = null
+  selected.value = null
+}
+
+async function saveDraftOverLatest() {
+  if (!conflict.value)
+    return
+  rule.value = conflict.value
+  conflict.value = null
+  await save()
 }
 
 onMounted(() => {
@@ -287,13 +328,36 @@ onBeforeUnmount(() => {
         <Icon :name="checking ? LoaderCircle : problems.length ? CircleAlert : CircleCheck" :size="14" :class="checking ? 'animate-spin' : ''" />
         {{ checking ? 'Checking…' : problems.length ? `${problems.length} to fix` : 'Ready' }}
       </span>
-      <UiButton variant="primary" :disabled="!ready || saving" @click="save">
+      <UiButton variant="primary" :disabled="!ready || saving || !!conflict" @click="save">
         {{ saving ? 'Saving…' : rule ? 'Save version' : 'Create rule' }}
       </UiButton>
     </header>
     <UiAlert v-if="error" class="mt-3">
       {{ error }}
     </UiAlert>
+    <section v-if="conflict" class="mt-3 grid max-h-[35vh] shrink-0 gap-3 overflow-y-auto rounded-2xl border border-accent/30 bg-raised p-4" role="alert">
+      <p class="m-0! text-sm">
+        Version {{ conflict.version }} was saved while you were editing. Your draft is preserved.
+      </p>
+      <div class="flex flex-wrap gap-2">
+        <UiButton @click="comparingConflict = !comparingConflict">
+          Review the saved version
+        </UiButton>
+        <UiButton @click="useLatest">
+          Use the saved version
+        </UiButton>
+        <UiButton variant="primary" :disabled="!ready || saving" @click="saveDraftOverLatest">
+          Save my draft as the next version
+        </UiButton>
+      </div>
+      <RuleFlow
+        v-if="comparingConflict"
+        :nodes="conflict.definition.steps"
+        container="/steps"
+        :catalog="catalog"
+        :agent-name="agentName"
+      />
+    </section>
     <div v-if="definition" class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_420px] gap-6 pt-5 max-[1100px]:grid-cols-1">
       <div class="min-h-0 overflow-y-auto pr-1 pb-16 [scrollbar-width:thin]">
         <div class="mx-auto grid max-w-190 gap-4">

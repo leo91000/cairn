@@ -107,8 +107,8 @@ internal fun RuleValueEditor(
                 held["value"] ?: JsonNull,
                 change = { change(literalRuleValue(it)) },
             )
-        else if (mode == "literal" && expects == "number")
-            RuleNumericField(held["value"] ?: JsonNull, false, label) {
+        else if (mode == "literal" && expects in setOf("number", "integer"))
+            RuleNumericField(held["value"] ?: JsonNull, expects == "integer", label) {
                 change(literalRuleValue(it))
             }
         else if (mode == "literal" && expects == "boolean")
@@ -130,9 +130,8 @@ internal fun RuleValueEditor(
                             "formula" -> formulaRuleValue(input)
                             "literal" ->
                                 literalRuleValue(
-                                    if (expects == "number")
-                                        input.toDoubleOrNull()?.let(::JsonPrimitive)
-                                            ?: JsonPrimitive(input)
+                                    if (expects in setOf("number", "integer"))
+                                        ruleNumber(input, expects == "integer")
                                     else if (expects == "json")
                                         runCatching { wireJson.parseToJsonElement(input) }
                                             .getOrElse { JsonPrimitive(input) }
@@ -351,6 +350,19 @@ internal fun RuleLiteralEditor(
     }
 }
 
+private fun ruleNumber(raw: String, integer: Boolean): JsonElement {
+    raw.toLongOrNull()?.let {
+        return JsonPrimitive(it)
+    }
+    if (!integer)
+        raw.toDoubleOrNull()
+            ?.takeIf { it.isFinite() }
+            ?.let {
+                return JsonPrimitive(it)
+            }
+    return JsonPrimitive(raw)
+}
+
 @Composable
 private fun RuleNumericField(
     value: JsonElement,
@@ -373,10 +385,7 @@ private fun RuleNumericField(
         draft,
         { raw ->
             draft = raw
-            val next =
-                if (integer) raw.toLongOrNull()?.let(::JsonPrimitive)
-                else raw.toDoubleOrNull()?.let(::JsonPrimitive)
-            emitted = next ?: JsonPrimitive(raw)
+            emitted = ruleNumber(raw, integer)
             change(emitted)
         },
         Modifier.fillMaxWidth(),

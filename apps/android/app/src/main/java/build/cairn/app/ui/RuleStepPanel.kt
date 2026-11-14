@@ -262,7 +262,12 @@ internal fun RuleStepPanel(
                                 "conversation" to "La conversation d’une clé",
                             ),
                         ) {
-                            patchAction("scope" to JsonPrimitive(it))
+                            patchAction(
+                                "scope" to JsonPrimitive(it),
+                                "key" to
+                                    if (it == "conversation") (action["key"] ?: templateValue())
+                                    else null,
+                            )
                         }
                         if (action.text("scope") == "conversation")
                             RuleValueEditor(
@@ -289,7 +294,7 @@ internal fun RuleStepPanel(
                             action["seconds"],
                             variables,
                             { patchAction("seconds" to it) },
-                            expects = "number",
+                            expects = "integer",
                         )
                         Text(
                             "Entre une seconde et sept jours. Le déclenchement reprend ensuite à l’étape suivante.",

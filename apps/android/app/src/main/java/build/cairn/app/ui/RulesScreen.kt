@@ -61,6 +61,21 @@ fun RulesScreen(
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf("") }
     var refresh by remember { mutableIntStateOf(0) }
+    var scopeCleared by
+        rememberSaveable(vm.api.cacheScope, agentFilter, instanceFilter) { mutableStateOf(false) }
+    var creatorNames by
+        remember(vm.api.cacheScope) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    LaunchedEffect(vm.api.cacheScope, state.isOwner) {
+        if (state.isOwner)
+            try {
+                creatorNames = vm.installationSharing().members.associate { it.id to it.email }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+    }
+    val creatorName: (String) -> String = {
+        if (it == state.session.account?.id) "vous" else creatorNames[it] ?: "une autre personne"
+    }
     Poll("rules:${vm.api.cacheScope}:$refresh", 10000) {
         try {
             val output: JsonObject = vm.api.get("/hook-rules")
@@ -90,10 +105,12 @@ fun RulesScreen(
             }
     }
     val visible = rules.filter { rule ->
-        (agentFilter.isBlank() ||
+        (scopeCleared ||
+            agentFilter.isBlank() ||
             rule.text("executionAgentId") == agentFilter ||
             rule.list("startedAgentIds").any { it.jsonPrimitive.content == agentFilter }) &&
-            (instanceFilter.isBlank() ||
+            (scopeCleared ||
+                instanceFilter.isBlank() ||
                 rule.obj("trigger").text("instanceId") == instanceFilter ||
                 rule.list("toolInstanceIds").any { it.jsonPrimitive.content == instanceFilter }) &&
             (filter != "mine" || rule.text("creatorAccountId") == state.session.account?.id) &&
@@ -114,6 +131,20 @@ fun RulesScreen(
                             enabled = catalog?.agents?.isNotEmpty() == true,
                         ) {
                             Text("+ Créer")
+                        }
+                    }
+                    if (
+                        !scopeCleared && (agentFilter.isNotBlank() || instanceFilter.isNotBlank())
+                    ) {
+                        Text(
+                            if (agentFilter.isNotBlank())
+                                "Agent : ${ruleAgentName(state, agentFilter)}"
+                            else
+                                "Instance : ${catalog?.hooks?.firstOrNull { wireJson.encodeToJsonElement(it.trigger).text("instanceId") == instanceFilter }?.instanceName ?: "sélectionnée"}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        TextButton(onClick = { scopeCleared = true }) {
+                            Text("Afficher toutes les règles")
                         }
                     }
                     OutlinedTextField(
@@ -178,7 +209,7 @@ fun RulesScreen(
                                         else MaterialTheme.colorScheme.error,
                                 )
                                 Text(
-                                    "${ruleAgentName(state, rule.text("executionAgentId"))} · v${rule.text("version")} · ${if (rule.text("creatorAccountId") == state.session.account?.id) "à vous" else "partagée"}",
+                                    "${ruleAgentName(state, rule.text("executionAgentId"))} · v${rule.text("version")} · ${creatorName(rule.text("creatorAccountId"))}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -232,6 +263,7 @@ fun RulesScreen(
                             },
                             edit,
                             openConversation,
+                            creatorName(it.text("creatorAccountId")),
                         )
                     } ?: Text("Sélectionnez une règle pour voir son fonctionnement.")
                 }
@@ -260,6 +292,7 @@ fun RulesScreen(
                         },
                         edit,
                         openConversation,
+                        creatorName(detail!!.text("creatorAccountId")),
                     )
                 }
             }
@@ -276,6 +309,7 @@ internal fun RuleDetailPanel(
     changed: (String) -> Unit,
     edit: (String) -> Unit,
     openConversation: (String) -> Unit,
+    creator: String,
 ) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable(rule.text("id")) { mutableStateOf("flow") }
@@ -293,7 +327,11 @@ internal fun RuleDetailPanel(
             error = ""
             try {
                 val saved: JsonObject =
-                    vm.api.send("POST", "/hook-rules/${segment(id)}/$path", body)
+                    vm.api.send(
+                        "POST",
+                        "/hook-rules/${segment(id)}/$path",
+                        body.patch("ruleId" to JsonPrimitive(id)),
+                    )
                 if (path == "duplicate") duplicateId = java.util.UUID.randomUUID().toString()
                 changed(saved.text("id"))
             } catch (e: Exception) {
@@ -313,7 +351,7 @@ internal fun RuleDetailPanel(
         if (definition.text("description").isNotBlank())
             Text(definition.text("description"), color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(
-            "Version ${rule.text("version")} · ${if (rule.text("creatorAccountId") == state.session.account?.id) "créée par vous" else "règle partagée"}",
+            "Version ${rule.text("version")} · créée par $creator",
             style = MaterialTheme.typography.bodySmall,
         )
         val trigger = describeTrigger(definition.obj("trigger"), catalog)
@@ -367,6 +405,18 @@ internal fun RuleDetailPanel(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary,
             )
+        rule.list("warnings").forEach { warning ->
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+            ) {
+                Text(
+                    warning.text("message"),
+                    Modifier.padding(14.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (rule.allowed("edit"))
                 Button(onClick = { edit(id) }, enabled = !busy) { Text("Modifier") }
@@ -632,6 +682,12 @@ internal fun RuleHistoryPanel(vm: CairnViewModel, ruleId: String) {
                         }
                         Text(if (expanded == id) "⌃" else "⌄")
                     }
+                    if (entry.text("error").isNotBlank())
+                        Text(
+                            entry.text("error"),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     if (expanded == id) {
                         val loaded = detail
                         if (loaded == null) CircularProgressIndicator(Modifier.size(20.dp))

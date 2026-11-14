@@ -4,7 +4,7 @@ import type { HookRuleProblem } from '../../../../packages/contracts/generated/t
 import type { RuleNode } from '../../../../packages/contracts/generated/typescript/RuleNode'
 import type { RuleValue } from '../../../../packages/contracts/generated/typescript/RuleValue'
 import type { VariableOption } from '../hook-rules'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { state } from '../api'
 import {
   catalogTool,
@@ -132,18 +132,26 @@ function setInput(name: string, value: RuleValue | null) {
 const agents = computed(() => props.catalog?.agents ?? [])
 
 // A wait is edited as an amount and a unit when it is a fixed number of seconds.
-const units = [{ value: 60, label: 'minutes' }, { value: 3600, label: 'hours' }, { value: 86400, label: 'days' }]
+const units = [{ value: 1, label: 'seconds' }, { value: 60, label: 'minutes' }, { value: 3600, label: 'hours' }, { value: 86400, label: 'days' }]
+const selectedWaitUnit = ref<number | null>(null)
 const wait = computed(() => {
   if (action.value?.type !== 'wait' || action.value.seconds.type !== 'literal' || typeof action.value.seconds.value !== 'number')
     return null
   const seconds = action.value.seconds.value
-  const unit = [...units].reverse().find(entry => seconds % entry.value === 0) ?? units[0]
+  const unit = units.find(entry => entry.value === selectedWaitUnit.value) ?? [...units].reverse().find(entry => seconds > 0 && seconds % entry.value === 0) ?? units[0]
   return { amount: seconds / unit.value, unit: unit.value }
 })
 
 function setWait(amount: number, unit: number) {
-  if (action.value?.type === 'wait')
-    setAction({ type: 'wait', seconds: { type: 'literal', value: Math.max(1, Math.round(amount * unit)) } })
+  if (action.value?.type === 'wait') {
+    selectedWaitUnit.value = unit
+    setAction({ type: 'wait', seconds: { type: 'literal', value: Math.round(amount * unit) } })
+  }
+}
+
+function useWaitFormula() {
+  if (wait.value)
+    setAction({ type: 'wait', seconds: { type: 'formula', expression: String(wait.value.amount * wait.value.unit) } })
 }
 
 const title = computed(() => node.value.type === 'action' ? stepChoice(node.value.action.type).title : node.value.type === 'if' ? 'If / otherwise' : 'For each')
@@ -183,6 +191,7 @@ const agentName = (id: string) => props.catalog?.agents.find(agent => agent.agen
           :placeholder="describeAction(node.action, catalog, agentName).title"
           @input="node = { ...node, label: ($event.target as HTMLInputElement).value }"
         >
+        <small v-for="problem in problemsAt('/label')" :key="problem" class="text-xs font-semibold text-coral">{{ problem }}</small>
       </label>
       <details class="grid gap-1.5">
         <summary class="cursor-pointer text-xs font-semibold text-muted">
@@ -398,8 +407,8 @@ const agentName = (id: string) => props.catalog?.agents.find(agent => agent.agen
     </template>
 
     <template v-else-if="action?.type === 'wait'">
-      <div v-if="wait" class="flex items-end gap-2">
-        <label class="grid flex-1 gap-1.5">
+      <div v-if="wait" class="flex flex-wrap items-end gap-2">
+        <label class="grid min-w-24 flex-1 gap-1.5">
           <span class="text-xs font-semibold">Wait for</span>
           <input
             type="number"
@@ -418,6 +427,9 @@ const agentName = (id: string) => props.catalog?.agents.find(agent => agent.agen
             {{ unit.label }}
           </option>
         </select>
+        <button type="button" class="basis-full rounded-full border border-line px-3 py-2 text-xs font-semibold text-accent" @click="useWaitFormula">
+          Use a formula
+        </button>
       </div>
       <RuleValueInput
         v-else
@@ -427,12 +439,20 @@ const agentName = (id: string) => props.catalog?.agents.find(agent => agent.agen
         :variables="variables"
         @update:model-value="seconds => setAction({ type: 'wait', seconds })"
       />
-      <small v-for="problem in problemsAt('/action/seconds').concat(problemsAt('/action'))" :key="problem" class="text-xs font-semibold text-coral">{{ problem }}</small>
+      <small v-for="problem in [...new Set(problemsAt('/action'))]" :key="problem" class="text-xs font-semibold text-coral">{{ problem }}</small>
       <p class="m-0! text-xs text-muted">
         At most 7 days. The triggering then continues with the next steps; a rule keeps at most 20 triggerings waiting.
       </p>
     </template>
 
+    <details v-if="mine.length" class="rounded-xl bg-coral/8 p-3">
+      <summary class="cursor-pointer text-xs font-semibold text-coral">
+        Review {{ mine.length }} validation {{ mine.length === 1 ? 'message' : 'messages' }} for this step
+      </summary>
+      <p v-for="(problem, index) in mine" :key="`${problem.path}:${index}`" class="m-0! mt-2! text-xs font-semibold text-coral">
+        {{ problem.message }}
+      </p>
+    </details>
     <footer class="flex justify-between border-t border-line pt-3">
       <button type="button" class="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-coral hover:bg-coral/10" @click="emit('remove')">
         <Icon :name="Trash2" :size="15" />Remove this step

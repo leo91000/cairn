@@ -173,19 +173,20 @@ const groups = computed(() => {
 function insert(option: VariableOption) {
   const element = field.value
   const current = text.value
-  const insertion = mode.value === 'template' ? `{{${option.expression}}}` : option.expression
+  const nextMode = props.expects === 'field' ? 'formula' : mode.value === 'literal' ? 'template' : mode.value
+  const insertion = nextMode === 'template' ? `{{${option.expression}}}` : option.expression
   const start = element?.selectionStart ?? current.length
   const end = element?.selectionEnd ?? current.length
-  if (mode.value === 'literal')
-    switchMode('template')
-  const base = mode.value === 'literal' ? '' : current
-  text.value = mode.value === 'formula' && props.expects === 'field' ? insertion : `${base.slice(0, start)}${insertion}${base.slice(end)}`
+  const value = nextMode === 'formula' && props.expects === 'field'
+    ? insertion
+    : `${current.slice(0, start)}${insertion}${current.slice(end)}`
+  model.value = nextMode === 'formula' ? { type: 'formula', expression: value } : { type: 'template', text: value }
   picking.value = false
   query.value = ''
   void nextTick(() => {
-    element?.focus()
+    field.value?.focus()
     const caret = start + insertion.length
-    element?.setSelectionRange(caret, caret)
+    field.value?.setSelectionRange(caret, caret)
   })
 }
 

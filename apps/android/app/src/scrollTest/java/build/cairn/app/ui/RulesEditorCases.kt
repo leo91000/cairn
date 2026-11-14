@@ -4,6 +4,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import build.cairn.app.data.*
+import build.cairn.contracts.HookRuleProblem
 import kotlinx.serialization.json.*
 import org.junit.*
 import org.junit.Assert.*
@@ -124,5 +125,46 @@ abstract class RulesEditorCases {
             )
         }
         assertEquals("payload[\"a\\\"b\"]", schemaFields(schema, "payload").single().expression)
+    }
+
+    @Test
+    fun aWaitKeepsAnIntegerWireValueWhileEditing() {
+        var value by mutableStateOf(literalRuleValue(JsonPrimitive(600)))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor("Durée", value, emptyList(), { value = it }, expects = "integer")
+            }
+        }
+        compose.onNode(hasSetTextAction()).performTextReplacement("900")
+        compose.runOnIdle { assertEquals("900", value["value"].toString()) }
+    }
+
+    @Test
+    fun theFlowShowsErrorsAtTheirStep() {
+        val step =
+            wireJson.parseToJsonElement(
+                """{"type":"action","id":"pause","action":{"type":"wait","seconds":{"type":"literal","value":0}}}"""
+            )
+        compose.setContent {
+            CairnTheme {
+                RuleFlowTree(
+                    listOf(step),
+                    "/steps",
+                    null,
+                    { "Assistant" },
+                    editable = true,
+                    problems =
+                        listOf(
+                            HookRuleProblem(
+                                path = "/steps/0/action/seconds",
+                                message = "Choisissez une durée positive.",
+                            )
+                        ),
+                )
+            }
+        }
+        compose
+            .onNodeWithText("Choisissez une durée positive.", substring = true)
+            .assertIsDisplayed()
     }
 }

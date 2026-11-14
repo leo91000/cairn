@@ -543,6 +543,14 @@ function loopsAround(definition: HookRuleDefinition, path: string) {
   return loops
 }
 
+function rememberedNames(nodes: RuleNode[]): string[] {
+  return [...new Set(nodes.flatMap(node => node.type === 'if'
+    ? [...rememberedNames(node.then), ...rememberedNames(node.otherwise)]
+    : node.type === 'forEach'
+      ? rememberedNames(node.body)
+      : node.action.type === 'storeValue' && node.action.scope === 'rule' && node.action.name ? [node.action.name] : []))]
+}
+
 /** What a value at this place of the tree can read. */
 export function variablesAt(definition: HookRuleDefinition, path: string, catalog: HookRuleCatalog | null): VariableOption[] {
   const hook = catalogHook(catalog, definition.trigger)
@@ -564,10 +572,17 @@ export function variablesAt(definition: HookRuleDefinition, path: string, catalo
       type: 'item',
       description: `The current item of ${describeValue(loop.items)}.`,
     })),
+    ...rememberedNames(definition.steps).map(name => ({
+      group: 'Remembered' as const,
+      expression: `values[${JSON.stringify(name)}]`,
+      label: name,
+      type: 'value',
+      description: `The value this rule remembers as ${name}.`,
+    })),
     {
       group: 'Remembered',
-      expression: 'values.',
-      label: 'values.…',
+      expression: 'values',
+      label: 'Remembered values',
       type: 'value',
       description: 'A value this rule remembered.',
     },

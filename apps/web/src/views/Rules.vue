@@ -41,21 +41,31 @@ const onWide = () => wide.value = wideQuery.matches
 let timer: ReturnType<typeof setInterval>
 let disposed = false
 
-const filters = computed(() => [
-  { value: 'all' as const, label: 'All', count: rules.value.length },
-  { value: 'mine' as const, label: 'Mine', count: rules.value.filter(rule => rule.creatorAccountId === state.accountId).length },
-  { value: 'blocked' as const, label: 'Stopped', count: rules.value.filter(rule => rule.blocks.length).length },
-])
-const visible = computed(() => rules.value.filter(rule =>
+const scoped = computed(() => rules.value.filter(rule =>
   (typeof route.query.agent !== 'string' || rule.executionAgentId === route.query.agent || rule.startedAgentIds.includes(route.query.agent))
-  && (typeof route.query.instance !== 'string' || (rule.trigger.type === 'plugin' && rule.trigger.instanceId === route.query.instance) || rule.toolInstanceIds.includes(route.query.instance))
-  && (filter.value === 'all' || (filter.value === 'mine' ? rule.creatorAccountId === state.accountId : rule.blocks.length > 0))
+  && (typeof route.query.instance !== 'string' || (rule.trigger.type === 'plugin' && rule.trigger.instanceId === route.query.instance) || rule.toolInstanceIds.includes(route.query.instance))))
+const filters = computed(() => [
+  { value: 'all' as const, label: 'All', count: scoped.value.length },
+  { value: 'mine' as const, label: 'Mine', count: scoped.value.filter(rule => rule.creatorAccountId === state.accountId).length },
+  { value: 'blocked' as const, label: 'Stopped', count: scoped.value.filter(rule => rule.blocks.length).length },
+])
+const visible = computed(() => scoped.value.filter(rule =>
+  (filter.value === 'all' || (filter.value === 'mine' ? rule.creatorAccountId === state.accountId : rule.blocks.length > 0))
   && `${rule.name} ${rule.description}`.toLowerCase().includes(query.value.trim().toLowerCase())))
+const creatorNames = ref<Record<string, string>>({})
+const creatorName = (account: string) => account === state.accountId ? 'you' : creatorNames.value[account] ?? 'another person'
+const newRuleLocation = computed(() => ({ path: '/rules/new', query: { ...(typeof route.query.agent === 'string' ? { agent: route.query.agent } : {}), ...(typeof route.query.instance === 'string' ? { instance: route.query.instance } : {}) } }))
+
+function clearScope() {
+  const { agent: _agent, instance: _instance, ...query } = route.query
+  void router.replace({ query })
+}
+
 const chosenId = computed(() => typeof route.query.rule === 'string' ? route.query.rule : null)
 const shownId = computed(() => chosenId.value ?? (wide.value ? visible.value[0]?.id : undefined))
 const summary = computed(() => {
-  const active = rules.value.filter(rule => !rule.blocks.length).length
-  return `${active} active · ${rules.value.length - active} stopped`
+  const active = scoped.value.filter(rule => !rule.blocks.length).length
+  return `${active} active · ${scoped.value.length - active} stopped`
 })
 const agentName = (id: string) => state.agents.find(agent => agent.id === id)?.name ?? catalog.value?.agents.find(agent => agent.agentId === id)?.name ?? 'Agent'
 
@@ -116,6 +126,17 @@ watch(shownId, () => {
 onMounted(() => {
   wideQuery.addEventListener('change', onWide)
   void load()
+  const accountScope = `${state.installationId}:${state.accountId}`
+  if (state.installationRole === 'owner') {
+    void fetch(`/api/installations/${encodeURIComponent(state.installationId)}/sharing`, { headers: { 'X-CSRF-Token': state.csrf } })
+      .then(async response => response.ok ? response.json() : null)
+      .then((sharing) => {
+        if (!disposed && state.installationRole === 'owner' && accountScope === `${state.installationId}:${state.accountId}` && sharing)
+          creatorNames.value = Object.fromEntries((sharing.members ?? []).map((member: { id: string, email: string }) => [member.id, member.email]))
+      })
+      .catch(() => {})
+  }
+
   void getHookRuleCatalog(api, {}).then(value => catalog.value = value).catch(() => {})
   timer = setInterval(() => {
     if (!document.hidden) {
@@ -149,11 +170,18 @@ onBeforeUnmount(() => {
         <button
           class="grid size-11 shrink-0 place-items-center rounded-full bg-ink text-canvas hover:opacity-90"
           aria-label="New rule"
-          @click="router.push('/rules/new')"
+          @click="router.push(newRuleLocation)"
         >
           <Icon :name="Plus" :size="20" />
         </button>
       </header>
+      <div v-if="route.query.agent || route.query.instance" class="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-accent/8 px-3 py-2 text-xs" role="status">
+        <span v-if="typeof route.query.agent === 'string'">Agent: {{ agentName(route.query.agent) }}</span>
+        <span v-if="typeof route.query.instance === 'string'">Plugin: {{ catalog?.hooks.find(entry => entry.trigger.type === 'plugin' && entry.trigger.instanceId === route.query.instance)?.instanceName ?? 'selected instance' }}</span>
+        <button type="button" class="ml-auto font-semibold text-accent" @click="clearScope">
+          Show all rules
+        </button>
+      </div>
       <label class="search-field mt-3 flex flex-row! min-h-11 items-center gap-2 rounded-full border border-line bg-surface px-4">
         <Icon :name="Search" :size="16" class="text-muted" /><input
           v-model="query"
@@ -193,14 +221,14 @@ onBeforeUnmount(() => {
               <p class="m-0! mt-1! flex items-center gap-1.5 text-xs text-muted">
                 <span class="size-1.5 rounded-full" :class="rule.blocks.length ? 'bg-coral' : 'bg-success'" />
                 <span :class="rule.blocks.length ? 'font-semibold text-coral' : ''">{{ rule.blocks.length ? blockTitles[rule.blocks[0].kind] : 'Active' }}</span>
-                <span>· v{{ rule.version }} · {{ rule.creatorAccountId === state.accountId ? 'yours' : 'shared' }} · {{ relativeTime(rule.updatedAt) }}</span>
+                <span>· v{{ rule.version }} · {{ creatorName(rule.creatorAccountId) }} · {{ relativeTime(rule.updatedAt) }}</span>
               </p>
             </div>
           </article>
         </li>
         <li v-if="!loading && !visible.length">
           <Empty :title="rules.length ? 'No matching rules' : 'No rules yet'" :description="rules.length ? 'Change the search or the filters.' : 'A rule answers an event without code: when a message arrives, call a tool or start an agent.'">
-            <UiButton v-if="!rules.length" @click="router.push('/rules/new')">
+            <UiButton v-if="!rules.length" @click="router.push(newRuleLocation)">
               <Icon :name="Plus" :size="16" />Create a rule
             </UiButton>
           </Empty>
@@ -214,6 +242,7 @@ onBeforeUnmount(() => {
         class="max-w-200"
         :rule="shownRule"
         :catalog="catalog"
+        :creator-name="creatorName(shownRule.creatorAccountId)"
         @changed="changed"
       />
       <Empty v-else-if="!loading" title="Your rules, in one place" description="Create a rule to answer events from your plugins." />
@@ -231,6 +260,7 @@ onBeforeUnmount(() => {
         :key="shownRule.id"
         :rule="shownRule"
         :catalog="catalog"
+        :creator-name="creatorName(shownRule.creatorAccountId)"
         sheet
         @changed="changed"
         @close="closeSheet"

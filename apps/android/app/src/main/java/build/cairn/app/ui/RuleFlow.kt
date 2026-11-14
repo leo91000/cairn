@@ -18,6 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleCatalog
+import build.cairn.contracts.HookRuleProblem
 import kotlinx.serialization.json.*
 
 @Composable
@@ -33,6 +34,7 @@ internal fun RuleFlowTree(
     remove: (String) -> Unit = {},
     move: (String, Int) -> Unit = { _, _ -> },
     depth: Int = 0,
+    problems: List<HookRuleProblem> = emptyList(),
 ) {
     Column(Modifier.fillMaxWidth()) {
         if (editable) RuleInsertPoint(container, 0, depth, insert)
@@ -42,6 +44,7 @@ internal fun RuleFlowTree(
             val kind =
                 if (node.text("type") == "action") node.obj("action").text("type")
                 else node.text("type")
+            val nodeProblems = problemsUnder(problems, path)
             val tone =
                 when (kind) {
                     "if" -> MaterialTheme.colorScheme.tertiary
@@ -77,7 +80,9 @@ internal fun RuleFlowTree(
                 border =
                     BorderStroke(
                         if (selected == path) 2.dp else 1.dp,
-                        if (selected == path) tone else MaterialTheme.colorScheme.outlineVariant,
+                        if (nodeProblems.isNotEmpty()) MaterialTheme.colorScheme.error
+                        else if (selected == path) tone
+                        else MaterialTheme.colorScheme.outlineVariant,
                     ),
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -118,6 +123,16 @@ internal fun RuleFlowTree(
                                 tint = tone,
                             )
                     }
+                    if (nodeProblems.isNotEmpty())
+                        Text(
+                            "${nodeProblems.size} points à corriger · ${nodeProblems.first().message}",
+                            Modifier.padding(horizontal = 14.dp, vertical = 6.dp).clickable {
+                                select(path)
+                            },
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                        )
                     if (editable)
                         Row(
                             Modifier.fillMaxWidth().padding(horizontal = 8.dp),
@@ -184,6 +199,7 @@ internal fun RuleFlowTree(
                                     remove,
                                     move,
                                     depth + 1,
+                                    problems,
                                 )
                             }
                         }

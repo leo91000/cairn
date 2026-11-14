@@ -250,6 +250,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
             :model-value="condition.key"
             label="Conversation key"
             :variables="variables"
+            :problems="problemsAt(`${conditionPath(index)}/key`)"
             @update:model-value="key => update(index, { ...condition, key })"
           />
           <RuleValueInput
@@ -258,6 +259,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
             label="Author"
             expects="field"
             :variables="variables"
+            :problems="problemsAt(`${conditionPath(index)}/author`)"
             @update:model-value="author => update(index, { ...condition, author })"
           />
         </template>
@@ -270,6 +272,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
             label="Author"
             expects="field"
             :variables="variables"
+            :problems="problemsAt(`${conditionPath(index)}/author`)"
             @update:model-value="author => update(index, { ...condition, author })"
           />
           <div class="grid grid-cols-2 gap-3">
@@ -301,6 +304,14 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
             @update:model-value="next => update(index, { type: 'not', condition: next })"
           />
         </template>
+        <p
+          v-for="(problem, at) in problems.filter(problem => problem.path === conditionPath(index) || (condition.type === 'authorQuota' && [`${conditionPath(index)}/limit`, `${conditionPath(index)}/windowMinutes`].includes(problem.path)))"
+          :key="`${problem.path}:${at}`"
+          class="m-0! text-xs font-semibold text-coral"
+          role="alert"
+        >
+          {{ problem.message }}
+        </p>
         <div class="flex justify-end gap-2">
           <button type="button" class="rounded-lg px-2 py-1 text-xs text-muted hover:bg-hover" @click="update(index, condition.type === 'not' ? condition.condition : { type: 'not', condition })">
             {{ condition.type === 'not' ? 'Stop inverting' : 'Invert' }}
@@ -311,6 +322,14 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
         </div>
       </div>
     </div>
+    <p
+      v-for="(problem, at) in problems.filter(problem => problem.path === path && (model.type === 'all' || model.type === 'any'))"
+      :key="at"
+      class="m-0! text-xs font-semibold text-coral"
+      role="alert"
+    >
+      {{ problem.message }}
+    </p>
     <small v-for="problem in problemsAt(`${path}/conditions`).filter((_, i) => i < 1 && !group?.conditions.length)" :key="problem" class="text-xs font-semibold text-coral">{{ problem }}</small>
     <div class="relative">
       <button

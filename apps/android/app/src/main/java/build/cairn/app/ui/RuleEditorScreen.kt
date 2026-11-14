@@ -71,6 +71,9 @@ fun RuleEditorScreen(
     var draft by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
     var original by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
     var revision by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
+    var loadedVersion by rememberSaveable(cacheScope, ruleId) { mutableIntStateOf(0) }
+    var conflict by remember(cacheScope, ruleId) { mutableStateOf<JsonObject?>(null) }
+    var comparingConflict by remember { mutableStateOf(false) }
     val creationId = rememberSaveable(cacheScope, ruleId) { java.util.UUID.randomUUID().toString() }
     var selected by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
     var catalog by remember(cacheScope) { mutableStateOf<HookRuleCatalog?>(null) }
@@ -109,6 +112,7 @@ fun RuleEditorScreen(
                         .toString()
                 original = draft
                 revision = rule?.text("revision").orEmpty()
+                loadedVersion = rule?.text("version")?.toIntOrNull() ?: 0
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -153,7 +157,7 @@ fun RuleEditorScreen(
         error = ""
         scope.launch {
             try {
-                val result: JsonObject =
+                suspend fun persist(): JsonObject =
                     if (ruleId.isBlank())
                         vm.api.send(
                             "POST",
@@ -169,10 +173,30 @@ fun RuleEditorScreen(
                             "PUT",
                             "/hook-rules/${segment(ruleId)}",
                             ruleObject(
+                                "ruleId" to JsonPrimitive(ruleId),
                                 "revision" to JsonPrimitive(revision),
                                 "definition" to definition,
                             ),
                         )
+                val result =
+                    try {
+                        persist()
+                    } catch (cause: ApiException) {
+                        if (cause.status != 409 || ruleId.isBlank()) throw cause
+                        val latest: JsonObject = vm.api.get("/hook-rules/${segment(ruleId)}")
+                        if (!latest.allowed("edit")) {
+                            canEdit = false
+                            error =
+                                "Vous ne pouvez plus modifier cette règle. Votre brouillon est conservé."
+                            return@launch
+                        }
+                        if (latest.text("version").toIntOrNull() != loadedVersion) {
+                            conflict = latest
+                            return@launch
+                        }
+                        revision = latest.text("revision")
+                        persist()
+                    }
                 original = draft
                 vm.notify(if (ruleId.isBlank()) "Règle créée" else "Nouvelle version enregistrée")
                 saved(result.text("id"))
@@ -193,7 +217,13 @@ fun RuleEditorScreen(
             Spacer(Modifier.weight(1f))
             Button(
                 onClick = ::save,
-                enabled = canEdit && checked && problems.isEmpty() && !saving && !loading,
+                enabled =
+                    canEdit &&
+                        checked &&
+                        problems.isEmpty() &&
+                        !saving &&
+                        !loading &&
+                        conflict == null,
             ) {
                 Text(
                     if (saving) "Enregistrement…"
@@ -211,6 +241,51 @@ fun RuleEditorScreen(
                 Modifier.padding(16.dp),
                 color = MaterialTheme.colorScheme.error,
             )
+        conflict?.let { latest ->
+            Column(
+                Modifier.heightIn(max = 300.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "La version ${latest.text("version")} a été enregistrée pendant votre modification. Votre brouillon est conservé."
+                )
+                TextButton(onClick = { comparingConflict = !comparingConflict }) {
+                    Text("Voir la version enregistrée")
+                }
+                if (comparingConflict)
+                    RuleFlowTree(
+                        latest.obj("definition").list("steps"),
+                        "/steps",
+                        catalog,
+                        { ruleAgentName(state, it) },
+                    )
+                TextButton(
+                    onClick = {
+                        draft = latest.obj("definition").toString()
+                        original = draft
+                        revision = latest.text("revision")
+                        loadedVersion = latest.text("version").toIntOrNull() ?: 0
+                        conflict = null
+                        selected = ""
+                    }
+                ) {
+                    Text("Utiliser la version enregistrée")
+                }
+                Button(
+                    onClick = {
+                        revision = latest.text("revision")
+                        loadedVersion = latest.text("version").toIntOrNull() ?: 0
+                        conflict = null
+                        save()
+                    },
+                    enabled = checked && problems.isEmpty() && !saving,
+                ) {
+                    Text("Enregistrer mon brouillon à la suite")
+                }
+            }
+        }
         if (definition != null && catalog != null && canEdit) {
             val currentCatalog = catalog!!
             val hook =
@@ -298,6 +373,7 @@ fun RuleEditorScreen(
                     { ruleAgentName(state, it) },
                     selected,
                     canEdit,
+                    problems = problems,
                     select = { selected = it },
                     insert = { container, index, kind ->
                         update(
@@ -360,13 +436,15 @@ fun RuleEditorScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                problems.forEach { problem ->
-                    Text(
-                        problem.message,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
+                problems
+                    .filter { !it.path.startsWith("/steps/") }
+                    .forEach { problem ->
+                        Text(
+                            problem.message,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                 warnings.forEach { warning ->
                     Text(
                         warning,

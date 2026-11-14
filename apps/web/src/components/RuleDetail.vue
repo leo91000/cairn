@@ -47,6 +47,7 @@ const props = defineProps<{
   rule: HookRule
   catalog: HookRuleCatalog | null
   sheet?: boolean
+  creatorName?: string
 }>()
 const emit = defineEmits<{ changed: [rule: HookRule | null], close: [] }>()
 const router = useRouter()
@@ -66,7 +67,7 @@ onBeforeUnmount(() => {
 
 const agentName = (id: string) => props.catalog?.agents.find(agent => agent.agentId === id)?.name ?? state.agents.find(agent => agent.id === id)?.name ?? 'Unknown agent'
 const trigger = computed(() => describeTrigger(props.rule.definition.trigger, props.catalog))
-const creator = computed(() => props.rule.creatorAccountId === state.accountId ? 'you' : state.installationRole === 'owner' ? 'a member' : 'another person')
+const creator = computed(() => props.creatorName ?? (props.rule.creatorAccountId === state.accountId ? 'you' : 'another person'))
 const active = computed(() => props.rule.blocks.length === 0)
 
 async function act(work: () => Promise<HookRule | null>, done: string) {
