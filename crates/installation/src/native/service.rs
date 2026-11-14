@@ -2551,14 +2551,15 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     // backends to release blocked I/O, confirms fencing, then unmounts. Complete
     // all other attributed fences before retiring any kernel device.
     block::recover_host_mounts(&state).await?;
-    for (attempt, _, _) in &interrupted {
+    for (attempt, run, _) in &interrupted {
         systemd::stop(attempt).await?;
+        block::recover_disk_consumers(&state, run).await?;
         super::suspension::recover(&state, attempt).await?;
     }
 
     {
         let state = state.clone();
-        tokio::task::spawn_blocking(move || storage::ublk::cleanup_stale(&state))
+        tokio::task::spawn_blocking(move || storage::ublk::cleanup_stale_native(&state))
             .await
             .map_err(Error::internal)??;
     }

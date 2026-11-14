@@ -11,6 +11,7 @@ use std::{
 };
 use tokio::process::{Child, Command};
 
+pub(super) mod consumers;
 mod diagnostics;
 
 pub struct Identity {

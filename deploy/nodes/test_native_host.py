@@ -19,7 +19,7 @@ SPEC.loader.exec_module(host)
 
 def release(**changes):
     value = dict(sha256='a' * 64, toolsSha256='b' * 64, size=3, toolsSize=3,
-                 os='linux', arch='x86_64', nodeProtocol=2,
+                 os='linux', arch='x86_64', nativeHostProtocol=1, executionProtocol=2,
                  runtimeId='synthetic-runtime',
                  binaryPath='/internal/nodes/native-binary', toolsPath='/internal/nodes/native-tools')
     value.update(changes)
@@ -178,6 +178,18 @@ class NativeHostTests(unittest.TestCase):
             host.require_storage()
             run.assert_not_called()
 
+    def test_old_kernel_is_rejected_before_storage_preparation(self):
+        for release in ('6.8.0-ubuntu', '6.10.12', 'invalid', '7'):
+            with self.subTest(release=release), \
+                    patch.object(host.os, 'uname', return_value=Mock(release=release)), \
+                    patch.object(host.subprocess, 'run') as run, \
+                    self.assertRaisesRegex(host.PrerequisiteError, 'Linux 6.11'):
+                host.require_storage()
+            run.assert_not_called()
+        for release in ('6.11.0', '6.14.0-ubuntu', '7.2.15-arch1-1'):
+            with self.subTest(release=release), patch.object(host.os, 'uname', return_value=Mock(release=release)):
+                host.require_storage_kernel()
+
     def test_missing_storage_tooling_or_wrong_control_device_fail_closed(self):
         with patch.object(host.shutil, 'which', return_value=None), self.assertRaisesRegex(ValueError, 'e2fsprogs'):
             host.require_storage()
@@ -197,10 +209,26 @@ class NativeHostTests(unittest.TestCase):
     def test_only_exact_compatible_release_artifacts_are_accepted(self):
         self.assertEqual(release(), host.validate_release(release()))
         for change in ({'sha256': '../escape'}, {'size': 1 << 40}, {'arch': 'aarch64'},
-                       {'os': 'windows'}, {'nodeProtocol': 3}, {'toolsPath': 'https://elsewhere.test/tool'},
+                       {'os': 'windows'}, {'nativeHostProtocol': 2}, {'executionProtocol': 3}, {'toolsPath': 'https://elsewhere.test/tool'},
                        {'runtimeId': 'bad%runtime'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 host.validate_release(release(**change))
+
+    def test_distribution_fences_legacy_supervisors_without_changing_execution_protocol(self):
+        candidate = release()
+        # Installed v2 supervisors require this exact legacy field before calling
+        # prepare(), draining, or activate(). Its absence fences those versions.
+        self.assertNotEqual(candidate.get('nodeProtocol'), 2)
+        self.assertEqual(candidate['executionProtocol'], 2)
+        legacy = dict(candidate, nodeProtocol=2)
+        del legacy['nativeHostProtocol']
+        del legacy['executionProtocol']
+        with self.assertRaisesRegex(ValueError, 'platform/protocol'):
+            host.validate_release(legacy)
+        source = (Path(SPEC.origin).parents[1] / '../crates/installation/src/native/releases.rs').resolve().read_text()
+        self.assertIn('"nativeHostProtocol": 1', source)
+        self.assertIn('"executionProtocol": 2', source)
+        self.assertNotIn('"nodeProtocol":', source)
 
     def test_partial_or_corrupt_download_cannot_replace_an_installed_binary(self):
         payload = b'approved bytes'

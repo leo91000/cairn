@@ -46,7 +46,10 @@ pub async fn metadata() -> Result<Value> {
         .await?;
     Ok(json!({
         "sha256": digest, "size": size, "version": env!("CARGO_PKG_VERSION"),
-        "os": "linux", "arch": "x86_64", "nodeProtocol": 2,
+        // The native host distribution protocol fences old installed supervisors
+        // before they download, drain or select an incompatible candidate.
+        "os": "linux", "arch": "x86_64", "nativeHostProtocol": 1,
+        "executionProtocol": 2,
         "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
         "binaryPath": "/internal/nodes/native-binary",
         "toolsPath": "/internal/nodes/native-tools", "toolsSha256": tools.0, "toolsSize": tools.1

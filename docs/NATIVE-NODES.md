@@ -9,7 +9,8 @@ never crash a driver. Review code before testing on a personal workstation.
 ## Requirements and enrollment
 
 Use Linux x86-64 with systemd 255+, cgroup v2, Python 3, curl, useradd/usermod,
-e2fsprogs, io_uring and a working `ublk_drv` kernel driver. Host libraries must be
+e2fsprogs, io_uring and a working `ublk_drv` kernel driver on Linux 6.11 or newer
+(asynchronous device retirement is required). Host libraries must be
 compatible with the published coding engines. The installed GPU
 driver, render/video device permissions and application libraries must already
 work. Cairn does not install GPU drivers, detach a GPU or close a graphical session.
@@ -200,6 +201,17 @@ their node. Changing nodes or backends starts an empty environment; existing
 container stores are not converted or transferred.
 
 ## Updates and removal
+
+Native releases now use `nativeHostProtocol: 1` and `executionProtocol: 2`,
+replacing the legacy distribution field `nodeProtocol`. Existing supervisors
+refuse this metadata before preparation or draining, so they keep their current
+runtime. The execution wire protocol remains 2. Before the first update to this
+release, provision Linux 6.11+ and refresh the root-owned supervisor from the
+installation's `/internal/nodes/native-host.py` download, then restart
+`cairn-native-node.service` during a maintenance window. Verify its healthy
+current runtime before allowing the normal candidate update. Do not delete
+node state or re-enroll the machine. This explicit supervisor migration is
+required even on hosts whose kernel is already compatible.
 
 Revoke the node in Cairn first, then stop/disable `cairn-native-node.service` on its
 host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries and

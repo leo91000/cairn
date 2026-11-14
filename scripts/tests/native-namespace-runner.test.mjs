@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest'
 
 const launcher = fileURLToPath(new URL('../test-native-namespace.mjs', import.meta.url))
 const testName = 'storage::ublk::namespace::tests::isolated_namespace_qualification'
+const retirementName = 'storage::ublk::tests::isolated_retirement_qualification'
 
 function invoke(args, overrides = {}) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-namespace-runner-'))
@@ -35,6 +36,7 @@ if (name === 'cargo') {
 }
 else if (name === 'installation-test') {
   if (!process.env.CAIRN_NAMESPACE_ABSENT) console.log('${testName}: test');
+  if (!process.env.CAIRN_RETIREMENT_ABSENT) console.log('${retirementName}: test');
 }
 else process.exit(Number(process.env.CAIRN_NAMESPACE_QUALIFICATION_STATUS || '0'));
 `
@@ -65,6 +67,14 @@ else process.exit(Number(process.env.CAIRN_NAMESPACE_QUALIFICATION_STATUS || '0'
 }
 
 describe('native namespace qualification launcher', () => {
+  it('executes physical retirement only when explicitly selected on the privileged route', () => {
+    const result = invoke(['--sudo', '--retirement'])
+    expect(result.status).toBe(0)
+    expect(result.calls.at(-1)).toEqual({ name: 'sudo', args: ['-n', 'unshare', '--mount', '--propagation', 'private', result.binary, '--exact', retirementName, '--ignored', '--nocapture'] })
+    expect(invoke(['--retirement']).status).not.toBe(0)
+    expect(invoke(['--sudo', '--retirement'], { CAIRN_RETIREMENT_ABSENT: '1' }).status).not.toBe(0)
+  })
+
   it('retains the workspace feature graph and chooses the installation test among workspace artifacts', () => {
     const result = invoke(['--sudo'])
     expect(result.status).toBe(0)

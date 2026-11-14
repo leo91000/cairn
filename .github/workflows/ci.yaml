@@ -726,6 +726,13 @@ jobs:
           else
             sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
           fi
+      - name: Qualify retirement with external device and task-less namespace references
+        if: inputs.ci-diagnostic != 'native'
+        timeout-minutes: 15
+        env:
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_INCREMENTAL: '0'
+        run: node scripts/test-native-namespace.mjs --sudo --retirement
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
