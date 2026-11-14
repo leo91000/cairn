@@ -57,15 +57,15 @@ pub(crate) async fn exclusive_after_release(
         if stop.is_cancelled() {
             return Err(Error::unavailable("Storage lock acquisition stopped."));
         }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::unavailable(busy));
+        }
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok(Guard(file));
         }
         let error = std::io::Error::last_os_error();
         if error.kind() != std::io::ErrorKind::WouldBlock {
             return Err(error.into());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(Error::unavailable(busy));
         }
         tokio::select! {
             () = stop.cancelled() => {
@@ -161,6 +161,33 @@ mod tests {
             "still busy"
         );
         drop(acquired);
+        assert!(exclusive(&path, "busy").is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_released_lock_is_not_acquired_after_its_wait_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("admission.lock");
+        let held = exclusive(&path, "busy").unwrap();
+        let waiting = tokio::spawn({
+            let path = path.clone();
+            async move {
+                exclusive_after_release(
+                    &path,
+                    "deadline expired",
+                    &tokio_util::sync::CancellationToken::new(),
+                    Duration::from_secs(30),
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        drop(held);
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert_eq!(
+            waiting.await.unwrap().err().unwrap().message,
+            "deadline expired"
+        );
         assert!(exclusive(&path, "busy").is_ok());
     }
 
