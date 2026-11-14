@@ -181,7 +181,12 @@ pub fn capabilities(path: &Path) -> Result<Value> {
     let kvm = device_opens("/dev/kvm")
         .is_some_and(|file| unsafe { libc::ioctl(file.as_raw_fd(), 0xae00) } == 12);
     let memory = memory_mi_b()?;
-    let stat = filesystem(path)?;
+    let native_data = crate::native::data_path(path);
+    let stat = filesystem(if crate::native::enabled() && native_data.is_dir() {
+        &native_data
+    } else {
+        path
+    })?;
     let cpu = cpu_count()?;
     let detected = Capabilities {
         os: "linux".into(),

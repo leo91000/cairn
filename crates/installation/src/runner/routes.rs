@@ -200,7 +200,19 @@ async fn disk_storage(
     require_post(&request)?;
     let directory = crate::storage::environment::directory(&broker.state, run)?;
     if crate::storage::image::exists(&directory) {
-        return Ok(Json(crate::storage::image::status(&directory).await?).into_response());
+        let mut status = crate::storage::image::status(&directory).await?;
+        let attempt = broker
+            .active
+            .lock()
+            .await
+            .iter()
+            .find(|(_, active)| active.plan.run_id() == run)
+            .map(|(id, _)| id.clone());
+        if let Some(attempt) = attempt {
+            let cpu = crate::microvm::suspension::inspect(&broker.state, &attempt).await?;
+            status["paused"] = cpu.paused.into();
+        }
+        return Ok(Json(status).into_response());
     }
     if !crate::storage::runtime::exists(&directory) {
         return Err(Error::conflict("Conversation has no local journal."));

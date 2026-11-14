@@ -36,7 +36,7 @@ pub async fn path_for_boot(directory: &Path, size: u64) -> Result<PathBuf> {
     Ok(image)
 }
 
-pub async fn sync(image: &Path) -> Result<()> {
+pub(crate) async fn sync_io(image: &Path) -> std::io::Result<()> {
     tokio::fs::OpenOptions::new()
         .write(true)
         .open(image)
@@ -46,6 +46,10 @@ pub async fn sync(image: &Path) -> Result<()> {
     Ok(())
 }
 
+pub async fn sync(image: &Path) -> Result<()> {
+    sync_io(image).await.map_err(Into::into)
+}
+
 pub async fn unassigned(directory: &Path) -> Result<bool> {
     Ok(read_record(directory).await?.context["unassigned"] == true)
 }
@@ -53,6 +57,40 @@ pub async fn unassigned(directory: &Path) -> Result<bool> {
 pub async fn authorize(owner: &super::environment::OwnerLease, context: &Value) -> Result<()> {
     let mut record = read_record(&owner.directory).await?;
     let requested = super::assignment::Assignment::new(context)?.assigned()?;
+    let expected = if owner
+        .directory
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "disks")
+    {
+        owner
+            .directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .to_owned()
+    } else {
+        tokio::fs::read_to_string(owner.directory.join("owner")).await?
+    };
+    crate::validation::uuid(&expected)?;
+    if context["owner"]
+        .as_str()
+        .is_some_and(|owner| owner != expected)
+    {
+        return Err(Error::conflict(
+            "Image assignment does not match its conversation namespace.",
+        ));
+    }
+    if record.context["unassigned"] != true
+        && record.context.get("owner").is_none()
+        && record.context["grant"].is_string()
+        && context["owner"] == expected
+    {
+        // Legacy grants are only historical local identities. The caller's
+        // durable namespace lease, not that retired token, establishes ownership.
+        record.context = context.clone();
+        return persist(&owner.directory, &record).await;
+    }
     if record.context["unassigned"] != true {
         let current = super::assignment::Assignment::new(&record.context)?.assigned()?;
         if current != requested {
@@ -118,18 +156,32 @@ pub(crate) async fn prepare_locked(
     let mut record = if exists(directory) {
         read_record(directory).await?
     } else if super::runtime::exists(directory) {
-        migrate_journal(directory, stop).await?
+        migrate_journal(directory, context, stop).await?
     } else {
         let pending = directory.join("image.pending.json");
+        require_fresh(directory, pending.exists())?;
         let record = match tokio::fs::read(&pending).await {
             Ok(bytes) => {
                 let record: Record = serde_json::from_slice(&bytes)?;
-                if record.format != FORMAT || record.size == 0 || record.context != *context {
+                let owner = |context: &Value| -> Result<Option<String>> {
+                    if context["unassigned"] == true {
+                        Ok(None)
+                    } else {
+                        super::assignment::Assignment::new(context)?.assigned()
+                    }
+                };
+                if record.format != FORMAT
+                    || record.size == 0
+                    || owner(&record.context)? != owner(context)?
+                {
                     return Err(Error::conflict(
                         "Local image initialization intent does not match this environment.",
                     ));
                 }
-                record
+                Record {
+                    context: context.clone(),
+                    ..record
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if image.exists() {
@@ -152,7 +204,11 @@ pub(crate) async fn prepare_locked(
         // permits rebuilding an incomplete mkfs, including after its rename.
         if !image.exists() || check(&image).await.is_err() {
             let policy = super::policy::for_node(&context["policy"])?;
-            let (total, free) = super::policy::space(directory)?;
+            let (total, free) = if super::reservation::reserved(directory)? {
+                super::policy::physical_space(directory)?
+            } else {
+                super::policy::space(directory)?
+            };
             if free <= policy.reserve(total).saturating_add(64 * 1024 * 1024) {
                 return Err(Error::new(
                     507,
@@ -169,6 +225,7 @@ pub(crate) async fn prepare_locked(
         }
         record
     };
+    compatible_owner(&record.context, context)?;
     let actual = tokio::fs::symlink_metadata(&image).await?;
     if !actual.is_file() || actual.len() < record.size || size < record.size || actual.len() > size
     {
@@ -199,6 +256,49 @@ pub(crate) async fn prepare_locked(
     Ok(image)
 }
 
+fn compatible_owner(current: &Value, requested: &Value) -> Result<()> {
+    if current["owner"]
+        .as_str()
+        .is_some_and(|owner| requested["owner"].as_str() != Some(owner))
+    {
+        return Err(Error::conflict(
+            "The retained image belongs to another conversation; no filesystem changes were made.",
+        ));
+    }
+    Ok(())
+}
+
+fn require_fresh(directory: &Path, initializing: bool) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if super::environment::retained(&name) || name == "image-reservation.json" {
+            continue;
+        }
+        let name = name.to_string_lossy();
+        if initializing
+            && matches!(
+                name.as_ref(),
+                "image.pending.json" | "image.partial" | "data.ext4"
+            )
+        {
+            continue;
+        }
+        let atomic_temporary = name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".tmp"))
+            .is_some_and(|name| crate::validation::uuid(name).is_ok())
+            && entry.file_type()?.is_file();
+        if atomic_temporary {
+            continue;
+        }
+        return Err(Error::conflict(
+            "Unrecognized retained storage; recover its source before creating a local image.",
+        ));
+    }
+    Ok(())
+}
+
 async fn read_record(directory: &Path) -> Result<Record> {
     let record: Record = serde_json::from_slice(&tokio::fs::read(directory.join(RECORD)).await?)?;
     if record.format != FORMAT || record.size == 0 {
@@ -217,10 +317,27 @@ async fn persist(directory: &Path, record: &Record) -> Result<()> {
     Ok(())
 }
 
-async fn migrate_journal(directory: &Path, stop: &CancellationToken) -> Result<Record> {
+async fn migrate_journal(
+    directory: &Path,
+    requested: &Value,
+    stop: &CancellationToken,
+) -> Result<Record> {
+    if directory.join("runtime.json").exists() {
+        let runtime: Value =
+            serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        if runtime["backend"]
+            .as_str()
+            .is_some_and(|backend| !matches!(backend, "vm" | "firecracker"))
+        {
+            return Err(Error::conflict(
+                "This retained disk belongs to another execution backend.",
+            ));
+        }
+    }
     let _replacement = super::runtime::replacement(directory).await?;
     let root = directory.join("lazy");
     let context = super::LazyDisk::context(&root)?;
+    compatible_owner(&context, requested)?;
     let temporary = directory.join("image.partial");
     match tokio::fs::remove_file(&temporary).await {
         Ok(()) => {}
@@ -297,6 +414,48 @@ async fn check(image: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn enforce_limits(
+    state: &Path,
+    attempt: &str,
+    stop: &CancellationToken,
+) -> Result<()> {
+    use crate::microvm::suspension::{self, Reason};
+    if stop.is_cancelled() {
+        return Err(Error::conflict("VM execution stopped."));
+    }
+    let observing = state.to_owned();
+    let worker = tokio::task::spawn_blocking(move || -> Result<bool> {
+        let policy = match std::fs::read(observing.join("storage-policy.json")) {
+            Ok(bytes) => super::policy::from_persisted(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                super::policy::Policy::default()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let (total, free) = super::policy::physical_space(&observing)?;
+        let configured = match std::fs::read(observing.join(crate::microvm::budget::FILE)) {
+            Ok(bytes) => serde_json::from_slice::<crate::microvm::budget::Budget>(&bytes)?
+                .limits
+                .disk_mi_b
+                .saturating_mul(1_048_576),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => u64::MAX,
+            Err(error) => return Err(error.into()),
+        };
+        let limit = configured.min(super::reservation::epoch_capacity(&observing)?);
+        Ok(free <= policy.reserve(total)
+            || crate::microvm::budget::disk_bytes(&observing)? >= limit)
+    });
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+        .await
+        .map_err(|_| Error::unavailable("VM disk observations are stale; execution must stop."))?
+        .map_err(Error::internal)??;
+    if stop.is_cancelled() {
+        return Err(Error::conflict("VM execution stopped."));
+    }
+    suspension::set_reason(state, attempt, &Reason::Storage, blocked).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +465,90 @@ mod tests {
 
     fn context() -> Value {
         json!({ "owner": "local-image-test", "policy": { "reserveMiB": 64, "reservePercent": 1 } })
+    }
+
+    #[tokio::test]
+    async fn an_owner_mismatch_is_refused_before_resizing_retained_data() {
+        let root = tempfile::tempdir().unwrap();
+        let context = context();
+        let image = prepare(root.path(), SIZE, &context, &CancellationToken::new())
+            .await
+            .unwrap();
+        let mut wrong = context.clone();
+        wrong["owner"] = "another-conversation".into();
+        assert_eq!(
+            prepare(root.path(), SIZE * 2, &wrong, &CancellationToken::new())
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(tokio::fs::metadata(&image).await.unwrap().len(), SIZE);
+        assert_eq!(read_record(root.path()).await.unwrap().context, context);
+    }
+
+    #[tokio::test]
+    async fn local_legacy_owner_upgrades_only_inside_its_durable_conversation_namespace() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let owner = super::super::environment::ownership(state.path(), &run, "busy")
+            .await
+            .unwrap();
+        let mut legacy = context();
+        legacy.as_object_mut().unwrap().remove("owner");
+        legacy["grant"] = "retired-local-token".into();
+        super::super::bootstrap::prepare(
+            &owner.directory,
+            SIZE,
+            &legacy,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let current = json!({ "owner":run, "policy":legacy["policy"] });
+        prepare(&owner.directory, SIZE, &current, &CancellationToken::new())
+            .await
+            .unwrap();
+        authorize(&owner, &current).await.unwrap();
+        assert_eq!(
+            read_record(&owner.directory).await.unwrap().context["owner"],
+            run
+        );
+        assert!(
+            authorize(
+                &owner,
+                &json!({ "owner":crate::config::id(), "policy":current["policy"] })
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_legacy_metadata_never_authorizes_empty_initialization() {
+        for footprint in ["lazy/payload-1", "resize-source/payload-1", "runtime.json"] {
+            let root = tempfile::tempdir().unwrap();
+            let retained = root.path().join(footprint);
+            tokio::fs::create_dir_all(retained.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(&retained, b"retained source")
+                .await
+                .unwrap();
+            assert_eq!(
+                prepare(root.path(), SIZE, &context(), &CancellationToken::new())
+                    .await
+                    .unwrap_err()
+                    .status,
+                409
+            );
+            assert_eq!(
+                tokio::fs::read(&retained).await.unwrap(),
+                b"retained source"
+            );
+            assert!(!root.path().join("image.json").exists());
+            assert!(!root.path().join("image.pending.json").exists());
+        }
     }
 
     #[tokio::test]

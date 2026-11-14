@@ -156,7 +156,10 @@ pub(super) async fn apply_budget(budget: &crate::microvm::budget::Budget) -> Res
         ));
     }
     let mut properties = budget_properties(budget);
-    properties.extend(io_properties(&super::state_dir(), 256 * 1_048_576)?);
+    properties.extend(io_properties(
+        &super::workspace::data_root(&super::state_dir()),
+        256 * 1_048_576,
+    )?);
     let mut args = vec!["set-property", "--runtime", &slice];
     args.extend(properties.iter().map(String::as_str));
     if !output("/usr/bin/systemctl", &args).await?.status.success() {

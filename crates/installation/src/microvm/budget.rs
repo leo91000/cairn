@@ -206,6 +206,7 @@ pub(crate) fn allocated_with(
 struct DiskUsage {
     sampled: Instant,
     bytes: u64,
+    committed: u64,
 }
 
 fn disk_usage() -> &'static Mutex<HashMap<PathBuf, DiskUsage>> {
@@ -214,16 +215,17 @@ fn disk_usage() -> &'static Mutex<HashMap<PathBuf, DiskUsage>> {
 }
 
 /// Reconcile once a second; admitted writes debit conservative headroom in between.
-pub fn disk_bytes(state: &Path) -> io::Result<u64> {
+fn sampled_disk_bytes(state: &Path) -> io::Result<(u64, u64)> {
     let mut usage = disk_usage()
         .lock()
         .map_err(|e| io::Error::other(e.to_string()))?;
     if let Some(value) = usage.get(state)
         && value.sampled.elapsed() < Duration::from_secs(1)
     {
-        return Ok(value.bytes);
+        return Ok((value.bytes, value.committed));
     }
     let mut bytes = 0_u64;
+    let mut committed = 0_u64;
     if state.join("native-accounting.json").exists() {
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(state.join("native-accounting.json"))?)
@@ -233,12 +235,19 @@ pub fn disk_bytes(state: &Path) -> io::Result<u64> {
             .ok_or_else(|| io::Error::other("Missing native data root"))?;
         bytes =
             crate::native::disk::usage_sync(Path::new(data), state).map_err(io::Error::other)?;
+        committed = bytes;
     } else {
         for root in crate::storage::environment::ROOTS
             .into_iter()
             .chain(["images"])
         {
-            bytes = bytes.saturating_add(allocated(&state.join(root))?);
+            let actual = allocated(&state.join(root))?;
+            bytes = bytes.saturating_add(actual);
+            committed = committed.saturating_add(if root == "images" {
+                actual
+            } else {
+                crate::storage::reservation::accounted_root(&state.join(root))?
+            });
         }
     }
     usage.insert(
@@ -246,9 +255,26 @@ pub fn disk_bytes(state: &Path) -> io::Result<u64> {
         DiskUsage {
             sampled: Instant::now(),
             bytes,
+            committed,
         },
     );
-    Ok(bytes)
+    Ok((bytes, committed))
+}
+
+pub fn disk_bytes(state: &Path) -> io::Result<u64> {
+    Ok(sampled_disk_bytes(state)?.0)
+}
+
+pub(crate) fn committed_disk_bytes(state: &Path) -> io::Result<u64> {
+    Ok(sampled_disk_bytes(state)?.1)
+}
+
+pub(crate) fn invalidate_disk_usage(state: &Path) -> io::Result<()> {
+    disk_usage()
+        .lock()
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .remove(state);
+    Ok(())
 }
 
 pub fn charge_disk(state: &Path, bytes: u64) -> io::Result<()> {
@@ -257,6 +283,7 @@ pub fn charge_disk(state: &Path, bytes: u64) -> io::Result<()> {
         .map_err(|e| io::Error::other(e.to_string()))?;
     if let Some(value) = usage.get_mut(state) {
         value.bytes = value.bytes.saturating_add(bytes);
+        value.committed = value.committed.saturating_add(bytes);
     }
     Ok(())
 }
@@ -278,7 +305,8 @@ pub fn disk_space(path: &Path, total: u64, free: u64) -> io::Result<(u64, u64)> 
             serde_json::from_slice(&bytes).map_err(io::Error::other)?
         };
         let limit = budget.limits.disk_mi_b * 1_048_576;
-        let remaining = limit.saturating_sub(disk_bytes(state)?);
+        let limit = limit.min(crate::storage::reservation::epoch_capacity(state)?);
+        let remaining = limit.saturating_sub(committed_disk_bytes(state)?);
         let policy: crate::storage::policy::Policy =
             match std::fs::read(state.join("storage-policy.json")) {
                 Ok(bytes) => {

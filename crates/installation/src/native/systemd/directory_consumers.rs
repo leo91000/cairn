@@ -294,8 +294,14 @@ fn remaining(source: &Source) -> io::Result<usize> {
             let process_file = directory(&process.path())?;
             let path = descriptor(&process_file);
             let mut held = Vec::new();
+            let mut filesystem_references = Vec::new();
             for task in fs::read_dir(path.join("task"))? {
                 let task = task?;
+                filesystem_references.extend([
+                    task.path().join("cwd"),
+                    task.path().join("root"),
+                    task.path().join("exe"),
+                ]);
                 match File::open(task.path().join("ns/mnt")) {
                     Ok(namespace) => held.push(namespace),
                     Err(error) if vanished(&error) => {}
@@ -304,11 +310,17 @@ fn remaining(source: &Source) -> io::Result<usize> {
             }
             // Include task-less namespaces pinned only by an FD, even those
             // held by the controller. Snapshot names before opening duplicates.
-            let descriptors = fs::read_dir(path.join("fd"))?
-                .map(|entry| entry.map(|entry| entry.path()))
+            let mut descriptors = fs::read_dir(path.join("fd"))?
+                .map(|entry| entry.map(|entry| (entry.path(), false)))
                 .collect::<io::Result<Vec<_>>>()?;
+            descriptors.extend(filesystem_references.into_iter().map(|path| (path, true)));
+            descriptors.extend(
+                fs::read_dir(path.join("map_files"))?
+                    .map(|entry| entry.map(|entry| (entry.path(), true)))
+                    .collect::<io::Result<Vec<_>>>()?,
+            );
             let mut files = false;
-            for path in descriptors {
+            for (path, filesystem_reference) in descriptors {
                 let target = match fs::read_link(&path) {
                     Ok(target) => target,
                     Err(error) if vanished(&error) => continue,
@@ -322,7 +334,7 @@ fn remaining(source: &Source) -> io::Result<usize> {
                     }
                     continue;
                 }
-                if name == current.as_str() || source.project == 0 {
+                if name == current.as_str() && !filesystem_reference || source.project == 0 {
                     continue;
                 }
                 let metadata = match fs::metadata(&path) {

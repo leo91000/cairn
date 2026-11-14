@@ -2,6 +2,7 @@
 pub mod image;
 pub mod layout;
 mod local;
+pub(crate) mod reservation;
 
 pub use local::prepare;
 

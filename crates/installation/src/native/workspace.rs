@@ -15,6 +15,52 @@ pub fn directory(state: &Path, run: &str) -> Result<PathBuf> {
     Ok(state.join("native").join(run))
 }
 
+pub(super) fn data_root(state: &Path) -> PathBuf {
+    state.join("native-data")
+}
+
+pub(super) fn workload(state: &Path, run: &str) -> Result<PathBuf> {
+    crate::validation::uuid(run)?;
+    Ok(data_root(state).join(run))
+}
+
+pub(super) fn control_for_workload(workload: &Path) -> Result<PathBuf> {
+    let pool = workload
+        .parent()
+        .ok_or_else(|| Error::bad("Missing native data pool."))?;
+    if pool.file_name().is_none_or(|name| name != "native-data") {
+        return Err(Error::bad("Native workload is outside its data pool."));
+    }
+    let state = pool
+        .parent()
+        .ok_or_else(|| Error::bad("Missing native state."))?;
+    directory(
+        state,
+        workload
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    )
+}
+
+pub(super) fn workload_for_control(control: &Path) -> Result<PathBuf> {
+    let native = control
+        .parent()
+        .ok_or_else(|| Error::bad("Missing native control namespace."))?;
+    if native.file_name().is_none_or(|name| name != "native") {
+        return Err(Error::bad("Invalid native control namespace."));
+    }
+    workload(
+        native
+            .parent()
+            .ok_or_else(|| Error::bad("Missing native state."))?,
+        control
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    )
+}
+
 pub(super) fn mount_path(path: &str) -> std::io::Result<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
     let mut bytes = Vec::new();

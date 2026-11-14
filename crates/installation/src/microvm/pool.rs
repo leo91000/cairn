@@ -134,6 +134,7 @@ pub struct Reservation {
     released: bool,
     slot: usize,
     vm: Option<Vm>,
+    disk_reservation: Option<crate::storage::reservation::Reservation>,
     owner: Option<crate::storage::environment::OwnerLease>,
     anonymous: Option<PathBuf>,
     prepared: Option<ready::Prepared>,
@@ -196,6 +197,8 @@ impl Pool {
         if prepared.exists() {
             tokio::fs::remove_dir_all(&prepared).await?;
         }
+        crate::skills::private_dir(&state).await?;
+        crate::storage::reservation::recover(&state).await?;
         crate::storage::environment::recover(&state).await?;
         if let Err(error) = super::images::collect(&state, &image).await {
             tracing::warn!(message = %error.message, "Runtime image collection skipped");
@@ -313,6 +316,14 @@ impl Pool {
         // Health and stop never take the admission lock or await VM teardown.
         self.retire_idle().await;
         self.ensure_not_quarantined()?;
+        budget::invalidate_disk_usage(&self.state)?;
+        if budget::committed_disk_bytes(&self.state)?
+            > next.limits.disk_mi_b.saturating_mul(1_048_576)
+        {
+            return Err(Error::conflict(
+                "Stop writable VMs before reducing the shared budget below their reserved image allowances.",
+            ));
+        }
         let _slots = self.slots.lock().await;
         let mut current = self.budget.lock().await;
         let cgroup = self.cgroup.get().unwrap();
@@ -501,6 +512,7 @@ impl Pool {
             released: false,
             slot,
             vm: None,
+            disk_reservation: None,
             owner: None,
             anonymous: None,
             prepared: None,
@@ -753,6 +765,7 @@ impl Pool {
             released: false,
             slot,
             vm: None,
+            disk_reservation: None,
             owner: None,
             anonymous: Some(self.state.join("environments").join(crate::config::id())),
             prepared: None,
@@ -793,6 +806,15 @@ impl Reservation {
             "diskMiB": DEFAULT_DISK_MIB,
         });
         let operation = async {
+            self.disk_reservation = Some(
+                crate::storage::reservation::reserve(
+                    &self.pool.state,
+                    &directory,
+                    DEFAULT_DISK_MIB * 1_048_576,
+                    &policy,
+                )
+                .await?,
+            );
             crate::storage::image::prepare(
                 &directory,
                 DEFAULT_DISK_MIB * 1_048_576,
@@ -808,6 +830,7 @@ impl Reservation {
                 self.slot,
                 &stop,
                 Some(&resources),
+                &mut self.disk_reservation,
             )
             .await;
             self.vm_in_flight = false;
@@ -955,6 +978,11 @@ impl Reservation {
             }
             let disk = self.owner.as_ref().unwrap().directory.clone();
             if !compatible {
+                let policy = crate::storage::policy::for_node(&plan.storage()["policy"])?;
+                self.disk_reservation = Some(
+                    crate::storage::reservation::reserve(&self.pool.state, &disk, size, &policy)
+                        .await?,
+                );
                 crate::storage::image::prepare(&disk, size, plan.storage(), &stop).await?;
             }
             crate::storage::image::authorize(self.owner.as_ref().unwrap(), plan.storage()).await?;
@@ -968,6 +996,7 @@ impl Reservation {
                     self.slot,
                     &stop,
                     plan.resources(),
+                    &mut self.disk_reservation,
                 )
                 .await;
                 self.vm_in_flight = false;
@@ -1079,30 +1108,48 @@ impl Reservation {
         // Captures share this attempt's lifetime. Release pending thaw retries
         // before shutdown removes the guest socket, including normal completion.
         stop.cancel();
-        self.finish().await;
+        let flushed = self.finish().await;
+        if !flushed {
+            return Ok(crate::runner::FINALIZATION_FAILED_SENTINEL);
+        }
         result
     }
 
-    async fn finish(&mut self) {
+    async fn finish(&mut self) -> bool {
         self.idle_stop.cancel();
         let control = self.idle_control.clone();
         let _capture = control.lock().await;
-        self.retire_anonymous().await;
+        let flushed = self.retire_anonymous().await;
+        if let Some(reservation) = self.disk_reservation.as_ref() {
+            loop {
+                match reservation.release().await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::warn!(message = %error.message, "VM capacity release will retry; ownership retained");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        }
+        self.disk_reservation.take();
         self.owner.take();
         release_slot(&self.pool, self.slot, self.completion.take()).await;
         self.released = true;
         if let Some(teardown) = self.physical_teardown.take() {
             let _ = teardown.send(true);
         }
+        flushed
     }
 
-    async fn retire_anonymous(&mut self) {
+    async fn retire_anonymous(&mut self) -> bool {
+        let mut flushed = true;
         if let Some(mut vm) = self.vm.take() {
             self.vm_in_flight = true;
-            vm.shutdown().await;
+            flushed = vm.shutdown().await;
             self.vm_in_flight = false;
         }
         discard_anonymous(self.anonymous.take()).await;
+        flushed
     }
 }
 
@@ -1111,7 +1158,7 @@ impl Drop for Reservation {
         if self.released {
             return;
         }
-        if self.vm_in_flight {
+        if self.vm_in_flight || self.disk_reservation.is_some() {
             // The local boot/shutdown future owned a VMM when it disappeared.
             // Keep its physical slot, disk files and logical ownership fenced;
             // neither completion channel may announce that cleanup succeeded.

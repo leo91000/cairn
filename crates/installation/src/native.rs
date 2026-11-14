@@ -120,8 +120,47 @@ pub fn prepare_storage_process() -> std::io::Result<()> {
                 "Native controller must share the system manager's mount namespace.",
             ));
         }
-        crate::storage::ublk::prepare_io_threads()
+        let state = state_dir();
+        let legacy = legacy_storage_present(&state)?;
+        if legacy {
+            crate::storage::ublk::prepare_io_threads()
+        } else {
+            Ok(())
+        }
     }
+}
+
+fn legacy_storage_present(state: &std::path::Path) -> std::io::Result<bool> {
+    for root in ["disks", "environments", "ublk-devices"] {
+        let entries = match std::fs::read_dir(state.join(root)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if root == "ublk-devices"
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            {
+                return Ok(true);
+            }
+            if entry.file_type()?.is_dir() {
+                match std::fs::symlink_metadata(entry.path().join("lazy/journal-v2.sqlite")) {
+                    Ok(_) => return Ok(true),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn data_path(state: &std::path::Path) -> std::path::PathBuf {
+    workspace::data_root(state)
 }
 
 #[cfg(test)]

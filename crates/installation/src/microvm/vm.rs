@@ -149,6 +149,11 @@ pub struct Vm {
     jail: PathBuf,
     lock: Option<std::fs::File>,
     child: Option<tokio::process::Child>,
+    reservation: Option<crate::storage::reservation::Reservation>,
+    closing: bool,
+    image_sync: Option<JoinHandle<std::io::Result<()>>>,
+    image_synced: bool,
+    image_flush_failed: bool,
     consoles: Vec<JoinHandle<()>>,
     network: Network,
     image: PathBuf,
@@ -164,6 +169,12 @@ impl Drop for Vm {
     fn drop(&mut self) {
         if let Some(child) = &mut self.child {
             let _ = child.start_kill();
+            // A kill request is not a reap. The enclosing pool quarantines a
+            // lost boot/shutdown future; retain physical ownership until its
+            // controller fence/recovery can establish that the VMM is gone.
+            if let Some(lock) = self.lock.take() {
+                std::mem::forget(lock);
+            }
         }
     }
 }
@@ -365,6 +376,7 @@ impl Vm {
         slot: usize,
         stop: &CancellationToken,
         resources: Option<&Value>,
+        reservation: &mut Option<crate::storage::reservation::Reservation>,
     ) -> Result<Self> {
         // GC cannot unlink a runtime between selecting it, publishing the disk
         // pin and linking the immutable files into the new jail.
@@ -393,6 +405,11 @@ impl Vm {
             jail,
             lock: Some(lock),
             child: None,
+            reservation: reservation.take(),
+            closing: false,
+            image_sync: None,
+            image_synced: false,
+            image_flush_failed: false,
             consoles: Vec::new(),
             network,
             image: image_path,
@@ -506,56 +523,100 @@ impl Vm {
         Ok(())
     }
 
-    pub async fn shutdown(&mut self) {
+    pub async fn shutdown(&mut self) -> bool {
+        loop {
+            match self.shutdown_once().await {
+                Ok(flushed) => return flushed,
+                Err(error) => {
+                    tracing::error!(vm_id = self.id(), message = %error.message, "VM close is unconfirmed; retaining disk ownership and capacity for retry");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+
+    async fn shutdown_once(&mut self) -> Result<bool> {
         let id = self.id().to_owned();
         let mut timing = Operation::new("vm_shutdown", &id, "guest_shutdown");
-        let blocked = super::suspension::inspect_jail(&self.jail)
-            .await
-            .map_or(true, |status| {
-                status.is_some_and(|status| status.paused || !status.acknowledged)
-            });
         let mut acknowledged = false;
-        if !blocked && !self.idle {
-            // Healthy guests get a bounded graceful stop.
-            let request = call::<Reply>(&self.socket, &GuestRequest::Shutdown);
-            if let Ok(Ok(reply)) = tokio::time::timeout(Duration::from_secs(10), request).await {
+        if !self.closing {
+            self.closing = true;
+            let blocked = super::suspension::inspect_jail(&self.jail)
+                .await
+                .map_or(true, |status| {
+                    status.is_some_and(|status| status.paused || !status.acknowledged)
+                });
+            if !blocked
+                && !self.idle
+                && let Ok(Ok(reply)) = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    call::<Reply>(&self.socket, &GuestRequest::Shutdown),
+                )
+                .await
+            {
                 acknowledged = reply.succeeded();
             }
         }
         timing.next("wait_vmm");
-        if let Some(mut child) = self.child.take() {
+        if let Some(child) = self.child.as_mut() {
             if !acknowledged {
                 let _ = child.start_kill();
             }
-            if tokio::time::timeout(Duration::from_secs(8), child.wait())
+            tokio::time::timeout(Duration::from_secs(8), child.wait())
                 .await
-                .is_err()
-            {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-            }
+                .map_err(|_| Error::unavailable("VMM exit is not confirmed."))??;
+            self.child.take();
         }
         if let Err(error) = super::suspension::finish_jail(&self.jail).await {
             tracing::warn!(vm_id = id, message = %error.message, "Could not finalize VM suspension accounting");
         }
-        for console in self.consoles.drain(..) {
-            let _ = console.await;
+        while let Some(console) = self.consoles.last_mut() {
+            let result = tokio::time::timeout(Duration::from_secs(2), console)
+                .await
+                .map_err(|_| Error::unavailable("VM console closure is not confirmed."))?;
+            if let Err(error) = result {
+                tracing::warn!(%error, "VM console task failed");
+            }
+            self.consoles.pop();
         }
-
         timing.next("sync_image");
-        if let Err(error) = crate::storage::image::sync(&self.image).await {
-            tracing::error!(%error, "Could not sync stopped VM image");
+        if !self.image_synced {
+            if self.image_sync.is_none() {
+                let image = self.image.clone();
+                let lease = self.lock.as_ref().unwrap().try_clone()?;
+                self.image_sync = Some(tokio::spawn(async move {
+                    let _lease = lease;
+                    crate::storage::image::sync_io(&image).await
+                }));
+            }
+            let sync =
+                tokio::time::timeout(Duration::from_secs(30), self.image_sync.as_mut().unwrap())
+                    .await
+                    .map_err(|_| Error::unavailable("Stopped VM image flush is still pending."))?;
+            self.image_flush_failed = !matches!(sync, Ok(Ok(())));
+            if self.image_flush_failed {
+                tracing::error!(
+                    vm_id = id,
+                    "Stopped VM image flush failed; retained work is a crash prefix"
+                );
+            }
+            self.image_synced = true;
+            self.image_sync.take();
         }
-
         timing.next("network_cleanup");
         self.network.remove().await;
-        if let Err(error) = tokio::fs::remove_dir_all(self.jail.parent().unwrap()).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(%error, "Could not remove VM jail");
+        match tokio::fs::remove_dir_all(self.jail.parent().unwrap()).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
+        if let Some(reservation) = self.reservation.as_ref() {
+            reservation.release().await?;
+        }
+        self.reservation.take();
         self.lock.take();
         timing.finish();
+        Ok(!self.image_flush_failed)
     }
 
     pub(super) fn id(&self) -> &str {

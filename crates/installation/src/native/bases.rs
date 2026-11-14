@@ -230,6 +230,12 @@ impl Bases {
                 crate::project_archives::cached_allocation(&self.data, archive, unit, stop).await?,
             );
         }
+        // Shared extracted caches may not exhaust the controller filesystem's
+        // inode pool. Allocation rounded per entry is a conservative upper
+        // bound on required inodes, including zero-length archive entries.
+        if expanded.div_ceil(unit) >= filesystem.f_favail.saturating_sub(1024) {
+            return Ok(());
+        }
         let budget = cache_limit(limit);
         let metadata = CLONE_RESERVE;
         // Extraction, raw ext4 and imported journal coexist during building.
@@ -337,7 +343,7 @@ impl Bases {
         if storage::runtime::exists(&directory)
             || root.join("initialized").exists()
             || root.join("data").exists()
-            || root.join("workload/data").exists()
+            || workspace::workload(&self.state, run)?.join("data").exists()
         {
             return Ok(false);
         }
@@ -369,7 +375,7 @@ impl Bases {
         }
         let lease = environment::lock(&self.state, run, super::block::DISK_BUSY).await?;
         private_dir(&root).await?;
-        let workload = root.join("workload");
+        let workload = workspace::workload(&self.state, run)?;
         private_dir(&workload).await?;
         super::quota::prepare(&self.state, &workload, size * disk::MIB).await?;
         let staging = workload.join("base.partial");

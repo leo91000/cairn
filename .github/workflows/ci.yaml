@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       ci-diagnostic:
-        description: Capture missing backend/native evidence on immutable sources; never release provenance
+        description: Capture backend/native diagnostics or check direct storage during development; never release provenance
         type: choice
-        options: [none, backend, native]
+        options: [none, backend, native, storage]
         default: none
       backend-diagnostic-selector:
         description: Fixed backend diagnostic workload; ignored outside ci-diagnostic=backend
@@ -56,6 +56,43 @@ concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
 jobs:
+  storage-development:
+    name: Direct storage kernel development checks
+    if: github.event_name == 'workflow_dispatch' && inputs.ci-diagnostic == 'storage'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Require a non-publishing development dispatch
+        env:
+          VALIDATION_ONLY: ${{ inputs.validation-only }}
+          BACKEND_ONLY: ${{ inputs.backend-only }}
+          DIAGNOSTIC_CANDIDATE: ${{ inputs.diagnostic-candidate }}
+          DIAGNOSTIC_REFERENCE: ${{ inputs.diagnostic-reference }}
+          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
+        run: |
+          test "$VALIDATION_ONLY" = true && test "$BACKEND_ONLY" = false
+          test -z "$DIAGNOSTIC_CANDIDATE" && test -z "$DIAGNOSTIC_REFERENCE" && test -z "$PLAN_STORAGE_REFERENCE"
+          git rev-parse HEAD
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
+      - name: Install bounded native test dependencies
+        timeout-minutes: 10
+        run: node scripts/install-native-ci-dependencies.mjs
+      - name: Qualify project quotas, exhaustion and resumable retirement
+        env:
+          CAIRN_NATIVE_DISPOSABLE_HOST: '1'
+        run: node scripts/qualify-native-quota.mjs
+      - name: Check direct image persistence, legacy refusal and capacity promises
+        run: |
+          pnpm test:backend --workspace --lib storage::image::
+          pnpm test:backend --workspace --lib storage::reservation::
   resolve:
     if: inputs.backend-only != true && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '')
     runs-on: ubuntu-24.04

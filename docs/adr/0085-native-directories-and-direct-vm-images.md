@@ -10,16 +10,28 @@ conservent leurs contrats. La suppression de S3 ne désactive pas la rétention.
 
 Une exécution native utilise un répertoire privé retenu pour ses fichiers, son
 home, ses données Docker et son temporaire géré. Le contrôleur conserve ses
-métadonnées de contrôle hors du quota de ce répertoire : un environnement plein
+métadonnées de contrôle sur un système de fichiers distinct du pool de données : un environnement plein
 doit encore pouvoir reprendre, appliquer une capacité accordée et libérer ses
 fichiers. La première implémentation vise un système de fichiers ext4 dédié, avec
-quotas de projet effectivement appliqués. Les limites de blocs et d’inodes sont
+quotas de projet effectivement appliqués, monté sous `state/native-data`.
+Les répertoires de conversation y sont ordinaires ; aucun montage ni périphérique
+n’est créé pour un nouvel environnement. Le compteur de projets, les reçus et les
+intentions de nettoyage restent sur le système de fichiers de contrôle. Les
+limites d’inodes utilisent la géométrie réelle du pool, et son épuisement ne peut
+pas empêcher le contrôleur de consigner une expiration. Les limites de blocs et d’inodes sont
 imposées par le noyau ; les cgroups ne bornent pas l’espace occupé. La comptabilité
 partagée utilise les octets alloués et les crédits d’appartenance vérifiés, sans
 facturer les trous d’un fichier sparse comme des blocs physiques.
 
 La VM reçoit directement un fichier ext4 local sur son interface bloc Firecracker.
-Sa taille borne sa capacité. L’image est retenue après arrêt, et la même node la
+Sa taille borne sa capacité. Pendant que le VMM peut écrire, une réservation
+locale facture toute cette capacité au budget partagé, même si le fichier reste
+sparse ou si le guest effectue un discard. Le budget distingue ces promesses des
+octets physiquement alloués. Une époque d’admission fige l’enveloppe physique hors
+écritures des VM ; une surveillance séparée suspend ou arrête les écritures si la
+réserve physique devient indisponible. L’admission peut attendre malgré une faible
+occupation des images. Après arrêt confirmé et flush terminé, elle libère la
+promesse inutilisée ; l’image retenue est alors facturée à son allocation réelle. L’image est retenue après arrêt, et la même node la
 rouvre au tour suivant. Aucun journal applicatif, transport ublk, copie distante ou
 consolidation périodique ne s’interpose entre ces nouveaux environnements et leur
 système de fichiers. Les caches de projets natifs sont des arbres de fichiers

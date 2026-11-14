@@ -35,21 +35,22 @@ test_name=$3
 cleanup() {
   result=$?
   trap - EXIT
-  if mountpoint -q "$fixture/state"; then
-    if ! umount -- "$fixture/state"; then
+  if mountpoint -q "$fixture/state/native-data"; then
+    if ! umount -- "$fixture/state/native-data"; then
       echo 'Native quota fixture unmount is unconfirmed; owned image retained.' >&2
       exit 1
     fi
   fi
   rm -f -- "$fixture/quota.ext4"
-  rmdir -- "$fixture/state" "$fixture/home" "$fixture"
+  rm -rf -- "$fixture/state"
+  rmdir -- "$fixture/home" "$fixture"
   exit "$result"
 }
 trap cleanup EXIT
-mkdir -- "$fixture/state" "$fixture/home"
+mkdir -p -- "$fixture/state/native-data" "$fixture/home"
 truncate -s 1G -- "$fixture/quota.ext4"
-mkfs.ext4 -q -F -O project,quota -Q prjquota "$fixture/quota.ext4"
-mount -o loop,prjquota -- "$fixture/quota.ext4" "$fixture/state"
+mkfs.ext4 -q -F -O project,quota -E quotatype=prjquota "$fixture/quota.ext4"
+mount -o loop,prjquota -- "$fixture/quota.ext4" "$fixture/state/native-data"
 env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME="$fixture/home" \\
   CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_QUOTA_TEST_STATE="$fixture/state" \\
   timeout --signal=TERM --kill-after=10s 180s \\

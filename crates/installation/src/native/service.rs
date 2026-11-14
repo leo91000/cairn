@@ -288,6 +288,45 @@ impl StorageClose {
     }
 }
 
+async fn settle_client(child: &mut tokio::process::Child, attempt: &str) {
+    let mut kill_requested = false;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) => {
+                tracing::error!(%attempt, %error, "Native supervisor client wait is unconfirmed; execution ownership retained");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(_) => {
+                if !kill_requested {
+                    let _ = child.start_kill();
+                    kill_requested = true;
+                }
+                tracing::error!(%attempt, "Native supervisor client exit is unconfirmed; execution ownership retained");
+            }
+        }
+    }
+}
+
+async fn settle_output(
+    task: &mut tokio::task::JoinHandle<Result<()>>,
+    bound: Duration,
+) -> Result<()> {
+    match tokio::time::timeout(bound, &mut *task).await {
+        Ok(result) => result.map_err(Error::internal)?,
+        Err(_) => {
+            // Close only our reader; an inherited output FD never authorizes
+            // killing an unrelated host service. Filesystem consumer fencing
+            // still runs in the finalizer after this explicit failure.
+            task.abort();
+            let _ = task.await;
+            Err(Error::unavailable(
+                "Native output closure is unconfirmed after workload stop.",
+            ))
+        }
+    }
+}
+
 fn completion_status(previous: i32, completion: block::Completion) -> (i32, bool) {
     (
         completion.exit_code(previous),
@@ -1412,19 +1451,7 @@ impl Controller {
                 _ = timer.tick() => {
                     let leased = self.leased(id).await;
                     let expired = self.expired(id, plan["expires"].as_i64()).await;
-                    let workspace_bytes = view.filesystems.iter().try_fold(0u64, |total, path| {
-                        block::used_bytes(path).map(|used| total.saturating_add(used))
-                    })?;
-                    let disk_directory = crate::storage::environment::directory(
-                        &self.state, text(&plan, "runId"),
-                    )?;
-                    let local_backing = tokio::task::spawn_blocking(move || {
-                        crate::storage::runtime::retained_backing_bytes(&disk_directory)
-                    })
-                    .await
-                    .map_err(Error::internal)??;
-                    let workspace_bytes = workspace_bytes.max(local_backing);
-                    let temporary_bytes = disk::bytes_if_present(&temporary).await?;
+                    let (workspace_bytes, temporary_bytes) = block::usage(&self.state, text(&plan, "runId")).await?;
                     let conversation_bytes = workspace_bytes.saturating_add(temporary_bytes);
                     let conversation_limit = self.monitor_capacity(id, &plan, workspace_bytes, temporary_bytes).await?;
                     let node_bytes = disk::used(&self.data, &self.state).await?;
@@ -1462,13 +1489,29 @@ impl Controller {
             }
         };
         systemd::stop(id).await?;
-        let _ = child.wait().await;
-        if readers & 1 == 0 {
-            out.await.map_err(Error::internal)??;
-        }
-        if readers & 2 == 0 {
-            err.await.map_err(Error::internal)??;
-        }
+        stop.cancel();
+        let mounted = { self.mounted.lock().await.get(text(&plan, "runId")).cloned() };
+        let consumer_result = if let Some(mounted) = mounted {
+            mounted.fence_consumers().await
+        } else {
+            Ok(())
+        };
+        // A timeout never proves termination. Retain this execution's locks
+        // while its exact supervisor child settles, even after SIGKILL.
+        settle_client(&mut child, id).await;
+        let stdout_result = if readers & 1 == 0 {
+            settle_output(&mut out, Duration::from_secs(5)).await
+        } else {
+            Ok(())
+        };
+        let stderr_result = if readers & 2 == 0 {
+            settle_output(&mut err, Duration::from_secs(5)).await
+        } else {
+            Ok(())
+        };
+        consumer_result?;
+        stdout_result?;
+        stderr_result?;
         let _ = tokio::fs::remove_file(plan_file).await;
         let _ = tokio::fs::remove_dir_all(container).await;
         Ok(code)
@@ -2319,7 +2362,12 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("POST", ["disks", run, "storage-status"]) => {
             uuid(run)?;
-            block::status(&controller.state, run).await?
+            let mut status = block::status(&controller.state, run).await?;
+            if let Some(mounted) = controller.mounted.lock().await.get(*run) {
+                status["paused"] = mounted.volume.paused().into();
+                status["waitingFor"] = mounted.volume.cpu_pause_reason()?.into();
+            }
+            status
         }
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
             let _disk = disk::lock(&controller.state).await?;
@@ -2623,6 +2671,23 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn inherited_output_writer_cannot_hold_finalization_open() {
+        let (mut input, mut output) = tokio::io::duplex(16);
+        let mut reader = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            input.read_to_end(&mut bytes).await?;
+            Ok(())
+        });
+        assert!(
+            settle_output(&mut reader, Duration::from_millis(20))
+                .await
+                .is_err()
+        );
+        assert!(reader.is_finished());
+        assert!(output.write_all(b"closed").await.is_err());
+    }
 
     #[tokio::test]
     async fn fenced_task_pressure_settles_an_admitted_write_before_draining_its_access() {

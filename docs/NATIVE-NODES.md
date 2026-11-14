@@ -239,3 +239,51 @@ VM nodes use the same mandatory ublk backend and a single flat ext4 filesystem.
 Neither backend advertises or requires a host FUSE capability. VM suspension and
 live memory reclamation preserve the running VMM; memory snapshots and the paired
 filesystem layout are no longer supported.
+
+
+## Pool de répertoires locaux (ADR-0085)
+
+Les nouveaux environnements utilisent des répertoires ordinaires dans
+`/var/lib/cairn-native/state/native-data/<conversation UUID>/`. Ce pool doit être
+un système de fichiers ext4 dédié, monté avec `prjquota`, appartenant à root sans
+écriture pour les autres comptes. Son périphérique doit différer de celui du
+répertoire `state` : les quotas de données ne réservent pas les inodes du système
+de fichiers, et un pool plein doit encore pouvoir écrire ses reçus de nettoyage.
+Les historiques et artefacts conservés par le manager ne sont pas déplacés dans
+ce pool. Les cgroups bornent CPU/RAM/processus et les débits IO, pas les octets
+occupés. Le contrôleur vérifie aussi que les quotas sont effectivement actifs.
+
+Le propriétaire prépare et monte ce volume avant l’enrôlement ou la mise à jour
+du superviseur. Cairn ne reformate, ne repartitionne et ne remonte pas un système
+de fichiers de production. Pour un volume **vide et jetable**, la qualification
+utilise `mkfs.ext4 -O project,quota -E quotatype=prjquota`, puis un montage avec
+`-o prjquota`. Ces commandes détruisent le contenu de leur cible ; elles ne sont
+pas une procédure de conversion d’un disque existant. L’exploitant choisit la
+capacité et la persistance du montage. Les fichiers locaux retenus et leurs
+métadonnées restent à leur emplacement jusqu’à leur conversion vérifiée.
+
+Le protocole de distribution `nativeHostProtocol: 2` exige un rafraîchissement
+explicite du superviseur après préparation du pool. Un ancien superviseur refuse
+la distribution avant de sélectionner le candidat ; le protocole d’exécution
+reste 2. Aucun déploiement de cette migration n’est réalisé par la PR.
+
+Une reprise rouvre l’arbre existant. Une source manquante ou inconnue est refusée,
+sans recréation silencieuse. La compatibilité ublk n’est chargée que pour des
+journaux ou périphériques historiques ; un environnement neuf ne l’utilise pas.
+Après vérification et bascule durable, le nettoyage efface ces anciennes ressources.
+Le retour à l’ancien format exige une sauvegarde antérieure à la conversion.
+
+La fin d’un tour clôt ses producteurs et son temporaire géré, mais retient ses
+fichiers de travail et données Docker privées. L’expiration selon la politique
+configurée, ou la suppression explicite, efface cet environnement. Les reçus
+permanents d’idempotence et les inodes de verrou restent nécessaires contre les
+retries tardifs ; le compteur de projets ne réutilise pas d’identifiant. Le pool
+partagé, les caches bornés et un pilote déjà chargé pour d’autres ressources ne
+sont pas des ressources privées d’une conversation et ne sont pas démontés par
+son expiration.
+
+La qualification système s’exécute uniquement sur infrastructure jetable. Le
+contrôle ciblé `ci.yaml` avec `ci-diagnostic=storage`, `validation-only=true` et
+`backend-only=false` donne un retour de développement sur les quotas et images.
+Il ne remplace pas les qualifications complètes `node-checks`, `native-runtime`,
+VM/Firecracker, ni la validation du head final avant merge.

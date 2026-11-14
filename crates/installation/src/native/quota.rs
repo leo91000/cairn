@@ -54,25 +54,28 @@ fn filesystem(file: &File) -> Result<libc::statfs> {
 }
 
 fn filesystem_identity(file: &File) -> Result<Vec<u8>> {
-    let status = filesystem(file)?;
-    // f_fsid is the kernel's persistent filesystem identity. Pair it with the
-    // owned control directory inode; a device number alone is never authority.
-    Ok(unsafe {
-        std::slice::from_raw_parts(
-            std::ptr::from_ref(&status.f_fsid).cast::<u8>(),
-            std::mem::size_of_val(&status.f_fsid),
-        )
-        .to_vec()
-    })
+    crate::storage::policy::filesystem_id(file).map_err(Into::into)
 }
 
 /// This node owns project IDs on its dedicated state filesystem. No automatic
 /// remount, quota activation or filesystem conversion is performed here.
 pub(super) fn require(state: &Path) -> Result<()> {
-    let file = open(state)?;
+    let pool = super::workspace::data_root(state);
+    let file = open(&pool)?;
+    let metadata = file.metadata()?;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err(Error::unavailable(
+            "Native data pool must be root-owned and not writable by other accounts.",
+        ));
+    }
+    if metadata.dev() == open(state)?.metadata()?.dev() {
+        return Err(Error::unavailable(
+            "Native data and controller state require separate filesystems so exhausted data inodes cannot block recovery.",
+        ));
+    }
     if filesystem(&file)?.f_type != libc::EXT4_SUPER_MAGIC {
         return Err(Error::unavailable(
-            "Native directories require a dedicated ext4 state filesystem with enforced project quotas.",
+            "Native directories require a dedicated ext4 native-data filesystem with enforced project quotas.",
         ));
     }
     let mounted = std::fs::read_to_string("/proc/self/mountinfo")?
@@ -82,7 +85,7 @@ pub(super) fn require(state: &Path) -> Result<()> {
                 return false;
             };
             let fields: Vec<_> = mount.split_whitespace().collect();
-            fields.get(4).is_some_and(|path| Path::new(path) == state)
+            fields.get(4).is_some_and(|path| Path::new(path) == pool)
                 && filesystem
                     .split_whitespace()
                     .nth(2)
@@ -100,7 +103,7 @@ pub(super) fn require(state: &Path) -> Result<()> {
     } == 0;
     if !mounted || !enabled {
         return Err(Error::unavailable(
-            "Mount the dedicated native state filesystem with enforced ext4 project quotas before starting this node; see docs/NATIVE-NODES.md.",
+            "Mount the native-data filesystem with enforced ext4 project quotas before starting this node; see docs/NATIVE-NODES.md.",
         ));
     }
     Ok(())
@@ -130,12 +133,10 @@ pub(in crate::native) fn project_io(file: &File) -> std::io::Result<u32> {
 }
 
 pub(in crate::native) fn owned_project(root: &Path, file: &File) -> Result<u32> {
-    let parent = root
-        .parent()
-        .ok_or_else(|| Error::bad("Missing native quota control directory."))?;
+    let parent = super::workspace::control_for_workload(root)?;
     let owner: Ownership =
         serde_json::from_slice(&std::fs::read(parent.join("quota-owner.json"))?)?;
-    owner.validate(parent, file)?;
+    owner.validate(&parent, file)?;
     if project_io(file)? != owner.project {
         return Err(Error::conflict("Native workload quota ownership changed."));
     }
@@ -205,13 +206,23 @@ pub(super) fn limit(root_path: &Path, bytes: u64) -> Result<()> {
     if project == 0 || bytes < 1024 {
         return Err(Error::conflict("Native directory has no project quota."));
     }
+    let status = filesystem(&root)?;
+    let total_bytes = status.f_blocks.saturating_mul(status.f_bsize as u64).max(1);
+    let data_inodes = status
+        .f_files
+        .saturating_sub((status.f_files / 100).max(64));
+    let inode_limit =
+        ((u128::from(bytes) * u128::from(data_inodes)) / u128::from(total_bytes)).max(1) as u64;
+    let mut current = Quota::default();
+    operation(&root, 0x800007, project, &mut current)?;
+    let inode_limit = inode_limit.max(current.inodes);
     let mut quota = Quota {
         block_hard: bytes / 1024,
         block_soft: bytes / 1024,
         // Bound zero-length files as well as allocated data. This limit grows
         // with the same grant and cannot consume the filesystem's inode pool.
-        inode_hard: (bytes / 4096).max(1024),
-        inode_soft: (bytes / 4096).max(1024),
+        inode_hard: inode_limit,
+        inode_soft: inode_limit,
         valid: 1 | 4,
         ..Default::default()
     };
@@ -239,21 +250,26 @@ pub(super) async fn prepare(state: &Path, root: &Path, bytes: u64) -> Result<()>
             "Native directories require a dedicated ext4 filesystem with project quota enforcement.",
         ));
     }
-    let parent = root
-        .parent()
-        .ok_or_else(|| Error::bad("Missing native quota control directory."))?;
+    let parent = super::workspace::control_for_workload(root)?;
     if parent.join("quota-retirement.json").exists() {
         return Err(Error::conflict(
             "Native quota retirement must finish before admission.",
         ));
     }
-    if root.file_name().is_none_or(|name| name != "workload")
-        || file.metadata()?.dev() != open(state)?.metadata()?.dev()
+    if file.metadata()?.dev() != open(&super::workspace::data_root(state))?.metadata()?.dev()
+        || file.metadata()?.dev() == open(state)?.metadata()?.dev()
     {
         return Err(Error::conflict(
-            "Native workload must belong to the node's state filesystem.",
+            "Native workload must belong to the separate native data filesystem.",
         ));
     }
+    if !file.metadata()?.is_dir() {
+        return Err(Error::conflict("Native workload must be a directory."));
+    }
+    tokio::fs::File::open(root.parent().unwrap())
+        .await?
+        .sync_all()
+        .await?;
     let marker = parent.join("quota-owner.json");
     let owner: Ownership = match tokio::fs::read(&marker).await {
         Ok(bytes) => serde_json::from_slice(&bytes)?,
@@ -274,13 +290,15 @@ pub(super) async fn prepare(state: &Path, root: &Path, bytes: u64) -> Result<()>
                 .ok_or_else(|| Error::unavailable("Native project quota IDs exhausted."))?;
             crate::skills::atomic_write(&counter, next.to_string().as_bytes()).await?;
             tokio::fs::File::open(state).await?.sync_all().await?;
-            let control = open(parent)?.metadata()?;
+            let control_file = open(&parent)?;
+            let control = control_file.metadata()?;
             let workload = file.metadata()?;
             let owner = Ownership {
                 project,
                 filesystem: filesystem_identity(&file)?,
                 control_device: control.dev(),
                 control_inode: control.ino(),
+                control_filesystem: filesystem_identity(&control_file)?,
                 workload_device: workload.dev(),
                 workload_inode: workload.ino(),
             };
@@ -289,8 +307,13 @@ pub(super) async fn prepare(state: &Path, root: &Path, bytes: u64) -> Result<()>
         }
         Err(error) => return Err(error.into()),
     };
-    owner.validate(parent, &file)?;
+    owner.validate(&parent, &file)?;
     match attributes(&file)?.project {
+        0 if parent.join("directory.json").exists() => {
+            return Err(Error::conflict(
+                "Retained native quota identity is missing; recover it before resuming.",
+            ));
+        }
         0 => set_project(&file, owner.project)?,
         project if project == owner.project => {}
         _ => return Err(Error::conflict("Native workload project was replaced.")),
@@ -305,18 +328,21 @@ struct Ownership {
     filesystem: Vec<u8>,
     control_device: u64,
     control_inode: u64,
+    control_filesystem: Vec<u8>,
     workload_device: u64,
     workload_inode: u64,
 }
 
 impl Ownership {
     fn validate(&self, parent: &Path, workload: &File) -> Result<()> {
-        let control = open(parent)?.metadata()?;
+        let control_file = open(parent)?;
+        let control = control_file.metadata()?;
         let metadata = workload.metadata()?;
         if self.project == 0
-            || control.dev() != self.control_device
+            || !metadata.is_dir()
+            || !control.is_dir()
             || control.ino() != self.control_inode
-            || metadata.dev() != self.workload_device
+            || filesystem_identity(&control_file)? != self.control_filesystem
             || metadata.ino() != self.workload_inode
             || filesystem_identity(workload)? != self.filesystem
         {
@@ -332,42 +358,57 @@ impl Ownership {
 /// consumers. The control receipt survives every unlink and a controller crash.
 pub(super) async fn retire(control_root: &Path) -> Result<()> {
     let marker = control_root.join("quota-retirement.json");
-    super::workspace::require_no_mounts(&control_root.join("workload"))?;
-    let workload = control_root.join("workload");
+    let workload = super::workspace::workload_for_control(control_root)?;
+    super::workspace::require_no_mounts(&workload)?;
+    if !control_root.join("quota-owner.json").exists()
+        && !marker.exists()
+        && !tokio::fs::try_exists(&workload).await?
+    {
+        return Ok(());
+    }
+    let pool = open(workload.parent().unwrap())?;
     let control = open(control_root)?;
     let metadata = control.metadata()?;
     let retirement: Ownership = match tokio::fs::read(&marker).await {
         Ok(bytes) => serde_json::from_slice(&bytes)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match tokio::fs::symlink_metadata(&workload).await {
+            let present = match tokio::fs::symlink_metadata(&workload).await {
                 Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
                     return Err(Error::conflict(
                         "Native workload is not an owned directory.",
                     ));
                 }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(error) => return Err(error.into()),
+            };
+            if !present {
+                let owner: Ownership = serde_json::from_slice(
+                    &tokio::fs::read(control_root.join("quota-owner.json")).await?,
+                )?;
+                super::atomic_write(&marker, &serde_json::to_vec(&owner)?).await?;
+                owner
+            } else {
+                let file = open(&workload)?;
+                let retirement: Ownership =
+                    match tokio::fs::read(control_root.join("quota-owner.json")).await {
+                        Ok(bytes) => serde_json::from_slice(&bytes)?,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::NotFound
+                                && attributes(&file)?.project == 0 =>
+                        {
+                            // A failed, unassigned preparation has no kernel quota to
+                            // release. Never alter the filesystem's project-zero quota.
+                            tokio::fs::remove_dir_all(&workload).await?;
+                            control.sync_all()?;
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                retirement.validate(control_root, &file)?;
+                super::atomic_write(&marker, &serde_json::to_vec(&retirement)?).await?;
+                retirement
             }
-            let file = open(&workload)?;
-            let retirement: Ownership =
-                match tokio::fs::read(control_root.join("quota-owner.json")).await {
-                    Ok(bytes) => serde_json::from_slice(&bytes)?,
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::NotFound
-                            && attributes(&file)?.project == 0 =>
-                    {
-                        // A failed, unassigned preparation has no kernel quota to
-                        // release. Never alter the filesystem's project-zero quota.
-                        tokio::fs::remove_dir_all(&workload).await?;
-                        control.sync_all()?;
-                        return Ok(());
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-            retirement.validate(control_root, &file)?;
-            super::atomic_write(&marker, &serde_json::to_vec(&retirement)?).await?;
-            retirement
         }
         Err(error) => return Err(error.into()),
     };
@@ -381,9 +422,9 @@ pub(super) async fn retire(control_root: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    if metadata.dev() != retirement.control_device
-        || metadata.ino() != retirement.control_inode
-        || filesystem_identity(&control)? != retirement.filesystem
+    if metadata.ino() != retirement.control_inode
+        || filesystem_identity(&control)? != retirement.control_filesystem
+        || filesystem_identity(&pool)? != retirement.filesystem
     {
         return Err(Error::conflict(
             "Native quota retirement no longer belongs to this environment.",
@@ -392,9 +433,7 @@ pub(super) async fn retire(control_root: &Path) -> Result<()> {
     if tokio::fs::try_exists(&workload).await? {
         let file = open(&workload)?;
         let metadata = file.metadata()?;
-        if metadata.dev() != retirement.workload_device
-            || metadata.ino() != retirement.workload_inode
-        {
+        if metadata.dev() != pool.metadata()?.dev() || metadata.ino() != retirement.workload_inode {
             return Err(Error::conflict(
                 "A replacement native workload cannot be retired by an old quota receipt.",
             ));
@@ -416,7 +455,7 @@ pub(super) async fn retire(control_root: &Path) -> Result<()> {
         set_project(&file, 0)?;
     }
     let mut usage = Quota::default();
-    operation(&control, 0x800007, retirement.project, &mut usage)?;
+    operation(&pool, 0x800007, retirement.project, &mut usage)?;
     if usage.space != 0 || usage.inodes != 0 {
         return Err(Error::conflict(
             "Native quota still has open or retained consumers; retirement will retry.",
@@ -426,7 +465,7 @@ pub(super) async fn retire(control_root: &Path) -> Result<()> {
         valid: 1 | 4,
         ..Default::default()
     };
-    operation(&control, 0x800008, retirement.project, &mut cleared)?;
+    operation(&pool, 0x800008, retirement.project, &mut cleared)?;
     match tokio::fs::remove_dir(&workload).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -445,7 +484,102 @@ pub(super) async fn retire(control_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{fs::OpenOptions, io::Write};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[test]
+    fn filesystem_identity_survives_device_renumbering_but_rejects_a_replaced_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let control_path = root.path().join("control");
+        let data_path = root.path().join("data");
+        std::fs::create_dir(&control_path).unwrap();
+        std::fs::create_dir(&data_path).unwrap();
+        let control = open(&control_path).unwrap();
+        let data = open(&data_path).unwrap();
+        let mut owner = Ownership {
+            project: 1,
+            filesystem: filesystem_identity(&data).unwrap(),
+            control_device: u64::MAX,
+            control_inode: control.metadata().unwrap().ino(),
+            control_filesystem: filesystem_identity(&control).unwrap(),
+            workload_device: u64::MAX,
+            workload_inode: data.metadata().unwrap().ino(),
+        };
+        owner.validate(&control_path, &data).unwrap();
+        owner.filesystem[0] ^= 0xff;
+        assert!(owner.validate(&control_path, &data).is_err());
+    }
+
+    #[test]
+    #[ignore = "owned subprocess helper, invoked only by kernel_quota_lifecycle_qualification"]
+    fn directory_consumer_child() {
+        assert_eq!(
+            std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),
+            Ok("1")
+        );
+        let root = std::path::PathBuf::from(
+            std::env::var_os("CAIRN_QUOTA_CONSUMER_ROOT").expect("owned fixture root"),
+        );
+        match std::env::var("CAIRN_QUOTA_CONSUMER_MODE").unwrap().as_str() {
+            "cwd" => std::env::set_current_dir(root).unwrap(),
+            "mmap" => {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(root.join("mapped"))
+                    .unwrap();
+                let memory = unsafe {
+                    libc::mmap(
+                        std::ptr::null_mut(),
+                        4096,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_SHARED,
+                        file.as_raw_fd(),
+                        0,
+                    )
+                };
+                assert_ne!(memory, libc::MAP_FAILED);
+                drop(file);
+            }
+            _ => panic!("unsupported fixture consumer"),
+        }
+        println!("fixture-consumer-ready");
+        std::io::stdout().flush().unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+
+    async fn consumer(root: &Path, mode: &str) -> tokio::process::Child {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native::quota::tests::directory_consumer_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("CAIRN_QUOTA_CONSUMER_ROOT", root)
+            .env("CAIRN_QUOTA_CONSUMER_MODE", mode)
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = BufReader::new(stdout);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                if line.contains("fixture-consumer-ready") {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        child
+    }
 
     #[tokio::test]
     #[ignore = "requires the dedicated disposable ext4 quota fixture; scripts/qualify-native-quota.mjs"]
@@ -464,10 +598,21 @@ mod tests {
         let foreign = state.join("native").join(crate::config::id());
         crate::skills::private_dir(&foreign).await.unwrap();
         std::fs::write(foreign.join("retained"), b"another environment").unwrap();
+        let foreign_data = super::super::workspace::workload_for_control(&foreign).unwrap();
+        crate::skills::private_dir(&foreign_data).await.unwrap();
+        prepare(&state, &foreign_data, 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        std::fs::write(
+            foreign_data.join("retained"),
+            b"another environment on the same data filesystem",
+        )
+        .unwrap();
+        let mut peer = consumer(&foreign_data, "cwd").await;
         let mut projects = Vec::new();
         let mut peak = 0;
         for cycle in 0..5 {
-            let workload = root.join("workload");
+            let workload = super::super::workspace::workload_for_control(&root).unwrap();
             crate::skills::private_dir(&workload).await.unwrap();
             prepare(&state, &workload, 4 * 1024 * 1024).await.unwrap();
             let project = attributes(&open(&workload).unwrap()).unwrap().project;
@@ -510,7 +655,12 @@ mod tests {
             assert!(!workload.exists());
             assert!(!root.join("quota-retirement.json").exists());
             let mut released = Quota::default();
-            match control(&open(&state).unwrap(), 0x800007, project, &mut released) {
+            match control(
+                &open(&super::super::workspace::data_root(&state)).unwrap(),
+                0x800007,
+                project,
+                &mut released,
+            ) {
                 Ok(()) => assert_eq!(
                     (
                         released.space,
@@ -530,9 +680,58 @@ mod tests {
                 b"another environment"
             );
         }
-        let workload = root.join("workload");
+        let workload = super::super::workspace::workload_for_control(&root).unwrap();
         crate::skills::private_dir(&workload).await.unwrap();
         prepare(&state, &workload, 4 * 1024 * 1024).await.unwrap();
+        let initial_inodes = super::super::workspace::filesystem(&workload)
+            .unwrap()
+            .f_favail;
+        let mut inode_error = None;
+        for index in 0..initial_inodes + 1 {
+            match std::fs::File::create(workload.join(format!("inode-{index}"))) {
+                Ok(file) => drop(file),
+                Err(error) => {
+                    inode_error = Some(error);
+                    break;
+                }
+            }
+        }
+        assert!(matches!(
+            inode_error.and_then(|error| error.raw_os_error()),
+            Some(libc::EDQUOT | libc::ENOSPC)
+        ));
+        assert!(
+            super::super::workspace::filesystem(&workload)
+                .unwrap()
+                .f_favail
+                > 0,
+            "per-environment inode quota must leave pool headroom"
+        );
+        super::super::atomic_write(&root.join("attempt"), b"inode-exhaustion-recovery")
+            .await
+            .unwrap();
+        retire(&root).await.unwrap();
+        crate::skills::private_dir(&workload).await.unwrap();
+        prepare(&state, &workload, 4 * 1024 * 1024).await.unwrap();
+        std::fs::write(workload.join("mapped"), vec![0; 4096]).unwrap();
+        for mode in ["cwd", "mmap"] {
+            let mut child = consumer(&workload, mode).await;
+            assert!(
+                super::super::systemd::directory_consumers::stop(&workload)
+                    .await
+                    .is_err(),
+                "missed external {mode} consumer"
+            );
+            child.kill().await.unwrap();
+            child.wait().await.unwrap();
+            super::super::systemd::directory_consumers::stop(&workload)
+                .await
+                .unwrap();
+            assert!(
+                peer.try_wait().unwrap().is_none(),
+                "another conversation's consumer was stopped"
+            );
+        }
         let mut held = std::fs::File::create(workload.join("held")).unwrap();
         held.write_all(b"old open data").unwrap();
         held.sync_all().unwrap();
@@ -542,6 +741,13 @@ mod tests {
             .unwrap();
         drop(held);
         retire(&root).await.unwrap();
+        assert_eq!(
+            std::fs::read(foreign_data.join("retained")).unwrap(),
+            b"another environment on the same data filesystem"
+        );
+        peer.kill().await.unwrap();
+        peer.wait().await.unwrap();
+        retire(&foreign).await.unwrap();
         crate::skills::private_dir(&workload).await.unwrap();
         prepare(&state, &workload, 4 * 1024 * 1024).await.unwrap();
         std::fs::write(workload.join("new-environment"), b"must survive").unwrap();

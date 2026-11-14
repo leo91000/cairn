@@ -125,6 +125,36 @@ impl Control {
     }
 }
 
+pub(crate) fn filesystem_id(file: &std::fs::File) -> std::io::Result<Vec<u8>> {
+    use std::os::fd::AsRawFd;
+    let mut status = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+    if unsafe { libc::fstatfs(file.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let status = unsafe { status.assume_init() };
+    Ok(unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::from_ref(&status.f_fsid).cast::<u8>(),
+            std::mem::size_of_val(&status.f_fsid),
+        )
+        .to_vec()
+    })
+}
+
+pub(crate) fn physical_space(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let mut status = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    if unsafe { libc::statvfs(name.as_ptr(), status.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let status = unsafe { status.assume_init() };
+    Ok((
+        status.f_blocks.saturating_mul(status.f_frsize),
+        status.f_bavail.saturating_mul(status.f_frsize),
+    ))
+}
+
 pub fn space(path: &Path) -> std::io::Result<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     // Sample pending writes before physical/quota usage. A write that finishes

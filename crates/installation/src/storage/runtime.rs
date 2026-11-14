@@ -169,6 +169,7 @@ pub fn live(directory: &Path) -> Option<Arc<Volume>> {
 
 /// Task accounting excludes only the bounded internal replacement copy.
 /// Node accounting continues to use every physically allocated file.
+#[cfg(test)]
 pub(crate) fn retained_backing_bytes(directory: &Path) -> io::Result<u64> {
     let entry = registry()
         .lock()

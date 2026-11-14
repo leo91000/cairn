@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -24,6 +24,8 @@ pub struct Volume {
     state: PathBuf,
     pub stop: CancellationToken,
     paused: AtomicBool,
+    pressure: AtomicU8,
+    observed: AtomicU64,
 }
 
 impl Volume {
@@ -36,15 +38,18 @@ impl Volume {
     }
 
     pub fn cpu_pause_reason(&self) -> Result<Option<&'static str>> {
-        let policy = match std::fs::read(self.state.join("storage-policy.json")) {
-            Ok(bytes) => storage::policy::from_persisted(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                storage::policy::Policy::default()
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let (total, free) = storage::policy::space(&self.root)?;
-        Ok((free <= policy.reserve(total)).then_some("disk-space"))
+        if crate::nodes::boot_ms().saturating_sub(self.observed.load(Ordering::Acquire)) > 15_000 {
+            return Ok(Some("storage-observation"));
+        }
+        Ok(match self.pressure.load(Ordering::Acquire) {
+            0 => None,
+            1 => Some("disk-space"),
+            _ => Some("storage-observation"),
+        })
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
     }
 
     pub fn limit_backing(&self, bytes: u64) -> Result<()> {
@@ -60,11 +65,16 @@ pub struct Handle {
 
 impl Handle {
     pub fn new(mount: Mounted) -> Self {
+        observe(Arc::downgrade(&mount.volume));
         Self {
             volume: mount.volume.clone(),
             filesystem: mount.filesystem.clone(),
             mount: tokio::sync::Mutex::new(mount),
         }
+    }
+
+    pub async fn fence_consumers(&self) -> Result<()> {
+        super::systemd::directory_consumers::stop(&self.volume.root).await
     }
 
     pub async fn abort_io(&self) -> Result<()> {
@@ -118,12 +128,14 @@ impl Mounted {
         };
         if completion != Completion::FailedFlush {
             remove_temporary(&self.volume.root.join("tmp")).await?;
-            remove_temporary(&self.volume.root.parent().unwrap().join("docker-runtime")).await?;
+            remove_temporary(
+                &workspace::control_for_workload(&self.volume.root)?.join("docker-runtime"),
+            )
+            .await?;
         }
         let record = async {
-            let attempt =
-                tokio::fs::read_to_string(self.volume.root.parent().unwrap().join("attempt"))
-                    .await?;
+            let control = workspace::control_for_workload(&self.volume.root)?;
+            let attempt = tokio::fs::read_to_string(control.join("attempt")).await?;
             super::capacity::record_retained(
                 &self.owner.directory,
                 &attempt,
@@ -160,10 +172,13 @@ pub async fn mount(
         .as_u64()
         .and_then(|size| size.checked_mul(super::disk::MIB))
         .ok_or_else(|| Error::bad("Missing native directory allowance."))?;
-    let workload = root.join("workload");
+    let workload = workspace::workload(state, run)?;
     workspace::require_no_mounts(&workload)?;
-    private_dir(&workload).await?;
     let saved = environment::directory(state, run)?;
+    if saved.join("directory.json").exists() && root.join("block-initialized").exists() {
+        require_retained_tree(&workload)?;
+    }
+    private_dir(&workload).await?;
     if !saved.join("directory.json").exists() && storage::runtime::exists(&saved) {
         migrate(state, run, plan, stop, &root).await?;
     }
@@ -184,6 +199,17 @@ pub async fn mount(
             "Native journal is missing; recover or expire the environment explicitly before starting a new one.",
         ));
     }
+    let runtime = json!({ "backend": "native", "storage": STORAGE, "os": "linux", "arch": "x86_64", "runtimeId": plan["runtimeId"] });
+    let marker = owner.directory.join("directory.json");
+    if marker.exists() {
+        let previous: Value = serde_json::from_slice(&tokio::fs::read(&marker).await?)?;
+        if ["backend", "storage", "os", "arch"]
+            .iter()
+            .any(|key| previous[*key] != runtime[*key])
+        {
+            return Err(Error::conflict("Native directory platform changed."));
+        }
+    }
     let policy: storage::policy::Policy =
         serde_json::from_value(plan["storage"]["policy"].clone())?;
     policy.validate().map_err(Error::bad)?;
@@ -196,17 +222,6 @@ pub async fn mount(
         ));
     }
     quota::prepare(state, &workload, bytes).await?;
-    let runtime = json!({ "backend": "native", "storage": STORAGE, "os": "linux", "arch": "x86_64", "runtimeId": plan["runtimeId"] });
-    let marker = owner.directory.join("directory.json");
-    if marker.exists() {
-        let previous: Value = serde_json::from_slice(&tokio::fs::read(&marker).await?)?;
-        if ["backend", "storage", "os", "arch"]
-            .iter()
-            .any(|key| previous[*key] != runtime[*key])
-        {
-            return Err(Error::conflict("Native directory platform changed."));
-        }
-    }
     let data = workload.join("data");
     private_dir(&data).await?;
     let view = block::View {
@@ -237,6 +252,8 @@ pub async fn mount(
             state: state.to_owned(),
             stop: CancellationToken::new(),
             paused: AtomicBool::new(false),
+            pressure: AtomicU8::new(2),
+            observed: AtomicU64::new(crate::nodes::boot_ms()),
         }),
         filesystem: Arc::new(AtomicU64::new(bytes)),
         owner,
@@ -252,7 +269,8 @@ async fn migrate(
     stop: &CancellationToken,
     root: &Path,
 ) -> Result<()> {
-    let staging = root.join("workload/directory-conversion");
+    let workload = workspace::workload(state, run)?;
+    let staging = workload.join("directory-conversion");
     let marker = root.join("directory-conversion-verified");
     if !marker.exists() {
         if staging.exists() {
@@ -263,7 +281,7 @@ async fn migrate(
         let copied = async {
             quota::prepare(
                 state,
-                &root.join("workload"),
+                &workload,
                 plan["resources"]["diskMiB"]
                     .as_u64()
                     .ok_or_else(|| Error::bad("Missing native allowance."))?
@@ -281,11 +299,12 @@ async fn migrate(
     }
     let owner = environment::lock(state, run, DISK_BUSY).await?;
     if staging.exists() {
-        let data = root.join("workload/data");
+        let data = workload.join("data");
         if data.exists() {
             tokio::fs::remove_dir(&data).await?;
         }
         tokio::fs::rename(&staging, &data).await?;
+        tokio::fs::File::open(&workload).await?.sync_all().await?;
         tokio::fs::File::open(root).await?.sync_all().await?;
     }
     let _replacement = storage::runtime::replacement(&owner.directory).await?;
@@ -298,6 +317,7 @@ async fn migrate(
         .sync_all()
         .await?;
     tokio::fs::remove_file(marker).await?;
+    cleanup_legacy_directories(state, run).await?;
     Ok(())
 }
 
@@ -345,7 +365,16 @@ pub async fn status(state: &Path, run: &str) -> Result<Value> {
     if !directory.join("directory.json").exists() {
         return block::status(state, run).await;
     }
-    let used = quota::usage(&workspace::directory(state, run)?.join("workload"))?;
+    let root = workspace::directory(state, run)?;
+    let workload = workspace::workload(state, run)?;
+    if root.join("block-initialized").exists() && require_retained_tree(&workload).is_err() {
+        // Keep the established availability code for older clients. It now
+        // identifies missing retained native data, not a transport requirement.
+        return Ok(
+            json!({ "mode": "native", "storage": STORAGE, "availability": "unavailable", "reason": super::MISSING_NATIVE_JOURNAL_CODE }),
+        );
+    }
+    let used = quota::usage(&workload)?;
     Ok(
         json!({ "mode": "native", "storage": STORAGE, "availability": "available", "localBytes": used, "activeLocalBytes": used, "paused": false }),
     )
@@ -357,10 +386,13 @@ pub async fn recover_completed(state: &Path, run: &str, attempt: &str) -> Result
         .exists()
     {
         let root = workspace::directory(state, run)?;
-        if root.join("workload").exists() && !root.join("quota-retirement.json").exists() {
-            super::systemd::directory_consumers::stop(&root.join("workload")).await?;
+        let workload = workspace::workload(state, run)?;
+        if workload.exists() && !root.join("quota-retirement.json").exists() {
+            super::systemd::directory_consumers::stop(&workload).await?;
         }
-        block::sync(&root).await?;
+        if workload.exists() {
+            block::sync(&workload).await?;
+        }
         atomic_write(&root.join("attempt"), attempt.as_bytes()).await?;
         return Ok(());
     }
@@ -371,30 +403,86 @@ pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>
     let lease = environment::lock(state, run, DISK_BUSY).await?;
     if delete {
         let root = workspace::directory(state, run)?;
-        if root.join("workload").exists()
+        let workload = workspace::workload(state, run)?;
+        if workload.exists()
             && root.join("quota-owner.json").exists()
             && !root.join("quota-retirement.json").exists()
         {
-            super::systemd::directory_consumers::stop(&root.join("workload")).await?;
+            super::systemd::directory_consumers::stop(&workload).await?;
         }
         quota::retire(&root).await?;
     }
-    block::action_locked(&lease.directory, delete).await
+    let grants = block::action_locked(&lease.directory, delete).await?;
+    if delete {
+        cleanup_legacy_directories(state, run).await?;
+    }
+    Ok(grants)
 }
 
-pub fn used_bytes(path: &Path) -> Result<u64> {
-    workspace::measure(path, true)
+pub async fn usage(state: &Path, run: &str) -> Result<(u64, u64)> {
+    let workload = workspace::workload(state, run)?;
+    tokio::task::spawn_blocking(move || -> Result<_> {
+        let temporary = workload.join("tmp");
+        let temporary = if temporary.exists() {
+            workspace::measure(&temporary, true)?
+        } else {
+            0
+        };
+        let total = quota::usage(&workload)?;
+        Ok((total.saturating_sub(temporary), temporary))
+    })
+    .await
+    .map_err(Error::internal)?
 }
 
 /// The workload quota includes managed temporary files, while control metadata
 /// remains writable after ENOSPC/EDQUOT. Legacy fixtures retain their old path.
 pub async fn temporary(state: &Path, run: &str) -> Result<PathBuf> {
     let root = workspace::directory(state, run)?;
-    Ok(if root.join("workload").is_dir() {
-        root.join("workload/tmp")
+    let workload = workspace::workload(state, run)?;
+    Ok(if workload.is_dir() {
+        workload.join("tmp")
     } else {
         root.join("tmp")
     })
+}
+
+async fn cleanup_legacy_directories(state: &Path, run: &str) -> Result<()> {
+    let base = state.join("native-block");
+    match tokio::fs::symlink_metadata(&base).await {
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err(Error::conflict(
+                "Legacy attachment namespace is not an owned directory.",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    let directory = base.join(run);
+    let metadata = match tokio::fs::symlink_metadata(&directory).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(Error::conflict(
+            "Legacy attachment directory is not an owned directory.",
+        ));
+    }
+    for path in [directory.join("root"), directory] {
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+                return Err(Error::conflict(
+                    "Unrecognized legacy attachment alias; cleanup retained for recovery.",
+                ));
+            }
+            Ok(_) => tokio::fs::remove_dir(path).await?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 async fn remove_temporary(path: &Path) -> Result<()> {
@@ -408,4 +496,109 @@ async fn remove_temporary(path: &Path) -> Result<()> {
         Err(error) => return Err(error.into()),
     }
     Ok(())
+}
+
+fn require_retained_tree(workload: &Path) -> Result<()> {
+    for name in ["", "data", "data/home", "data/workspaces", "data/output"] {
+        let path = workload.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(Error::conflict(
+                    "Retained native data was replaced by an unsupported file or alias; recover it before resuming.",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::conflict(
+                    "Retained native data is missing; recover it or explicitly expire the environment.",
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn observe(volume: std::sync::Weak<Volume>) {
+    tokio::spawn(async move {
+        loop {
+            let Some(current) = volume.upgrade() else {
+                return;
+            };
+            let state = current.state.clone();
+            let root = current.root.clone();
+            let stop = current.stop.clone();
+            drop(current);
+            let sample = tokio::task::spawn_blocking(move || -> Result<bool> {
+                let policy = match std::fs::read(state.join("storage-policy.json")) {
+                    Ok(bytes) => storage::policy::from_persisted(&bytes)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        storage::policy::Policy::default()
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let (total, free) = storage::policy::space(&root)?;
+                Ok(free <= policy.reserve(total))
+            });
+            let result =
+                tokio::select! { () = stop.cancelled() => return, result = sample => result };
+            if stop.is_cancelled() {
+                return;
+            }
+            if let Some(current) = volume.upgrade() {
+                let value = match result {
+                    Ok(Ok(false)) => 0,
+                    Ok(Ok(true)) => 1,
+                    _ => 2,
+                };
+                current.pressure.store(value, Ordering::Release);
+                current
+                    .observed
+                    .store(crate::nodes::boot_ms(), Ordering::Release);
+            }
+            tokio::select! { () = stop.cancelled() => return, () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {} }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_retained_data_reports_unavailable_without_recreating_files() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let root = workspace::directory(state.path(), &run).unwrap();
+        private_dir(&root).await.unwrap();
+        atomic_write(&root.join("block-initialized"), b"1")
+            .await
+            .unwrap();
+        let owner = environment::ownership(state.path(), &run, "busy")
+            .await
+            .unwrap();
+        atomic_write(&owner.directory.join("directory.json"), b"{}")
+            .await
+            .unwrap();
+        drop(owner);
+        let status = status(state.path(), &run).await.unwrap();
+        assert_eq!(status["availability"], "unavailable");
+        assert!(!workspace::workload(state.path(), &run).unwrap().exists());
+    }
+
+    #[test]
+    fn missing_or_aliased_retained_tree_is_refused_without_recreation() {
+        let root = tempfile::tempdir().unwrap();
+        let workload = root.path().join("workload");
+        std::fs::create_dir_all(workload.join("data/home")).unwrap();
+        std::fs::create_dir_all(workload.join("data/workspaces")).unwrap();
+        assert!(require_retained_tree(&workload).is_err());
+        assert!(!workload.join("data/output").exists());
+        std::os::unix::fs::symlink(workload.join("data/home"), workload.join("data/output"))
+            .unwrap();
+        assert!(require_retained_tree(&workload).is_err());
+        std::fs::remove_file(workload.join("data/output")).unwrap();
+        std::fs::create_dir(workload.join("data/output")).unwrap();
+        require_retained_tree(&workload).unwrap();
+    }
 }

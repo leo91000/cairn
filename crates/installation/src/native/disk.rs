@@ -50,12 +50,23 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
             Err(error) => Err(error.into()),
         }
     }
+    use std::os::unix::fs::MetadataExt;
     let mut seen = std::collections::HashSet::new();
     let mut used = size(data, false, &mut seen)?;
     for entry in std::fs::read_dir(state)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name == "roots" {
+        if name == "native-data" && entry.metadata()?.dev() != std::fs::metadata(state)?.dev() {
+            // The dedicated data filesystem accounts directories, deleted-open
+            // inodes and all project payloads without rescanning every file.
+            let filesystem = super::workspace::filesystem(&entry.path())?;
+            used = used.saturating_add(
+                filesystem
+                    .f_blocks
+                    .saturating_sub(filesystem.f_bfree)
+                    .saturating_mul(filesystem.f_frsize),
+            );
+        } else if name == "roots" {
             for plan in std::fs::read_dir(entry.path())? {
                 let plan = plan?;
                 if plan.file_type()?.is_file() {
@@ -89,6 +100,7 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
             }
         } else {
             let physical = name == "native-bases"
+                || name == "native-data"
                 || super::super::storage::environment::ROOTS
                     .iter()
                     .any(|root| name == *root);

@@ -19,7 +19,7 @@ SPEC.loader.exec_module(host)
 
 def release(**changes):
     value = dict(sha256='a' * 64, toolsSha256='b' * 64, size=3, toolsSize=3,
-                 os='linux', arch='x86_64', nodeProtocol=2,
+                 os='linux', arch='x86_64', nativeHostProtocol=2, executionProtocol=2,
                  runtimeId='synthetic-runtime',
                  binaryPath='/internal/nodes/native-binary', toolsPath='/internal/nodes/native-tools')
     value.update(changes)
@@ -163,29 +163,78 @@ class NativeHostTests(unittest.TestCase):
                     prepare.assert_not_called()
 
     def test_native_storage_loads_only_its_missing_driver_and_checks_control(self):
-        with patch.object(host.shutil, 'which', return_value='/synthetic/tool'), \
-                patch.object(host.Path, 'is_dir', return_value=False), \
-                patch.object(host.Path, 'stat', return_value=Mock(st_mode=host.stat.S_IFCHR)), \
-                patch.object(host.subprocess, 'run') as run:
-            host.require_storage()
-            self.assertEqual(['modprobe', 'ublk_drv'], run.call_args.args[0])
+        with patch.object(host, 'require_data_pool'), patch.object(host, 'require_storage_kernel'), \
+                patch.object(host, 'legacy_storage_present', return_value=True):
+            with patch.object(host.shutil, 'which', return_value='/synthetic/tool'), \
+                    patch.object(host.Path, 'is_dir', return_value=False), \
+                    patch.object(host.Path, 'stat', return_value=Mock(st_mode=host.stat.S_IFCHR)), \
+                    patch.object(host.subprocess, 'run') as run:
+                host.require_storage()
+                self.assertEqual(['modprobe', 'ublk_drv'], run.call_args.args[0])
 
     def test_loaded_storage_driver_does_not_need_its_module_file_again(self):
-        with patch.object(host.shutil, 'which', return_value='/synthetic/tool'), \
-                patch.object(host.Path, 'is_dir', return_value=True), \
-                patch.object(host.Path, 'stat', return_value=Mock(st_mode=host.stat.S_IFCHR)), \
+        with patch.object(host, 'require_data_pool'), patch.object(host, 'require_storage_kernel'), \
+                patch.object(host, 'legacy_storage_present', return_value=True):
+            with patch.object(host.shutil, 'which', return_value='/synthetic/tool'), \
+                    patch.object(host.Path, 'is_dir', return_value=True), \
+                    patch.object(host.Path, 'stat', return_value=Mock(st_mode=host.stat.S_IFCHR)), \
+                    patch.object(host.subprocess, 'run') as run:
+                host.require_storage()
+                run.assert_not_called()
+
+    def test_missing_storage_tooling_or_wrong_control_device_fail_closed(self):
+        with patch.object(host, 'require_data_pool'), patch.object(host, 'require_storage_kernel'), \
+                patch.object(host, 'legacy_storage_present', return_value=True):
+            with patch.object(host.shutil, 'which', side_effect=lambda name: '/synthetic/rsync' if name == 'rsync' else None), self.assertRaisesRegex(ValueError, 'e2fsprogs'):
+                host.require_storage()
+            with patch.object(host.shutil, 'which', return_value='/synthetic/tool'), \
+                    patch.object(host.Path, 'is_dir', return_value=True), \
+                    patch.object(host.Path, 'stat', return_value=Mock(st_mode=host.stat.S_IFREG)), \
+                    self.assertRaisesRegex(ValueError, 'character device'):
+                host.require_storage()
+
+    def test_fresh_directory_storage_never_loads_a_block_driver(self):
+        with patch.object(host, 'require_data_pool'), patch.object(host, 'require_storage_kernel'), \
+                patch.object(host, 'legacy_storage_present', return_value=False), \
+                patch.object(host.shutil, 'which', return_value='/synthetic/tool'), \
                 patch.object(host.subprocess, 'run') as run:
             host.require_storage()
             run.assert_not_called()
 
-    def test_missing_storage_tooling_or_wrong_control_device_fail_closed(self):
-        with patch.object(host.shutil, 'which', return_value=None), self.assertRaisesRegex(ValueError, 'e2fsprogs'):
-            host.require_storage()
-        with patch.object(host.shutil, 'which', return_value='/synthetic/tool'), \
-                patch.object(host.Path, 'is_dir', return_value=True), \
-                patch.object(host.Path, 'stat', return_value=Mock(st_mode=host.stat.S_IFREG)), \
-                self.assertRaisesRegex(ValueError, 'character device'):
-            host.require_storage()
+    def test_quota_preflight_requires_a_separate_protected_ext4_pool(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pool = root / 'state/native-data'
+            pool.mkdir(parents=True)
+            original_stat = host.Path.stat
+            def metadata(path, *args, **kwargs):
+                if path == pool:
+                    return SimpleNamespace(st_dev=original_stat(pool.parent).st_dev + 1, st_uid=0, st_mode=host.stat.S_IFDIR | 0o700)
+                return original_stat(path, *args, **kwargs)
+            def mounted(**changes):
+                entry = dict(target=str(pool), fstype='ext4', options='rw,prjquota')
+                entry.update(changes)
+                return Mock(stdout=json.dumps(dict(filesystems=[entry])))
+            with patch.object(host, 'ROOT', root), patch.object(host.Path, 'stat', autospec=True, side_effect=metadata), \
+                    patch.object(host.subprocess, 'run', return_value=mounted()) as probe:
+                host.require_data_pool()
+                self.assertEqual(probe.call_args.args[0][0], 'findmnt')
+                for change in [dict(target=str(root)), dict(fstype='btrfs'), dict(options='rw')]:
+                    probe.return_value = mounted(**change)
+                    with self.assertRaisesRegex(ValueError, 'prjquota'):
+                        host.require_data_pool()
+            with patch.object(host, 'ROOT', root), patch.object(host.subprocess, 'run', return_value=mounted()):
+                with self.assertRaisesRegex(ValueError, 'prjquota'):
+                    host.require_data_pool()
+
+    def test_legacy_release_metadata_is_refused(self):
+        value = release()
+        value.pop('nativeHostProtocol')
+        value.pop('executionProtocol')
+        value['nodeProtocol'] = 2
+        with self.assertRaisesRegex(ValueError, 'protocol'):
+            host.validate_release(value)
 
     def test_origin_cannot_redirect_credentials_to_another_path_or_scheme(self):
         self.assertEqual('https://manager.example.test', host.origin('https://manager.example.test/'))
@@ -197,7 +246,7 @@ class NativeHostTests(unittest.TestCase):
     def test_only_exact_compatible_release_artifacts_are_accepted(self):
         self.assertEqual(release(), host.validate_release(release()))
         for change in ({'sha256': '../escape'}, {'size': 1 << 40}, {'arch': 'aarch64'},
-                       {'os': 'windows'}, {'nodeProtocol': 3}, {'toolsPath': 'https://elsewhere.test/tool'},
+                       {'os': 'windows'}, {'nativeHostProtocol': 1}, {'executionProtocol': 3}, {'toolsPath': 'https://elsewhere.test/tool'},
                        {'runtimeId': 'bad%runtime'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 host.validate_release(release(**change))
