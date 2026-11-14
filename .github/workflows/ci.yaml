@@ -1141,6 +1141,7 @@ jobs:
           docker info -f '{{ .DriverStatus }}' | grep -q 'io.containerd.snapshotter.v1'
           docker buildx inspect default
       - uses: docker/setup-buildx-action@v4.3.0
+        id: vm-builder
         if: github.event_name != 'pull_request'
       - uses: docker/login-action@v4.6.0
         if: env.PUBLISH == 'true'
@@ -1224,6 +1225,14 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
+      - name: Prepare capacity for full writable VM image promises
+        if: inputs.validation-only == true && inputs.vm-storage-qualification == true
+        timeout-minutes: 3
+        env:
+          VM_STORAGE_QUALIFICATION: ${{ inputs.vm-storage-qualification }}
+          VALIDATION_ONLY: ${{ inputs.validation-only }}
+          VM_STORAGE_BUILDER: ${{ steps.vm-builder.outputs.name }}
+        run: node scripts/prepare-vm-storage-capacity.mjs
       - name: Wait for the concurrent fixture build
         env:
           GH_TOKEN: ${{ github.token }}

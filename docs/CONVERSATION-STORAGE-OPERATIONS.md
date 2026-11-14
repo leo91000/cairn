@@ -86,7 +86,12 @@ wins over a leftover pin, preserving later user edits during cleanup.
 
 Existing journal-backed environments use a compatibility reader during conversion.
 Their source remains intact until verified replacement data and a format marker
-are durable. Native conversion copies files with ownership, links and xattrs,
+are durable. Native conversion records a versioned proof of the replacement's
+filesystem/inode, contents, links, ownership/modes/timestamps and extended
+attributes. Replays validate that proof and quota ownership before publishing the
+format or deleting any surviving journal; missing or changed output keeps the
+journal intact. Obsolete unversioned verification markers fail explicitly without
+erasing either source. Native conversion copies files with ownership, links and xattrs,
 verifies them with a checksum pass and respects the destination quota. VM conversion
 exports the stopped logical disk, compares every byte and checks ext4 before
 publishing its direct image. Interrupted phases resume; a committed replacement

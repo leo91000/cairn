@@ -5,6 +5,7 @@ use crate::{
     skills::private_dir,
     storage::{self, environment},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -194,14 +195,18 @@ pub async fn mount(
     let owner = environment::ownership(state, run, DISK_BUSY).await?;
     let physical = crate::file_lock::exclusive(&owner.directory.join("lock"), DISK_BUSY)?;
     if owner.directory.join("directory.json").exists() && owner.directory.join("lazy").exists() {
-        // A durable directory marker wins over a partially removed legacy
-        // journal. Never reopen or copy that old format after the switch.
+        // The new format wins over partial source cleanup only while its
+        // independently verified replacement still exists and belongs to us.
+        quota::usage(&workload)?;
+        let proof = read_conversion_proof(&root).await?;
+        verify_conversion_target(&workload.join("data"), &proof).await?;
         let _replacement = storage::runtime::replacement(&owner.directory).await?;
         tokio::fs::remove_dir_all(owner.directory.join("lazy")).await?;
         tokio::fs::File::open(&owner.directory)
             .await?
             .sync_all()
             .await?;
+        remove_conversion_proof(&root).await?;
     }
     if root.join("block-initialized").exists() && !owner.directory.join("directory.json").exists() {
         return Err(Error::conflict(
@@ -319,6 +324,16 @@ async fn migrate(
     let workload = workspace::workload(state, run)?;
     let staging = workload.join("directory-conversion");
     let marker = root.join("directory-conversion-verified");
+    if marker.exists() {
+        quota::usage(&workload)?;
+        let proof = read_conversion_proof(root).await?;
+        let target = if staging.exists() {
+            staging.clone()
+        } else {
+            workload.join("data")
+        };
+        verify_conversion_target(&target, &proof).await?;
+    }
     if !marker.exists() {
         if staging.exists() {
             tokio::fs::remove_dir_all(&staging).await?;
@@ -349,15 +364,23 @@ async fn migrate(
             if quota::usage(&workload)? > allowance {
                 return Err(Error::conflict("Legacy native data exceeds its migration allowance; increase the grant before conversion."));
             }
-            Ok(())
+            capture_conversion_proof(&staging).await
         }
         .await;
         legacy.close().await?;
         drop(legacy);
-        copied?;
-        atomic_write(&marker, b"1").await?;
+        let proof = copied?;
+        atomic_write(&marker, &serde_json::to_vec(&proof)?).await?;
     }
     let owner = environment::lock(state, run, DISK_BUSY).await?;
+    quota::usage(&workload)?;
+    let proof = read_conversion_proof(root).await?;
+    let target = if staging.exists() {
+        staging.clone()
+    } else {
+        workload.join("data")
+    };
+    verify_conversion_target(&target, &proof).await?;
     if staging.exists() {
         let data = workload.join("data");
         if data.exists() {
@@ -376,8 +399,204 @@ async fn migrate(
         .await?
         .sync_all()
         .await?;
-    tokio::fs::remove_file(marker).await?;
+    remove_conversion_proof(root).await?;
     cleanup_legacy_directories(state, run).await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct ConversionProof {
+    version: u8,
+    filesystem: Vec<u8>,
+    inode: u64,
+    digest: String,
+}
+
+async fn read_conversion_proof(root: &Path) -> Result<ConversionProof> {
+    let bytes = tokio::fs::read(root.join("directory-conversion-verified")).await?;
+    let proof: ConversionProof = serde_json::from_slice(&bytes).map_err(|_| {
+        Error::conflict(
+            "Native conversion verification metadata is unsupported; both sources were retained.",
+        )
+    })?;
+    if proof.version != 1 || proof.digest.len() != 64 {
+        return Err(Error::conflict(
+            "Native conversion verification metadata is unsupported.",
+        ));
+    }
+    Ok(proof)
+}
+
+async fn remove_conversion_proof(root: &Path) -> Result<()> {
+    tokio::fs::remove_file(root.join("directory-conversion-verified")).await?;
+    tokio::fs::File::open(root).await?.sync_all().await?;
+    Ok(())
+}
+
+async fn verify_conversion_target(target: &Path, expected: &ConversionProof) -> Result<()> {
+    let current = capture_conversion_proof(target).await?;
+    if current != *expected {
+        return Err(Error::conflict(
+            "Native conversion replacement changed or is missing; legacy source retained.",
+        ));
+    }
+    Ok(())
+}
+
+async fn capture_conversion_proof(target: &Path) -> Result<ConversionProof> {
+    let target = target.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<ConversionProof> {
+        use std::os::{
+            fd::AsRawFd,
+            unix::fs::{MetadataExt, OpenOptionsExt},
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&target)?;
+        for name in ["home", "workspaces", "output"] {
+            let metadata = std::fs::symlink_metadata(target.join(name))?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(Error::conflict(
+                    "Native conversion replacement is incomplete; legacy source retained.",
+                ));
+            }
+        }
+        let pinned = PathBuf::from(format!("/proc/self/fd/{}/.", file.as_raw_fd()));
+        let digest = conversion_digest(&pinned)?;
+        let metadata = file.metadata()?;
+        Ok(ConversionProof {
+            version: 1,
+            filesystem: storage::policy::filesystem_id(&file)?,
+            inode: metadata.ino(),
+            digest,
+        })
+    })
+    .await
+    .map_err(Error::internal)?
+}
+
+fn conversion_digest(root: &Path) -> std::io::Result<String> {
+    use std::{
+        io::Read,
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+    };
+    let mut pending = vec![root.to_owned()];
+    let mut hash = blake3::Hasher::new();
+    while let Some(path) = pending.pop() {
+        let metadata = if path == root {
+            std::fs::metadata(&path)?
+        } else {
+            std::fs::symlink_metadata(&path)?
+        };
+        let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
+        let name = relative.as_os_str().as_encoded_bytes();
+        hash.update(&(name.len() as u64).to_le_bytes());
+        hash.update(name);
+        for value in [
+            metadata.mode() as u64,
+            metadata.uid() as u64,
+            metadata.gid() as u64,
+            metadata.nlink(),
+            metadata.rdev(),
+            metadata.len(),
+            metadata.mtime() as u64,
+            metadata.mtime_nsec() as u64,
+        ] {
+            hash.update(&value.to_le_bytes());
+        }
+        if metadata.is_dir() {
+            let mut entries = std::fs::read_dir(&path)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort();
+            pending.extend(entries.into_iter().rev());
+        } else if metadata.is_file() {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&path)?;
+            let current = file.metadata()?;
+            if !current.is_file()
+                || (current.dev(), current.ino()) != (metadata.dev(), metadata.ino())
+            {
+                return Err(std::io::Error::other(
+                    "Native conversion entry changed during verification",
+                ));
+            }
+            let mut bytes = [0; 131072];
+            loop {
+                let count = file.read(&mut bytes)?;
+                if count == 0 {
+                    break;
+                }
+                hash.update(&bytes[..count]);
+            }
+        } else if metadata.file_type().is_symlink() {
+            hash.update(std::fs::read_link(&path)?.as_os_str().as_encoded_bytes());
+        }
+        hash_conversion_attributes(&path, &mut hash)?;
+    }
+    Ok(hash.finalize().to_hex().to_string())
+}
+
+fn hash_conversion_attributes(path: &Path, hash: &mut blake3::Hasher) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let length = unsafe { libc::llistxattr(path.as_ptr(), std::ptr::null_mut(), 0) };
+    if length < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if length > 1024 * 1024 {
+        return Err(std::io::Error::other(
+            "Native conversion attribute list exceeds bound",
+        ));
+    }
+    let mut names = vec![0_u8; length as usize];
+    if length != 0
+        && unsafe { libc::llistxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) }
+            != length
+    {
+        return Err(std::io::Error::other(
+            "Native conversion attributes changed during verification",
+        ));
+    }
+    let mut names = names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    names.sort();
+    for name in names {
+        let attribute = std::ffi::CString::new(name)?;
+        let length =
+            unsafe { libc::lgetxattr(path.as_ptr(), attribute.as_ptr(), std::ptr::null_mut(), 0) };
+        if length < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if length > 1024 * 1024 {
+            return Err(std::io::Error::other(
+                "Native conversion attribute exceeds bound",
+            ));
+        }
+        let mut value = vec![0_u8; length as usize];
+        if unsafe {
+            libc::lgetxattr(
+                path.as_ptr(),
+                attribute.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+            )
+        } != length
+        {
+            return Err(std::io::Error::other(
+                "Native conversion attribute changed during verification",
+            ));
+        }
+        hash.update(&(name.len() as u64).to_le_bytes());
+        hash.update(name);
+        hash.update(&(value.len() as u64).to_le_bytes());
+        hash.update(&value);
+    }
     Ok(())
 }
 
@@ -740,6 +959,139 @@ fn observe(volume: std::sync::Weak<Volume>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn conversion_proof_survives_rename_and_refuses_changed_or_missing_replacements() {
+        let fixture = tempfile::tempdir().unwrap();
+        let staging = fixture.path().join("staging");
+        for name in ["home", "workspaces", "output"] {
+            private_dir(&staging.join(name)).await.unwrap();
+        }
+        tokio::fs::write(staging.join("workspaces/saved"), b"original user work")
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink("saved", staging.join("workspaces/alias")).unwrap();
+        let fifo = std::ffi::CString::new(
+            staging
+                .join("workspaces/pipe")
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+        .unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let proof = capture_conversion_proof(&staging).await.unwrap();
+        verify_conversion_target(&staging, &proof).await.unwrap();
+        let data = fixture.path().join("data");
+        tokio::fs::rename(&staging, &data).await.unwrap();
+        verify_conversion_target(&data, &proof).await.unwrap();
+        let file =
+            std::ffi::CString::new(data.join("workspaces/saved").as_os_str().as_encoded_bytes())
+                .unwrap();
+        let attribute = c"user.cairn-conversion-test";
+        assert_eq!(
+            unsafe {
+                libc::lsetxattr(
+                    file.as_ptr(),
+                    attribute.as_ptr(),
+                    b"changed".as_ptr().cast(),
+                    7,
+                    0,
+                )
+            },
+            0
+        );
+        assert!(verify_conversion_target(&data, &proof).await.is_err());
+        assert_eq!(
+            unsafe { libc::lremovexattr(file.as_ptr(), attribute.as_ptr()) },
+            0
+        );
+        verify_conversion_target(&data, &proof).await.unwrap();
+        tokio::fs::write(data.join("workspaces/saved"), b"changed user work")
+            .await
+            .unwrap();
+        assert!(verify_conversion_target(&data, &proof).await.is_err());
+        tokio::fs::remove_dir_all(&data).await.unwrap();
+        assert!(verify_conversion_target(&data, &proof).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_verified_conversion_output_never_erases_its_legacy_source() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let root = workspace::directory(state.path(), &run).unwrap();
+        let source = environment::directory(state.path(), &run).unwrap();
+        private_dir(&root).await.unwrap();
+        private_dir(&source.join("lazy")).await.unwrap();
+        let retained = source.join("lazy/journal-v2.sqlite");
+        tokio::fs::write(&retained, b"retained legacy source bytes")
+            .await
+            .unwrap();
+        atomic_write(&root.join("directory-conversion-verified"), b"1")
+            .await
+            .unwrap();
+        let plan = json!({ "runtimeId": "fixture", "resources": { "diskMiB": 128 },
+            "storage": { "owner": run, "policy": { "reserveMiB": 64, "reservePercent": 1 } } });
+        for _ in 0..2 {
+            assert!(
+                mount(state.path(), &run, &plan, &CancellationToken::new())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                tokio::fs::read(&retained).await.unwrap(),
+                b"retained legacy source bytes"
+            );
+            assert!(!source.join("directory.json").exists());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires scripts/qualify-native-quota.mjs on its dedicated disposable filesystem"]
+    async fn kernel_missing_conversion_replacement_preserves_original_journal() {
+        assert_eq!(
+            std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),
+            Ok("1")
+        );
+        let state = PathBuf::from(std::env::var_os("CAIRN_NATIVE_QUOTA_TEST_STATE").unwrap());
+        quota::require(&state).unwrap();
+        let run = crate::config::id();
+        let root = workspace::directory(&state, &run).unwrap();
+        let workload = workspace::workload(&state, &run).unwrap();
+        let source = environment::directory(&state, &run).unwrap();
+        private_dir(&root).await.unwrap();
+        private_dir(&workload).await.unwrap();
+        let context = json!({ "owner": run, "policy": { "memoryCacheMiB": 4, "reserveMiB": 64, "reservePercent": 1 } });
+        let stop = CancellationToken::new();
+        storage::bootstrap::prepare_native(&source, 128 * super::super::disk::MIB, &context, &stop)
+            .await
+            .unwrap();
+        quota::prepare(&state, &workload, 128 * super::super::disk::MIB)
+            .await
+            .unwrap();
+        let staging = workload.join("directory-conversion");
+        for name in ["home", "workspaces", "output"] {
+            private_dir(&staging.join(name)).await.unwrap();
+        }
+        tokio::fs::write(staging.join("workspaces/saved"), b"user work")
+            .await
+            .unwrap();
+        let proof = capture_conversion_proof(&staging).await.unwrap();
+        atomic_write(
+            &root.join("directory-conversion-verified"),
+            &serde_json::to_vec(&proof).unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::remove_dir_all(staging).await.unwrap();
+        let plan =
+            json!({ "runtimeId": "fixture", "resources": { "diskMiB": 128 }, "storage": context });
+        assert!(migrate(&state, &run, &plan, &stop, &root).await.is_err());
+        assert!(source.join("lazy/journal-v2.sqlite").exists());
+        assert!(!source.join("directory.json").exists());
+        quota::retire(&root).await.unwrap();
+        let lease = environment::lock(&state, &run, DISK_BUSY).await.unwrap();
+        block::action_locked(&lease.directory, true).await.unwrap();
+    }
 
     #[tokio::test]
     async fn unsupported_native_sources_without_initialization_hints_are_preserved() {

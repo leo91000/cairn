@@ -79,7 +79,12 @@ store and runs the real KVM smoke and retention suites. This opt-in requires
 The growth scenario crosses 32 GiB with a 33 GiB image reservation. The retention
 memory scenario uses 1 GiB images, since writable direct images now reserve their
 full capacity against node/free-space admission. Missing physical capacity is a
-qualification failure, not a reason to skip the case.
+qualification failure, not a reason to skip the case. Before smoke tests, this
+opt-in requires 48 GiB free on the VM fixture filesystem. If needed, it prunes
+only the builder created by this disposable job and verifies that the loaded
+candidate image ID is unchanged. It refuses local/self-hosted/publishing paths
+and fails if reclaimed capacity is still insufficient; it removes no workspaces,
+credentials or running images.
 
 Full qualifications run the resolved OpenCode and Claude Code native adapters,
 plus the Plan boundary checks for the resolved Claude Code and Codex releases,
