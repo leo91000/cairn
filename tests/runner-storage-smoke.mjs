@@ -130,6 +130,34 @@ export async function storageSmoke({
   docker('exec', name, 'test', '!', '-e', '/dev/ublk-control')
   await finish(first)
 
+  const exhausted = await start(false)
+  await ready(exhausted)
+  await writeFile(path.join(inbox, 'messages.json'), '[{"text":"exhaust"}]')
+  const full = await until(async () => {
+    const match = (await logs(exhausted)).match(/storage.enospc (\{[^\n]+\})/)
+    return match && JSON.parse(match[1])
+  })
+  assert.equal(full.code, 'ENOSPC')
+  const peakBytes = (await status()).localBytes
+  assert.ok(peakBytes > 256 * 1048576, 'Pressure must reach actual allocated image blocks')
+  await writeFile(path.join(inbox, 'messages.json'), '[{"text":"reclaim"}]')
+  await until(async () => (await logs(exhausted)).includes('storage.reclaimed'))
+  await finish(exhausted)
+  docker('restart', name)
+  await reconnect()
+  const trimmed = await start(false)
+  await ready(trimmed)
+  // The new guest's immutable control helper trims its data filesystem after
+  // boot. This exercises the actual virtio discard -> host hole-punch path.
+  await until(async () => (await status()).localBytes < peakBytes - 128 * 1048576)
+  process.stdout.write(`${JSON.stringify({
+    kind: 'vm-image-enospc-and-discard',
+    ...full,
+    peakAllocatedBytes: peakBytes,
+    reclaimedAllocatedBytes: (await status()).localBytes,
+  })}\n`)
+  await finish(trimmed)
+
   const soakSeconds = Number(process.env.CAIRN_STORAGE_SOAK_SECONDS || 0)
   if (soakSeconds > 0) {
     assert.ok(Number.isFinite(soakSeconds) && soakSeconds >= 60 && soakSeconds <= 3600)

@@ -178,8 +178,8 @@ pub async fn mount(
     if saved.join("directory.json").exists() && root.join("block-initialized").exists() {
         require_retained_tree(&workload)?;
     }
-    private_dir(&workload).await?;
     if !saved.join("directory.json").exists() && storage::runtime::exists(&saved) {
+        private_dir(&workload).await?;
         migrate(state, run, plan, stop, &root).await?;
     }
     let owner = environment::ownership(state, run, DISK_BUSY).await?;
@@ -199,6 +199,12 @@ pub async fn mount(
             "Native journal is missing; recover or expire the environment explicitly before starting a new one.",
         ));
     }
+    if !owner.directory.join("directory.json").exists() {
+        // Acquire both ownership fences before classifying retained bytes. An
+        // active/preparing owner must keep the existing busy/stop semantics.
+        require_fresh(&owner.directory, &root, &workload)?;
+    }
+    private_dir(&workload).await?;
     let runtime = json!({ "backend": "native", "storage": STORAGE, "os": "linux", "arch": "x86_64", "runtimeId": plan["runtimeId"] });
     let marker = owner.directory.join("directory.json");
     if marker.exists() {
@@ -520,6 +526,73 @@ async fn remove_temporary(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn require_fresh(saved: &Path, control: &Path, workload: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(saved) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries.into_iter().flatten() {
+        let entry = entry?;
+        let name = entry.file_name();
+        let temporary = name
+            .to_str()
+            .and_then(|name| name.strip_prefix('.'))
+            .and_then(|name| name.strip_suffix(".tmp"))
+            .is_some_and(|name| crate::validation::uuid(name).is_ok())
+            && entry.file_type()?.is_file();
+        if !environment::retained(&name) && !temporary {
+            return Err(Error::conflict(
+                "Unrecognized retained native storage; recover its source before creating a directory environment.",
+            ));
+        }
+    }
+    for name in [
+        "data",
+        "runtime.json",
+        "initialized",
+        "block-initialized",
+        "block-seeding",
+        "block-restore.pending.json",
+    ] {
+        match control.join(name).symlink_metadata() {
+            Ok(_) => {
+                return Err(Error::conflict(
+                    "Native retained data has no recognized source format; recover or expire it explicitly.",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // A crash before the first format marker can leave an assigned quota and
+    // the newly created empty data directory. It cannot have admitted a writer.
+    let present = match std::fs::symlink_metadata(workload) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,
+        Ok(_) => {
+            return Err(Error::conflict(
+                "Native workload is not an owned directory.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if present {
+        for entry in std::fs::read_dir(workload)? {
+            let entry = entry?;
+            if entry.file_name() != "data"
+                || !entry.file_type()?.is_dir()
+                || std::fs::read_dir(entry.path())?.next().is_some()
+            {
+                return Err(Error::conflict(
+                    "Unrecognized native directory contents; retained files were preserved.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn require_retained_tree(workload: &Path) -> Result<()> {
     for name in ["", "data", "data/home", "data/workspaces", "data/output"] {
         let path = workload.join(name);
@@ -548,7 +621,6 @@ fn observe(volume: std::sync::Weak<Volume>) {
                 return;
             };
             let state = current.state.clone();
-            let root = current.root.clone();
             let stop = current.stop.clone();
             drop(current);
             let sample = tokio::task::spawn_blocking(move || -> Result<bool> {
@@ -559,11 +631,16 @@ fn observe(volume: std::sync::Weak<Volume>) {
                     }
                     Err(error) => return Err(error.into()),
                 };
-                let (total, free) = storage::policy::space(&root)?;
+                // A project directory's statfs is quota-limited by ext4.
+                // Node reserve pressure must use the unrestricted data pool;
+                // the independent capacity monitor handles task pressure.
+                let (total, free) = storage::policy::space(&workspace::data_root(&state))?;
                 Ok(free <= policy.reserve(total))
             });
-            let result =
-                tokio::select! { () = stop.cancelled() => return, result = sample => result };
+            let result = tokio::select! {
+                () = stop.cancelled() => return,
+                result = sample => result,
+            };
             if stop.is_cancelled() {
                 return;
             }
@@ -578,7 +655,10 @@ fn observe(volume: std::sync::Weak<Volume>) {
                     .observed
                     .store(crate::nodes::boot_ms(), Ordering::Release);
             }
-            tokio::select! { () = stop.cancelled() => return, () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {} }
+            tokio::select! {
+                () = stop.cancelled() => return,
+                () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            }
         }
     });
 }
@@ -586,6 +666,54 @@ fn observe(volume: std::sync::Weak<Volume>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unsupported_native_sources_without_initialization_hints_are_preserved() {
+        for name in ["lazy/payload-1", "lazy/journal-v1.sqlite", "runtime.json"] {
+            let state = tempfile::tempdir().unwrap();
+            let run = crate::config::id();
+            let saved = environment::directory(state.path(), &run).unwrap();
+            let source = saved.join(name);
+            private_dir(source.parent().unwrap()).await.unwrap();
+            tokio::fs::write(&source, b"retained work from an unsupported format")
+                .await
+                .unwrap();
+            let plan = json!({ "runtimeId": "fixture", "resources": { "diskMiB": 64 },
+                "storage": { "owner": run, "policy": { "memoryCacheMiB": 4, "reserveMiB": 64, "reservePercent": 1 } } });
+            for _ in 0..2 {
+                assert!(
+                    mount(state.path(), &run, &plan, &CancellationToken::new())
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    tokio::fs::read(&source).await.unwrap(),
+                    b"retained work from an unsupported format"
+                );
+                assert!(!saved.join("directory.json").exists());
+                assert!(!workspace::workload(state.path(), &run).unwrap().exists());
+            }
+        }
+    }
+
+    #[test]
+    fn unrecognized_workload_contents_and_aliases_are_not_fresh() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let saved = environment::directory(state.path(), &run).unwrap();
+        let control = workspace::directory(state.path(), &run).unwrap();
+        let workload = workspace::workload(state.path(), &run).unwrap();
+        std::fs::create_dir_all(workload.join("data/workspaces")).unwrap();
+        std::fs::write(workload.join("data/workspaces/saved"), b"retained work").unwrap();
+        assert!(require_fresh(&saved, &control, &workload).is_err());
+        assert_eq!(
+            std::fs::read(workload.join("data/workspaces/saved")).unwrap(),
+            b"retained work"
+        );
+        let alias = workload.with_file_name(crate::config::id());
+        std::os::unix::fs::symlink(&workload, &alias).unwrap();
+        assert!(require_fresh(&saved, &control, &alias).is_err());
+    }
 
     #[tokio::test]
     async fn missing_retained_data_reports_unavailable_without_recreating_files() {

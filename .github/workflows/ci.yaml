@@ -97,6 +97,17 @@ jobs:
         run: |
           pnpm test:backend --workspace --lib storage::image::
           pnpm test:backend --workspace --lib storage::reservation::
+  vm-discard-qualification:
+    name: Direct VM discard implementation qualification
+    needs: resolve
+    if: inputs.validation-only == true && inputs.vm-storage-qualification == true && needs.resolve.outputs.reuse != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Exercise the pinned VMM discard and async IO implementation
+        run: bash scripts/test-firecracker-discard.sh
   resolve:
     if: inputs.backend-only != true && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '')
     runs-on: ubuntu-24.04
@@ -1312,7 +1323,7 @@ jobs:
         run: df -h /
   beacon-image:
     needs: resolve
-    if: (inputs.validation-only != true || inputs.vm-storage-qualification == true) && needs.resolve.outputs.reuse != 'true'
+    if: inputs.validation-only != true && needs.resolve.outputs.reuse != 'true'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       published: ${{ env.PUBLISH }}

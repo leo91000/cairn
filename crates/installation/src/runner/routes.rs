@@ -211,6 +211,14 @@ async fn disk_storage(
         if let Some(attempt) = attempt {
             let cpu = crate::microvm::suspension::inspect(&broker.state, &attempt).await?;
             status["paused"] = cpu.paused.into();
+            status["waitingFor"] = if cpu
+                .reasons
+                .contains(&crate::microvm::suspension::Reason::Storage)
+            {
+                "disk-space".into()
+            } else {
+                Value::Null
+            };
         }
         return Ok(Json(status).into_response());
     }

@@ -125,7 +125,8 @@ pub async fn status(directory: &Path) -> Result<Value> {
         "size": record.size,
         "localBytes": bytes,
         "activeLocalBytes": bytes,
-        "paused": false
+        "paused": false,
+        "waitingFor": null
     }))
 }
 

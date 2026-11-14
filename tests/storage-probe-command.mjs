@@ -15,11 +15,32 @@ export function storageProbeCommand({
       assert.equal(fs.readFileSync(file,'utf8'),'journal survives');
       const savedReadMs=performance.now()-started;
       console.log('storage.ready'); setInterval(()=>console.log('storage.tick'),1000);
+      let pressure='idle';
       setInterval(()=>{
         let messages;
         try {messages=JSON.parse(fs.readFileSync(${JSON.stringify(inbox)},'utf8'));}
         catch(error) {if(error.code==='ENOENT'||error instanceof SyntaxError)return;throw error;}
-        if(!Array.isArray(messages)||!messages.some(message=>message?.text==='finish'))return;
+        if(!Array.isArray(messages))return;
+        if(pressure==='idle'&&messages.some(message=>message?.text==='exhaust')){
+          const before=fs.statfsSync(${JSON.stringify(workspace)});
+          assert.ok(before.blocks*before.bsize<=512*1024*1024,'pressure workload requires its own bounded guest data filesystem');
+          const fd=fs.openSync(file+'.pressure','w'),data=Buffer.alloc(1024*1024,42),at=performance.now(),cpu=process.cpuUsage();
+          let written=0,code;
+          try{while(written<600*1024*1024){const count=fs.writeSync(fd,data);assert.ok(count>0);written+=count;fs.fsyncSync(fd);}}
+          catch(error){code=error.code;}
+          finally{fs.closeSync(fd);}
+          assert.equal(code,'ENOSPC','guest data capacity must reject further allocation');
+          assert.equal(fs.readFileSync(file,'utf8'),'journal survives');
+          const usage=process.cpuUsage(cpu);pressure='full';
+          console.log('storage.enospc '+JSON.stringify({code,writtenBytes:written,wallMs:performance.now()-at,cpuMs:(usage.user+usage.system)/1000}));
+          return;
+        }
+        if(pressure==='full'&&messages.some(message=>message?.text==='reclaim')){
+          fs.unlinkSync(file+'.pressure');cp.execFileSync('sync');
+          assert.equal(fs.readFileSync(file,'utf8'),'journal survives');pressure='reclaimed';
+          console.log('storage.reclaimed');return;
+        }
+        if(!messages.some(message=>message?.text==='finish'))return;
         cp.execFileSync('sync'); console.log('storage.finished'); process.exit(0);
       },50);
       if(${soak}) {

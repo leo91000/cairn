@@ -206,7 +206,14 @@ pub(super) fn limit(root_path: &Path, bytes: u64) -> Result<()> {
     if project == 0 || bytes < 1024 {
         return Err(Error::conflict("Native directory has no project quota."));
     }
-    let status = filesystem(&root)?;
+    // ext4 statfs on a project-inheriting directory reports its quota-limited
+    // geometry. Derive new limits from the project-zero pool, never the old grant.
+    let pool = open(
+        root_path
+            .parent()
+            .ok_or_else(|| Error::bad("Missing native data pool."))?,
+    )?;
+    let status = filesystem(&pool)?;
     let total_bytes = status.f_blocks.saturating_mul(status.f_bsize as u64).max(1);
     let data_inodes = status
         .f_files
@@ -471,6 +478,9 @@ pub(super) async fn retire(control_root: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    // Persist removal on the data filesystem before discarding the recovery
+    // intent on the separate control filesystem.
+    pool.sync_all()?;
     match tokio::fs::remove_file(control_root.join("quota-owner.json")).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -683,9 +693,8 @@ mod tests {
         let workload = super::super::workspace::workload_for_control(&root).unwrap();
         crate::skills::private_dir(&workload).await.unwrap();
         prepare(&state, &workload, 4 * 1024 * 1024).await.unwrap();
-        let initial_inodes = super::super::workspace::filesystem(&workload)
-            .unwrap()
-            .f_favail;
+        let pool = super::super::workspace::data_root(&state);
+        let initial_inodes = super::super::workspace::filesystem(&pool).unwrap().f_favail;
         let mut inode_error = None;
         for index in 0..initial_inodes + 1 {
             match std::fs::File::create(workload.join(format!("inode-{index}"))) {
@@ -701,10 +710,7 @@ mod tests {
             Some(libc::EDQUOT | libc::ENOSPC)
         ));
         assert!(
-            super::super::workspace::filesystem(&workload)
-                .unwrap()
-                .f_favail
-                > 0,
+            super::super::workspace::filesystem(&pool).unwrap().f_favail > 0,
             "per-environment inode quota must leave pool headroom"
         );
         super::super::atomic_write(&root.join("attempt"), b"inode-exhaustion-recovery")

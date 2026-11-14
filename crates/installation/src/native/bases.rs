@@ -386,7 +386,9 @@ impl Bases {
         let source = self.root().join(&ready.key).join("contents");
         super::directory::copy_verified(&source, &staging).await?;
         tokio::fs::rename(&staging, workload.join("data")).await?;
-        tokio::fs::File::open(&root).await?.sync_all().await?;
+        // The data pool is a different filesystem from controller metadata.
+        // Persist this rename before publishing initialization or releasing its pin.
+        tokio::fs::File::open(&workload).await?.sync_all().await?;
         atomic_write(
             &root.join("file-owner.json"),
             &serde_json::to_vec(&json!({ "uid": ready.inputs.uid, "gid": ready.inputs.gid }))?,
