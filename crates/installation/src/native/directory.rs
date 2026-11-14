@@ -127,9 +127,9 @@ impl Mounted {
             }
         };
         if completion != Completion::FailedFlush {
-            remove_temporary(&self.volume.root.join("tmp")).await?;
-            remove_temporary(
-                &workspace::control_for_workload(&self.volume.root)?.join("docker-runtime"),
+            retire_temporary(
+                &self.volume.root,
+                &workspace::control_for_workload(&self.volume.root)?,
             )
             .await?;
         }
@@ -459,7 +459,11 @@ pub async fn recover_completed(state: &Path, run: &str, attempt: &str) -> Result
         if workload.exists() {
             block::sync(&workload).await?;
         }
+        // Recovery must settle the same temporary resources as normal close
+        // before startup acknowledges this execution and removes its retry flag.
+        retire_temporary(&workload, &root).await?;
         atomic_write(&root.join("attempt"), attempt.as_bytes()).await?;
+        tokio::fs::File::open(&root).await?.sync_all().await?;
         return Ok(());
     }
     block::recover_completed(state, run, attempt).await
@@ -548,6 +552,18 @@ async fn cleanup_legacy_directories(state: &Path, run: &str) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
+    Ok(())
+}
+
+async fn retire_temporary(workload: &Path, control: &Path) -> Result<()> {
+    remove_temporary(&workload.join("tmp")).await?;
+    // Make the data-filesystem retirement durable before a control-filesystem
+    // exit record can suppress subsequent recovery after another crash.
+    if workload.exists() {
+        tokio::fs::File::open(workload).await?.sync_all().await?;
+    }
+    remove_temporary(&control.join("docker-runtime")).await?;
+    tokio::fs::File::open(control).await?.sync_all().await?;
     Ok(())
 }
 

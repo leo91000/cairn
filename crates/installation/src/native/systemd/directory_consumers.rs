@@ -3,7 +3,7 @@
 use crate::error::{Error, Result};
 use crate::native::workspace::mount_path as unescape;
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     os::{
@@ -136,8 +136,36 @@ fn container(cgroup: &str) -> Option<&str> {
     (id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(id)
 }
 
-fn owned_scopes(source: &Source) -> io::Result<BTreeSet<String>> {
-    let mut scopes = BTreeSet::new();
+struct Scope {
+    name: String,
+    file: File,
+}
+
+impl Scope {
+    fn attribute(
+        root: &Path,
+        name: String,
+        proof: impl FnOnce() -> io::Result<bool>,
+    ) -> io::Result<Option<Self>> {
+        // Open BEFORE collecting positive attribution. A rescan followed by a
+        // separate pathname open can instead pin a newly reused foreign scope.
+        let file = directory(&root.join(&name))?;
+        if !proof()? {
+            return Ok(None);
+        }
+        let original = file.metadata()?;
+        let current = fs::metadata(root.join(&name))?;
+        if (original.dev(), original.ino()) != (current.dev(), current.ino()) {
+            return Err(io::Error::other(
+                "Native Docker scope changed during attribution",
+            ));
+        }
+        Ok(Some(Self { name, file }))
+    }
+}
+
+fn owned_scopes(source: &Source) -> io::Result<BTreeMap<String, Scope>> {
+    let mut scopes: BTreeMap<String, Scope> = BTreeMap::new();
     for process in fs::read_dir("/proc")? {
         let process = process?;
         if !process
@@ -148,7 +176,7 @@ fn owned_scopes(source: &Source) -> io::Result<BTreeSet<String>> {
         {
             continue;
         }
-        let inspect = || -> io::Result<Option<String>> {
+        let inspect = || -> io::Result<Option<Scope>> {
             // Pin procfs before reading identity, so PID reuse cannot redirect
             // a later read to the replacement process's mount namespace.
             let process_file = directory(&process.path())?;
@@ -157,15 +185,29 @@ fn owned_scopes(source: &Source) -> io::Result<BTreeSet<String>> {
             let Some(id) = container(&group) else {
                 return Ok(None);
             };
-            let mounts = read(&process.join("mountinfo"))?;
-            if read(&process.join("cgroup"))? != group || !source.docker_bind(&mounts, id)? {
-                return Ok(None);
-            }
-            Ok(Some(format!("docker-{id}.scope")))
+            Scope::attribute(
+                Path::new("/sys/fs/cgroup/system.slice"),
+                format!("docker-{id}.scope"),
+                || {
+                    let mounts = read(&process.join("mountinfo"))?;
+                    Ok(read(&process.join("cgroup"))? == group
+                        && source.docker_bind(&mounts, id)?)
+                },
+            )
         };
         match inspect() {
             Ok(Some(scope)) => {
-                scopes.insert(scope);
+                if let Some(previous) = scopes.get(&scope.name) {
+                    let old = previous.file.metadata()?;
+                    let current = scope.file.metadata()?;
+                    if (old.dev(), old.ino()) != (current.dev(), current.ino()) {
+                        return Err(io::Error::other(
+                            "Native Docker scope was replaced during inventory",
+                        ));
+                    }
+                } else {
+                    scopes.insert(scope.name.clone(), scope);
+                }
             }
             Ok(None) => {}
             Err(error) if vanished(&error) => {}
@@ -386,7 +428,7 @@ fn remaining(source: &Source) -> io::Result<usize> {
     Ok(remaining)
 }
 
-async fn scopes(source: &Arc<Source>) -> Result<BTreeSet<String>> {
+async fn scopes(source: &Arc<Source>) -> Result<BTreeMap<String, Scope>> {
     let source = source.clone();
     tokio::task::spawn_blocking(move || owned_scopes(&source))
         .await
@@ -400,17 +442,14 @@ pub(in crate::native) async fn stop(path: &Path) -> Result<()> {
     let source = Arc::new(Source::open(path)?);
     source.revalidate()?;
     let owned = scopes(&source).await?;
-    for scope in owned {
+    for scope in owned.into_values() {
         source.revalidate()?;
-        if !scopes(&source).await?.contains(&scope) {
-            continue;
-        }
-        let group = match directory(&Path::new("/sys/fs/cgroup/system.slice").join(&scope)) {
-            Ok(group) => group,
+        let group = scope.file;
+        match terminate(&group, &scope.name) {
+            Ok(()) => {}
             Err(error) if vanished(&error) => continue,
             Err(error) => return Err(error.into()),
-        };
-        terminate(&group, &scope)?;
+        }
         let graceful = tokio::time::Instant::now() + Duration::from_secs(10);
         let deadline = graceful + Duration::from_secs(10);
         let mut forced = false;
@@ -455,6 +494,32 @@ pub(in crate::native) async fn stop(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cgroup_attribution_never_returns_a_replacement_opened_after_its_proof() {
+        let root = tempfile::tempdir().unwrap();
+        let name = format!("docker-{}.scope", "a".repeat(64));
+        let original = root.path().join(&name);
+        fs::create_dir(&original).unwrap();
+        let pinned = Scope::attribute(root.path(), name.clone(), || Ok(true))
+            .unwrap()
+            .unwrap();
+        let original_inode = pinned.file.metadata().unwrap().ino();
+        drop(pinned);
+        let result = Scope::attribute(root.path(), name.clone(), || {
+            fs::rename(&original, root.path().join("retired")).unwrap();
+            fs::create_dir(&original).unwrap();
+            // This is the stale positive process/mount evidence that used to
+            // precede opening the replacement cgroup by its recycled pathname.
+            Ok(true)
+        });
+        assert!(result.is_err());
+        assert_ne!(fs::metadata(&original).unwrap().ino(), original_inode);
+        assert_eq!(
+            fs::metadata(root.path().join("retired")).unwrap().ino(),
+            original_inode
+        );
+    }
 
     #[test]
     fn shared_device_and_inherited_mounts_do_not_attribute_another_environment() {

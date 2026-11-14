@@ -1,39 +1,49 @@
 # Prepared native project bases
 
-Prepared bases extend the [project ZIP cache](PROJECT-ARCHIVES.md). A warm native
-conversation on the execution node copies its small private journal metadata and shares an immutable
-sealed prefix. It avoids downloading, hashing and unpacking another project ZIP,
-creating project inodes, formatting another filesystem and changing each file's
-owner. The private volume still validates its journal before mounting and checks
-payload integrity on reads.
+Prepared bases extend the [project ZIP cache](PROJECT-ARCHIVES.md) with verified
+plain directory templates. A fresh environment gets its own private file copy,
+then publishes its native directory format before execution. It avoids fetching
+and decompressing another ZIP; it still creates private files and verifies their
+contents. File ownership, links and xattrs are preserved. The cache shares no
+mutable working-file inodes with conversations.
 
-See [ADR-0058](adr/0058-prepared-native-project-bases.md) for ownership,
-cache admission, cancellation and recovery. These are disposable caches.
-Existing conversations preserve their saved files and resume with current tools.
+[ADR-0085](adr/0085-native-directories-and-direct-vm-images.md) supersedes the
+journal-clone format in [ADR-0058](adr/0058-prepared-native-project-bases.md).
+A durable environment-qualified initialization pin keeps the verified source
+through copying, rename and format publication. Interrupted copies retry their
+private partial tree. Renamed data is verified without overwriting it. A committed
+format wins over a leftover pin, preserving later user changes. Environment
+deletion releases unfinished pins and private data; cache reclamation follows
+its existing limits. Existing conversations retain their own files.
 
 ## Reproducible measurements
 
-Run the production archive extraction, base construction, cloning, geometry,
-volume-open and journal I/O through the isolated backend launcher:
+Use a disposable Linux host with root, ext4 project quotas and the pinned native
+build dependencies. The isolated launcher creates one private loop filesystem,
+executes the actual quota/base admission/recovery cases, then the measurement:
 
 ```sh
-mkdir -p "$HOME/.cache/cairn-bases-benchmark"
-TMPDIR="$HOME/.cache/cairn-bases-benchmark" pnpm test:backend \
-  -p cairn-installation --lib measure_prepared_native_bases -- --ignored --nocapture
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  CAIRN_NATIVE_DISPOSABLE_HOST=1 node scripts/qualify-native-quota.mjs
 ```
 
-The workload contains 4,096 text files of 4 KiB and 8 MiB seeded random bytes
-(StdRng seed 42), 24 MiB total, in a 256 MiB virtual ext4 filesystem. Three
-alternating samples compare cached ZIP extraction/ownership/final synchronization
-with durable private metadata cloning, atomic journal publication, geometry checking and full
-journal open. Base construction is measured separately. Output records encoded
-ZIP bytes, allocated base bytes, new private bytes, wall and process CPU time,
-advisory cold/warm 4 MiB journal reads and a synchronized 4 KiB raw journal delta.
+Do not designate a personal or production host. The launcher refuses an unset
+flag and retains its owned fixture if unmount cannot be confirmed. It requires
+exactly one passing, non-ignored result for each selected case. Logs and JSON
+measurement rows belong outside tracked files.
 
-This benchmark uses a local host filesystem, with no ublk mount or WAN. Its ZIP
-`syncfs` can include unrelated host writeback; it does not establish a production
-startup speedup. `POSIX_FADV_DONTNEED` is a cold-read hint, not proof of a cold
-physical device. The block write is a disposable journal I/O probe, not a complete
-application filesystem transaction. Real mounting, workload isolation, local
-restart and frozen-workload shutdown are qualified separately by the
-disposable native-runtime CI fixture.
+`measure_prepared_native_bases` uses 4,096 text files of 4 KiB and 8 MiB seeded
+random bytes (StdRng seed 42), 24 MiB total. Three alternating samples compare
+cached ZIP extraction/ownership/final synchronization with verified private
+prepared-directory admission, including format publication and initialization.
+Both destinations use the same data filesystem and 256 MiB project quotas. Base
+construction is measured separately. Output includes encoded ZIP bytes, allocated
+base/private bytes, wall time and process plus reaped-child CPU (including rsync),
+identical advisory cold/warm 4 MiB file reads and a synchronized new 4 KiB file.
+
+This is local filesystem preparation and IO, not production network latency.
+Pool-wide `syncfs` can include other writeback; the cases run serially on their
+owned filesystem. `POSIX_FADV_DONTNEED` is advisory, not proof of cold hardware.
+Actual execution, Docker, controller crash recovery and expiration are separately
+qualified by the full disposable native-runtime fixture. The local legacy-journal
+versus direct-file block comparison is documented in [journal qualification](JOURNAL-RECOVERY.md#qualification).

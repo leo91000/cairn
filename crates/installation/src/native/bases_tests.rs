@@ -2,7 +2,7 @@ use super::{bases::*, disk};
 use crate::{
     project_archives::Archive,
     skills::private_dir,
-    storage::{self, Disk},
+    storage::{self},
 };
 use serde_json::json;
 use std::{io::Write, os::unix::fs::MetadataExt, path::Path};
@@ -344,22 +344,72 @@ async fn active_background_build_releases_its_temporary_files_before_foreground_
 }
 
 #[tokio::test]
-#[ignore = "reproducible local ZIP extraction versus prepared native base benchmark"]
+#[ignore = "requires the disposable project-quota pool; scripts/qualify-native-quota.mjs"]
 async fn measure_prepared_native_bases() {
     use rand::{RngCore, SeedableRng};
-    use std::{os::fd::AsRawFd, time::Instant};
+    use std::{io::Read, os::fd::AsRawFd, time::Instant};
+
     fn cpu_ms() -> f64 {
-        let mut time = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
+        let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
         assert_eq!(
-            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) },
+            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, time.as_mut_ptr()) },
             0
         );
-        time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
+        let time = unsafe { time.assume_init() };
+        let mut children = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, children.as_mut_ptr()) },
+            0
+        );
+        let children = unsafe { children.assume_init() };
+        time.tv_sec as f64 * 1000.0
+            + time.tv_nsec as f64 / 1_000_000.0
+            + (children.ru_utime.tv_sec + children.ru_stime.tv_sec) as f64 * 1000.0
+            + (children.ru_utime.tv_usec + children.ru_stime.tv_usec) as f64 / 1000.0
     }
-    let (root, bases, mut archive, policy) = fixture().await;
+
+    fn file_io(root: &Path, expected: &[u8]) -> serde_json::Value {
+        let mut reads = Vec::new();
+        for cold in [true, false] {
+            let mut file = std::fs::File::open(root.join("asset")).unwrap();
+            if cold {
+                assert_eq!(
+                    unsafe {
+                        libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+                    },
+                    0
+                );
+            }
+            let mut buffer = vec![0; 4 * 1024 * 1024];
+            let begin = Instant::now();
+            let cpu = cpu_ms();
+            file.read_exact(&mut buffer).unwrap();
+            let sample = json!({ "wallMs": begin.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu });
+            assert_eq!(buffer, expected[..buffer.len()]);
+            reads.push(sample);
+        }
+        let begin = Instant::now();
+        let cpu = cpu_ms();
+        {
+            let mut file = std::fs::File::create(root.join("measurement-delta")).unwrap();
+            file.write_all(&[0x5a; 4096]).unwrap();
+            file.sync_all().unwrap();
+        }
+        json!({ "read4MiBColdHintThenWarm": reads, "write4KiB": {
+            "wallMs": begin.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu
+        } })
+    }
+
+    assert_eq!(
+        std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),
+        Ok("1")
+    );
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    let state =
+        std::path::PathBuf::from(std::env::var_os("CAIRN_NATIVE_QUOTA_TEST_STATE").unwrap());
+    super::quota::require(&state).unwrap();
+    let (_root, mut bases, mut archive, policy) = fixture().await;
+    bases.state = state.clone();
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -401,8 +451,16 @@ async fn measure_prepared_native_bases() {
     let ready = bases.lookup(&archives, 256).await.unwrap().unwrap();
     let cache = bases.state.join("native-bases").join(&ready.key);
     let mut samples = Vec::new();
-    for index in 0..3 {
-        let extracted = root.path().join(format!("zip-{index}"));
+    for _ in 0..3 {
+        let baseline_run = crate::config::id();
+        let baseline_control = super::workspace::directory(&state, &baseline_run).unwrap();
+        let baseline_workload = super::workspace::workload(&state, &baseline_run).unwrap();
+        private_dir(&baseline_control).await.unwrap();
+        private_dir(&baseline_workload).await.unwrap();
+        super::quota::prepare(&state, &baseline_workload, 256 * disk::MIB)
+            .await
+            .unwrap();
+        let extracted = baseline_workload.join("data");
         let begin = Instant::now();
         let cpu = cpu_ms();
         crate::project_archives::extract_cached(&bases.data, &archive, &extracted, &stop)
@@ -412,81 +470,44 @@ async fn measure_prepared_native_bases() {
             .await
             .unwrap();
         super::block::sync(&extracted).await.unwrap();
-        let zip_sample = json!({
-            "wallMs": begin.elapsed().as_secs_f64() * 1000.0,
-            "cpuMs": cpu_ms() - cpu
-        });
+        let zip_sample =
+            json!({ "wallMs": begin.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu });
+        let baseline_io = file_io(&extracted, &random);
         let run = crate::config::id();
+        let attempt = crate::config::id();
         let plan = json!({
-            "id": crate::config::id(),
-            "runId": run,
-            "runtimeId": "a".repeat(40),
+            "id": attempt, "runId": run, "runtimeId": "a".repeat(40),
             "resources": { "diskMiB": 256 },
-            "nativeProjectArchives": archives,
-            "nativeProjectBase": ready.key,
-            "storage": {
-                "master": "http://127.0.0.1:1/",
-                "grant": format!("probe-{index}"),
-                "policy": policy
-            }
+            "nativeProjectArchives": archives, "nativeProjectBase": ready.key,
+            "storage": { "owner": run, "policy": policy }
         });
         let begin = Instant::now();
         let cpu = cpu_ms();
         assert!(bases.initialize(&plan, &stop).await.unwrap());
-        let physical = storage::environment::directory(&bases.state, &run).unwrap();
-        storage::bootstrap::prepare_native(&physical, 256 * 1024 * 1024, &plan["storage"], &stop)
+        let mut mounted = super::directory::mount(&state, &run, &plan, &stop)
             .await
             .unwrap();
-        let volume = storage::runtime::load(&physical).await.unwrap();
-        let clone_sample = json!({
-            "wallMs": begin.elapsed().as_secs_f64() * 1000.0,
-            "cpuMs": cpu_ms() - cpu
-        });
-        let private_bytes = super::bases::reclaimable_bytes(&physical).unwrap()
-            + super::workspace::measure(&bases.state.join("native").join(&run), true).unwrap();
-        for entry in std::fs::read_dir(physical.join("lazy")).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_name().to_string_lossy().starts_with("payload-") {
-                let file = std::fs::File::open(entry.path()).unwrap();
-                assert_eq!(
-                    unsafe {
-                        libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
-                    },
-                    0
-                );
-            }
-        }
-        let mut reads = Vec::new();
-        let mut buffer = vec![0; 4 * 1024 * 1024];
-        for _ in 0..2 {
-            let begin = Instant::now();
-            let cpu = cpu_ms();
-            volume.disk.read_at(0, &mut buffer).unwrap();
-            reads.push(json!({
-                "wallMs": begin.elapsed().as_secs_f64() * 1000.0,
-                "cpuMs": cpu_ms() - cpu
-            }));
-        }
-        let begin = Instant::now();
-        let cpu = cpu_ms();
-        volume
-            .disk
-            .write_at(64 * 1024 * 1024, &[0x5a; 4096])
+        super::directory::initialize(&state, &run, &plan, 256 * disk::MIB)
+            .await
             .unwrap();
-        volume.disk.sync().unwrap();
-        let write = json!({
-            "wallMs": begin.elapsed().as_secs_f64() * 1000.0,
-            "cpuMs": cpu_ms() - cpu
-        });
-        samples.push(json!({
-            "zip": zip_sample,
-            "clone": clone_sample,
-            "privateBytesBeforeDelta": private_bytes,
-            "read4MiBColdHintThenWarm": reads,
-            "write4KiBDelta": write
-        }));
-        drop(volume);
-        tokio::fs::remove_dir_all(extracted).await.unwrap();
+        let clone_sample =
+            json!({ "wallMs": begin.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu });
+        let workload = super::workspace::workload(&state, &run).unwrap();
+        let private_bytes = super::quota::usage(&workload).unwrap();
+        let prepared_io = file_io(
+            &workload.join("data/workspaces").join(&archive.project_id),
+            &random,
+        );
+        samples.push(json!({ "cachedZipExtraction": zip_sample, "preparedDirectoryAdmission": clone_sample,
+            "privateAllocatedBytesBeforeDelta": private_bytes, "baselineIo": baseline_io, "preparedIo": prepared_io }));
+        let control = super::workspace::directory(&state, &run).unwrap();
+        tokio::fs::write(control.join("attempt"), attempt.as_bytes())
+            .await
+            .unwrap();
+        mounted.close().await.unwrap();
+        drop(mounted);
+        super::directory::action(&state, &run, true).await.unwrap();
+        super::quota::retire(&baseline_control).await.unwrap();
     }
     println!(
         "{}",
@@ -495,9 +516,12 @@ async fn measure_prepared_native_bases() {
             "baseAllocatedBytes": super::workspace::measure(&cache, true).unwrap(),
             "basePreparation": warm, "samples": samples,
             "hostLoad": std::fs::read_to_string("/proc/loadavg").unwrap(),
-            "conditions": "4096x4KiB text + seeded random42 8MiB; local host filesystem; cached ZIP/base; no ublk mount or WAN. ZIP final syncfs can include unrelated host writes. Clone includes durable metadata, atomic journal publication, geometry and full journal open. Reads use advisory DONTNEED; writes probe a disposable raw journal block.",
+            "kernel": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap().trim(),
+            "cpuScope": "test process plus reaped child CPU, including rsync/checksum children",
+            "conditions": "4096x4KiB text + seeded random42 8MiB; cached ZIP reference and prepared-directory admission on same dedicated ext4 project-quota pool; 256MiB per project; no ublk or WAN. Native admission includes verified private copy, durable format and initialization. Syncfs can include other pool writeback. File reads use advisory DONTNEED, not guaranteed hardware-cold storage; writes fsync a new 4KiB file. Development profile with debug=0/incremental=0 in CI."
         })
     );
+    bases.trim(0, u64::MAX, None).await.unwrap();
 }
 
 /// Uses the real quota pool supplied by the disposable qualification launcher.
@@ -625,6 +649,37 @@ async fn kernel_prepared_base_admission_and_recovery() {
             .unwrap();
         mounted.close().await.unwrap();
         drop(mounted);
+        // Model leftover temporary resources after controller death. Recovery
+        // must clean them even if no conversation ever resumes afterward.
+        private_dir(&workload.join("tmp")).await.unwrap();
+        private_dir(&control.join("docker-runtime")).await.unwrap();
+        tokio::fs::write(workload.join("tmp/interrupted-output"), b"temporary")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            control.join("docker-runtime/interrupted-runtime"),
+            b"temporary",
+        )
+        .await
+        .unwrap();
+        super::directory::recover_completed(&state, &run, &attempt)
+            .await
+            .unwrap();
+        super::directory::recover_completed(&state, &run, &attempt)
+            .await
+            .unwrap();
+        assert!(!workload.join("tmp").exists());
+        assert!(!control.join("docker-runtime").exists());
+        assert_eq!(
+            std::fs::read(
+                workload
+                    .join("data/workspaces")
+                    .join(&archive.project_id)
+                    .join("file")
+            )
+            .unwrap(),
+            b"initial project"
+        );
         super::directory::action(&state, &run, true).await.unwrap();
         assert!(!workload.exists());
     }

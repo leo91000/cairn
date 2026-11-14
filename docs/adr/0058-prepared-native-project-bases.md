@@ -1,3 +1,5 @@
+> Statut : Le format de clonage par journal est remplacé par les modèles de répertoires privés de l’[ADR-0085](0085-native-directories-and-direct-vm-images.md). Voir aussi les [mesures actuelles](../NATIVE-BASES.md).
+
 > Statut : Mise à jour par [ADR-0083](0083-local-conversation-disks-without-s3.md) : la consolidation locale du journal remplace la publication pour libérer les segments propres à une conversation ; le préfixe scellé partagé reste immuable.
 
 # Prepared native project bases use sealed journal segments

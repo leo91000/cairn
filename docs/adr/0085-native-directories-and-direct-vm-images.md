@@ -89,3 +89,15 @@ drops that capability from the copy child and checks allocated quota usage befor
 committing the copy, retaining
 the legacy source when the copy exceeds its allowance. Disposable quota tests drop
 that capability explicitly; they do not claim adversarial root confinement.
+
+Les bases natives préparées deviennent des modèles de répertoires vérifiés,
+remplaçant le clonage par préfixe de journal de l’[ADR-0058](0058-prepared-native-project-bases.md).
+Chaque environnement reçoit des fichiers privés ; la copie et sa vérification
+créent des inodes et ont un coût à mesurer face à l’extraction ZIP. Un lien de
+contrôle nommant la clé du cache et l’exécution sert à la fois d’intention durable
+et de pin du cache. Il survit au nettoyage des pins temporaires d’exécution.
+Une copie interrompue reprend son arbre partiel privé ; un renommage terminé
+est vérifié sans écrasement. Après publication durable du format, le nettoyage
+d’une intention résiduelle conserve les modifications utilisateur ultérieures.
+Les temporaires et les données Docker éphémères sont aussi retirés lors de la
+récupération d’une exécution interrompue, avant son acquittement.
