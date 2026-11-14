@@ -24,6 +24,10 @@ fn invalid() -> Error {
     Error::bad_gateway("The plugin returned invalid or unresolved resources.")
 }
 
+fn not_granted() -> Error {
+    Error::forbidden("This agent is not granted that plugin instance.")
+}
+
 fn item(manifest: &Manifest, raw: Value, kind: &str) -> Result<PluginResource> {
     let resource: PluginResource = serde_json::from_value(raw).map_err(|_| invalid())?;
     let declaration = manifest.resource_type(kind).ok_or_else(invalid)?;
@@ -91,6 +95,23 @@ async fn instance(
     agent: Option<&str>,
     authority: Option<Authority>,
 ) -> Result<Read> {
+    // A read through an agent learns nothing of a package or instance the agent is
+    // not granted: neither whether it exists, nor its approval, types or state.
+    if let Some(agent) = agent {
+        let (agent, plugin, id) = (agent.to_owned(), plugin.to_owned(), instance.to_owned());
+        let granted = s
+            .store
+            .read(move |db| {
+                Ok(db
+                    .plugin_instance(&id)?
+                    .is_some_and(|connection| connection.plugin_id == plugin)
+                    && db.has_plugin_grant(&agent, &id)?)
+            })
+            .await?;
+        if !granted {
+            return Err(not_granted());
+        }
+    }
     let package = registry::active(s, plugin).await?;
     if package.manifest.resource_type(kind).is_none() {
         return Err(Error::not_found("This plugin has no such resource type."));
@@ -131,9 +152,7 @@ async fn instance(
             .read(move |db| db.has_plugin_grant(&agent_id, &instance_id))
             .await?;
         if !permitted {
-            return Err(Error::forbidden(
-                "This agent is not granted that plugin instance.",
-            ));
+            return Err(not_granted());
         }
         Scope::Agent {
             agent_id: agent.to_owned(),

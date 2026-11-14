@@ -492,3 +492,157 @@ async fn an_installation_agent_reads_only_through_its_own_grants() {
         );
     }
 }
+
+const NOT_GRANTED: &str = "This agent is not granted that plugin instance.";
+
+/// A list and a resolve of one resource type, through an agent when one is named.
+fn reads(plugin: &str, instance: &str, kind: &str, agent: Option<&str>) -> [String; 2] {
+    let through = agent
+        .map(|agent| format!("&agentId={agent}"))
+        .unwrap_or_default();
+    let base = format!("/api/plugins/{plugin}/connections/{instance}/resources");
+    [
+        format!("{base}?resourceType={kind}{through}"),
+        format!("{base}/ancestors?resourceType={kind}&id=support{through}"),
+    ]
+}
+
+/// Every read refuses with the same status and message.
+async fn refused_alike(
+    f: &Fixture,
+    account: Option<&str>,
+    paths: &[String],
+    expected: (StatusCode, &str),
+) {
+    for path in paths {
+        let (status, refused) = get(f, account, path).await;
+        assert_eq!(
+            (status, refused["error"].as_str().unwrap_or_default()),
+            expected,
+            "{path}: {refused}"
+        );
+    }
+}
+
+async fn set_enabled(f: &Fixture, enabled: bool) {
+    let mut instance =
+        f.s.store
+            .plugin_instance(&f.instance)
+            .await
+            .unwrap()
+            .unwrap();
+    instance.enabled = enabled;
+    instance.revision = cairn_installation::config::id();
+    f.s.store
+        .transaction(move |db| db.save_plugin_instance(&instance))
+        .await
+        .unwrap();
+}
+
+async fn set_approval(f: &Fixture, digest: &str) {
+    let digest = digest.to_owned();
+    f.s.store
+        .transaction(move |db| {
+            db.0.execute(
+                "UPDATE plugin_approvals SET digest=?1 WHERE plugin_id='grant-probe'",
+                [digest],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_ungranted_agent_reveals_nothing_of_the_instance_or_its_package() {
+    let f = Fixture::new().await;
+    let granted = reviewer(&f).await;
+    let ungranted =
+        f.s.agent_fixture(json!({ "name": "Ungranted" }), None)
+            .await
+            .unwrap();
+    let ungranted = text(&ungranted, "id").to_owned();
+    relay_fixture::allow_member(&f.s, MEMBER, &ungranted).await;
+    let unknown = "00000000-0000-4000-8000-0000000000ff";
+    let probes = |agent: &str| {
+        [
+            reads("grant-probe", &f.instance, "channel", Some(agent)),
+            reads("grant-probe", unknown, "channel", Some(agent)),
+            reads("missing-plugin", &f.instance, "channel", Some(agent)),
+            reads("grant-probe", &f.instance, "unknown-type", Some(agent)),
+        ]
+        .concat()
+    };
+    let not_granted = (StatusCode::FORBIDDEN, NOT_GRANTED);
+    let posts = f.posts.load(Ordering::SeqCst);
+
+    // Known, unknown, foreign and untyped instances look the same without a grant.
+    refused_alike(&f, Some(MEMBER), &probes(&ungranted), not_granted).await;
+    refused_alike(&f, None, &probes(&ungranted), not_granted).await;
+    refused_alike(
+        &f,
+        Some(MEMBER),
+        &[
+            reads("grant-probe", unknown, "channel", Some(&granted)),
+            reads("missing-plugin", &f.instance, "channel", Some(&granted)),
+        ]
+        .concat(),
+        not_granted,
+    )
+    .await;
+    let untyped = reads("grant-probe", &f.instance, "unknown-type", Some(&granted));
+    refused_alike(
+        &f,
+        Some(MEMBER),
+        &untyped,
+        (
+            StatusCode::NOT_FOUND,
+            "This plugin has no such resource type.",
+        ),
+    )
+    .await;
+
+    // So do a disabled instance and a package changed since its approval.
+    set_enabled(&f, false).await;
+    refused_alike(&f, Some(MEMBER), &probes(&ungranted), not_granted).await;
+    let disabled = (
+        StatusCode::BAD_REQUEST,
+        "Enable this instance before reading its resources.",
+    );
+    let granted_reads = reads("grant-probe", &f.instance, "channel", Some(&granted));
+    refused_alike(&f, Some(MEMBER), &granted_reads, disabled).await;
+    let owned = reads("grant-probe", &f.instance, "channel", None);
+    refused_alike(&f, None, &owned, disabled).await;
+    set_enabled(&f, true).await;
+
+    let approved =
+        f.s.store
+            .transaction(|db| {
+                Ok(db
+                    .plugin_package("grant-probe")?
+                    .approvals
+                    .get("1")
+                    .cloned()
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+    set_approval(&f, &"0".repeat(64)).await;
+    refused_alike(&f, Some(MEMBER), &probes(&ungranted), not_granted).await;
+    let changed = (
+        StatusCode::FORBIDDEN,
+        "This plugin changed since it was approved. Review it in Plugins.",
+    );
+    refused_alike(&f, Some(MEMBER), &granted_reads, changed).await;
+    refused_alike(&f, None, &owned, changed).await;
+    set_approval(&f, &approved).await;
+    assert_eq!(f.posts.load(Ordering::SeqCst), posts);
+
+    // With the grant, the same reads go through.
+    for path in &granted_reads {
+        let operation = start(&f, Some(MEMBER), path).await;
+        let (status, read) = poll(&f, Some(MEMBER), &operation).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["state"], "completed", "{read}");
+    }
+}
