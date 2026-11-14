@@ -460,7 +460,7 @@ pub(crate) async fn import(
     };
     let _mutation = s.skills.mutations.lock().await;
     origin.authority.recheck(s).await?;
-    crate::conversation_writers::record_skill_intent(s, scope, &skill, writer).await?;
+    crate::conversation_writers::record_skill_intent(s, scope, &skill, project, writer).await?;
     let source_scope = scope.to_owned();
     let source_name = skill.clone();
     let auth = origin.authority.clone();

@@ -1092,6 +1092,15 @@ pub(crate) fn edit_by(
     }
     let (before, inherited, own, agent, _) = effective(db, provider, input.agent_id)?;
     let native_before = text(&own.value, "developer_instructions").to_owned();
+    let native_present = own.value.get("developer_instructions").is_some();
+    let native_removed = own
+        .removed
+        .iter()
+        .any(|path| path == "/developer_instructions");
+    let instruction_source_before = input
+        .agent_id
+        .map(|agent| instruction_source(db, provider, &agent.to_string()))
+        .transpose()?;
     let mapped_profile = agent
         .as_ref()
         .is_some_and(|agent| Provider::from(agent.settings.provider) == provider);
@@ -1294,8 +1303,23 @@ pub(crate) fn edit_by(
         provider.as_str(),
         &native_before,
         text(&native_after, "developer_instructions"),
+        native_before != text(&native_after, "developer_instructions")
+            || native_present != native_after.get("developer_instructions").is_some()
+            || native_removed != removed.iter().any(|path| path == "/developer_instructions"),
         writer,
     )?;
+    if let (Some(agent), Some(before)) = (input.agent_id, instruction_source_before) {
+        let agent = agent.to_string();
+        if before != instruction_source(db, provider, &agent)? {
+            for chat in db
+                .conversations()?
+                .into_iter()
+                .filter(|chat| chat.agent_id == agent)
+            {
+                crate::conversation_writers::record_entry(db, &chat.id, writer)?;
+            }
+        }
+    }
     db.audit(
         "coding-agent.configuration.saved",
         &json!({ "provider": provider, "agentId": input.agent_id }),

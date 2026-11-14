@@ -319,7 +319,11 @@ matching its current content: a write that skipped the record makes the conversa
 ineligible. Conversations, instructions and skills written before this record never
 qualify. Native instruction documents have their own writer history, and each turn
 records the source it follows. A human rewrite cannot erase earlier agent authorship
-of those instructions.
+of those instructions. Skill history remains attached to the conversation when later
+turns stop selecting a skill. Installation skill reads, listings and archive exports
+record their exact revisions and canonical directories; reading an unrecorded or agent-written skill closes the
+conversation immediately. Native inheritance and removal changes count as instruction
+changes too.
 Reading another conversation, run or task through `cairn_installation` (`list_chats`,
 `get_chat`, `read_chat_content`, `list_runs`, `get_run`, `read_run_content`, `get_task`)
 and delegating a task, whose report the conversation reads, count as agent entries.

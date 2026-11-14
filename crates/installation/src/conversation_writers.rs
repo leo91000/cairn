@@ -55,6 +55,15 @@ CREATE TABLE IF NOT EXISTS conversation_turn_entries(
  instruction_source TEXT NOT NULL CHECK(json_valid(instruction_source)),
  PRIMARY KEY(run_id,message_id)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS conversation_skill_sources(
+ chat_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+ scope TEXT NOT NULL,
+ name TEXT NOT NULL,
+ path TEXT NOT NULL,
+ revision TEXT NOT NULL,
+ writer_key INTEGER NOT NULL,
+ PRIMARY KEY(chat_id,scope,name,path,revision)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS agent_instruction_writers(
  key INTEGER PRIMARY KEY,
  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -77,6 +86,7 @@ CREATE INDEX IF NOT EXISTS native_instruction_writers_scope ON native_instructio
 CREATE TABLE IF NOT EXISTS skill_writers(
  key INTEGER PRIMARY KEY,
  scope TEXT NOT NULL,
+ root TEXT,
  name TEXT NOT NULL,
  revision TEXT NOT NULL,
  writer TEXT NOT NULL CHECK(writer IN ('person','rule','agent','unknown')),
@@ -84,6 +94,7 @@ CREATE TABLE IF NOT EXISTS skill_writers(
  written_at INTEGER NOT NULL CHECK(written_at BETWEEN 0 AND 9007199254740991)
 );
 CREATE INDEX IF NOT EXISTS skill_writers_scope_name ON skill_writers(scope,name,key);
+CREATE INDEX IF NOT EXISTS skill_writers_root_name ON skill_writers(root,name,key);
 ";
 
 /// Version 33 to 34. Nothing written before has a recorded writer, so nothing is
@@ -344,7 +355,10 @@ pub(crate) fn record_turn(db: &Db<'_>, run: &str, message: &str) -> Result<()> {
         text(&stored["snapshot"]["agent"], "id"),
     )?;
     let followed = text(&stored["snapshot"]["agent"], "instructions");
-    if instructions != followed {
+    if instructions != followed
+        || !followed.is_empty()
+            && check_instruction_source(db, &source, followed, "", i64::MAX, true).is_err()
+    {
         source = InstructionSource::Unknown;
     }
     let frozen = FrozenInstructions {
@@ -355,7 +369,72 @@ pub(crate) fn record_turn(db: &Db<'_>, run: &str, message: &str) -> Result<()> {
         "INSERT INTO conversation_turn_entries VALUES(?,?,NULL,?) ON CONFLICT(run_id,message_id) DO NOTHING",
     )?
     .execute(params![run, message, serde_json::to_string(&frozen)?])?;
+    let chat: String = db.0.query_row(
+        "SELECT chat_id FROM chat_messages WHERE id=?",
+        [message],
+        |row| row.get(0),
+    )?;
+    for skill in stored["snapshot"]["skills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        db.0.execute(
+            "INSERT OR IGNORE INTO conversation_skill_sources VALUES(?,?,?,?,?,(SELECT coalesce(max(key),0) FROM skill_writers))",
+            params![
+                chat,
+                "",
+                text(skill, "name"),
+                text(skill, "path"),
+                text(skill, "bundle")
+            ],
+        )?;
+    }
     Ok(())
+}
+
+/// A skill read becomes part of the conversation even when no launch snapshot
+/// selected it. Unrecorded or agent-written content closes the conversation now.
+pub(crate) async fn record_skill_read(
+    s: &Service,
+    bearer: &str,
+    scope: &str,
+    name: &str,
+    revision: &str,
+    project: Option<&Path>,
+) -> Result<()> {
+    let root = s.skills.root(project).await?.to_string_lossy().into_owned();
+    let path = Path::new(&root)
+        .join(name)
+        .join("SKILL.md")
+        .to_string_lossy()
+        .into_owned();
+    let (bearer, scope, name, revision) = (
+        bearer.to_owned(),
+        scope.to_owned(),
+        name.to_owned(),
+        revision.to_owned(),
+    );
+    s.store
+        .transaction(move |db| {
+            let run = crate::installation_mcp::authorize_in(db, &bearer)?;
+            let Some(chat) = db.conversation_for_run(text(&run, "id"))? else {
+                return Ok(());
+            };
+            let history = skill_writes(db, &scope, &name, &root)?;
+            if revision.is_empty()
+                || history.iter().any(|write| write.writer != "person")
+                || !history.iter().any(|write| write.digest == revision)
+            {
+                record_entry(db, &chat.id, &EntryWriter::Agent)?;
+            }
+            db.0.execute(
+                "INSERT OR IGNORE INTO conversation_skill_sources VALUES(?,?,?,?,?,(SELECT coalesce(max(key),0) FROM skill_writers))",
+                params![chat.id, scope, name, path, revision],
+            )?;
+            Ok(())
+        })
+        .await
 }
 
 /// Binds the first launch grant of a turn that a message started. A relaunch of the
@@ -407,7 +486,7 @@ fn insert_instructions(db: &Db<'_>, agent: &str, digest: &str, writer: &EntryWri
     Ok(())
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(crate) enum InstructionSource {
     Profile { agent: String },
@@ -430,9 +509,10 @@ pub(crate) fn record_native_instructions(
     provider: &str,
     before: &str,
     after: &str,
+    changed: bool,
     writer: &EntryWriter,
 ) -> Result<()> {
-    if before == after {
+    if !changed {
         return Ok(());
     }
     let latest: Option<String> = db.0.query_row(
@@ -478,9 +558,27 @@ pub(crate) fn record_skill(
     revision: &str,
     writer: &EntryWriter,
 ) -> Result<()> {
+    let root: Option<Option<String>> =
+        db.0.query_row(
+            "SELECT root FROM skill_writers WHERE scope=? AND name=? ORDER BY key DESC LIMIT 1",
+            params![scope, name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    record_skill_at(db, scope, name, revision, root.flatten().as_deref(), writer)
+}
+
+fn record_skill_at(
+    db: &Db<'_>,
+    scope: &str,
+    name: &str,
+    revision: &str,
+    root: Option<&str>,
+    writer: &EntryWriter,
+) -> Result<()> {
     let (kind, account, _) = writer.columns();
-    db.0.prepare_cached("INSERT INTO skill_writers(scope,name,revision,writer,account_id,written_at) VALUES(?,?,?,?,?,?)")?
-        .execute(params![scope, name, revision, kind, account, now()])?;
+    db.0.prepare_cached("INSERT INTO skill_writers(scope,name,revision,root,writer,account_id,written_at) VALUES(?,?,?,?,?,?,?)")?
+        .execute(params![scope,name,revision,root,kind,account,now()])?;
     Ok(())
 }
 
@@ -490,11 +588,13 @@ pub(crate) async fn record_skill_intent(
     s: &Service,
     scope: &str,
     name: &str,
+    project: Option<&Path>,
     writer: &EntryWriter,
 ) -> Result<()> {
+    let root = s.skills.root(project).await?.to_string_lossy().into_owned();
     let (scope, name, writer) = (scope.to_owned(), name.to_owned(), writer.clone());
     s.store
-        .transaction(move |db| record_skill(db, &scope, &name, "", &writer))
+        .transaction(move |db| record_skill_at(db, &scope, &name, "", Some(&root), &writer))
         .await
 }
 
@@ -508,9 +608,10 @@ pub(crate) async fn record_skill_write(
 ) -> Result<()> {
     let bundle = s.skills.bundle(scope, name, project).await?;
     let revision = text(&bundle, "revision").to_owned();
+    let root = s.skills.root(project).await?.to_string_lossy().into_owned();
     let (scope, name, writer) = (scope.to_owned(), name.to_owned(), writer.clone());
     s.store
-        .transaction(move |db| record_skill(db, &scope, &name, &revision, &writer))
+        .transaction(move |db| record_skill_at(db, &scope, &name, &revision, Some(&root), &writer))
         .await
 }
 
@@ -608,11 +709,11 @@ fn writes(db: &Db<'_>, sql: &str, key: &str) -> Result<Vec<InstructionWrite>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-fn skill_writes(db: &Db<'_>, scope: &str, name: &str) -> Result<Vec<InstructionWrite>> {
+fn skill_writes(db: &Db<'_>, scope: &str, name: &str, root: &str) -> Result<Vec<InstructionWrite>> {
     Ok(db
         .0
-        .prepare_cached("SELECT revision,writer,account_id,written_at FROM skill_writers WHERE scope=? AND name=? ORDER BY key")?
-        .query_map(params![scope, name], |row| {
+        .prepare_cached("SELECT revision,writer,account_id,written_at FROM skill_writers WHERE name=? AND (scope=? OR root=?) ORDER BY key")?
+        .query_map(params![name, scope, root], |row| {
             Ok(InstructionWrite {
                 digest: row.get(0)?,
                 writer: row.get(1)?,
@@ -875,6 +976,24 @@ fn skills_written_by(
         .as_array()
         .cloned()
         .unwrap_or_default();
+    let mut skills = skills;
+    if let Some(chat) = db.conversation_for_run(text(run, "id"))? {
+        skills.extend(
+            db.0.prepare_cached(
+                "SELECT scope,name,path,revision,writer_key FROM conversation_skill_sources WHERE chat_id=?",
+            )?
+            .query_map([chat.id], |row| {
+                Ok(json!({
+                    "scope": row.get::<_, String>(0)?,
+                    "name": row.get::<_, String>(1)?,
+                    "path": row.get::<_, String>(2)?,
+                    "bundle": row.get::<_, String>(3)?,
+                    "writerKey": row.get::<_, i64>(4)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+    }
     let mut run_projects = BTreeSet::new();
     for project in run["snapshot"]["projects"].as_array().into_iter().flatten() {
         let id = text(project, "id");
@@ -890,6 +1009,7 @@ fn skills_written_by(
     }
     for skill in &skills {
         let name = text(skill, "name");
+        let explicit_scope = text(skill, "scope");
         let skill_root = Path::new(text(skill, "path"))
             .parent()
             .and_then(Path::parent)
@@ -898,23 +1018,29 @@ fn skills_written_by(
                     "Cairn did not record the scope of the skill {name}."
                 ))
             })?;
-        let scope = if eligibility.global_skills.as_deref() == Some(skill_root) {
-            "global".to_owned()
+        let inferred = if eligibility.global_skills.as_deref() == Some(skill_root) {
+            (!eligibility.project_skills.contains_key(skill_root)).then_some("global")
         } else {
             eligibility
                 .project_skills
                 .get(skill_root)
                 .and_then(|scope| scope.as_deref())
-                .filter(|scope| run_projects.contains(*scope))
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    refused(&format!(
-                        "Cairn did not record the scope of the skill {name}."
-                    ))
-                })?
         };
+        let scope = inferred
+            .filter(|scope| {
+                if explicit_scope.is_empty() {
+                    *scope == "global" || run_projects.contains(*scope)
+                } else {
+                    *scope == explicit_scope
+                }
+            })
+            .ok_or_else(|| {
+                refused(&format!(
+                    "Cairn did not record the scope of the skill {name}."
+                ))
+            })?;
         let revision = text(skill, "bundle");
-        let history = skill_writes(db, &scope, name)?;
+        let history = skill_writes(db, scope, name, &skill_root.to_string_lossy())?;
         if history
             .iter()
             .any(|write| write.written_at >= since && !write.by(person))
@@ -928,7 +1054,11 @@ fn skills_written_by(
                 "This agent follows the skill {name}, which an agent wrote."
             )));
         }
-        let recorded = history.iter().any(|write| write.digest == revision);
+        let writer_key = skill["writerKey"].as_i64().unwrap_or(i64::MAX);
+        let recorded: bool = db.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM skill_writers WHERE name=? AND (scope=? OR root=?) AND revision=? AND writer='person' AND key<=?)",
+            params![name,scope,skill_root.to_string_lossy(),revision,writer_key], |row| row.get(0),
+        )?;
         if !recorded || revision.is_empty() {
             return Err(refused(&format!(
                 "Cairn did not record who wrote the skill {name}."
@@ -943,9 +1073,10 @@ mod tests {
     use super::*;
     use crate::store::Store;
 
-    const TABLES: [&str; 6] = [
+    const TABLES: [&str; 7] = [
         "agent_instruction_writers",
         "conversation_entry_writers",
+        "conversation_skill_sources",
         "conversation_turn_entries",
         "conversation_writers",
         "native_instruction_writers",
@@ -1398,6 +1529,46 @@ mod tests {
                         &eligibility
                     )
                     .is_err()
+                );
+
+                // Dynamic reads must prove their scope from the canonical directory too.
+                let mut wrong_scope = run(
+                    "project-person",
+                    "/workspace/project-id/.agents/skills/project-person/SKILL.md",
+                    None,
+                );
+                wrong_scope["snapshot"]["skills"][0]["scope"] = "another-project".into();
+                assert!(
+                    skills_written_by(db, &wrong_scope, "person", since, &eligibility)
+                        .unwrap_err()
+                        .message
+                        .contains("scope")
+                );
+
+                // A deleted project alias cannot hide who wrote the same physical skill.
+                record_skill_at(
+                    db,
+                    "deleted-alias",
+                    "project-person",
+                    "project-person-revision",
+                    Some("/workspace/project-id/.agents/skills"),
+                    &EntryWriter::Agent,
+                )?;
+                assert!(
+                    skills_written_by(
+                        db,
+                        &run(
+                            "project-person",
+                            "/workspace/project-id/.agents/skills/project-person/SKILL.md",
+                            Some("project-id")
+                        ),
+                        "person",
+                        since,
+                        &eligibility
+                    )
+                    .unwrap_err()
+                    .message
+                    .contains("Someone else changed")
                 );
 
                 // Changed by someone else since the conversation started.

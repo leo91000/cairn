@@ -358,6 +358,28 @@ impl Skills {
     }
 
     pub async fn list(&self, scope: &str, project: Option<&Path>) -> Result<Vec<Value>> {
+        Ok(self
+            .list_versions(scope, project, false)
+            .await?
+            .into_iter()
+            .map(|(value, _)| value)
+            .collect())
+    }
+
+    pub(crate) async fn list_with_revisions(
+        &self,
+        scope: &str,
+        project: Option<&Path>,
+    ) -> Result<Vec<(Value, String)>> {
+        self.list_versions(scope, project, true).await
+    }
+
+    async fn list_versions(
+        &self,
+        scope: &str,
+        project: Option<&Path>,
+        revisions: bool,
+    ) -> Result<Vec<(Value, String)>> {
         let root = self.root(project).await?;
         let _read = bundle::access(&root).await.read_owned().await;
         let mut entries = fs::read_dir(&root).await?;
@@ -411,12 +433,20 @@ impl Skills {
                     }
                 }
             }
-            listings.push(listing);
+            let revision = if revisions {
+                bundle::describe_locked(&root.join(&directory))
+                    .await
+                    .map(|bundle| bundle.revision)
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            listings.push((listing, revision));
         }
-        listings.sort_by(|a, b| a.name.cmp(&b.name));
+        listings.sort_by(|a, b| a.0.name.cmp(&b.0.name));
         listings
             .into_iter()
-            .map(|listing| Ok(serde_json::to_value(listing)?))
+            .map(|(listing, revision)| Ok((serde_json::to_value(listing)?, revision)))
             .collect()
     }
 
@@ -464,6 +494,25 @@ impl Skills {
 
     /// Text files as UTF-8, other files as base64.
     pub async fn read(&self, skill: &str, file: &str, project: Option<&Path>) -> Result<Value> {
+        Ok(self.read_version(skill, file, project, false).await?.0)
+    }
+
+    pub(crate) async fn read_with_revision(
+        &self,
+        skill: &str,
+        file: &str,
+        project: Option<&Path>,
+    ) -> Result<(Value, String)> {
+        self.read_version(skill, file, project, true).await
+    }
+
+    async fn read_version(
+        &self,
+        skill: &str,
+        file: &str,
+        project: Option<&Path>,
+        revision: bool,
+    ) -> Result<(Value, String)> {
         let root = self.root(project).await?;
         let _read = bundle::access(&root).await.read_owned().await;
         if !visible(file) {
@@ -487,12 +536,20 @@ impl Skills {
         } else {
             (STANDARD.encode(bytes), "base64")
         };
-        Ok(json!({
-            "content": content,
-            "encoding": encoding,
-            "size": size,
-            "executable": executable,
-        }))
+        let revision = if revision {
+            bundle::describe_locked(&directory).await?.revision
+        } else {
+            String::new()
+        };
+        Ok((
+            json!({
+                "content": content,
+                "encoding": encoding,
+                "size": size,
+                "executable": executable,
+            }),
+            revision,
+        ))
     }
 
     pub async fn bundle(&self, scope: &str, skill: &str, project: Option<&Path>) -> Result<Value> {

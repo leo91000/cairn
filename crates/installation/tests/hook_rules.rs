@@ -1188,6 +1188,368 @@ async fn unrecorded_defaults_cannot_borrow_a_profiles_instruction_writer() {
 }
 
 #[tokio::test]
+async fn removing_inherited_instructions_permanently_closes_existing_conversations() {
+    let f = granted().await;
+    native_instructions(&f, "Human defaults", None).await;
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    let target = json!({
+        "provider": "codex",
+        "agentId": MAIN_AGENT_ID,
+    });
+    let (_, current) = call(
+        &f,
+        OWNER,
+        "POST",
+        "/api/settings/coding-agents/read",
+        target.clone(),
+    )
+    .await;
+    let changed = agent(
+        &f,
+        &f.bearer,
+        "save_coding_agent_configuration",
+        json!({
+            "provider": "codex",
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "document": "",
+            "changes": [],
+            "reset": false,
+        }),
+    )
+    .await;
+    assert!(!refused(&changed), "{changed}");
+    assert!(
+        !mcp_result(&changed)["document"]
+            .as_str()
+            .unwrap()
+            .contains("Human defaults")
+    );
+    let (_, current) = call(
+        &f,
+        OWNER,
+        "POST",
+        "/api/settings/coding-agents/read",
+        target,
+    )
+    .await;
+    let (status, restored) = call(
+        &f,
+        OWNER,
+        "PUT",
+        "/api/settings/coding-agents",
+        json!({
+            "provider": "codex",
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "document": current["document"],
+            "changes": [],
+            "reset": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    refused_because(
+        &agent(
+            &f,
+            &bearer,
+            "create_hook_rule",
+            json!({
+                "definition": definition(&f, MAIN_AGENT_ID),
+            }),
+        )
+        .await,
+        "Another writer reached this conversation",
+    );
+}
+
+fn skill_content(name: &str, body: &str) -> String {
+    format!("---\nname: {name}\ndescription: A support skill\n---\n{body}\n")
+}
+
+#[tokio::test]
+async fn deleting_a_changed_skill_never_restores_conversation_eligibility() {
+    let f = granted().await;
+    let (status, saved) = call(
+        &f,
+        OWNER,
+        "PUT",
+        "/api/skills/global/support",
+        json!({
+            "content": skill_content("support", "Human instructions"),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (chat, bearer) = person_conversation(&f, OWNER).await;
+    let write = json!({
+        "definition": definition(&f, MAIN_AGENT_ID),
+        "enabled": false,
+    });
+    let created = agent(&f, &bearer, "create_hook_rule", write.clone()).await;
+    assert!(!refused(&created), "{created}");
+    let detail = f.s.chat_detail(&chat).await.unwrap();
+    let run_id = text(&detail["run"], "id").to_owned();
+    let before = f.s.store.run(&run_id).await.unwrap();
+    assert_eq!(before["snapshot"]["skills"][0]["name"], "support");
+    let edited = agent(
+        &f,
+        &f.bearer,
+        "save_skill",
+        json!({
+            "scope": "global",
+            "name": "support",
+            "content": skill_content("support","Agent instructions"),
+        }),
+    )
+    .await;
+    assert!(!refused(&edited), "{edited}");
+    let (status, deleted) = call(
+        &f,
+        OWNER,
+        "DELETE",
+        "/api/skills/global/support",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    f.s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (status, sent) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/chats/{chat}/messages"),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Write my next rule.",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let bearer = fixture::running_conversation(&f.s, &chat).await;
+    let after = f.s.store.run(&run_id).await.unwrap();
+    assert_eq!(after["snapshot"]["skills"], json!([]));
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write).await,
+        "Someone else changed the skill support",
+    );
+}
+
+#[tokio::test]
+async fn skill_reads_track_unselected_content_and_allow_recorded_human_skills() {
+    for (index, (operation, extra)) in [
+        (
+            "read_skill",
+            json!({
+                "path": "SKILL.md",
+            }),
+        ),
+        ("read_skill", json!({})),
+        ("export_skill_archive", json!({})),
+        ("list_skills", json!({})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let f = granted().await;
+        let (_, bearer) = person_conversation(&f, OWNER).await;
+        let name = format!("unsafe-{index}");
+        let saved = agent(
+            &f,
+            &bearer,
+            "save_skill",
+            json!({
+                "scope": "global",
+                "name": name,
+                "content": skill_content(&name,"Agent instructions"),
+            }),
+        )
+        .await;
+        assert!(!refused(&saved), "{saved}");
+        let write = json!({
+            "definition": definition(&f, MAIN_AGENT_ID),
+            "enabled": false,
+        });
+        let before = agent(&f, &bearer, "create_hook_rule", write.clone()).await;
+        assert!(!refused(&before), "{before}");
+        let mut input = json!({
+            "scope": "global",
+            "name": name,
+        });
+        if operation == "list_skills" {
+            input = json!({
+                "scope": "global",
+            });
+        }
+        for (key, value) in extra.as_object().unwrap() {
+            input[key] = value.clone();
+        }
+        let read = agent(&f, &bearer, operation, input).await;
+        assert!(!refused(&read), "{operation}: {read}");
+        refused_because(
+            &agent(&f, &bearer, "create_hook_rule", write).await,
+            "Another writer reached this conversation",
+        );
+    }
+    let f = granted().await;
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    let (status, saved) = call(
+        &f,
+        OWNER,
+        "PUT",
+        "/api/skills/global/human",
+        json!({
+            "content": skill_content("human","Human instructions"),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let read = agent(
+        &f,
+        &bearer,
+        "read_skill",
+        json!({
+            "scope": "global",
+            "name": "human",
+            "path": "SKILL.md",
+        }),
+    )
+    .await;
+    assert!(!refused(&read), "{read}");
+    let written = agent(
+        &f,
+        &bearer,
+        "create_hook_rule",
+        json!({
+            "definition": definition(&f, MAIN_AGENT_ID),
+            "enabled": false,
+        }),
+    )
+    .await;
+    assert!(!refused(&written), "{written}");
+    f.s.skills
+        .save(
+            "unrecorded",
+            &skill_content("unrecorded", "Unknown instructions"),
+            None,
+        )
+        .await
+        .unwrap();
+    let read = agent(
+        &f,
+        &bearer,
+        "read_skill",
+        json!({
+            "scope": "global",
+            "name": "unrecorded",
+            "path": "SKILL.md",
+        }),
+    )
+    .await;
+    assert!(!refused(&read), "{read}");
+    refused_because(
+        &agent(
+            &f,
+            &bearer,
+            "create_hook_rule",
+            json!({
+                "definition": definition(&f, MAIN_AGENT_ID),
+            }),
+        )
+        .await,
+        "Another writer reached this conversation",
+    );
+}
+
+#[tokio::test]
+async fn later_human_instruction_writes_never_attest_an_earlier_unknown_turn() {
+    for native in [false, true] {
+        let f = granted().await;
+        if native {
+            native_instructions(&f, "Earlier instructions", None).await;
+            f.s.store
+                .transaction(|db| {
+                    db.0.execute("DELETE FROM native_instruction_writers", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        } else {
+            f.s.store
+                .transaction(|db| {
+                    db.0.execute(
+                        "UPDATE agents SET instructions='Earlier instructions' WHERE id=?",
+                        [MAIN_AGENT_ID],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let (_, bearer) = person_conversation(&f, OWNER).await;
+        for instructions in ["Human replacement", "Earlier instructions"] {
+            if native {
+                native_instructions(&f, instructions, None).await;
+            } else {
+                person_instructions(&f, instructions).await;
+            }
+        }
+        let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+        refused_because(
+            &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+            "did not record the source of this turn's instructions",
+        );
+        let (_, fresh) = person_conversation(&f, OWNER).await;
+        let created = agent(&f, &fresh, "create_hook_rule", write).await;
+        assert!(!refused(&created), "{created}");
+    }
+}
+
+#[tokio::test]
+async fn later_human_skill_writes_never_attest_an_earlier_unknown_turn() {
+    let f = granted().await;
+    f.s.skills
+        .save(
+            "earlier",
+            &skill_content("earlier", "Earlier instructions"),
+            None,
+        )
+        .await
+        .unwrap();
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    for instructions in ["Human replacement", "Earlier instructions"] {
+        let (status, saved) = call(
+            &f,
+            OWNER,
+            "PUT",
+            "/api/skills/global/earlier",
+            json!({
+                "content": skill_content("earlier", instructions),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+    }
+    let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+        "did not record who wrote the skill earlier",
+    );
+    let (_, fresh) = person_conversation(&f, OWNER).await;
+    let created = agent(&f, &fresh, "create_hook_rule", write).await;
+    assert!(!refused(&created), "{created}");
+}
+
+#[tokio::test]
 async fn an_eligible_conversation_lifts_grant_protection_for_its_person_only() {
     let f = granted().await;
     common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
