@@ -83,13 +83,10 @@ internal fun RuleValueEditor(
                                                 "integer" ->
                                                     JsonPrimitive(text.toLongOrNull() ?: 0L)
                                                 "boolean" -> JsonPrimitive(true)
-                                                "json" ->
-                                                    if (
-                                                        schema != null &&
-                                                            schemaKind(schema, JsonNull) == "array"
-                                                    )
-                                                        JsonArray(emptyList())
-                                                    else JsonObject(emptyMap())
+                                                "json" -> runCatching {
+                                                        wireJson.parseToJsonElement(text)
+                                                    }
+                                                        .getOrElse { JsonPrimitive(text) }
                                                 else -> JsonPrimitive(text)
                                             }
                                     )

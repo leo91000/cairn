@@ -110,6 +110,7 @@ describe('rule definition recovery and condition depth', () => {
     const optional = JSON.parse(JSON.stringify(original)) as HookRuleDefinition
     if (optional.steps[0].type === 'action' && optional.steps[0].action.type === 'storeValue')
       optional.steps[0].action.key = null
+    optional.steps[0] = { ...optional.steps[0], label: '' } as RuleNode
     expect(sameRuleDefinition(original, optional)).toBe(true)
     const changed = JSON.parse(JSON.stringify(original)) as HookRuleDefinition
     if (changed.steps[0].type === 'action' && changed.steps[0].action.type === 'storeValue' && changed.steps[0].action.value.type === 'literal')

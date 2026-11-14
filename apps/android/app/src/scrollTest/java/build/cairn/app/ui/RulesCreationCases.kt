@@ -93,10 +93,20 @@ abstract class RulesCreationCases {
 
     @Test fun aKnownCreationRejectionAllowsCorrectingTheDraft() = recoverCreation(false, true)
 
-    private fun recoverCreation(restore: Boolean, reject: Boolean = false) {
+    @Test
+    fun aLostReplacementResponseDoesNotWriteAnotherVersion() =
+        recoverCreation(false, replace = true)
+
+    private fun recoverCreation(
+        restore: Boolean,
+        reject: Boolean = false,
+        replace: Boolean = false,
+    ) {
         val id = "da2dd0ad-91ce-4566-b426-77c03628f59e"
         val unavailable = AtomicBoolean(true)
-        val failureMessage = if (reject) "Creation rejected" else "Uncertain creation"
+        val failureMessage =
+            if (reject) "Creation rejected"
+            else if (replace) "Uncertain replacement" else "Uncertain creation"
         val closed = AtomicBoolean(false)
         val stored = AtomicReference<JsonObject?>(null)
         val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
@@ -106,6 +116,15 @@ abstract class RulesCreationCases {
             put("version", version)
             put("definition", definition)
             put("allowed", buildJsonObject { put("edit", true) })
+        }
+        if (replace) {
+            val initial =
+                wireJson
+                    .parseToJsonElement(
+                        """{"name":"Original","description":"","trigger":{"type":"cairn","hook":"replyReady"},"executionAgentId":"$MAIN_AGENT_ID","limits":{"triggeringsPerHour":60,"conversationsPerHour":5},"steps":[{"type":"action","id":"save","action":{"type":"storeValue","scope":"rule","name":"last","value":{"type":"literal","value":0}}}]}"""
+                    )
+                    .jsonObject
+            stored.set(record(initial, 1))
         }
         fun json(body: String, status: Int = 200) =
             MockResponse()
@@ -137,7 +156,11 @@ abstract class RulesCreationCases {
                                 val body =
                                     wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
                                 writes += "PUT" to body
+                                if (body.text("revision") != stored.get().text("revision"))
+                                    return json("""{"error":"Revision conflict"}""", 409)
                                 stored.set(record(body.obj("definition")!!, 2))
+                                if (replace && unavailable.get())
+                                    return json("""{"error":"$failureMessage"}""", 503)
                             }
                             return json(stored.get().toString())
                         }
@@ -175,7 +198,13 @@ abstract class RulesCreationCases {
                 val state by vm.state.collectAsState()
                 CairnTheme {
                     if (state.installation != null && !closed.get())
-                        RuleEditorScreen(vm, state, "", saved = { closed.set(true) }, back = {})
+                        RuleEditorScreen(
+                            vm,
+                            state,
+                            if (replace) id else "",
+                            saved = { closed.set(true) },
+                            back = {},
+                        )
                 }
             }
             fun waitFor(test: () -> Boolean) =
@@ -186,6 +215,29 @@ abstract class RulesCreationCases {
             try {
                 waitFor {
                     compose.onAllNodesWithText("Nom de la règle").fetchSemanticsNodes().isNotEmpty()
+                }
+                if (replace) {
+                    compose.onNodeWithText("Nom de la règle").performTextReplacement("Latest draft")
+                    waitFor {
+                        compose
+                            .onAllNodes(hasText("Enregistrer") and isEnabled())
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
+                    compose.onNodeWithText("Enregistrer").performClick()
+                    waitFor {
+                        compose
+                            .onAllNodesWithText(failureMessage, substring = true)
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
+                    unavailable.set(false)
+                    compose.onNodeWithText("Enregistrer").performClick()
+                    waitFor { closed.get() }
+                    assertEquals(2, writes.count { it.first == "PUT" })
+                    assertEquals(2, stored.get()!!["version"]!!.jsonPrimitive.int)
+                    assertEquals("Latest draft", stored.get().obj("definition").text("name"))
+                    return
                 }
                 compose.onNodeWithText("Nom de la règle").performTextReplacement("Original")
                 compose.onNodeWithText("Étape").performScrollTo().performClick()

@@ -644,9 +644,12 @@ export function sameRuleDefinition(left: HookRuleDefinition, right: HookRuleDefi
   }
 
   const node = (value: RuleNode): object => {
+    const fields = present(value)
+    if (fields.label === '')
+      delete fields.label
     if (value.type === 'if') {
       return {
-        ...present(value),
+        ...fields,
         condition: condition(value.condition),
         then: value.then.map(node),
         otherwise: value.otherwise.map(node),
@@ -654,8 +657,8 @@ export function sameRuleDefinition(left: HookRuleDefinition, right: HookRuleDefi
     }
 
     if (value.type === 'forEach')
-      return { ...present(value), body: value.body.map(node) }
-    return { ...present(value), action: present(value.action) }
+      return { ...fields, body: value.body.map(node) }
+    return { ...fields, action: present(value.action) }
   }
 
   const stable = (value: HookRuleDefinition) => JSON.stringify({ ...value, steps: value.steps.map(node) }, (_key, entry) =>

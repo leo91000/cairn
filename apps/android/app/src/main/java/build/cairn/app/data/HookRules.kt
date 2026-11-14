@@ -789,6 +789,7 @@ private fun canonicalRuleCondition(value: JsonElement): JsonElement {
 private fun canonicalRuleNode(value: JsonElement): JsonElement {
     val objectValue = value as? JsonObject ?: return value
     val fields = presentRuleFields(objectValue).toMutableMap()
+    if ((fields["label"] as? JsonPrimitive)?.contentOrNull == "") fields.remove("label")
     when (value.text("type")) {
         "if" -> {
             value.obj("condition")?.let { fields["condition"] = canonicalRuleCondition(it) }

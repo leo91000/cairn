@@ -22,6 +22,17 @@ class RuleDraftComparisonTest {
                 )
                 .jsonObject
         assertTrue(sameRuleDefinition(original, optional))
+        val emptyLabel =
+            JsonObject(
+                optional +
+                    ("steps" to
+                        JsonArray(
+                            optional.list("steps").map {
+                                JsonObject(it.jsonObject + ("label" to JsonPrimitive("")))
+                            }
+                        ))
+            )
+        assertTrue(sameRuleDefinition(original, emptyLabel))
         val changed =
             wireJson
                 .parseToJsonElement(original.toString().replace("{\"missing\":null}", "{}"))

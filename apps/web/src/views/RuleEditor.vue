@@ -255,18 +255,23 @@ async function save() {
         if (!(cause instanceof ApiError) || cause.status !== 409)
           throw cause
         const latest = await getHookRule(api, { ruleId: rule.value.id })
-        if (!latest.allowed.edit) {
+        if (sameRuleDefinition(latest.definition, submitted)) {
+          saved = latest
+        }
+        else {
+          if (!latest.allowed.edit) {
+            rule.value = latest
+            throw new Error('You can no longer edit this rule. Your draft is still here.')
+          }
+
+          if (latest.version !== rule.value.version) {
+            conflict.value = latest
+            return
+          }
+
           rule.value = latest
-          throw new Error('You can no longer edit this rule. Your draft is still here.')
+          saved = await replaceHookRule(api, { ruleId: latest.id, revision: latest.revision, definition: submitted })
         }
-
-        if (latest.version !== rule.value.version) {
-          conflict.value = latest
-          return
-        }
-
-        rule.value = latest
-        saved = await replaceHookRule(api, { ruleId: latest.id, revision: latest.revision, definition: submitted })
       }
     }
     else {

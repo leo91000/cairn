@@ -293,6 +293,7 @@ internal fun RuleStepPanel(
                             action["value"],
                             variables,
                             { patchAction("value" to it) },
+                            expects = "json",
                         )
                     }
                     "wait" -> {

@@ -367,4 +367,16 @@ abstract class RulesEditorCases {
             assertEquals("payload.a", unwrapRuleTemplate(" {{payload.a}} "))
         }
     }
+
+    @Test
+    fun aRememberedJsonValueKeepsItsNumberWhenChoosingFixedValue() {
+        var value by mutableStateOf(templateValue("5"))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor("Mémoire", value, emptyList(), { value = it }, expects = "json")
+            }
+        }
+        compose.onNodeWithText("Valeur").performClick()
+        compose.runOnIdle { assertEquals(literalRuleValue(JsonPrimitive(5)), value) }
+    }
 }

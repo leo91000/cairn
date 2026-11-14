@@ -38,7 +38,10 @@ refreshed while preserving the draft; a newer saved definition can be reviewed,
 adopted or explicitly replaced by the draft as the next version.
 An uncertain creation keeps its original identity and submitted definition. Edits
 made afterwards remain in the editor and can be saved as the recovered rule's
-next version, including after native recreation. Removing a block with nested
+next version, including after native recreation. A replacement whose response
+was lost is recovered as already saved when its definition matches the draft,
+without writing an identical extra version. Clearing an action label restores
+its default title. Removing a block with nested
 steps asks first. Both enforce the tree and condition-depth limits, counting
 negation as a separate level. History shows retry counts and the resume time on
 both platforms.

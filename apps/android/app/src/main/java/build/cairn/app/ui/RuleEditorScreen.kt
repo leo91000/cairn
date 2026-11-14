@@ -208,19 +208,28 @@ fun RuleEditorScreen(
                     } catch (cause: ApiException) {
                         if (cause.status != 409 || targetRuleId.isBlank()) throw cause
                         val latest: JsonObject = vm.api.get("/hook-rules/${segment(targetRuleId)}")
-                        if (!latest.allowed("edit")) {
-                            canEdit = false
-                            selected = ""
-                            error =
-                                "Vous ne pouvez plus modifier cette règle. Votre brouillon est conservé."
-                            return@launch
+                        if (
+                            sameRuleDefinition(
+                                latest.obj("definition").orEmpty(),
+                                submittedDefinition,
+                            )
+                        ) {
+                            latest
+                        } else {
+                            if (!latest.allowed("edit")) {
+                                canEdit = false
+                                selected = ""
+                                error =
+                                    "Vous ne pouvez plus modifier cette règle. Votre brouillon est conservé."
+                                return@launch
+                            }
+                            if (latest.text("version").toIntOrNull() != loadedVersion) {
+                                conflict = latest
+                                return@launch
+                            }
+                            revision = latest.text("revision")
+                            persist()
                         }
-                        if (latest.text("version").toIntOrNull() != loadedVersion) {
-                            conflict = latest
-                            return@launch
-                        }
-                        revision = latest.text("revision")
-                        persist()
                     }
                 check(
                     result.text("id").isNotBlank() &&
