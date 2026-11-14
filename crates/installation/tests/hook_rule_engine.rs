@@ -53,8 +53,9 @@ async fn granted() -> Fixture {
     f
 }
 
-/// Queues a hook event as the plugin's transport would. The queue identity derives from
-/// the external one, so queuing it again models an event read again after a stop.
+/// Queues a hook event as the plugin's transport would, including its engine wake-up.
+/// The queue identity derives from the external one, so queuing it again models an
+/// event read again after a stop.
 async fn emit(f: &Fixture, external: &str, payload: Value) {
     emit_on(f, &f.instance, external, payload).await;
 }
@@ -88,6 +89,7 @@ async fn emit_on(f: &Fixture, instance_id: &str, external: &str, payload: Value)
         })
         .await
         .unwrap();
+    f.s.rules.notify_queued();
 }
 
 fn steps(actions: &Value) -> Value {
@@ -1512,6 +1514,7 @@ async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{response}");
+    let slow = text(&response, "id").to_owned();
     let mut other_definition = source["definition"].clone();
     other_definition["trigger"]["instanceId"] = other_id.into();
     let (status, other_rule) = call(
@@ -1581,6 +1584,30 @@ async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
     .await;
     f.release.notify_one();
     worker.await.unwrap().unwrap();
+    assert!(
+        later_events.is_ok(),
+        "A resolver held later same-instance events in the shared queue."
+    );
+    assert!(
+        progress.is_ok(),
+        "Resource resolution held up independent rule work."
+    );
+
+    // The held resolution admitted its event with the only resolver call, after the
+    // release: the resolution timeout never ended the hold while both batches drained.
+    let held =
+        f.s.store
+            .read(move |db| {
+                Ok(db.0.query_row(
+                "SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=? AND event_id='queued-slow-resolution' AND status='completed'",
+                [slow],
+                |row| row.get::<_, i64>(0),
+            )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(held, 1, "The held resolution did not admit its event.");
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
     let completed =
         f.s.store
             .read(move |db| {
@@ -1593,14 +1620,6 @@ async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
             .await
             .unwrap();
     assert_eq!(completed, 61);
-    assert!(
-        later_events.is_ok(),
-        "A resolver held later same-instance events in the shared queue."
-    );
-    assert!(
-        progress.is_ok(),
-        "Resource resolution held up independent rule work."
-    );
 }
 
 #[tokio::test]

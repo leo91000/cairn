@@ -165,6 +165,12 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Tests only: signal a hook event queued directly, as the plugin transport does.
+    #[doc(hidden)]
+    pub fn notify_queued(&self) {
+        self.wake.notify_one();
+    }
+
     fn delivery_waiting(&self, key: &(String, String)) -> bool {
         self.delivery_retries
             .lock()
