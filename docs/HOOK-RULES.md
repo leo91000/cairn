@@ -94,7 +94,10 @@ Resolution is limited to one operation per rule and eight in total, with a ten-s
 read deadline and backoff for the affected rule when resolution fails temporarily.
 The same event is never triggered twice for one rule.
 
-The engine walks the tree in order. Before every action it checks the rule again: a
+The engine runs at most one action per rule at a time, returning its executor slot
+after each action. Least recently served rules receive the next free slots; waits
+and retries release their slots until due. The engine walks each tree in order.
+Before every action it checks the rule again: a
 disabled, paused, rights-lost or ended rule stops its triggerings, while an exhausted
 budget lets those already counted finish. A rule blocked while some of its triggerings
 wait stops them. A member's triggering acts only once their
@@ -138,7 +141,8 @@ Actions:
 - `storeValue` with the rule scope keeps up to 64 KiB.
 - `wait` resumes the next steps later; a rule keeps at most 20 triggerings waiting,
   including retries. Membership verification waits retain their seven-day deadline.
-  A rule can hold at most 1,000 active triggerings and unresolved admissions combined; later events are refused only
+  A rule can hold at most 1,000 active triggerings and unresolved admissions combined,
+  and at most 16 MiB of event data across them; later events are refused only
   for that rule and counted as `notAdmitted` in its history, without retaining their
   payloads or blocking the shared instance queue.
 - Conversation actions and conditions about conversation keys come with ticket G

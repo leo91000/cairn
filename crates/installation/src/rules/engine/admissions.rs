@@ -31,7 +31,7 @@ pub(super) fn fanout(db: &Db<'_>, event: &HookEvent, fields: &[String]) -> Resul
         let Some((_, version)) = listener else {
             continue;
         };
-        if db.refuse_admission(&rule, &event.id)? {
+        if db.refuse_admission(&rule, &event.id, event_json.len() + fields_json.len())? {
             continue;
         }
         if !fits {

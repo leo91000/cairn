@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS hook_rule_admissions(
  version INTEGER NOT NULL CHECK(version>=1),
  instance_id TEXT NOT NULL REFERENCES plugin_instances(id) ON DELETE CASCADE,
  event TEXT NOT NULL CHECK(json_valid(event) AND json_type(event)='object'),
+ event_bytes INTEGER GENERATED ALWAYS AS(length(CAST(event AS BLOB))+length(CAST(fields AS BLOB))) STORED,
  fields TEXT NOT NULL CHECK(json_valid(fields) AND json_type(fields)='array'),
  created_at INTEGER NOT NULL,
  CHECK(length(CAST(event AS BLOB))+length(CAST(fields AS BLOB))<=983040),
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS hook_rule_triggerings(
  version INTEGER NOT NULL CHECK(version>=1),
  event_id TEXT NOT NULL CHECK(length(event_id) BETWEEN 1 AND 300),
  event TEXT NOT NULL CHECK(json_valid(event) AND json_type(event)='object'),
+ event_bytes INTEGER GENERATED ALWAYS AS(length(CAST(event AS BLOB))) STORED,
  status TEXT NOT NULL CHECK(status IN ('running','waiting','retrying','completed','failed','stopped')),
  cursor TEXT NOT NULL CHECK(json_valid(cursor) AND json_type(cursor)='object'),
  pending TEXT CHECK(pending IS NULL OR json_valid(pending)),
@@ -134,6 +136,8 @@ const DELIVERY_PATIENCE: i64 = 10 * 60_000;
 /// Triggerings waiting at once, per rule.
 pub(crate) const MAX_WAITING: i64 = 20;
 pub(crate) const MAX_PENDING: i64 = 1000;
+/// Event bytes retained by unresolved admissions and active triggerings, per rule.
+pub(crate) const MAX_PENDING_EVENT_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_RECORDED_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_CURSOR_BYTES: usize = 512 * 1024;
 pub(crate) const MAX_RULE_VALUES_BYTES: usize = 1024 * 1024;
@@ -157,6 +161,7 @@ pub struct Engine {
     delivery_retries: Mutex<HashMap<(String, String), (Instant, u32)>>,
     maintenance: Mutex<Option<Instant>>,
     last_resolution: Mutex<HashMap<String, Instant>>,
+    last_execution: Mutex<HashMap<String, Instant>>,
 }
 
 impl Engine {
@@ -459,16 +464,17 @@ impl Db<'_> {
 
     /// Capacity refusal is a per-rule decision, with no payload retained and no
     /// external resolution. Its receipt prevents recounting if another listener defers.
-    fn refuse_admission(&self, rule: &str, event: &str) -> Result<bool> {
-        let full: bool = self.0.query_row(
-            "SELECT ((SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=?1 \
-             AND status IN ('running','waiting','retrying')) + \
-             (SELECT count(*) FROM hook_rule_admissions a WHERE a.rule_id=?1 AND a.event_id<>?3 \
-             AND NOT EXISTS(SELECT 1 FROM hook_rule_receipts r WHERE r.rule_id=a.rule_id AND r.event_id=a.event_id)))>=?2",
-            params![rule, MAX_PENDING, event],
-            |row| row.get(0),
+    fn refuse_admission(&self, rule: &str, event: &str, incoming_bytes: usize) -> Result<bool> {
+        let (count, bytes): (i64, i64) = self.0.query_row(
+            "SELECT ((SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=?1 AND status IN ('running','waiting','retrying')) + \
+             (SELECT count(*) FROM hook_rule_admissions a WHERE a.rule_id=?1 AND a.event_id<>?2 \
+                 AND NOT EXISTS(SELECT 1 FROM hook_rule_receipts r WHERE r.rule_id=a.rule_id AND r.event_id=a.event_id))), \
+             ((SELECT coalesce(sum(event_bytes),0) FROM hook_rule_triggerings WHERE rule_id=?1 AND status IN ('running','waiting','retrying')) + \
+              (SELECT coalesce(sum(event_bytes),0) FROM hook_rule_admissions a WHERE a.rule_id=?1 AND a.event_id<>?2 \
+                 AND NOT EXISTS(SELECT 1 FROM hook_rule_receipts r WHERE r.rule_id=a.rule_id AND r.event_id=a.event_id)))",
+            params![rule, event], |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        if !full {
+        if count < MAX_PENDING && bytes as usize + incoming_bytes <= MAX_PENDING_EVENT_BYTES {
             return Ok(false);
         }
         self.record_admission_refusal(rule, event)?;
@@ -674,11 +680,13 @@ async fn deliver_hook(
             Delivery::Handled
         });
     }
+    let record = hook_record(event, fields);
+    let incoming_bytes = record.to_string().len();
     let full = s
         .store
         .transaction({
             let (rule, event) = (row.id.clone(), event.id.clone());
-            move |db| db.refuse_admission(&rule, &event)
+            move |db| db.refuse_admission(&rule, &event, incoming_bytes)
         })
         .await?;
     if full {
@@ -715,7 +723,6 @@ async fn deliver_hook(
         }
     }
     s.rules.clear_delivery(&key);
-    let record = hook_record(event, fields);
     let (rule, number, event_id) = (row.id.clone(), version.version, event.id.clone());
     let inserted = s
     .store
@@ -723,7 +730,7 @@ async fn deliver_hook(
         if !admissions::eligible(db, &rule, &event_id, number)? {
             return Ok(None);
         }
-        if db.refuse_admission(&rule, &event_id)? { return Ok(None) }
+        if db.refuse_admission(&rule, &event_id, incoming_bytes)? { return Ok(None) }
         let recorded = record.to_string();
         let recorded_bytes = recorded.len() + 256;
         if recorded_bytes > MAX_RECORDED_BYTES - ERROR_RESERVE {
@@ -804,7 +811,11 @@ async fn queued_instances(s: &Service) -> Result<Vec<String>> {
 
 /// Claims due triggerings. An action left in flight by an interrupted executor stays
 /// ambiguous: its triggering fails rather than replaying it.
-async fn claim(s: &Service, capacity: usize) -> Result<Vec<String>> {
+async fn claim(
+    s: &Service,
+    capacity: usize,
+    excluded: &HashSet<String>,
+) -> Result<Vec<(String, String)>> {
     let due = s.store.read(|db| {
         Ok(db.0.query_row(
             "SELECT EXISTS(SELECT 1 FROM hook_rule_triggerings WHERE (status='running' \
@@ -815,7 +826,9 @@ async fn claim(s: &Service, capacity: usize) -> Result<Vec<String>> {
     if !due {
         return Ok(Vec::new());
     }
-    s.store
+    let excluded = excluded.clone();
+    let order = s.rules.last_execution.lock().unwrap().clone();
+    let (due, existing) = s.store
         .transaction(move |db| {
             let at = now();
             let interrupted = "Cairn stopped while this action was running. It is not run again, \
@@ -832,36 +845,48 @@ async fn claim(s: &Service, capacity: usize) -> Result<Vec<String>> {
                  WHERE status='running' AND in_flight=1 AND lease_until<?1",
             )?
             .execute(params![at, interrupted, serde_json::to_string(&Cursor::default())?])?;
-            // Member checks may wait on Beacon. Leave half of the executors
-            // available to owner rules, even if older member work remains due.
             let members_running: i64 = db.0.query_row(
                 "SELECT count(*) FROM hook_rule_triggerings t JOIN hook_rules r ON r.id=t.rule_id \
                  WHERE r.creator_owner=0 AND t.status='running' AND t.lease_until>=?1",
                 [at], |row| row.get(0),
             )?;
-            let member_capacity = (PARALLEL / 2).saturating_sub(members_running as usize);
+            let mut member_capacity = (PARALLEL / 2).saturating_sub(members_running as usize);
+            // One oldest due triggering per rule, excluding any leased or locally
+            // running rule. Least recently served rules get the next free slot.
+            let mut candidates = db.0.prepare_cached(
+                "SELECT t.id,t.rule_id,r.creator_owner FROM hook_rules r JOIN hook_rule_triggerings t ON t.id=( \
+                   SELECT d.id FROM hook_rule_triggerings d WHERE d.rule_id=r.id AND ( \
+                     (d.status='running' AND (d.lease_until IS NULL OR d.lease_until<?1)) OR \
+                     (d.status IN ('waiting','retrying') AND d.next_at<=?1)) ORDER BY d.created_at,d.id LIMIT 1) \
+                 WHERE NOT EXISTS(SELECT 1 FROM hook_rule_triggerings active WHERE active.rule_id=r.id \
+                   AND active.status='running' AND active.lease_until>=?1) ORDER BY t.created_at,t.id",
+            )?.query_map([at], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, bool>(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            candidates.retain(|(_, rule, _)| !excluded.contains(rule));
+            candidates.sort_by_key(|(_, rule, _)| order.get(rule).copied());
             let mut due = Vec::new();
-            for (owner, limit) in [(false, member_capacity), (true, capacity)] {
-                let limit = limit.min(capacity.saturating_sub(due.len()));
-                if limit == 0 {
-                    continue;
+            for (id, rule, owner) in candidates {
+                if due.len() >= capacity { break }
+                if !owner {
+                    if member_capacity == 0 { continue }
+                    member_capacity -= 1;
                 }
-                let mut statement = db.0.prepare_cached(
-                    "SELECT t.id FROM hook_rule_triggerings t JOIN hook_rules r ON r.id=t.rule_id \
-                     WHERE r.creator_owner=?3 AND ((t.status='running' AND \
-                     (t.lease_until IS NULL OR t.lease_until<?1)) OR (t.status IN ('waiting','retrying') \
-                     AND t.next_at<=?1)) ORDER BY t.created_at,t.id LIMIT ?2",
+                db.0.execute(
+                    "UPDATE hook_rule_triggerings SET status='running',next_at=NULL,lease_until=?2 WHERE id=?1",
+                    params![id, at + LEASE],
                 )?;
-                due.extend(statement.query_map(params![at, limit as i64, owner], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?);
+                due.push((id, rule));
             }
-            for id in &due {
-                db.0.prepare_cached("UPDATE hook_rule_triggerings SET status='running',next_at=NULL,lease_until=?2 WHERE id=?1")?
-                    .execute(params![id, at + LEASE])?;
-            }
-            Ok(due)
-        })
-        .await
+            let existing = db.0.prepare_cached("SELECT id FROM hook_rules")?
+                .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<HashSet<_>>>()?;
+            Ok((due, existing))
+        }).await?;
+    let mut order = s.rules.last_execution.lock().unwrap();
+    order.retain(|rule, _| existing.contains(rule));
+    for (_, rule) in &due {
+        order.insert(rule.clone(), Instant::now());
+    }
+    Ok(due)
 }
 
 fn sweep_rule(db: &Db<'_>, rule: &str) -> Result<()> {
@@ -952,6 +977,7 @@ async fn sweep(s: &Service) -> Result<()> {
 /// progressing while a tool call occupies another executor slot.
 pub async fn tick(s: &Arc<Service>) -> Result<usize> {
     let mut tasks = tokio::task::JoinSet::new();
+    let mut running = HashMap::new();
     let mut intakes = tokio::task::JoinSet::new();
     let mut deliveries = tokio::task::JoinSet::new();
     let mut resolving = HashSet::new();
@@ -1008,7 +1034,8 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
 
         let capacity = PARALLEL.saturating_sub(tasks.len());
         if capacity > 0 {
-            let due = match claim(s, capacity).await {
+            let excluded = running.values().cloned().collect();
+            let due = match claim(s, capacity, &excluded).await {
                 Ok(due) => due,
                 Err(error) if tasks.is_empty() && intakes.is_empty() && deliveries.is_empty() => {
                     return Err(error);
@@ -1018,13 +1045,14 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
                     Vec::new()
                 }
             };
-            for id in due {
+            for (id, rule) in due {
                 ran += 1;
                 let service = s.clone();
-                tasks.spawn(async move {
+                let task = tasks.spawn(async move {
                     let result = run(&service, &id).await;
                     (id, result)
                 });
+                running.insert(task.id(), rule);
             }
         }
 
@@ -1065,9 +1093,13 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
                     None => {}
                 }
             }
-            completed = tasks.join_next(), if !tasks.is_empty() => {
+            completed = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                if let Some(completed) = &completed {
+                    let task_id = match completed { Ok((id, _)) => *id, Err(error) => error.id() };
+                    running.remove(&task_id);
+                }
                 match completed {
-                    Some(Ok((id, Err(error)))) => {
+                    Some(Ok((_, (id, Err(error))))) => {
                         tracing::warn!(triggering = %id, error = %error, "Rule triggering failed to run");
                         let failed = id.clone();
                         let saved = s.store
@@ -1426,14 +1458,20 @@ enum Step {
     Done,
 }
 
-/// Runs one claimed triggering until it waits, retries or ends.
+/// Runs one action, then returns the slot so another rule can progress. Only a
+/// successful nonterminal action releases its lease; ambiguous effects never replay.
 async fn run(s: &Arc<Service>, id: &str) -> Result<()> {
-    loop {
-        match step(s, id).await? {
-            Step::Continue => continue,
-            Step::Done => return Ok(()),
-        }
+    if let Step::Continue = step(s, id).await? {
+        let id = id.to_owned();
+        s.store.transaction(move |db| {
+            db.0.execute(
+                "UPDATE hook_rule_triggerings SET lease_until=NULL WHERE id=? AND status='running' AND in_flight=0",
+                [id],
+            )?;
+            Ok(())
+        }).await?;
     }
+    Ok(())
 }
 
 /// What the interpreter decided before an effect, computed off the async runtime.
@@ -2246,8 +2284,8 @@ mod tests {
             }
             Ok(())
         }).await.unwrap();
-        let first = claim(&service, PARALLEL).await.unwrap();
-        assert_eq!(first.len(), PARALLEL / 2);
+        let first = claim(&service, PARALLEL, &HashSet::new()).await.unwrap();
+        assert_eq!(first.len(), 1);
         service.store.transaction(|db| {
             db.0.execute(
                 "INSERT INTO hook_rule_triggerings(id,rule_id,version,event_id,event,status,cursor,in_flight,actions,tool_calls,verify,created_at,updated_at) \
@@ -2256,11 +2294,53 @@ mod tests {
             Ok(())
         }).await.unwrap();
         assert_eq!(
-            claim(&service, PARALLEL - first.len()).await.unwrap(),
-            ["owner-triggering"]
+            claim(&service, PARALLEL - first.len(), &HashSet::new())
+                .await
+                .unwrap(),
+            [("owner-triggering".to_owned(), "owner".to_owned())]
         );
         // More old member work cannot take the reserved slots on a later pass.
-        assert!(claim(&service, PARALLEL).await.unwrap().is_empty());
+        assert!(
+            claim(&service, PARALLEL, &HashSet::new())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn rules_not_yet_served_precede_an_older_rules_next_action() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+        service.store.transaction(|db| {
+            for index in 0..9 {
+                let rule = format!("rule-{index}");
+                db.0.execute(
+                    "INSERT INTO hook_rules(id,creator_account_id,creator_owner,revision,version,created_at,updated_at) \
+                     VALUES(?1,'owner',1,'revision',1,1,1)", [&rule],
+                )?;
+                db.0.execute(
+                    "INSERT INTO hook_rule_triggerings(id,rule_id,version,event_id,event,status,cursor,in_flight,actions,tool_calls,verify,created_at,updated_at) \
+                     VALUES(?1,?2,1,?1,'{}','running','{}',0,0,0,0,1,1)",
+                    params![format!("triggering-{index}"), rule],
+                )?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let first = claim(&service, PARALLEL, &HashSet::new()).await.unwrap();
+        assert_eq!(first.len(), 8);
+        service
+            .store
+            .transaction(|db| {
+                db.0.execute("UPDATE hook_rule_triggerings SET lease_until=NULL", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let second = claim(&service, PARALLEL, &HashSet::new()).await.unwrap();
+        assert_eq!(second[0].1, "rule-8", "Older work took every slot again.");
     }
 
     #[test]

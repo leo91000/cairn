@@ -742,7 +742,7 @@ pub struct RuleCatalogLimits {
     pub max_triggerings_per_hour: u32,
     pub max_conversations_per_hour: u32,
     pub max_wait_seconds: u32,
-    /// Blocks and iterations one triggering may run, waits excluded.
+    /// Blocks and iterations one triggering may run, actions excluded.
     pub max_steps: u32,
     pub max_tool_calls: u32,
     pub max_nodes: u32,
@@ -758,6 +758,10 @@ pub struct RuleCatalogLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub max_pending: Option<u32>,
+    /// Event bytes retained by unresolved admissions and active triggerings, per rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub max_pending_event_bytes: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

@@ -800,6 +800,13 @@ async fn slow_tools_do_not_hold_up_new_hook_intake_or_other_executor_slots() {
     tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
         .await
         .unwrap();
+    rule(
+        &f,
+        OWNER,
+        steps(&json!([post("independent", &f, &json!({}))])),
+        60,
+    )
+    .await;
     emit(
         &f,
         "new",
@@ -1331,11 +1338,12 @@ async fn the_end_of_a_creators_membership_stops_waiting_work() {
 #[tokio::test]
 async fn a_claim_error_does_not_abort_another_triggerings_in_flight_tool() {
     let f = granted().await;
+    rule(&f, OWNER, steps(&json!([post("slow", &f, &json!({}))])), 60).await;
     rule(&f, OWNER, json!([{
-        "type": "if", "id": "which",
-        "condition": { "type": "authorIn", "author": { "type": "formula", "expression": "author" }, "people": [{ "resourceType": "person", "id": "alice" }] },
-        "then": [post("slow", &f, &json!({}))],
-        "otherwise": [wait_step(1), post("afterWait", &f, &json!({}))],
+        "type": "if", "id": "bob",
+        "condition": { "type": "authorIn", "author": { "type": "formula", "expression": "author" }, "people": [{ "resourceType": "person", "id": "bob" }] },
+        "then": [wait_step(1), post("afterWait", &f, &json!({}))],
+        "otherwise": [],
     }]), 60).await;
     emit(
         &f,
@@ -2547,4 +2555,158 @@ async fn a_resolution_that_finishes_after_its_admission_deadline_cannot_act() {
     );
     assert_eq!(listed["notAdmitted"], 1);
     assert!(!has_seen(&f, &rule).await);
+}
+
+#[tokio::test]
+async fn one_rules_slow_burst_leaves_an_executor_for_another_rule() {
+    let f = granted().await;
+    let slow = rule(
+        &f,
+        OWNER,
+        steps(&json!([post("slow", &f, &json!({}))])),
+        200,
+    )
+    .await;
+    f.hold_posts.store(true, Ordering::SeqCst);
+    for index in 0..8 {
+        emit(
+            &f,
+            &format!("slow-burst-{index}"),
+            json!({ "channel": "support", "author": "alice" }),
+        )
+        .await;
+    }
+    let service = f.s.clone();
+    let worker = tokio::spawn(async move { engine::tick(&service).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+        .await
+        .unwrap();
+    let fast = rule(
+        &f,
+        OWNER,
+        steps(&json!([post(
+            "fast",
+            &f,
+            &json!({
+                "result": { "type": "literal", "value": { "done": "fast" } },
+            })
+        )])),
+        200,
+    )
+    .await;
+    emit(
+        &f,
+        "fast-behind-burst",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    let progress = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if history(&f, OWNER, &fast).await["triggerings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["status"] == "completed")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let slow_calls = f.posts.load(Ordering::SeqCst);
+    f.hold_posts.store(false, Ordering::SeqCst);
+    f.release.notify_waiters();
+    worker.await.unwrap().unwrap();
+    assert!(
+        progress.is_ok(),
+        "A slow rule's burst monopolized every executor."
+    );
+    assert_eq!(
+        slow_calls, 1,
+        "Only one action of a rule may occupy an executor."
+    );
+    let completed = history(&f, OWNER, &slow).await;
+    assert!(
+        completed["triggerings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["status"] == "completed")
+    );
+}
+
+#[tokio::test]
+async fn large_unresolved_events_obey_the_per_rule_byte_budget() {
+    let f = Fixture::new().await;
+    f.marker("resolver-unavailable").await;
+    f.set(json!([contribution("hook", "message", json!([]))]))
+        .await;
+    let fast = rule(&f, OWNER, steps(&json!([])), 200).await;
+    let agent =
+        f.s.agent_fixture(json!({ "name": "Byte-limited listener" }), None)
+            .await
+            .unwrap();
+    let agent_id = text(&agent, "id");
+    f.set_for(
+        agent_id,
+        json!([contribution("hook", "message", support())]),
+    )
+    .await;
+    let (_, source) = call(
+        &f,
+        OWNER,
+        "GET",
+        &format!("/api/hook-rules/{fast}"),
+        Value::Null,
+    )
+    .await;
+    let mut definition = source["definition"].clone();
+    definition["executionAgentId"] = agent_id.into();
+    let (status, slow) = call(
+        &f,
+        OWNER,
+        "POST",
+        "/api/hook-rules",
+        json!({ "definition": definition }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{slow}");
+    let slow = text(&slow, "id").to_owned();
+    for batch in 0..4 {
+        for index in 0..25 {
+            emit(
+                &f,
+                &format!("large-{batch}-{index}"),
+                json!({ "channel": "support", "author": "alice", "large": "x".repeat(250*1024) }),
+            )
+            .await;
+        }
+        engine::tick(&f.s).await.unwrap();
+    }
+    let id = slow.clone();
+    let (rows, bytes) = f.s.store.read(move |db| {
+        Ok(db.0.query_row("SELECT count(*),coalesce(sum(event_bytes),0) FROM hook_rule_admissions WHERE rule_id=?", [id], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, i64>(1)?)))?)
+    }).await.unwrap();
+    assert!(rows > 0 && rows < 100);
+    assert!(bytes <= 16 * 1024 * 1024, "Retained event bytes: {bytes}");
+    assert_eq!(
+        history(&f, OWNER, &slow).await["notAdmitted"]
+            .as_i64()
+            .unwrap(),
+        100 - rows
+    );
+    assert_eq!(history(&f, OWNER, &fast).await["withoutEffect"], 100);
+    let queued =
+        f.s.store
+            .read(|db| {
+                Ok(db
+                    .0
+                    .query_row("SELECT count(*) FROM plugin_hook_events", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(queued, 0);
 }

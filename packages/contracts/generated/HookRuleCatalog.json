@@ -271,6 +271,15 @@
             "null"
           ]
         },
+        "maxPendingEventBytes": {
+          "description": "Event bytes retained by unresolved admissions and active triggerings, per rule.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "maxRecordedBytes": {
           "format": "uint32",
           "minimum": 0,
@@ -288,7 +297,7 @@
           ]
         },
         "maxSteps": {
-          "description": "Blocks and iterations one triggering may run, waits excluded.",
+          "description": "Blocks and iterations one triggering may run, actions excluded.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"

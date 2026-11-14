@@ -32,6 +32,7 @@ pub(crate) struct Fixture {
     pub(crate) http_origin: String,
     pub(crate) posts: Arc<AtomicUsize>,
     pub(crate) pause: Arc<AtomicBool>,
+    pub(crate) hold_posts: Arc<AtomicBool>,
     pub(crate) entered: Arc<tokio::sync::Notify>,
     pub(crate) release: Arc<tokio::sync::Notify>,
     pub(crate) moved_parent: Arc<AtomicBool>,
@@ -94,6 +95,7 @@ impl Fixture {
         let posts = Arc::new(AtomicUsize::new(0));
         let count = posts.clone();
         let pause = Arc::new(AtomicBool::new(false));
+        let hold_posts = Arc::new(AtomicBool::new(false));
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let moved_parent = Arc::new(AtomicBool::new(false));
@@ -110,22 +112,28 @@ impl Fixture {
         );
         let hold_entered = entered.clone();
         let hold_release = release.clone();
-        let (paused, arrived, resume) = (pause.clone(), entered.clone(), release.clone());
+        let (paused, held, arrived, resume) = (
+            pause.clone(),
+            hold_posts.clone(),
+            entered.clone(),
+            release.clone(),
+        );
         let (origin, _server) = common::serve_locally(
             Router::new()
                 .route(
                     "/effect",
                     any(move || {
                         let moved = remote_parent.clone();
-                        let (count, paused, arrived, resume) = (
+                        let (count, paused, held, arrived, resume) = (
                             count.clone(),
                             paused.clone(),
+                            held.clone(),
                             arrived.clone(),
                             resume.clone(),
                         );
                         async move {
                             count.fetch_add(1, Ordering::SeqCst);
-                            if paused.swap(false, Ordering::SeqCst) {
+                            if paused.swap(false, Ordering::SeqCst) || held.load(Ordering::SeqCst) {
                                 arrived.notify_one();
                                 resume.notified().await;
                             }
@@ -382,6 +390,7 @@ return {
             http_origin: origin,
             posts,
             pause,
+            hold_posts,
             entered,
             release,
             moved_parent,

@@ -14,6 +14,8 @@ data class RuleCatalogLimits(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val maxPending: Long? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val maxPendingEventBytes: Long? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val maxRecordedBytes: Long? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val maxRuleValuesBytes: Long? = null,
@@ -27,6 +29,7 @@ data class RuleCatalogLimits(
         maxCursorBytes?.let { require(it >= 0L) }
         require(maxNodes >= 0L)
         maxPending?.let { require(it >= 0L) }
+        maxPendingEventBytes?.let { require(it >= 0L) }
         maxRecordedBytes?.let { require(it >= 0L) }
         maxRuleValuesBytes?.let { require(it >= 0L) }
         require(maxSteps >= 0L)
