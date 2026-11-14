@@ -18,6 +18,13 @@ const root = new URL('../../', import.meta.url)
 const workflow = parse(readFileSync(new URL('.github/workflows/ci.yaml', root), 'utf8'))
 const realSudo = process.env.CAIRN_TEST_REAL_SUDO === '1'
 const setup = workflow.jobs.backend.steps.find(step => step.name === 'Install native test dependencies')
+// Work budgets for a faulted phase, chosen by what must happen before it
+// expires. Expiry scenarios prove the bound from the supervisor's markers,
+// whether or not the fake APT has started. Started scenarios need Node startup
+// (and sometimes a child spawn) first: keep headroom for the explicit 200 ms
+// startup controls and scheduler contention, within the same harness.
+const expirySeconds = 0.15
+const startedFixtureSeconds = 0.75
 
 async function executeSetup(fault = '', {
   profile = 'native',
@@ -27,6 +34,8 @@ async function executeSetup(fault = '', {
   cancelMarkerFailure = false,
   aptStartupDelayMs = 0,
   aptEntryDelayMs = 0,
+  faultStartupDelayMs = 0,
+  workSeconds: faultWorkSeconds,
   interruptSignal,
   interruptPhase = 'descendant',
 } = {}) {
@@ -46,6 +55,9 @@ const { constants } = require('node:os')
 const name = basename(process.argv[1])
 const args = process.argv.slice(2)
 const phase = name === 'sudo' ? 'entry' : args.includes('update') ? 'update' : 'install'
+// Models a faulted command that the host has not scheduled before its deadline.
+if (phase === ${JSON.stringify(fault)} && ${faultStartupDelayMs} > 0)
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${faultStartupDelayMs})
 if (phase !== 'entry' && ${aptEntryDelayMs} > 0) {
   appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'apt-entry', pid: process.pid, uid: process.getuid() }) + '\\n')
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${aptEntryDelayMs})
@@ -98,10 +110,7 @@ if (phase === fault) {
   // bounded marker writes may exceed the shortened deadline.
   // The independent two-second harness still rejects a stuck setup or cleanup.
   const exercisesDeadline = ['entry', 'update', 'install', 'hard-stall', 'orphan-stall', 'stalled-supervision'].includes(fault)
-  // APT fault assertions need Node startup (and sometimes a child spawn) to
-  // happen before the real deadline. Keep headroom for the explicit 200 ms
-  // startup controls as well as scheduler contention, within the same harness.
-  const fixtureWorkSeconds = fault === 'entry' ? 0.15 : 0.75
+  const fixtureWorkSeconds = faultWorkSeconds ?? (fault === 'entry' ? expirySeconds : startedFixtureSeconds)
   const workSeconds = fault === 'controller-crash' ? 2 : interruptSignal && !cancelMarkerFailure ? 5 : exercisesDeadline ? fixtureWorkSeconds : undefined
   const deadlinePhase = fault === 'install' ? 'install' : 'update'
   const phaseSeconds = workSeconds === undefined ? {} : { [deadlinePhase]: workSeconds }
@@ -269,13 +278,37 @@ describe('native CI dependency setup', () => {
     expect(result.calls).toEqual([])
   })
 
-  it.each(['entry', 'update', 'install'])('bounds and identifies a silent %s stall without starting later work', async (fault) => {
-    const result = await executeSetup(fault)
+  // An install deadline may expire before a loaded host starts the faulted
+  // APT fixture. Phase markers, not the fixture's own start, identify the
+  // bounded phase; APT is never run again after it. The update stall needs its
+  // admission marker, so it keeps the started-fixture budget.
+  it.each([
+    ['entry', expirySeconds, 0],
+    ['update', startedFixtureSeconds, 0],
+    ['install', expirySeconds, 0],
+    ['install', expirySeconds, 1000],
+  ])('bounds and identifies a silent %s stall without starting later work (budget %s s, fixture startup delay %i ms)', async (fault, workSeconds, faultStartupDelayMs) => {
+    const result = await executeSetup(fault, { workSeconds, faultStartupDelayMs })
     expect(result.harnessKilled).toBe(false)
     expect(result.status).toBe(124)
     expect(result.output).toContain(`phase=${fault === 'install' ? 'install' : 'update'} event=start`)
     expect(result.output.includes('phase=update event=apt-start')).toBe(fault !== 'entry')
-    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(fault === 'install' ? 1 : 0)
+    expect(result.output.match(/phase=install event=start /g) ?? []).toHaveLength(fault === 'install' ? 1 : 0)
+    const installs = result.calls.filter(call => call.phase === 'install')
+    if (fault === 'install') {
+      expect(result.output).toContain('phase=update event=end code=0')
+      expect(result.output).toContain('phase=install event=end code=124')
+      expect(result.calls.filter(call => call.phase === 'update')).toHaveLength(1)
+      // A delayed fixture is stopped with its group before it can run.
+      if (faultStartupDelayMs)
+        expect(installs).toHaveLength(0)
+      else
+        expect(installs.length).toBeLessThanOrEqual(1)
+    }
+    else {
+      expect(installs).toHaveLength(0)
+    }
+
     expect(result.elapsedMs).toBeLessThan(1800)
   })
 
@@ -288,14 +321,17 @@ describe('native CI dependency setup', () => {
     expect(result.survivingFixturePids).toEqual([])
   })
 
-  it('reaches the install deadline after a slow successful update', async () => {
-    const result = await executeSetup('install', { aptStartupDelayMs: 250 })
+  // Slow update startup must not consume the install budget. The install
+  // expiry needs no started fixture, which keeps margin within the harness.
+  it.each([0, 1000])('reaches the install deadline after a slow successful update (install startup delay %i ms)', async (faultStartupDelayMs) => {
+    const result = await executeSetup('install', { aptStartupDelayMs: 250, workSeconds: expirySeconds, faultStartupDelayMs })
     expect(result.harnessKilled).toBe(false)
     expect(result.status).toBe(124)
     expect(result.output).toContain('phase=update event=end code=0')
-    expect(result.output).toContain('phase=install event=start')
+    expect(result.output.match(/phase=install event=start /g) ?? []).toHaveLength(1)
     expect(result.output).toContain('phase=install event=end code=124')
-    expect(result.calls.filter(call => ['update', 'install'].includes(call.phase)).map(call => call.phase)).toEqual(['update', 'install'])
+    expect(result.calls.filter(call => call.phase === 'update')).toHaveLength(1)
+    expect(result.calls.filter(call => call.phase === 'install').length).toBeLessThanOrEqual(faultStartupDelayMs ? 0 : 1)
     expect(result.liveAtPublicExit).toEqual([])
     expect(result.survivingFixturePids).toEqual([])
     expect(result.elapsedMs).toBeLessThan(1800)
