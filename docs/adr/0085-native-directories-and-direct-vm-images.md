@@ -119,3 +119,12 @@ son identité et ses consommateurs après l’arrêt de l’exécution. Un conso
 inconnu conserve les fichiers et une erreur récupérable ; cette vérification ne
 signale aucun processus. L’effacement et le fsync du parent précèdent la bascule
 de migration, et la récupération des formats déjà publiés rejoue ce nettoyage.
+
+L’admission d’une image VM attend uniquement la contention réelle du verrou de
+capacité, avec annulation et délai de 30 secondes ; un conflit d’appartenance
+reste un refus distinct. La migration native facture simultanément sa source
+retenue et la copie supplémentaire au budget partagé. Elle exige aussi la réserve
+physique du pool de données, observe le coût restant de la copie sous quota, et
+interrompt son groupe rsync si ces conditions cessent d’être remplies. La source
+reste retenue, le groupe est signalé avant de réutiliser son identifiant, et ses
+consommateurs sont attendus avant la suppression de la copie partielle.

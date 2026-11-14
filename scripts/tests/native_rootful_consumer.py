@@ -36,8 +36,16 @@ daemon = subprocess.Popen([str(binary / 'dockerd'), '--data-root=' + str(store),
 
 
 def docker(*args, data=None):
-    return subprocess.run([str(binary / 'docker'), '--host=' + socket, *args],
-        env=environment, input=data, capture_output=True, check=True, timeout=60).stdout.decode().strip()
+    result = subprocess.run([str(binary / 'docker'), '--host=' + socket, *args],
+        env=environment, input=data, capture_output=True, timeout=60)
+    if result.returncode:
+        # These are synthetic, credential-free commands against this private
+        # daemon. Preserve its actual error instead of only printing argv.
+        if args[0] != 'info':
+            detail = result.stderr.decode(errors='replace')[-8192:]
+            print(f'Private Docker {args[0]} failed ({result.returncode}): {detail}', file=sys.stderr)
+        result.check_returncode()
+    return result.stdout.decode().strip()
 
 
 try:

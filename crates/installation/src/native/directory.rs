@@ -347,6 +347,12 @@ async fn migrate(
             if requested < original {
                 return Err(Error::conflict("Native conversion cannot shrink its retained allowance."));
             }
+            let source = root.join("data");
+            let measured = source.clone();
+            let required = tokio::task::spawn_blocking(move || super::bases::clone_footprint(&measured))
+                .await.map_err(Error::internal)??;
+            let fallback = storage::policy::for_node(&plan["storage"]["policy"])?;
+            check_copy_headroom(state, required, &fallback).await?;
             quota::prepare(
                 state,
                 &workload,
@@ -357,7 +363,10 @@ async fn migrate(
             )
             .await?;
             private_dir(&staging).await?;
-            copy_verified(&root.join("data"), &staging).await?;
+            let capacity = MigrationCapacity {
+                state: state.to_owned(), workload: workload.clone(), required, fallback,
+            };
+            copy_verified_with_capacity(&source, &staging, stop, Some(&capacity)).await?;
             // Verify the final allocated total as well as the kernel-enforced
             // copy. Keep the old journal intact if the grant is insufficient.
             let allowance = plan["resources"]["diskMiB"].as_u64().unwrap() * super::disk::MIB;
@@ -369,7 +378,19 @@ async fn migrate(
         .await;
         legacy.close().await?;
         drop(legacy);
-        let proof = copied?;
+        let proof = match copied {
+            Ok(proof) => proof,
+            Err(error) => {
+                // No writer was admitted to this uncommitted private tree.
+                // The monitored rsync group has settled before returning here.
+                workspace::require_no_mounts(&staging)?;
+                if staging.exists() {
+                    tokio::fs::remove_dir_all(&staging).await?;
+                }
+                tokio::fs::File::open(&workload).await?.sync_all().await?;
+                return Err(error);
+            }
+        };
         atomic_write(&marker, &serde_json::to_vec(&proof)?).await?;
     }
     let owner = environment::lock(state, run, DISK_BUSY).await?;
@@ -601,12 +622,92 @@ fn hash_conversion_attributes(path: &Path, hash: &mut blake3::Hasher) -> std::io
     Ok(())
 }
 
-pub(super) async fn copy_verified(source: &Path, target: &Path) -> Result<()> {
-    let source = format!("{}/", source.display());
+struct MigrationCapacity {
+    state: PathBuf,
+    workload: PathBuf,
+    required: u64,
+    fallback: storage::policy::Policy,
+}
+
+impl MigrationCapacity {
+    async fn check(&self) -> Result<()> {
+        let workload = self.workload.clone();
+        let allocated = tokio::task::spawn_blocking(move || quota::usage(&workload))
+            .await
+            .map_err(Error::internal)??;
+        check_copy_headroom(
+            &self.state,
+            self.required.saturating_sub(allocated),
+            &self.fallback,
+        )
+        .await
+    }
+}
+
+async fn check_copy_headroom(
+    state: &Path,
+    remaining: u64,
+    fallback: &storage::policy::Policy,
+) -> Result<()> {
+    let state = state.to_owned();
+    let fallback = fallback.clone();
+    let sample = tokio::task::spawn_blocking(move || -> Result<()> {
+        let policy = match std::fs::read(state.join("storage-policy.json")) {
+            Ok(bytes) => storage::policy::from_persisted(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fallback,
+            Err(error) => return Err(error.into()),
+        };
+        let (total, free) = storage::policy::physical_space(&workspace::data_root(&state))?;
+        let pending = storage::cache::pending_write_bytes();
+        let physical = free
+            .saturating_sub(policy.reserve(total))
+            .saturating_sub(pending);
+        let shared = match std::fs::read(state.join(crate::microvm::budget::FILE)) {
+            Ok(bytes) => {
+                let budget = super::native_budget(&serde_json::from_slice(&bytes)?)?;
+                crate::microvm::budget::invalidate_disk_usage(&state)?;
+                let used = crate::microvm::budget::committed_disk_bytes(&state)?;
+                (budget.limits.disk_mi_b * super::disk::MIB)
+                    .saturating_sub(used)
+                    .saturating_sub(pending)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => u64::MAX,
+            Err(error) => return Err(error.into()),
+        };
+        if remaining.saturating_add(super::disk::MIB) > physical.min(shared) {
+            return Err(Error::new(
+                507,
+                "Native conversion needs replacement headroom within the shared budget and data-pool reserve; source retained.",
+            ));
+        }
+        Ok(())
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), sample)
+        .await
+        .map_err(|_| {
+            Error::unavailable(
+                "Native conversion capacity observations are stale; source retained.",
+            )
+        })?
+        .map_err(Error::internal)?
+}
+
+pub(super) async fn copy_verified(
+    source: &Path,
+    target: &Path,
+    stop: &CancellationToken,
+) -> Result<()> {
+    copy_verified_with_capacity(source, target, stop, None).await
+}
+
+async fn copy_verified_with_capacity(
+    source: &Path,
+    target: &Path,
+    stop: &CancellationToken,
+    capacity: Option<&MigrationCapacity>,
+) -> Result<()> {
     let mut copy = tokio::process::Command::new("rsync");
-    // Root's CAP_SYS_RESOURCE bypasses project quotas, including inode limits.
-    // The child retains the ownership/xattr privileges needed for preservation,
-    // but its exec cannot regain the quota exemption from UID zero.
+    // The exec child retains ownership/xattr privileges but cannot bypass quotas.
     unsafe {
         copy.pre_exec(|| {
             if libc::geteuid() == 0
@@ -618,47 +719,202 @@ pub(super) async fn copy_verified(source: &Path, target: &Path) -> Result<()> {
             Ok(())
         });
     }
-    let result = copy
-        .args([
-            "-aHAX",
-            "--numeric-ids",
-            "--sparse",
-            "--fsync",
-            "--",
-            &source,
-        ])
-        .arg(target)
-        .kill_on_drop(true)
-        .output()
-        .await?;
-    if !result.status.success() {
-        return Err(Error::unavailable("Native copy failed; source retained."));
-    }
-    verify_copy(Path::new(source.trim_end_matches('/')), target).await?;
+    copy.args(["-aHAX", "--numeric-ids", "--sparse", "--fsync", "--"])
+        .arg(format!("{}/", source.display()))
+        .arg(target);
+    rsync_status(copy, stop, capacity).await?;
+    verify_copy_with_capacity(source, target, stop, capacity).await?;
     block::sync(target).await
 }
 
-pub(super) async fn verify_copy(source: &Path, target: &Path) -> Result<()> {
-    let source = format!("{}/", source.display());
-    let verify = tokio::process::Command::new("rsync")
+pub(super) async fn verify_copy(
+    source: &Path,
+    target: &Path,
+    stop: &CancellationToken,
+) -> Result<()> {
+    verify_copy_with_capacity(source, target, stop, None).await
+}
+
+async fn verify_copy_with_capacity(
+    source: &Path,
+    target: &Path,
+    stop: &CancellationToken,
+    capacity: Option<&MigrationCapacity>,
+) -> Result<()> {
+    let mut verify = tokio::process::Command::new("rsync");
+    verify
         .args([
             "-aHAXnc",
             "--numeric-ids",
             "--delete",
             "--itemize-changes",
             "--",
-            &source,
         ])
-        .arg(target)
+        .arg(format!("{}/", source.display()))
+        .arg(target);
+    rsync_status(verify, stop, capacity).await
+}
+
+/// rsync is a local trusted program; both commands are quiet on success. Keep
+/// its leader unreaped until stdout closes, so cancellation can signal only its
+/// original process group while that leader's PID cannot be recycled.
+async fn rsync_status(
+    mut command: tokio::process::Command,
+    stop: &CancellationToken,
+    capacity: Option<&MigrationCapacity>,
+) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    if let Some(capacity) = capacity {
+        capacity.check().await?;
+    }
+    if stop.is_cancelled() {
+        return Err(Error::unavailable("Native copy stopped; source retained."));
+    }
+    let mut child = command
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
-        .output()
-        .await?;
-    if !verify.status.success() || !verify.stdout.is_empty() {
-        return Err(Error::conflict(
-            "Native copy verification failed; source retained.",
-        ));
+        .spawn()?;
+    let mut output = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::unavailable("Native copy output was not acquired."))?;
+    let mut one = [0_u8; 1];
+    let mut closed = false;
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+    let result = loop {
+        tokio::select! {
+            () = stop.cancelled() => {
+                break Err(Error::unavailable("Native copy stopped; source retained."));
+            },
+            result = output.read(&mut one), if !closed => {
+                match result {
+                    Ok(0) => closed = true,
+                    Ok(_) => {
+                        break Err(Error::conflict("Native copy verification reported differences; source retained."));
+                    },
+                    Err(error) => break Err(error.into()),
+                }
+            },
+            status = child.wait(), if closed => {
+                break status.map_err(Into::into);
+            },
+            _ = interval.tick(), if capacity.is_some() => {
+                if let Some(capacity) = capacity
+                    && let Err(error) = capacity.check().await
+                {
+                    break Err(error);
+                }
+            }
+        }
+    };
+    let status = match result {
+        Ok(status) => status,
+        Err(error) => {
+            // Child has not been reaped on these branches. Its numeric PID
+            // still pins the process-group identity established before exec.
+            if let Some(pid) = child.id()
+                && unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                tracing::warn!(
+                    "Native copy group signalling failed; ownership retained while waiting"
+                );
+            }
+            // Keep the leader unreaped while its group identity is needed to
+            // inventory children, including a receiver blocked in filesystem IO.
+            if let Some(pid) = child.id() {
+                let mut warning = tokio::time::Instant::now();
+                loop {
+                    let observation = copy_group_remaining(pid);
+                    if matches!(&observation, Ok(0)) {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= warning {
+                        match observation {
+                            Ok(remaining) => tracing::warn!(
+                                remaining,
+                                "Native copy descendants remain unsettled; ownership retained"
+                            ),
+                            Err(error) => {
+                                tracing::warn!(%error, "Native copy descendant inventory is uncertain; ownership retained");
+                            }
+                        }
+                        warning = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+                    Ok(result) => {
+                        result?;
+                        break;
+                    }
+                    Err(_) => tracing::warn!(
+                        "Native copy retirement is pending; source and ownership retained"
+                    ),
+                }
+            }
+            return Err(error);
+        }
+    };
+    if !status.success() {
+        return Err(Error::unavailable(format!(
+            "Native copy failed ({status}); source retained."
+        )));
+    }
+    if let Some(capacity) = capacity {
+        capacity.check().await?;
     }
     Ok(())
+}
+
+fn copy_group_remaining(leader: u32) -> std::io::Result<usize> {
+    let mut remaining = 0;
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == leader {
+            continue;
+        }
+        let group = unsafe { libc::getpgid(pid as i32) };
+        if group < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                continue;
+            }
+            return Err(error);
+        }
+        if group != leader as i32 {
+            continue;
+        }
+        let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let tail = stat
+            .rsplit_once(") ")
+            .ok_or_else(|| std::io::Error::other("Invalid copy process inventory"))?
+            .1;
+        let mut fields = tail.split_whitespace();
+        let state = fields.next();
+        let _parent = fields.next();
+        let group = fields.next().and_then(|value| value.parse::<u32>().ok());
+        if group == Some(leader) && !matches!(state, Some("Z" | "X")) {
+            remaining += 1;
+        }
+    }
+    Ok(remaining)
 }
 
 pub async fn status(state: &Path, run: &str) -> Result<Value> {
@@ -977,6 +1233,254 @@ fn observe(volume: std::sync::Weak<Volume>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+
+    fn copy_budget(state: &Path, disk_mib: u64) {
+        std::fs::write(
+            state.join(crate::microvm::budget::FILE),
+            serde_json::to_vec(&json!({
+                "nativeModeProtocol": 1,
+                "slots": 1,
+                "limits": {
+                    "cpu": 1,
+                    "memoryMiB": 128,
+                    "diskMiB": disk_mib
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn copy_space_fixture(state: &Path, data: &Path) -> storage::policy::Policy {
+        use std::io::Write;
+        std::fs::create_dir_all(workspace::data_root(state)).unwrap();
+        std::fs::write(
+            state.join("native-accounting.json"),
+            serde_json::to_vec(&json!({ "data": data })).unwrap(),
+        )
+        .unwrap();
+        let policy =
+            storage::policy::for_node(&json!({ "reserveMiB": 64, "reservePercent": 1 })).unwrap();
+        std::fs::write(
+            state.join("storage-policy.json"),
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
+        let mut source = std::fs::File::create(data.join("retained-source")).unwrap();
+        source.write_all(b"retained source canary").unwrap();
+        source.set_len(96 * super::super::disk::MIB).unwrap();
+        std::fs::File::create(data.join("other-work"))
+            .unwrap()
+            .set_len(24 * super::super::disk::MIB)
+            .unwrap();
+        policy
+    }
+
+    #[tokio::test]
+    async fn replacement_admission_charges_retained_work_and_refreshes_budget_and_physical_reserve()
+    {
+        const CHILD: &str = "CAIRN_TEST_NATIVE_COPY_HEADROOM";
+        if std::env::var_os(CHILD).is_none() {
+            let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .env_clear().env(CHILD, "1").env("TMPDIR", std::env::temp_dir())
+                .args(["--exact", "native::directory::tests::replacement_admission_charges_retained_work_and_refreshes_budget_and_physical_reserve", "--nocapture"])
+                .status().await.unwrap();
+            assert!(status.success());
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let policy = copy_space_fixture(state.path(), data.path());
+        let required = 96 * super::super::disk::MIB;
+        copy_budget(state.path(), 128);
+        assert_eq!(
+            check_copy_headroom(state.path(), required, &policy)
+                .await
+                .unwrap_err()
+                .status,
+            507
+        );
+        copy_budget(state.path(), 256);
+        check_copy_headroom(state.path(), required, &policy)
+            .await
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(data.path().join("other-work"))
+            .unwrap()
+            .set_len(128 * super::super::disk::MIB)
+            .unwrap();
+        assert!(
+            check_copy_headroom(state.path(), required, &policy)
+                .await
+                .is_err()
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(data.path().join("other-work"))
+            .unwrap()
+            .set_len(24 * super::super::disk::MIB)
+            .unwrap();
+        let (total, _) =
+            storage::policy::physical_space(&workspace::data_root(state.path())).unwrap();
+        let mut reserve = policy.clone();
+        reserve.reserve_mi_b = total / super::super::disk::MIB + 1;
+        std::fs::write(
+            state.path().join("storage-policy.json"),
+            serde_json::to_vec(&reserve).unwrap(),
+        )
+        .unwrap();
+        assert!(check_copy_headroom(state.path(), 0, &policy).await.is_err());
+        assert_eq!(
+            std::fs::metadata(data.path().join("retained-source"))
+                .unwrap()
+                .len(),
+            required
+        );
+        let mut source = std::fs::File::open(data.path().join("retained-source")).unwrap();
+        let mut canary = [0; 22];
+        source.read_exact(&mut canary).unwrap();
+        assert_eq!(&canary, b"retained source canary");
+    }
+
+    fn sleeping_copy(marker: &Path) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                r#"sleep 30 & printf '%s %s' "$$" "$!" > "$1.partial"; mv "$1.partial" "$1"; wait"#,
+                "native-copy-test",
+            ])
+            .arg(marker);
+        command
+    }
+
+    async fn copy_process_handles(marker: &Path) -> Vec<std::fs::File> {
+        use std::os::fd::FromRawFd;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(value) = tokio::fs::read_to_string(marker).await {
+                    let pids: Vec<u32> = value
+                        .split_whitespace()
+                        .map(|value| value.parse().unwrap())
+                        .collect();
+                    if pids.len() == 2 {
+                        return pids
+                            .into_iter()
+                            .map(|pid| {
+                                let fd =
+                                    unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+                                assert!(fd >= 0);
+                                unsafe { std::fs::File::from_raw_fd(fd) }
+                            })
+                            .collect();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    fn copy_processes_exited(handles: &[std::fs::File]) {
+        use std::os::fd::AsRawFd;
+        for file in handles {
+            let mut poll = libc::pollfd {
+                fd: file.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(unsafe { libc::poll(&mut poll, 1, 2000) }, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_settles_only_the_owned_copy_process_group() {
+        let fixture = tempfile::tempdir().unwrap();
+        let marker = fixture.path().join("copy-processes");
+        let stop = CancellationToken::new();
+        let operation = tokio::spawn({
+            let stop = stop.clone();
+            let command = sleeping_copy(&marker);
+            async move { rsync_status(command, &stop, None).await }
+        });
+        let handles = copy_process_handles(&marker).await;
+        stop.cancel();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), operation)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        copy_processes_exited(&handles);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires scripts/qualify-native-quota.mjs on its dedicated disposable filesystem"]
+    async fn kernel_migration_copy_headroom() {
+        assert_eq!(
+            std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),
+            Ok("1")
+        );
+        let state = PathBuf::from(std::env::var_os("CAIRN_NATIVE_QUOTA_TEST_STATE").unwrap());
+        quota::require(&state).unwrap();
+        let names = [
+            crate::microvm::budget::FILE,
+            "native-accounting.json",
+            "storage-policy.json",
+        ];
+        let previous: Vec<_> = names
+            .iter()
+            .map(|name| std::fs::read(state.join(name)).ok())
+            .collect();
+        let data = tempfile::tempdir().unwrap();
+        let policy = copy_space_fixture(&state, data.path());
+        copy_budget(&state, 512);
+        let run = crate::config::id();
+        let root = workspace::directory(&state, &run).unwrap();
+        private_dir(&root).await.unwrap();
+        let workload = workspace::workload(&state, &run).unwrap();
+        quota::prepare(&state, &workload, 128 * super::super::disk::MIB)
+            .await
+            .unwrap();
+        let capacity = MigrationCapacity {
+            state: state.clone(),
+            workload: workload.clone(),
+            required: 96 * super::super::disk::MIB,
+            fallback: policy,
+        };
+        capacity.check().await.unwrap();
+        let marker = data.path().join("copy-processes");
+        let operation = tokio::spawn({
+            let command = sleeping_copy(&marker);
+            async move { rsync_status(command, &CancellationToken::new(), Some(&capacity)).await }
+        });
+        let handles = copy_process_handles(&marker).await;
+        copy_budget(&state, 128);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), operation)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err()
+                .status,
+            507
+        );
+        copy_processes_exited(&handles);
+        assert!(data.path().join("retained-source").is_file());
+        quota::retire(&root).await.unwrap();
+        for (name, value) in names.into_iter().zip(previous) {
+            if let Some(bytes) = value {
+                std::fs::write(state.join(name), bytes).unwrap();
+            } else {
+                std::fs::remove_file(state.join(name)).unwrap();
+            }
+        }
+        crate::microvm::budget::invalidate_disk_usage(&state).unwrap();
+    }
 
     #[tokio::test]
     async fn conversion_proof_survives_rename_and_refuses_changed_or_missing_replacements() {

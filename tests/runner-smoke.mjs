@@ -591,7 +591,7 @@ console.log('probe.done');
           });req.on('error',reject);
         });
         const drive=config.drives.find(d=>d.drive_id==='data');
-        require('node:assert/strict').equal(drive.path_on_host,'disk.blk');
+        require('node:assert/strict').equal(drive.path_on_host,'data.ext4');
         require('node:assert/strict').equal(drive.socket,undefined);
         return {machine:config['machine-config'],config:config.balloon,stats};
       })).then(result=>console.log(JSON.stringify(result)));

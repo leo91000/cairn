@@ -598,12 +598,21 @@ impl Pool {
         directory: &Path,
         size: u64,
         policy: &crate::storage::policy::Policy,
+        stop: &CancellationToken,
     ) -> Result<crate::storage::reservation::Reservation> {
         let _admission = self.admission.lock().await;
         self.cancel_preparing().await?;
         loop {
             self.ensure_not_quarantined()?;
-            match crate::storage::reservation::reserve(&self.state, directory, size, policy).await {
+            match crate::storage::reservation::reserve_cancellable(
+                &self.state,
+                directory,
+                size,
+                policy,
+                stop,
+            )
+            .await
+            {
                 Ok(reservation) => return Ok(reservation),
                 Err(error) if error.status == 507 => {
                     let idle = {
@@ -841,11 +850,12 @@ impl Reservation {
         });
         let operation = async {
             self.disk_reservation = Some(
-                crate::storage::reservation::reserve(
+                crate::storage::reservation::reserve_cancellable(
                     &self.pool.state,
                     &directory,
                     DEFAULT_DISK_MIB * 1_048_576,
                     &policy,
+                    &stop,
                 )
                 .await?,
             );
@@ -1013,7 +1023,8 @@ impl Reservation {
             let disk = self.owner.as_ref().unwrap().directory.clone();
             if !compatible {
                 let policy = crate::storage::policy::for_node(&plan.storage()["policy"])?;
-                self.disk_reservation = Some(self.pool.reserve_image(&disk, size, &policy).await?);
+                self.disk_reservation =
+                    Some(self.pool.reserve_image(&disk, size, &policy, &stop).await?);
                 crate::storage::image::prepare(&disk, size, plan.storage(), &stop).await?;
             }
             crate::storage::image::authorize(self.owner.as_ref().unwrap(), plan.storage()).await?;
@@ -1718,7 +1729,7 @@ mod tests {
                 507
             );
             let promise = pool
-                .reserve_image(&requested, 33 * MIB, &policy)
+                .reserve_image(&requested, 33 * MIB, &policy, &CancellationToken::new())
                 .await
                 .unwrap();
             assert_eq!(
@@ -1738,7 +1749,7 @@ mod tests {
             }
             let impossible = state.join("disks").join(crate::config::id());
             assert_eq!(
-                pool.reserve_image(&impossible, 64 * MIB, &policy)
+                pool.reserve_image(&impossible, 64 * MIB, &policy, &CancellationToken::new())
                     .await
                     .err()
                     .unwrap()

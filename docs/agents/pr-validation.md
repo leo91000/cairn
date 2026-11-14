@@ -74,7 +74,9 @@ provide test evidence for the PR; it cannot supply reusable release provenance.
 
 For direct-storage development, `ci-diagnostic=storage`, `validation-only=true`
 and `backend-only=false` run the dedicated project-quota lifecycle test and image
-persistence/admission tests on a disposable runner. This does not replace the
+persistence/admission tests on a disposable runner. The native kernel selection
+also verifies migration-copy headroom reduction and owned-copy process cleanup;
+all five exact cases must execute, without accepting an empty or ignored match. This does not replace the
 full native/node/VM qualifications. The quota fixture drops `CAP_SYS_RESOURCE`
 because Linux allows that capability to bypass project hard limits.
 

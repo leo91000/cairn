@@ -489,13 +489,13 @@ impl Bases {
         if existing_data && std::fs::read_dir(&data)?.next().is_some() {
             // Rename may have completed before the format marker. Verify only;
             // never overwrite retained files while replaying initialization.
-            super::directory::verify_copy(&source, &data).await?;
+            super::directory::verify_copy(&source, &data, stop).await?;
         } else {
             if staging.exists() {
                 tokio::fs::remove_dir_all(&staging).await?;
             }
             private_dir(&staging).await?;
-            super::directory::copy_verified(&source, &staging).await?;
+            super::directory::copy_verified(&source, &staging, stop).await?;
             tokio::fs::rename(&staging, &data).await?;
         }
         tokio::fs::File::open(&workload).await?.sync_all().await?;
@@ -588,7 +588,7 @@ async fn finish_initializing_base(
 
 /// Admission concerns a private copy on ext4, not compressed blocks in the
 /// controller filesystem. Keep a conservative per-entry/logical allocation bound.
-fn clone_footprint(root: &Path) -> std::io::Result<u64> {
+pub(super) fn clone_footprint(root: &Path) -> std::io::Result<u64> {
     let mut pending = vec![root.to_owned()];
     let mut bytes = 0_u64;
     while let Some(path) = pending.pop() {

@@ -112,9 +112,13 @@ async fn prepared_directory_base_is_verified_and_private_copies_survive_cache_re
     assert!(!source.join("lazy").exists());
     let private = bases.state.join("private-copy");
     private_dir(&private).await.unwrap();
-    super::directory::copy_verified(&source.join("contents"), &private)
-        .await
-        .unwrap();
+    super::directory::copy_verified(
+        &source.join("contents"),
+        &private,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     let relative = Path::new("workspaces")
         .join(&archive.project_id)
         .join("file");
@@ -599,9 +603,13 @@ async fn kernel_prepared_base_admission_and_recovery() {
                     .unwrap();
             } else {
                 private_dir(&workload.join("data")).await.unwrap();
-                super::directory::copy_verified(&source.join("contents"), &workload.join("data"))
-                    .await
-                    .unwrap();
+                super::directory::copy_verified(
+                    &source.join("contents"),
+                    &workload.join("data"),
+                    &stop,
+                )
+                .await
+                .unwrap();
             }
             if phase == "committed" {
                 super::directory::publish_format(&directory, &control, &plan, 128 * disk::MIB)

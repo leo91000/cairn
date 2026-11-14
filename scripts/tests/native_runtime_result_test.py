@@ -1,5 +1,9 @@
 """Unprivileged checks of native exit records and retained health observations."""
+import ast
+from contextlib import redirect_stderr
 import importlib.util
+import io
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -12,6 +16,35 @@ path = Path(__file__).with_name('native_runtime_test.py')
 spec = importlib.util.spec_from_file_location('native_runtime_test', path)
 runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
+
+
+class RootfulDockerDiagnosticTest(unittest.TestCase):
+    def setUp(self):
+        source = Path(__file__).with_name('native_rootful_consumer.py')
+        function = next(node for node in ast.parse(source.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == 'docker')
+        self.process = Mock()
+        scope = dict(binary=Path('/private/docker-bin'), socket='unix:///private/docker.sock',
+                     environment={}, subprocess=types.SimpleNamespace(run=self.process), sys=sys)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), scope)
+        self.docker = scope['docker']
+
+    def test_info_keeps_the_readiness_loop_exception_contract(self):
+        self.process.return_value = subprocess.CompletedProcess(['docker', 'info'], 1, b'', b'not ready')
+        error = io.StringIO()
+        with redirect_stderr(error), self.assertRaises(subprocess.CalledProcessError):
+            self.docker('info')
+        self.assertEqual(error.getvalue(), '')
+
+    def test_failed_run_exposes_bounded_real_error_without_masking_cli_status(self):
+        self.process.return_value = subprocess.CompletedProcess(['docker', 'run'], 127, b'', b'x' * 20000 + b'OCI fixture error')
+        error = io.StringIO()
+        with redirect_stderr(error), self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.docker('run', 'fixture')
+        self.assertEqual(caught.exception.returncode, 127)
+        self.assertIn('OCI fixture error', error.getvalue())
+        self.assertLess(len(error.getvalue()), 8400)
+        self.process.return_value = subprocess.CompletedProcess(['docker', 'inspect'], 0, b'identity\n', b'')
+        self.assertEqual(self.docker('inspect'), 'identity')
 
 
 class RetainedWorkspaceTest(unittest.TestCase):

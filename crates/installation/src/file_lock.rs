@@ -37,6 +37,45 @@ fn acquire(path: &Path, busy: &str, operation: libc::c_int) -> Result<Guard> {
     Ok(Guard(file))
 }
 
+/// Wait only for real flock contention. Ownership and filesystem errors remain
+/// distinct, and cancellation/deadline never leave a detached lock acquirer.
+pub(crate) async fn exclusive_after_release(
+    path: &Path,
+    busy: &str,
+    stop: &tokio_util::sync::CancellationToken,
+    maximum_wait: std::time::Duration,
+) -> Result<Guard> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    let deadline = tokio::time::Instant::now() + maximum_wait;
+    loop {
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Storage lock acquisition stopped."));
+        }
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Guard(file));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::WouldBlock {
+            return Err(error.into());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::unavailable(busy));
+        }
+        tokio::select! {
+            () = stop.cancelled() => {
+                return Err(Error::unavailable("Storage lock acquisition stopped."));
+            },
+            () = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(10))) => {}
+        }
+    }
+}
+
 /// Locks a directory itself. No entry is created in it, so a lock attempt
 /// cannot race with removal of the directory and leave it non-empty.
 pub fn exclusive_directory(path: &Path, busy: &str) -> Result<Guard> {
@@ -84,6 +123,44 @@ mod tests {
             "closing the old child must not unlock the new owner"
         );
         drop(next);
+        assert!(exclusive(&path, "busy").is_ok());
+    }
+
+    #[tokio::test]
+    async fn waiting_file_acquisition_settles_contention_cancellation_and_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("admission.lock");
+        let held = exclusive(&path, "busy").unwrap();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut waiting = tokio::spawn({
+            let path = path.clone();
+            let stop = stop.clone();
+            async move { exclusive_after_release(&path, "busy", &stop, Duration::from_secs(2)).await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(held);
+        let acquired = waiting.await.unwrap().unwrap();
+        assert!(exclusive(&path, "busy").is_err());
+        stop.cancel();
+        assert!(
+            exclusive_after_release(&path, "busy", &stop, Duration::from_secs(2))
+                .await
+                .is_err()
+        );
+        let uncancelled = tokio_util::sync::CancellationToken::new();
+        assert_eq!(
+            exclusive_after_release(&path, "still busy", &uncancelled, Duration::from_millis(30))
+                .await
+                .err()
+                .unwrap()
+                .message,
+            "still busy"
+        );
+        drop(acquired);
         assert!(exclusive(&path, "busy").is_ok());
     }
 

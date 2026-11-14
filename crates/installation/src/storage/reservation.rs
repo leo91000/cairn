@@ -186,19 +186,41 @@ impl Reservation {
     }
 }
 
+#[cfg(test)]
 pub async fn reserve(
     state: &Path,
     directory: &Path,
     size: u64,
     policy: &super::policy::Policy,
 ) -> Result<Reservation> {
+    reserve_cancellable(
+        state,
+        directory,
+        size,
+        policy,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
+pub(crate) async fn reserve_cancellable(
+    state: &Path,
+    directory: &Path,
+    size: u64,
+    policy: &super::policy::Policy,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<Reservation> {
     crate::skills::private_dir(directory).await?;
+    let gate = crate::file_lock::exclusive_after_release(
+        &state.join("image-reservations.lock"),
+        "VM disk capacity admission remained busy; retry the request.",
+        stop,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
     let (state, directory, policy) = (state.to_owned(), directory.to_owned(), policy.clone());
     tokio::task::spawn_blocking(move || -> Result<_> {
-        let _gate = crate::file_lock::exclusive(
-            &state.join("image-reservations.lock"),
-            "VM disk admission is busy.",
-        )?;
+        let _gate = gate;
         // Legacy source writers use this same admission gate. Snapshot the host
         // envelope only at an epoch boundary with no direct VMM writers alive.
         let _legacy = super::cache::admission()?;
@@ -315,6 +337,54 @@ pub(crate) fn reserved(directory: &Path) -> io::Result<bool> {
 mod tests {
     use super::*;
     use std::os::fd::AsRawFd;
+
+    #[tokio::test]
+    async fn admission_waits_for_an_inflight_capacity_change_and_preserves_owner_conflicts() {
+        let (root, first, second, policy) = fixture();
+        let old = reserve(root.path(), &first, 4 * 1_048_576, &policy)
+            .await
+            .unwrap();
+        let gate =
+            crate::file_lock::exclusive(&root.path().join("image-reservations.lock"), "busy")
+                .unwrap();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut next = tokio::spawn({
+            let state = root.path().to_owned();
+            let second = second.clone();
+            let policy = policy.clone();
+            let stop = stop.clone();
+            async move { reserve_cancellable(&state, &second, 4 * 1_048_576, &policy, &stop).await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut next)
+                .await
+                .is_err()
+        );
+        drop(gate);
+        let next = next.await.unwrap().unwrap();
+        assert_eq!(
+            reserve(root.path(), &second, 4 * 1_048_576, &policy)
+                .await
+                .err()
+                .unwrap()
+                .status,
+            409
+        );
+        old.release().await.unwrap();
+        next.release().await.unwrap();
+        let gate =
+            crate::file_lock::exclusive(&root.path().join("image-reservations.lock"), "busy")
+                .unwrap();
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        cancelled.cancel();
+        assert!(
+            reserve_cancellable(root.path(), &second, 4 * 1_048_576, &policy, &cancelled)
+                .await
+                .is_err()
+        );
+        assert!(!second.join(RECORD).exists());
+        drop(gate);
+    }
 
     fn fixture() -> (
         tempfile::TempDir,

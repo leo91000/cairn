@@ -26,7 +26,7 @@ if (!binary)
 const target = path.resolve('target')
 mkdirSync(target, { recursive: true })
 const fixture = mkdtempSync(path.join(target, 'quota-qualification-'))
-const tests = ['native::quota::tests::kernel_quota_lifecycle_qualification', 'native::bases_tests::kernel_prepared_base_admission_and_recovery', 'native::bases_tests::measure_prepared_native_bases', 'native::directory::tests::kernel_missing_conversion_replacement_preserves_original_journal']
+const tests = ['native::quota::tests::kernel_quota_lifecycle_qualification', 'native::bases_tests::kernel_prepared_base_admission_and_recovery', 'native::bases_tests::measure_prepared_native_bases', 'native::directory::tests::kernel_missing_conversion_replacement_preserves_original_journal', 'native::directory::tests::kernel_migration_copy_headroom']
 const script = `
 set -euo pipefail
 binary=$1
