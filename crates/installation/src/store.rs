@@ -1835,7 +1835,7 @@ mod schema_tests {
     #[test]
     fn startup_steps_accept_a_database_upgraded_by_another_startup() {
         type Upgrade = fn(&mut Connection) -> Result<()>;
-        let steps: [(&str, Upgrade); 10] = [
+        let steps: [(&str, Upgrade); 11] = [
             ("accounts", crate::accounts::migration::upgrade),
             ("conversations", crate::chats::migration::upgrade),
             ("questions", crate::chats::question_migration::upgrade),
@@ -1846,6 +1846,7 @@ mod schema_tests {
             ("placement", crate::nodes::attempts_migration::upgrade),
             ("deliverables", crate::artifacts::migration::upgrade),
             ("agent access", crate::agent_access::upgrade),
+            ("conversation writers", crate::conversation_writers::upgrade),
         ];
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());

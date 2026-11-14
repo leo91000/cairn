@@ -778,11 +778,20 @@ async fn an_agent_writes_rules_only_for_the_person_of_its_eligible_conversation(
     let copy = agent(&f, &bearer, "duplicate_hook_rule", json!({ "ruleId": id })).await;
     assert!(!refused(&copy), "{copy}");
     assert_eq!(mcp_result(&copy)["creatorAccountId"], OWNER);
+    assert_eq!(mcp_result(&copy)["source"], "installationAgent");
     assert_eq!(mcp_result(&copy)["conversationId"], chat.as_str());
 
     // Never another account's rule, nor an emergency pause or a budget.
     let (_, theirs) = create(&f, MEMBER, definition(&f, MAIN_AGENT_ID)).await;
     let theirs = text(&theirs, "id").to_owned();
+    let duplicated = agent(
+        &f,
+        &bearer,
+        "duplicate_hook_rule",
+        json!({ "ruleId": theirs }),
+    )
+    .await;
+    refused_because(&duplicated, "duplicates only rules of the person");
     for (name, input) in [
         (
             "set_hook_rule_enabled",
