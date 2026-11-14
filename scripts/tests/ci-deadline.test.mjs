@@ -195,38 +195,46 @@ it('reports incomplete process inventory as UNKNOWN instead of succeeding', asyn
   assert.equal(proof.cleanupUnknown, true)
 })
 
-it('adopts and closes an escaped stdout owner within the publication reserve', async (t) => {
-  const output = temporary(t)
-  const file = path.join(output, 'escaped.pid')
-  const code = `const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:['ignore','inherit','inherit']});require('node:fs').writeFileSync(${JSON.stringify(file)},''+child.pid);child.unref()`
-  let pid
-  const started = Date.now()
-  try {
-    const status = await observeCommand({
-      command: process.execPath,
-      args: ['-e', code],
-      output,
-      jobStartedAt: started,
-      jobMinutes: 0.05,
-      reserveSeconds: 0,
-      sampleMs: 1000,
-      graceMs: 50,
-      closeGraceMs: 50,
-    })
-    pid = Number(readFileSync(file, 'utf8'))
-    assert.notEqual(status, 0)
-    assert.ok(Date.now() - started < 1000, 'pipe/close wait must retain its evidence-upload reserve')
-    const proof = JSON.parse(readFileSync(path.join(output, 'latest.json'), 'utf8'))
-    assert.equal(proof.containmentReady, true)
-    assert.equal(proof.cleanupUnknown, false)
-    assert.equal(live(pid), false)
-  }
-  finally {
-    pid ??= existsSync(file) ? Number(readFileSync(file, 'utf8')) : undefined
-    if (pid && live(pid))
-      process.kill(pid, 'SIGKILL')
-  }
-})
+for (const startupDelayMs of [0, 1200]) {
+  it(`adopts and closes an escaped stdout owner within the publication reserve (startup ${startupDelayMs} ms)`, async (t) => {
+    const output = temporary(t)
+    const file = path.join(output, 'escaped.pid')
+    const code = `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${startupDelayMs});const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:['ignore','inherit','inherit']});require('node:fs').writeFileSync(${JSON.stringify(file)},''+child.pid);child.unref()`
+    let pid
+    let cleanupStartedAt
+    const started = Date.now()
+    try {
+      const status = await observeCommand({
+        command: process.execPath,
+        args: ['-e', code],
+        output,
+        jobStartedAt: started,
+        jobMinutes: 0.05,
+        reserveSeconds: 0,
+        sampleMs: 1000,
+        graceMs: 50,
+        closeGraceMs: 50,
+        onCommandSettled: () => cleanupStartedAt = Date.now(),
+      })
+      pid = Number(readFileSync(file, 'utf8'))
+      assert.notEqual(status, 0)
+      // Startup consumes the job clock, while this assertion qualifies the
+      // cleanup/pipe-close phase after the guard has observed command completion.
+      assert.ok(cleanupStartedAt !== undefined)
+      assert.ok(Date.now() - cleanupStartedAt < 1000, 'pipe/close wait must retain its evidence-upload reserve')
+      assert.ok(Date.now() - started < 3000, 'startup and cleanup must stay inside the original job clock')
+      const proof = JSON.parse(readFileSync(path.join(output, 'latest.json'), 'utf8'))
+      assert.equal(proof.containmentReady, true)
+      assert.equal(proof.cleanupUnknown, false)
+      assert.equal(live(pid), false)
+    }
+    finally {
+      pid ??= existsSync(file) ? Number(readFileSync(file, 'utf8')) : undefined
+      if (pid && live(pid))
+        process.kill(pid, 'SIGKILL')
+    }
+  })
+}
 
 it('adopts a fast setsid daemon with closed stdio before its parent disappears', async (t) => {
   const output = temporary(t)

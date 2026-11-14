@@ -89,10 +89,23 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertIsNone(rejection_signal(path, method, status, b'{}', role))
 
     def test_api_keeps_request_response_exception_and_close_contract(self):
+        original = FIXTURE.read_text()
+
+        def compile_api(source):
+            api = next(node for node in ast.walk(ast.parse(source))
+                       if isinstance(node, ast.FunctionDef) and node.name == 'api')
+            module = ast.Module(body=[api], type_ignores=[])
+            return compile(ast.fix_missing_locations(module), '<fixture-api>', 'exec')
+
+        # Reuse only immutable code, never a request's namespace or state. Every
+        # scenario still executes the original and instrumented API in isolation.
+        original_api = compile_api(original)
+        implementations = {
+            role: ((False, original_api), (True, compile_api(instrument(original, role))))
+            for role in ('reference', 'candidate')
+        }
         for failure in (None, BrokenPipeError(), ValueError('closed stream')):
-            original = FIXTURE.read_text()
-            for role in ('reference', 'candidate'):
-                observed = instrument(original, role)
+            for role, apis in implementations.items():
                 cases = (
                     (PATH, 409, b'{"error":"Native workspace is still active."}',
                      'native_attempt_admission', 'workspace_owner_busy'),
@@ -106,7 +119,7 @@ class DiagnosticsTests(unittest.TestCase):
                 )
                 for path, status, payload, route, reason in cases:
                     results = []
-                    for is_observed, source in ((False, original), (True, observed)):
+                    for is_observed, api in apis:
                         requests, reads, closures = [], [], []
 
                         def read_response():
@@ -122,9 +135,7 @@ class DiagnosticsTests(unittest.TestCase):
                                                            getresponse=lambda: response, close=lambda: closures.append(True))
                         host = types.SimpleNamespace(UnixControllerConnection=lambda *a, **kw: connection)
                         namespace = dict(host=host, state=Path('/synthetic'), token='private-request-token', json=json, urllib=urllib)
-                        api = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.FunctionDef) and node.name == 'api')
-                        module = ast.Module(body=[api], type_ignores=[])
-                        exec(compile(ast.fix_missing_locations(module), '<fixture-api>', 'exec'), namespace)
+                        exec(api, namespace)
                         output = io.StringIO()
                         with contextlib.redirect_stdout(output), patch('builtins.print', side_effect=failure) if failure else contextlib.nullcontext():
                             try:
