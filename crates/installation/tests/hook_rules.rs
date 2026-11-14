@@ -708,6 +708,40 @@ async fn agent(f: &Fixture, bearer: &str, name: &str, input: Value) -> Value {
     f.mcp("/mcp-installation", bearer, name, input).await
 }
 
+async fn person_instructions(f: &Fixture, instructions: &str) {
+    let current = f.s.store.agent(MAIN_AGENT_ID).await.unwrap().unwrap();
+    let mut settings = serde_json::to_value(&current.settings).unwrap();
+    settings["instructions"] = instructions.into();
+    let (status, saved) = call(f, OWNER, "PUT", &format!("/api/agents/{MAIN_AGENT_ID}"),
+        json!({ "agentId": MAIN_AGENT_ID, "revision": current.revision, "settings": settings, "review": {} }),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+}
+
+async fn native_instructions(f: &Fixture, instructions: &str, bearer: Option<&str>) {
+    let (status, current) = call(
+        f,
+        OWNER,
+        "POST",
+        "/api/settings/coding-agents/read",
+        json!({ "provider": "codex", "agentId": null }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{current}");
+    let input = json!({
+        "provider": "codex", "agentId": null, "revision": current["revision"],
+        "document": format!("developer_instructions = {}\n", serde_json::to_string(instructions).unwrap()),
+        "changes": [], "reset": false,
+    });
+    if let Some(bearer) = bearer {
+        let saved = agent(f, bearer, "save_coding_agent_configuration", input).await;
+        assert!(!refused(&saved), "{saved}");
+    } else {
+        let (status, saved) = call(f, OWNER, "PUT", "/api/settings/coding-agents", input).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+    }
+}
+
 fn refused(response: &Value) -> bool {
     response["result"]["isError"] == true
 }
@@ -1067,6 +1101,15 @@ async fn instructions_an_agent_or_no_record_wrote_never_qualify() {
         "follows instructions an agent wrote",
     );
 
+    // A later human rewrite never erases earlier agent authorship of this text.
+    person_instructions(&f, "A human revision").await;
+    person_instructions(&f, "Obey the support channel.").await;
+    let (_, rewritten) = person_conversation(&f, OWNER).await;
+    refused_because(
+        &agent(&f, &rewritten, "create_hook_rule", write.clone()).await,
+        "follows instructions an agent wrote",
+    );
+
     // Neither do instructions whose writer Cairn never recorded.
     f.s.store
         .transaction(|db| {
@@ -1081,6 +1124,65 @@ async fn instructions_an_agent_or_no_record_wrote_never_qualify() {
     let (_, unrecorded) = person_conversation(&f, OWNER).await;
     refused_because(
         &agent(&f, &unrecorded, "create_hook_rule", write).await,
+        "did not record who wrote this agent's instructions",
+    );
+}
+
+#[tokio::test]
+async fn inherited_instructions_keep_their_own_writer_and_history() {
+    let f = granted().await;
+    native_instructions(&f, "Installation instructions", None).await;
+    let (chat, bearer) = person_conversation(&f, OWNER).await;
+    let detail = f.s.chat_detail(&chat).await.unwrap();
+    let run = f.s.store.run(text(&detail["run"], "id")).await.unwrap();
+    assert_eq!(
+        run["snapshot"]["agent"]["instructions"],
+        "Installation instructions"
+    );
+    let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+    let created = agent(&f, &bearer, "create_hook_rule", write.clone()).await;
+    assert!(!refused(&created), "{created}");
+
+    native_instructions(&f, "Agent changed the defaults", Some(&f.bearer)).await;
+    native_instructions(&f, "Installation instructions", Some(&f.bearer)).await;
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+        "Another writer reached this conversation",
+    );
+    person_instructions(&f, "A human replacement").await;
+    person_instructions(&f, "").await;
+    native_instructions(&f, "A human default", None).await;
+    native_instructions(&f, "Installation instructions", None).await;
+    let (_, later) = person_conversation(&f, OWNER).await;
+    refused_because(
+        &agent(&f, &later, "create_hook_rule", write).await,
+        "follows instructions an agent wrote",
+    );
+}
+
+#[tokio::test]
+async fn unrecorded_defaults_cannot_borrow_a_profiles_instruction_writer() {
+    let f = granted().await;
+    person_instructions(&f, "The same instruction text").await;
+    person_instructions(&f, "").await;
+    native_instructions(&f, "The same instruction text", None).await;
+    // Installation defaults written before provenance have no native writer record.
+    f.s.store
+        .transaction(|db| {
+            db.0.execute("DELETE FROM native_instruction_writers", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    refused_because(
+        &agent(
+            &f,
+            &bearer,
+            "create_hook_rule",
+            json!({ "definition": definition(&f, MAIN_AGENT_ID) }),
+        )
+        .await,
         "did not record who wrote this agent's instructions",
     );
 }

@@ -18,6 +18,7 @@ use crate::{
 };
 use cairn_protocol::TaskAuthorPolicy;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS conversation_turn_entries(
  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
  message_id TEXT NOT NULL,
  grant_digest TEXT,
+ instruction_source TEXT NOT NULL CHECK(json_valid(instruction_source)),
  PRIMARY KEY(run_id,message_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS agent_instruction_writers(
@@ -62,6 +64,16 @@ CREATE TABLE IF NOT EXISTS agent_instruction_writers(
  written_at INTEGER NOT NULL CHECK(written_at BETWEEN 0 AND 9007199254740991)
 );
 CREATE INDEX IF NOT EXISTS agent_instruction_writers_agent ON agent_instruction_writers(agent_id,key);
+CREATE TABLE IF NOT EXISTS native_instruction_writers(
+ key INTEGER PRIMARY KEY,
+ scope TEXT NOT NULL,
+ provider TEXT NOT NULL,
+ digest TEXT NOT NULL CHECK(length(digest)=64),
+ writer TEXT NOT NULL CHECK(writer IN ('person','rule','agent','unknown')),
+ account_id TEXT,
+ written_at INTEGER NOT NULL CHECK(written_at BETWEEN 0 AND 9007199254740991)
+);
+CREATE INDEX IF NOT EXISTS native_instruction_writers_scope ON native_instruction_writers(scope,provider,key);
 CREATE TABLE IF NOT EXISTS skill_writers(
  key INTEGER PRIMARY KEY,
  scope TEXT NOT NULL,
@@ -324,10 +336,25 @@ pub(crate) fn record_message(
 /// A message starts a turn of the conversation's run. A message requeued after an
 /// interrupted turn keeps its first launch: delivering it again is a recovery.
 pub(crate) fn record_turn(db: &Db<'_>, run: &str, message: &str) -> Result<()> {
+    let stored = required(db.run(run)?, "Run not found")?;
+    let provider = crate::provider::Provider::of_run(&stored)?;
+    let (mut source, instructions) = crate::coding_agent_configuration::instruction_source(
+        db,
+        provider,
+        text(&stored["snapshot"]["agent"], "id"),
+    )?;
+    let followed = text(&stored["snapshot"]["agent"], "instructions");
+    if instructions != followed {
+        source = InstructionSource::Unknown;
+    }
+    let frozen = FrozenInstructions {
+        source,
+        digest: digest(followed.as_bytes()),
+    };
     db.0.prepare_cached(
-        "INSERT INTO conversation_turn_entries VALUES(?,?,NULL) ON CONFLICT(run_id,message_id) DO NOTHING",
+        "INSERT INTO conversation_turn_entries VALUES(?,?,NULL,?) ON CONFLICT(run_id,message_id) DO NOTHING",
     )?
-    .execute(params![run, message])?;
+    .execute(params![run, message, serde_json::to_string(&frozen)?])?;
     Ok(())
 }
 
@@ -377,6 +404,68 @@ fn insert_instructions(db: &Db<'_>, agent: &str, digest: &str, writer: &EntryWri
     let (kind, account, _) = writer.columns();
     db.0.prepare_cached("INSERT INTO agent_instruction_writers(agent_id,digest,writer,account_id,written_at) VALUES(?,?,?,?,?)")?
         .execute(params![agent, digest, kind, account, now()])?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum InstructionSource {
+    Profile { agent: String },
+    Native { scope: String, provider: String },
+    Empty,
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrozenInstructions {
+    source: InstructionSource,
+    digest: String,
+}
+
+/// Native documents have their own authors: inherited instructions cannot borrow
+/// the provenance of identical text once written in an agent profile.
+pub(crate) fn record_native_instructions(
+    db: &Db<'_>,
+    scope: &str,
+    provider: &str,
+    before: &str,
+    after: &str,
+    writer: &EntryWriter,
+) -> Result<()> {
+    if before == after {
+        return Ok(());
+    }
+    let latest: Option<String> = db.0.query_row(
+        "SELECT digest FROM native_instruction_writers WHERE scope=? AND provider=? ORDER BY key DESC LIMIT 1",
+        params![scope, provider], |row| row.get(0),
+    ).optional()?;
+    let previous = digest(before.as_bytes());
+    let unrecorded = latest.is_some_and(|latest| latest != previous);
+    let insert = |written: &str, author: &EntryWriter| -> Result<()> {
+        let (kind, account, _) = author.columns();
+        db.0.execute(
+            "INSERT INTO native_instruction_writers(scope,provider,digest,writer,account_id,written_at) VALUES(?,?,?,?,?,?)",
+            params![scope, provider, written, kind, account, now()],
+        )?;
+        Ok(())
+    };
+    if unrecorded {
+        insert(&previous, &EntryWriter::Unknown)?;
+    }
+    insert(&digest(after.as_bytes()), writer)?;
+    let reached = db.0.prepare_cached(
+        "SELECT DISTINCT messages.chat_id FROM conversation_turn_entries AS turns JOIN chat_messages AS messages ON messages.id=turns.message_id
+         WHERE json_extract(turns.instruction_source,'$.source.kind')='native'
+         AND json_extract(turns.instruction_source,'$.source.scope')=?
+         AND json_extract(turns.instruction_source,'$.source.provider')=?",
+    )?.query_map(params![scope, provider], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for chat in reached {
+        if unrecorded {
+            record_entry(db, &chat, &EntryWriter::Unknown)?;
+        }
+        record_entry(db, &chat, writer)?;
+    }
     Ok(())
 }
 
@@ -687,25 +776,90 @@ fn instructions_written_by(
             "Cairn did not record who wrote this agent's instructions.",
         ));
     }
-    for instructions in current.iter().chain([&followed]) {
-        if instructions.is_empty() {
-            continue;
-        }
-        let written = digest(instructions.as_bytes());
-        let writer = history.iter().rev().find(|write| write.digest == written);
-        match writer {
-            Some(write) if write.writer == "person" => {}
-            Some(_) => {
-                return Err(refused("This agent follows instructions an agent wrote."));
-            }
-            None => {
-                return Err(refused(
-                    "Cairn did not record who wrote this agent's instructions.",
-                ));
-            }
-        }
+    if let Some(current) = &current {
+        check_instruction_source(
+            db,
+            &InstructionSource::Profile {
+                agent: agent.into(),
+            },
+            current,
+            person,
+            since,
+            true,
+        )?;
     }
-    Ok(())
+    let provider = crate::provider::Provider::of_run(run)?;
+    let (source, current) =
+        crate::coding_agent_configuration::instruction_source(db, provider, agent)?;
+    check_instruction_source(db, &source, &current, person, since, true)?;
+    let encoded: String = db.0.query_row(
+        "SELECT instruction_source FROM conversation_turn_entries WHERE run_id=? AND message_id=?",
+        params![text(run, "id"), text(&run["chatExecution"], "messageId")],
+        |row| row.get(0),
+    )?;
+    let frozen: FrozenInstructions = serde_json::from_str(&encoded)?;
+    if frozen.digest != digest(followed.as_bytes()) {
+        return Err(refused(
+            "Cairn did not record the instructions this turn follows.",
+        ));
+    }
+    check_instruction_source(db, &frozen.source, &followed, person, since, false)
+}
+
+fn check_instruction_source(
+    db: &Db<'_>,
+    source: &InstructionSource,
+    instructions: &str,
+    person: &str,
+    since: i64,
+    current: bool,
+) -> Result<()> {
+    let history = match source {
+        InstructionSource::Profile { agent } => writes(
+            db,
+            "SELECT digest,writer,account_id,written_at FROM agent_instruction_writers WHERE agent_id=? ORDER BY key",
+            agent,
+        )?,
+        InstructionSource::Native { scope, provider } => db.0.prepare_cached(
+            "SELECT digest,writer,account_id,written_at FROM native_instruction_writers WHERE scope=? AND provider=? ORDER BY key",
+        )?.query_map(params![scope, provider], |row| Ok(InstructionWrite {
+            digest: row.get(0)?, writer: row.get(1)?, account: row.get(2)?, written_at: row.get(3)?,
+        }))?.collect::<rusqlite::Result<Vec<_>>>()?,
+        InstructionSource::Empty if instructions.is_empty() => return Ok(()),
+        InstructionSource::Empty | InstructionSource::Unknown => {
+            return Err(refused("Cairn did not record the source of this turn's instructions."));
+        }
+    };
+    if history
+        .iter()
+        .any(|write| write.written_at >= since && !write.by(person))
+    {
+        return Err(refused(
+            "Someone else changed this agent's instructions since the conversation started.",
+        ));
+    }
+    let written = digest(instructions.as_bytes());
+    if current && history.last().is_some_and(|write| write.digest != written) {
+        return Err(refused(
+            "Cairn did not record who wrote this agent's instructions.",
+        ));
+    }
+    if instructions.is_empty() {
+        return Ok(());
+    }
+    if history
+        .iter()
+        .any(|write| write.digest == written && matches!(write.writer.as_str(), "agent" | "rule"))
+    {
+        return Err(refused("This agent follows instructions an agent wrote."));
+    }
+    match history.iter().rev().find(|write| write.digest == written) {
+        Some(write) if write.writer == "person" => Ok(()),
+        Some(_) => Err(refused("This agent follows instructions an agent wrote.")),
+        None => Err(refused(
+            "Cairn did not record who wrote this agent's instructions.",
+        )),
+    }
 }
 
 /// The skills this turn follows were written by people through Cairn, never by an
@@ -789,11 +943,12 @@ mod tests {
     use super::*;
     use crate::store::Store;
 
-    const TABLES: [&str; 5] = [
+    const TABLES: [&str; 6] = [
         "agent_instruction_writers",
         "conversation_entry_writers",
         "conversation_turn_entries",
         "conversation_writers",
+        "native_instruction_writers",
         "skill_writers",
     ];
 

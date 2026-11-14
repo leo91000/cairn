@@ -312,12 +312,14 @@ ADR-0075:
 - the conversation was never moved to another agent (an agent merge).
 
 Cairn records who writes each conversation entry, each change to an agent's
-instructions and each skill change through its skill tools (`save_skill`,
+instructions (including inherited native defaults) and each skill change through its skill tools (`save_skill`,
 `edit_skill_files`, `import_skill`, `update_skill_source`, `delete_skill`; imports count
 as written by the importer). Every message must carry an attestation of the person
 matching its current content: a write that skipped the record makes the conversation
 ineligible. Conversations, instructions and skills written before this record never
-qualify.
+qualify. Native instruction documents have their own writer history, and each turn
+records the source it follows. A human rewrite cannot erase earlier agent authorship
+of those instructions.
 Reading another conversation, run or task through `cairn_installation` (`list_chats`,
 `get_chat`, `read_chat_content`, `list_runs`, `get_run`, `read_run_content`, `get_task`)
 and delegating a task, whose report the conversation reads, count as agent entries.
