@@ -61,6 +61,12 @@ async fn emit(f: &Fixture, external: &str, payload: Value) {
 }
 
 async fn emit_on(f: &Fixture, instance_id: &str, external: &str, payload: Value) {
+    queue_on(f, instance_id, external, payload).await;
+}
+
+/// Queues a hook event without waking the engine, as an event left by a failed intake:
+/// only the engine's polling reads it.
+async fn queue_on(f: &Fixture, instance_id: &str, external: &str, payload: Value) {
     let instance =
         f.s.store
             .plugin_instance(instance_id)
@@ -1611,6 +1617,72 @@ async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
             .await
             .unwrap();
     assert_eq!(completed, 61);
+}
+
+#[tokio::test]
+async fn a_continuous_flow_of_completions_does_not_postpone_reading_the_queues() {
+    let f = granted().await;
+    rule(
+        &f,
+        OWNER,
+        steps(&json!([post("post", &f, &json!({}))])),
+        200,
+    )
+    .await;
+    let late = rule(
+        &f,
+        OWNER,
+        json!([{
+            "type": "if",
+            "id": "late",
+            "condition": { "type": "formula", "expression": "author == \"late\"" },
+            "then": [remember_seen()],
+            "otherwise": [],
+        }]),
+        200,
+    )
+    .await;
+    // Every post waits for the test to release it, one completion at a time.
+    f.hold_posts.store(true, Ordering::SeqCst);
+    let flow = 20;
+    for index in 0..flow {
+        emit(
+            &f,
+            &format!("flow-{index}"),
+            json!({ "channel": "support", "author": "alice" }),
+        )
+        .await;
+    }
+    let service = f.s.clone();
+    let worker = tokio::spawn(async move { engine::tick(&service).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+        .await
+        .unwrap();
+    queue_on(
+        &f,
+        &f.instance,
+        "late",
+        json!({ "channel": "support", "author": "late" }),
+    )
+    .await;
+    let mut released = 0;
+    while released < flow && !has_seen(&f, &late).await {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        f.release.notify_one();
+        released += 1;
+    }
+    let seen_during_flow = has_seen(&f, &late).await;
+    f.hold_posts.store(false, Ordering::SeqCst);
+    while f.posts.load(Ordering::SeqCst) > released {
+        f.release.notify_one();
+        released += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    worker.await.unwrap().unwrap();
+    assert!(
+        seen_during_flow,
+        "Completions every 300 ms postponed reading the queue past the flow."
+    );
 }
 
 #[tokio::test]

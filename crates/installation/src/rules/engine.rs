@@ -157,6 +157,8 @@ const KEPT: i64 = 200;
 const TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 /// Triggerings run at once.
 const PARALLEL: usize = 8;
+/// How often one engine pass reads the hook queues again without a wakeup.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The engine's wake-up, shared by intake and the executor.
 #[derive(Default)]
@@ -1003,7 +1005,14 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
     let mut admitting = HashSet::new();
     let mut checked = HashSet::new();
     let mut ran = 0;
+    // Queues are read again at an absolute deadline: a continuous flow of completions
+    // must not postpone it.
+    let mut poll_at = Instant::now() + POLL_INTERVAL;
     loop {
+        if Instant::now() >= poll_at {
+            checked.clear();
+            poll_at = Instant::now() + POLL_INTERVAL;
+        }
         match queued_instances(s).await {
             Ok(instances) => {
                 for instance in instances {
@@ -1089,7 +1098,7 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
                 deliveries.abort_all();
                 return Ok(ran);
             }
-            () = tokio::time::sleep(std::time::Duration::from_secs(2)) => { checked.clear(); }
+            () = tokio::time::sleep_until(poll_at.into()) => {}
             () = s.rules.wake.notified() => { checked.clear(); }
             completed = intakes.join_next(), if !intakes.is_empty() => {
                 match completed {

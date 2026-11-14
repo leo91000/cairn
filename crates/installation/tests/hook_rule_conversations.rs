@@ -1608,3 +1608,99 @@ async fn a_progress_triggering_does_not_act_once_its_rule_is_exhausted() {
     );
     assert!(values(&f, &progress).await.get("step").is_none());
 }
+
+#[tokio::test]
+async fn cairn_hooks_keep_their_cadence_during_a_continuous_flow_of_completions() {
+    use std::sync::atomic::Ordering;
+    let f = granted().await;
+    // Alice's messages post and wait for the test; Bob's start a keyed conversation.
+    rule_on(
+        &f,
+        OWNER,
+        plugin(&f),
+        json!([{
+            "type": "if",
+            "id": "who",
+            "condition": { "type": "formula", "expression": "author == \"alice\"" },
+            "then": [action("post", &json!({
+                "type": "callTool", "instanceId": f.instance, "tool": "grant_probe_post",
+                "input": { "channel": { "type": "literal", "value": "support" } },
+            }))],
+            "otherwise": [start("start")],
+        }]),
+        json!({ "triggeringsPerHour": 200, "conversationsPerHour": 10 }),
+    )
+    .await;
+    let reply = rule_on(
+        &f,
+        OWNER,
+        cairn("replyReady"),
+        json!([remember("text", "reply", "text")]),
+        limits(),
+    )
+    .await;
+    let progress = rule_on(
+        &f,
+        OWNER,
+        cairn("progress"),
+        json!([remember("step", "step", "step")]),
+        limits(),
+    )
+    .await;
+    emit(&f, "bob", message("bob", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:bob").await.unwrap();
+    let run = launched(&f, &chat).await;
+    let delivered = json!({ "messageId": first_message(&f, &chat).await });
+    event(&f, &run, "chat.user", "", Some(delivered)).await;
+    engine::tick(&f.s).await.unwrap();
+
+    f.hold_posts.store(true, Ordering::SeqCst);
+    let flow = 20;
+    for index in 0..flow {
+        emit(&f, &format!("flow-{index}"), message("alice", "post")).await;
+    }
+    let service = f.s.clone();
+    let worker = tokio::spawn(async move { engine::tick(&service).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+        .await
+        .unwrap();
+    // The turn is due a progress report, then completes, while the flow continues.
+    f.s.store
+        .transaction({
+            let chat = chat.clone();
+            move |db| age_progress(db, &chat)
+        })
+        .await
+        .unwrap();
+    let mut completed = false;
+    let mut released = 0;
+    while released < flow {
+        let remembered_progress = values(&f, &progress).await.get("step").is_some();
+        if remembered_progress && !completed {
+            let item = json!({ "item": { "type": "agent_message", "text": "Done." } });
+            event(&f, &run, "item.completed", "", Some(item)).await;
+            event(&f, &run, "turn.completed", "", None).await;
+            completed = true;
+        }
+        if completed && values(&f, &reply).await.get("reply").is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        f.release.notify_one();
+        released += 1;
+    }
+    let reported_during_flow = released < flow;
+    f.hold_posts.store(false, Ordering::SeqCst);
+    while f.posts.load(Ordering::SeqCst) > released {
+        f.release.notify_one();
+        released += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    worker.await.unwrap().unwrap();
+    assert!(
+        reported_during_flow,
+        "Completions every 300 ms held back the progress or the reply of a keyed turn."
+    );
+    assert_eq!(values(&f, &reply).await["reply"], "Done.");
+}
