@@ -49,7 +49,8 @@ const modes = computed(() => {
   ]
   if (['field', 'formula'].includes(props.expects))
     return all.filter(entry => entry.value === 'formula')
-  if (props.expects === 'number' || props.expects === 'boolean')
+  const schemaType = props.schema ? resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type : null
+  if (props.expects === 'number' || props.expects === 'boolean' || (schemaType && schemaType !== 'string'))
     return all.filter(entry => entry.value !== 'template')
   return all
 })
@@ -203,7 +204,27 @@ function outside(event: PointerEvent) {
 document.addEventListener('pointerdown', outside)
 onBeforeUnmount(() => document.removeEventListener('pointerdown', outside))
 
-const typeMismatch = computed(() => ['number', 'boolean'].includes(props.expects) && model.value.type !== 'formula' && (model.value.type !== 'literal' || (props.expects === 'number' ? typeof model.value.value !== 'number' : typeof model.value.value !== 'boolean')))
+const expectedKind = computed(() => props.expects === 'number' || props.expects === 'boolean' ? props.expects : props.schema ? resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type : null)
+const typeMismatch = computed(() => {
+  const expected = expectedKind.value
+  if (!expected || model.value.type === 'formula')
+    return false
+  if (model.value.type === 'template')
+    return expected !== 'string'
+  const value = model.value.value
+  const kind = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value
+  return expected === 'integer' ? typeof value !== 'number' || !Number.isInteger(value) : kind !== expected
+})
+const expectedLabels: Record<string, string> = {
+  array: 'list',
+  object: 'object',
+  integer: 'number',
+  number: 'number',
+  boolean: 'boolean',
+  string: 'text',
+}
+const expectedLabel = computed(() => expectedLabels[expectedKind.value ?? ''] ?? 'value')
+
 const invalid = computed(() => (props.problems?.length ?? 0) > 0)
 const fieldLabel = computed(() => props.variables.find(option => option.expression === text.value)?.label)
 </script>
@@ -362,7 +383,7 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
         </div>
       </div>
     </div>
-    <small v-if="typeMismatch" class="text-xs text-coral" role="alert">Use a fixed {{ expects === 'number' ? 'number' : 'boolean' }} or a formula returning one.</small>
+    <small v-if="typeMismatch" class="text-xs text-coral" role="alert">Use a fixed {{ expectedLabel }} or a formula returning one.</small>
     <small v-if="expects === 'field' && fieldLabel" class="text-xs text-muted">{{ fieldLabel }}</small>
     <small v-else-if="hint && !invalid" class="text-xs text-muted">{{ hint }}</small>
     <small

@@ -348,8 +348,23 @@ abstract class RulesEditorCases {
                 )
             }
         }
+        compose.onNodeWithText("Valeur").performClick()
         compose.onNodeWithText("+ Insérer une variable").performClick()
         compose.onNodeWithText("Utiliser Auteur").performClick()
         compose.runOnIdle { assertEquals(templateValue("Avant {{payload.author}}"), value) }
+    }
+
+    @Test
+    fun switchingATemplateWithTwoInsertionsToAFormulaKeepsValidQuotedText() {
+        val template = "{{payload.a}}-{{payload.b}}"
+        var value by mutableStateOf(templateValue(template))
+        compose.setContent {
+            CairnTheme { RuleValueEditor("Texte", value, emptyList(), { value = it }) }
+        }
+        compose.onNodeWithText("Formule").performClick()
+        compose.runOnIdle {
+            assertEquals(formulaRuleValue(JsonPrimitive(template).toString()), value)
+            assertEquals("payload.a", unwrapRuleTemplate(" {{payload.a}} "))
+        }
     }
 }

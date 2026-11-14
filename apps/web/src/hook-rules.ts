@@ -618,6 +618,53 @@ export function comparisonExpects(left: RuleValue, operator: RuleOperator, varia
   return type === 'integer' || type === 'number' ? 'number' : type === 'boolean' ? 'boolean' : 'text'
 }
 
+export function ruleConditionDepth(condition: RuleCondition): number {
+  if (condition.type === 'all' || condition.type === 'any')
+    return 1 + Math.max(0, ...condition.conditions.map(ruleConditionDepth))
+  if (condition.type === 'not')
+    return 1 + ruleConditionDepth(condition.condition)
+  return 1
+}
+
+export function comparisonListSchema(left: RuleValue, variables: VariableOption[]) {
+  const type = comparisonExpects(left, 'equals', variables)
+  return { type: 'array', items: { type: type === 'text' ? 'string' : type } }
+}
+
+// Only schema-level optional fields are normalized. Literal JSON data, including
+// null properties, keeps its exact meaning.
+export function sameRuleDefinition(left: HookRuleDefinition, right: HookRuleDefinition): boolean {
+  const present = <T extends object>(value: T) => Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null))
+  const condition = (value: RuleCondition): object => {
+    if (value.type === 'all' || value.type === 'any')
+      return { ...present(value), conditions: value.conditions.map(condition) }
+    if (value.type === 'not')
+      return { ...present(value), condition: condition(value.condition) }
+    return present(value)
+  }
+
+  const node = (value: RuleNode): object => {
+    if (value.type === 'if') {
+      return {
+        ...present(value),
+        condition: condition(value.condition),
+        then: value.then.map(node),
+        otherwise: value.otherwise.map(node),
+      }
+    }
+
+    if (value.type === 'forEach')
+      return { ...present(value), body: value.body.map(node) }
+    return { ...present(value), action: present(value.action) }
+  }
+
+  const stable = (value: HookRuleDefinition) => JSON.stringify({ ...value, steps: value.steps.map(node) }, (_key, entry) =>
+    entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b)))
+      : entry)
+  return stable(left) === stable(right)
+}
+
 export function typedComparisonRight(value: RuleValue | null | undefined, expects: ReturnType<typeof comparisonExpects>): RuleValue {
   if (value?.type === 'formula')
     return value

@@ -32,6 +32,7 @@ const props = defineProps<{
   catalog: HookRuleCatalog | null
   agentName: (id: string) => string
   editable?: boolean
+  depth?: number
   inLoop?: boolean
   executionAgentId?: string
   selected?: string | null
@@ -47,7 +48,13 @@ const emit = defineEmits<{
 }>()
 
 const menu = ref<number | null>(null)
-const choices = computed(() => stepChoices.filter(choice => (choice.kind !== 'wait' || !props.inLoop) && (choice.kind !== 'callTool' || props.catalog?.tools.some(tool => !props.executionAgentId || tool.agentIds.includes(props.executionAgentId)))))
+const choices = computed(() => stepChoices.filter((choice) => {
+  if (choice.kind === 'wait' && props.inLoop)
+    return false
+  if (['if', 'forEach'].includes(choice.kind) && (props.depth ?? 0) >= 7)
+    return false
+  return choice.kind !== 'callTool' || props.catalog?.tools.some(tool => !props.executionAgentId || tool.agentIds.includes(props.executionAgentId))
+}))
 
 function pick(index: number, kind: StepKind) {
   menu.value = null
@@ -195,6 +202,7 @@ const ranTone: Record<string, string> = {
                 :catalog="catalog"
                 :agent-name="agentName"
                 :in-loop="inLoop"
+                :depth="(depth ?? 0) + 1"
                 :editable="editable"
                 :execution-agent-id="executionAgentId"
                 :selected="selected"
@@ -219,6 +227,7 @@ const ranTone: Record<string, string> = {
                 :catalog="catalog"
                 :agent-name="agentName"
                 :in-loop="inLoop"
+                :depth="(depth ?? 0) + 1"
                 :editable="editable"
                 :execution-agent-id="executionAgentId"
                 :selected="selected"
@@ -242,6 +251,7 @@ const ranTone: Record<string, string> = {
                 :catalog="catalog"
                 :agent-name="agentName"
                 :in-loop="true"
+                :depth="(depth ?? 0) + 1"
                 :editable="editable"
                 :execution-agent-id="executionAgentId"
                 :selected="selected"

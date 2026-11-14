@@ -698,6 +698,15 @@ internal fun RuleHistoryPanel(vm: CairnViewModel, ruleId: String) {
                         }
                         Text(if (expanded == id) "⌃" else "⌄")
                     }
+                    (entry.jsonObject["resumesAt"] as? JsonPrimitive)
+                        ?.longOrNull
+                        ?.takeIf { entry.text("status") != "completed" }
+                        ?.let { at ->
+                            Text(
+                                "Reprise : ${upcomingStamp(at)}",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
                     if (entry.text("error").isNotBlank())
                         Text(
                             entry.text("error"),
@@ -718,6 +727,15 @@ internal fun RuleHistoryPanel(vm: CairnViewModel, ruleId: String) {
                                     "${index + 1}. ${step.text("label").ifBlank { step.text("nodeId") }} · ${triggeringStatusTitles[step.text("status")] ?: step.text("status")}",
                                     style = MaterialTheme.typography.labelLarge,
                                 )
+                                (step.jsonObject["attempts"] as? JsonPrimitive)
+                                    ?.intOrNull
+                                    ?.takeIf { it > 1 }
+                                    ?.let { attempts ->
+                                        Text(
+                                            "$attempts tentatives",
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    }
                                 if (step.text("error").isNotEmpty())
                                     Text(
                                         step.text("error"),

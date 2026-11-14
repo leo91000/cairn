@@ -7,7 +7,9 @@ import { computed, ref } from 'vue'
 import {
   binaryOperator,
   comparisonExpects,
+  comparisonListSchema,
   operatorTitles,
+  ruleConditionDepth,
   typedComparisonRight,
 } from '../hook-rules'
 import {
@@ -33,7 +35,9 @@ const props = defineProps<{
 const model = defineModel<RuleCondition>({ required: true })
 // The server counts the root at level 1; a new group must still fit its leaf.
 const depth = computed(() => props.depth ?? 0)
-const canNestGroup = computed(() => depth.value + 3 <= 6)
+const actualGroup = computed(() => model.value.type === 'all' || model.value.type === 'any')
+const canAddCondition = computed(() => actualGroup.value ? depth.value + 2 <= 6 : depth.value + ruleConditionDepth(model.value) + 1 <= 6)
+const canNestGroup = computed(() => canAddCondition.value && depth.value + 3 <= 6)
 const group = computed(() => model.value.type === 'all' || model.value.type === 'any' ? model.value : { type: 'all' as const, conditions: [model.value] })
 
 const operators = Object.entries(operatorTitles) as Array<[RuleOperator, string]>
@@ -62,6 +66,8 @@ function conditionPath(index: number) {
 
 function add(kind: 'compare' | 'authorIn' | 'formula' | 'group' | 'conversationExists' | 'authorStartedConversation' | 'authorQuota') {
   adding.value = false
+  if (!canAddCondition.value)
+    return
   const field = props.variables.find(option => option.group === 'Event')?.expression ?? 'payload'
   let condition: RuleCondition
   switch (kind) {
@@ -103,7 +109,18 @@ function remove(index: number) {
   setConditions(conditionsOf(model.value).filter((_, position) => position !== index))
 }
 
+function canInvert(condition: RuleCondition) {
+  return condition.type === 'not' || depth.value + (actualGroup.value ? 2 : 1) + ruleConditionDepth(condition) <= 6
+}
+
+function invert(index: number, condition: RuleCondition) {
+  if (canInvert(condition))
+    update(index, condition.type === 'not' ? condition.condition : { type: 'not', condition })
+}
+
 function toggleKind() {
+  if (!actualGroup.value && !canAddCondition.value)
+    return
   if (group.value)
     model.value = { type: group.value.type === 'all' ? 'any' : 'all', conditions: group.value.conditions }
 }
@@ -135,6 +152,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
         type="button"
         class="rounded-full border border-accent/40 bg-accent/10 px-3 py-1 text-xs font-bold text-accent hover:bg-accent/15"
         :aria-label="`Match ${group.type === 'all' ? 'all' : 'any'} of the conditions; switch`"
+        :disabled="!actualGroup && !canAddCondition"
         @click="toggleKind"
       >
         {{ group.type === 'all' ? 'ALL' : 'ANY' }}
@@ -171,6 +189,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
             :model-value="condition.right"
             :label="condition.operator === 'in' ? 'Values (a list)' : condition.operator === 'matches' ? 'Regular expression' : 'Value'"
             :expects="comparisonExpects(condition.left, condition.operator, variables)"
+            :schema="condition.operator === 'in' ? comparisonListSchema(condition.left, variables) : undefined"
             :variables="variables"
             :problems="problemsAt(`${conditionPath(index)}/right`)"
             :hint="condition.operator === 'in' ? 'For example [&quot;alice&quot;, &quot;bob&quot;].' : undefined"
@@ -306,7 +325,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
             :path="`${conditionPath(index)}/condition`"
             :variables="variables"
             :problems="problems"
-            :depth="depth + 1"
+            :depth="depth + (actualGroup ? 2 : 1)"
             :people-source="peopleSource"
             @update:model-value="next => update(index, { type: 'not', condition: next })"
           />
@@ -320,7 +339,12 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
           {{ problem.message }}
         </p>
         <div class="flex justify-end gap-2">
-          <button type="button" class="rounded-lg px-2 py-1 text-xs text-muted hover:bg-hover" @click="update(index, condition.type === 'not' ? condition.condition : { type: 'not', condition })">
+          <button
+            type="button"
+            class="rounded-lg px-2 py-1 text-xs text-muted hover:bg-hover"
+            :disabled="!canInvert(condition)"
+            @click="invert(index, condition)"
+          >
             {{ condition.type === 'not' ? 'Stop inverting' : 'Invert' }}
           </button>
           <button type="button" class="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-muted hover:bg-hover hover:text-coral" @click="remove(index)">
@@ -343,6 +367,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
         type="button"
         class="inline-flex items-center gap-1.5 rounded-full border border-line px-3 py-1.5 text-xs font-semibold hover:bg-hover"
         :aria-expanded="adding"
+        :disabled="!canAddCondition"
         @click="adding = !adding"
       >
         <Icon :name="Plus" :size="14" />Add a condition

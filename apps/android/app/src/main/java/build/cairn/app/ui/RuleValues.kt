@@ -70,6 +70,7 @@ internal fun RuleValueEditor(
                 FilterChip(
                     selected = mode == kind,
                     onClick = {
+                        if (kind == mode) return@FilterChip
                         change(
                             when (kind) {
                                 "literal" ->
@@ -94,14 +95,11 @@ internal fun RuleValueEditor(
                                     )
                                 "formula" ->
                                     formulaRuleValue(
-                                        if (
-                                            mode == "template" &&
-                                                text.startsWith("{{") &&
-                                                text.endsWith("}}")
-                                        )
-                                            text.substring(2, text.length - 2).trim()
-                                        else if (mode == "literal") held["value"].toString()
-                                        else JsonPrimitive(text).toString()
+                                        when (mode) {
+                                            "template" -> unwrapRuleTemplate(text)
+                                            "literal" -> held["value"].toString()
+                                            else -> text
+                                        }
                                     )
                                 else -> templateValue(if (mode == "formula") "{{$text}}" else text)
                             }

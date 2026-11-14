@@ -771,6 +771,59 @@ fun literalRuleValue(value: JsonElement): JsonObject = buildJsonObject {
     put("value", value)
 }
 
+private fun presentRuleFields(value: JsonObject): JsonObject =
+    JsonObject(value.filterValues { it != JsonNull })
+
+private fun canonicalRuleCondition(value: JsonElement): JsonElement {
+    val objectValue = value as? JsonObject ?: return value
+    val fields = presentRuleFields(objectValue).toMutableMap()
+    when (value.text("type")) {
+        "all",
+        "any" ->
+            fields["conditions"] = JsonArray(value.list("conditions").map(::canonicalRuleCondition))
+        "not" -> value.obj("condition")?.let { fields["condition"] = canonicalRuleCondition(it) }
+    }
+    return JsonObject(fields)
+}
+
+private fun canonicalRuleNode(value: JsonElement): JsonElement {
+    val objectValue = value as? JsonObject ?: return value
+    val fields = presentRuleFields(objectValue).toMutableMap()
+    when (value.text("type")) {
+        "if" -> {
+            value.obj("condition")?.let { fields["condition"] = canonicalRuleCondition(it) }
+            fields["then"] = JsonArray(value.list("then").map(::canonicalRuleNode))
+            fields["otherwise"] = JsonArray(value.list("otherwise").map(::canonicalRuleNode))
+        }
+        "forEach" -> fields["body"] = JsonArray(value.list("body").map(::canonicalRuleNode))
+        "action" -> value.obj("action")?.let { fields["action"] = presentRuleFields(it) }
+    }
+    return JsonObject(fields)
+}
+
+fun sameRuleDefinition(left: JsonObject, right: JsonObject): Boolean {
+    fun canonical(value: JsonObject) =
+        JsonObject(value + ("steps" to JsonArray(value.list("steps").map(::canonicalRuleNode))))
+    return canonical(left) == canonical(right)
+}
+
+fun ruleConditionDepth(condition: JsonElement?): Int =
+    when (condition.text("type")) {
+        "all",
+        "any" -> 1 + (condition.list("conditions").maxOfOrNull { ruleConditionDepth(it) } ?: 0)
+        "not" -> 1 + ruleConditionDepth(condition.obj("condition"))
+        else -> 1
+    }
+
+fun unwrapRuleTemplate(text: String): String {
+    val trimmed = text.trim()
+    if (trimmed.startsWith("{{") && trimmed.endsWith("}}")) {
+        val expression = trimmed.substring(2, trimmed.length - 2)
+        if (!expression.contains("{{")) return expression.trim()
+    }
+    return JsonPrimitive(text).toString()
+}
+
 fun comparisonExpects(left: JsonElement?, operator: String, variables: List<RuleVariable>): String {
     if (operator == "in") return "json"
     if (operator in setOf("matches", "startsWith", "endsWith", "contains")) return "text"

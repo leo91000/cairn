@@ -14,8 +14,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import build.cairn.app.data.CairnViewModel
-import build.cairn.app.data.INSTALLATION_NOTIFICATION_TARGET
-import build.cairn.app.data.RULE_NOTIFICATION_TARGET_PREFIX
+import build.cairn.app.data.notificationTarget
 import build.cairn.app.diagnostics.FrameMonitor
 import build.cairn.app.ui.AppUpdatePrompt
 import build.cairn.app.ui.CairnApp
@@ -84,24 +83,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun receive(intent: Intent) {
-        if (
-            intent.action == "build.cairn.app.OPEN_CHAT" ||
-                intent.action == "build.cairn.app.OPEN_INSTALLATION"
-        ) {
-            targetChat =
-                if (intent.action == "build.cairn.app.OPEN_INSTALLATION") {
-                    val rule =
-                        intent.data?.getQueryParameter("rule")?.takeIf {
-                            runCatching { java.util.UUID.fromString(it) }.isSuccess
-                        }
-                    if (rule == null) INSTALLATION_NOTIFICATION_TARGET
-                    else RULE_NOTIFICATION_TARGET_PREFIX + rule
-                } else
-                    intent
-                        .getStringExtra("chat")
-                        .orEmpty()
-                        .takeIf { runCatching { java.util.UUID.fromString(it) }.isSuccess }
-                        .orEmpty()
+        notificationTarget(intent)?.let { target ->
+            targetChat = target
             targetCacheScope = intent.getStringExtra("origin").orEmpty()
             targetAccount = intent.getStringExtra("account").orEmpty()
         }

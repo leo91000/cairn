@@ -36,6 +36,12 @@ variables into text or formulas. The installation validates drafts and reports
 errors at their step. Saving creates a version. A state-only revision change is
 refreshed while preserving the draft; a newer saved definition can be reviewed,
 adopted or explicitly replaced by the draft as the next version.
+An uncertain creation keeps its original identity and submitted definition. Edits
+made afterwards remain in the editor and can be saved as the recovered rule's
+next version, including after native recreation. Removing a block with nested
+steps asks first. Both enforce the tree and condition-depth limits, counting
+negation as a separate level. History shows retry counts and the resume time on
+both platforms.
 Comparison values follow the selected field's number or boolean type. Both
 pickers expose the catalog's variables and formula functions, with signatures,
 descriptions and examples. Inserting a variable into a typed value produces a

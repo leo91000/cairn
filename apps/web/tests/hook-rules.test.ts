@@ -6,6 +6,8 @@ import {
   comparisonExpects,
   nodeAt,
   pathOfNode,
+  ruleConditionDepth,
+  sameRuleDefinition,
   typedComparisonRight,
   variablesAt,
   withInserted,
@@ -97,5 +99,28 @@ describe('visual rule editing', () => {
     expect(typedComparisonRight({ type: 'template', text: '5' }, 'number')).toEqual({ type: 'literal', value: 5 })
     expect(typedComparisonRight({ type: 'template', text: 'false' }, 'boolean')).toEqual({ type: 'literal', value: false })
     expect(typedComparisonRight({ type: 'template', text: '{{payload.count}}' }, 'number')).toEqual({ type: 'formula', expression: 'payload.count' })
+  })
+})
+
+describe('rule definition recovery and condition depth', () => {
+  it('compares client drafts without depending on property order and retains null data', () => {
+    const original: HookRuleDefinition = { ...definition(), steps: [action] }
+    const reordered = Object.fromEntries(Object.entries(original).reverse()) as HookRuleDefinition
+    expect(sameRuleDefinition(original, reordered)).toBe(true)
+    const optional = JSON.parse(JSON.stringify(original)) as HookRuleDefinition
+    if (optional.steps[0].type === 'action' && optional.steps[0].action.type === 'storeValue')
+      optional.steps[0].action.key = null
+    expect(sameRuleDefinition(original, optional)).toBe(true)
+    const changed = JSON.parse(JSON.stringify(original)) as HookRuleDefinition
+    if (changed.steps[0].type === 'action' && changed.steps[0].action.type === 'storeValue' && changed.steps[0].action.value.type === 'literal')
+      delete (changed.steps[0].action.value.value as any).missing
+    expect(sameRuleDefinition(original, changed)).toBe(false)
+  })
+
+  it('counts negation separately from each group and leaf', () => {
+    let condition: any = { type: 'formula', expression: 'true' }
+    for (let depth = 0; depth < 3; depth++)
+      condition = { type: 'all', conditions: [condition] }
+    expect(ruleConditionDepth({ type: 'all', conditions: [{ type: 'not', condition }] })).toBe(6)
   })
 })

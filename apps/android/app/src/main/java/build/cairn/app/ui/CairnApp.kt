@@ -310,12 +310,7 @@ private fun WorkspaceApp(
     }
     LaunchedEffect(targetChat, vm.api.cacheScope) {
         if (targetChat.isNotBlank() && targetCacheScope == vm.api.cacheScope) {
-            nav.navigate(
-                if (targetChat.startsWith(RULE_NOTIFICATION_TARGET_PREFIX))
-                    "rules?rule=${segment(targetChat.removePrefix(RULE_NOTIFICATION_TARGET_PREFIX))}"
-                else if (targetChat == INSTALLATION_NOTIFICATION_TARGET) "fil"
-                else "chat/${segment(targetChat)}"
-            ) {
+            nav.navigate(notificationRoute(targetChat)) {
                 // A pager may now display a different page from its route's starting id.
                 val pager = nav.currentDestination?.route
                 if (pager == "chat/{id}" || pager == "fil/run/{id}") {

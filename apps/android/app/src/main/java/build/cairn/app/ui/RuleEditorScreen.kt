@@ -76,6 +76,9 @@ fun RuleEditorScreen(
     var loadedVersion by rememberSaveable(cacheScope, ruleId) { mutableIntStateOf(0) }
     var conflict by remember(cacheScope, ruleId) { mutableStateOf<JsonObject?>(null) }
     var comparingConflict by remember { mutableStateOf(false) }
+    var recoveredRuleId by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
+    var creationDefinition by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
+    val targetRuleId = ruleId.ifBlank { recoveredRuleId }
     val creationId = rememberSaveable(cacheScope, ruleId) { java.util.UUID.randomUUID().toString() }
     var selected by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
     var catalog by remember(cacheScope) { mutableStateOf<HookRuleCatalog?>(null) }
@@ -107,7 +110,8 @@ fun RuleEditorScreen(
             val loaded: HookRuleCatalog = vm.api.get("/hook-rules/catalog")
             catalog = loaded
             val rule: JsonObject? =
-                if (ruleId.isBlank()) null else vm.api.get("/hook-rules/${segment(ruleId)}")
+                if (targetRuleId.isBlank()) null
+                else vm.api.get("/hook-rules/${segment(targetRuleId)}")
             if (rule == null && loaded.agents.isEmpty()) {
                 error =
                     "Un accès à un agent est nécessaire pour créer une règle. Demandez-le au propriétaire."
@@ -164,37 +168,46 @@ fun RuleEditorScreen(
     }
     fun save() {
         if (definition == null || saving || !checked || problems.isNotEmpty() || !canEdit) return
+        val submittedDraft = draft
+        val submittedDefinition = wireJson.parseToJsonElement(submittedDraft).jsonObject
         saving = true
         error = ""
         scope.launch {
             try {
                 suspend fun persist(): JsonObject =
-                    if (ruleId.isBlank())
-                        vm.api.send(
-                            "POST",
-                            "/hook-rules",
-                            ruleObject(
-                                "creationId" to JsonPrimitive(creationId),
-                                "definition" to definition,
-                                "enabled" to JsonPrimitive(true),
-                            ),
-                        )
-                    else
+                    if (targetRuleId.isBlank()) {
+                        if (creationDefinition.isBlank()) creationDefinition = submittedDraft
+                        try {
+                            vm.api.send(
+                                "POST",
+                                "/hook-rules",
+                                ruleObject(
+                                    "creationId" to JsonPrimitive(creationId),
+                                    "definition" to wireJson.parseToJsonElement(creationDefinition),
+                                    "enabled" to JsonPrimitive(true),
+                                ),
+                            )
+                        } catch (cause: ApiException) {
+                            if (cause.status in 400..499 && cause.status != 408)
+                                creationDefinition = ""
+                            throw cause
+                        }
+                    } else
                         vm.api.send(
                             "PUT",
-                            "/hook-rules/${segment(ruleId)}",
+                            "/hook-rules/${segment(targetRuleId)}",
                             ruleObject(
-                                "ruleId" to JsonPrimitive(ruleId),
+                                "ruleId" to JsonPrimitive(targetRuleId),
                                 "revision" to JsonPrimitive(revision),
-                                "definition" to definition,
+                                "definition" to submittedDefinition,
                             ),
                         )
                 val result =
                     try {
                         persist()
                     } catch (cause: ApiException) {
-                        if (cause.status != 409 || ruleId.isBlank()) throw cause
-                        val latest: JsonObject = vm.api.get("/hook-rules/${segment(ruleId)}")
+                        if (cause.status != 409 || targetRuleId.isBlank()) throw cause
+                        val latest: JsonObject = vm.api.get("/hook-rules/${segment(targetRuleId)}")
                         if (!latest.allowed("edit")) {
                             canEdit = false
                             selected = ""
@@ -209,8 +222,32 @@ fun RuleEditorScreen(
                         revision = latest.text("revision")
                         persist()
                     }
+                check(
+                    result.text("id").isNotBlank() &&
+                        result.obj("definition") != null &&
+                        result.obj("allowed")?.get("edit").flag() != null
+                ) {
+                    "La réponse de sauvegarde est incomplète. Votre brouillon est conservé ; réessayez."
+                }
+                if (
+                    !sameRuleDefinition(
+                        result.obj("definition").orEmpty(),
+                        wireJson.parseToJsonElement(draft).jsonObject,
+                    )
+                ) {
+                    recoveredRuleId = result.text("id")
+                    revision = result.text("revision")
+                    loadedVersion = result.text("version").toIntOrNull() ?: 0
+                    canEdit = result.allowed("edit")
+                    conflict = if (canEdit) result else null
+                    error =
+                        "La sauvegarde a réussi. Vos dernières modifications sont conservées ; enregistrez-les dans la version suivante."
+                    return@launch
+                }
                 original = draft
-                vm.notify(if (ruleId.isBlank()) "Règle créée" else "Nouvelle version enregistrée")
+                vm.notify(
+                    if (targetRuleId.isBlank()) "Règle créée" else "Nouvelle version enregistrée"
+                )
                 saved(result.text("id"))
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -239,7 +276,7 @@ fun RuleEditorScreen(
             ) {
                 Text(
                     if (saving) "Enregistrement…"
-                    else if (ruleId.isBlank()) "Créer" else "Enregistrer"
+                    else if (targetRuleId.isBlank()) "Créer" else "Enregistrer"
                 )
             }
         }
@@ -314,7 +351,7 @@ fun RuleEditorScreen(
                 verticalArrangement = Arrangement.spacedBy(18.dp),
             ) {
                 Text(
-                    if (ruleId.isBlank()) "Créer une règle" else "Modifier la règle",
+                    if (targetRuleId.isBlank()) "Créer une règle" else "Modifier la règle",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
                 )

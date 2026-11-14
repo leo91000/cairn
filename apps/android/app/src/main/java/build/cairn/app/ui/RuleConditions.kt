@@ -23,6 +23,7 @@ internal fun RuleConditionEditor(
 ) {
     val group = value.text("type") in setOf("all", "any")
     val conditions = if (group) value.list("conditions") else listOf(value)
+    val canAddCondition = if (group) depth + 2 <= 6 else depth + ruleConditionDepth(value) + 1 <= 6
     var adding by remember { mutableStateOf(false) }
     fun replace(index: Int, next: JsonObject) {
         if (!group) change(next)
@@ -34,6 +35,7 @@ internal fun RuleConditionEditor(
             )
     }
     fun add(kind: String) {
+        if (!canAddCondition) return
         val author =
             formulaRuleValue(
                 variables
@@ -142,7 +144,7 @@ internal fun RuleConditionEditor(
                                 { replace(index, condition.patch("condition" to it)) },
                                 vm,
                                 peopleSource,
-                                depth + 1,
+                                depth + if (group) 2 else 1,
                             )
                         }
                         "compare" -> {
@@ -313,6 +315,9 @@ internal fun RuleConditionEditor(
                     Row {
                         if (condition.text("type") != "not")
                             TextButton(
+                                enabled =
+                                    depth + (if (group) 2 else 1) + ruleConditionDepth(condition) <=
+                                        6,
                                 onClick = {
                                     replace(
                                         index,
@@ -321,7 +326,7 @@ internal fun RuleConditionEditor(
                                             "condition" to condition,
                                         ),
                                     )
-                                }
+                                },
                             ) {
                                 Text("Inverser")
                             }
@@ -359,7 +364,9 @@ internal fun RuleConditionEditor(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         Box {
-            OutlinedButton(onClick = { adding = true }) { Text("+ Ajouter une condition") }
+            OutlinedButton(onClick = { adding = true }, enabled = canAddCondition) {
+                Text("+ Ajouter une condition")
+            }
             DropdownMenu(adding, { adding = false }) {
                 val choices =
                     listOf(
@@ -372,7 +379,8 @@ internal fun RuleConditionEditor(
                     ) +
                         // The server counts the root at level 1; a new group must still fit its
                         // leaf.
-                        if (depth + 3 <= 6) listOf("all" to "Groupe ET", "any" to "Groupe OU")
+                        if (canAddCondition && depth + 3 <= 6)
+                            listOf("all" to "Groupe ET", "any" to "Groupe OU")
                         else emptyList()
                 choices.forEach { (kind, title) ->
                     DropdownMenuItem(text = { Text(title) }, onClick = { add(kind) })

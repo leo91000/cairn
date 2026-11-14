@@ -35,6 +35,7 @@ import {
   nodeAt,
   pathOfNode,
   problemsUnder,
+  sameRuleDefinition,
   schemaFields,
   triggerKey,
   variablesAt,
@@ -72,6 +73,7 @@ const wideQuery = window.matchMedia('(width > 1100px)')
 const wide = ref(wideQuery.matches)
 const onWide = () => wide.value = wideQuery.matches
 const creationId = crypto.randomUUID()
+const creationDefinition = ref<HookRuleDefinition | null>(null)
 const loadedDefinition = ref('')
 const validated = ref(false)
 const validationError = ref('')
@@ -80,6 +82,7 @@ let leavingAfterSave = false
 const pendingLeave = ref<string | null>(null)
 const conflict = ref<HookRule | null>(null)
 const comparingConflict = ref(false)
+const removingId = ref<string | null>(null)
 
 const agentName = (agent: string) => catalog.value?.agents.find(entry => entry.agentId === agent)?.name ?? 'an agent'
 
@@ -188,7 +191,7 @@ watch(definition, value => scheduleValidation(value), { deep: true })
 
 const general = computed(() => problems.value.filter(problem => !problem.path.startsWith('/steps/')))
 const stepProblems = computed(() => problems.value.filter(problem => problem.path.startsWith('/steps')))
-const ready = computed(() => validated.value && !checking.value && problems.value.length === 0 && !!definition.value?.name.trim())
+const ready = computed(() => (!rule.value || rule.value.allowed.edit) && validated.value && !checking.value && problems.value.length === 0 && !!definition.value?.name.trim())
 
 function insert(container: string, index: number, kind: StepKind) {
   if (!definition.value)
@@ -207,7 +210,20 @@ function mutateTree(update: (definition: HookRuleDefinition) => HookRuleDefiniti
 }
 
 function remove(path: string) {
+  const node = definition.value ? nodeAt(definition.value, path) : undefined
+  if (node && ((node.type === 'if' && (node.then.length || node.otherwise.length)) || (node.type === 'forEach' && node.body.length))) {
+    removingId.value = node.id
+    return
+  }
+
   mutateTree(definition => withRemoved(definition, path))
+}
+
+function confirmRemove() {
+  const path = definition.value && removingId.value ? pathOfNode(definition.value, removingId.value) : null
+  removingId.value = null
+  if (path)
+    mutateTree(definition => withRemoved(definition, path))
 }
 
 function move(path: string, offset: -1 | 1) {
@@ -224,33 +240,54 @@ const selectedNode = computed({
 const selectedVariables = computed(() => definition.value && selected.value ? variablesAt(definition.value, selected.value, catalog.value) : [])
 
 async function save() {
-  if (!definition.value || saving.value)
+  if (!definition.value || saving.value || !ready.value)
     return
+  const submitted = JSON.parse(JSON.stringify(definition.value)) as HookRuleDefinition
   saving.value = true
   error.value = ''
   try {
     let saved: HookRule
     if (rule.value) {
       try {
-        saved = await replaceHookRule(api, { ruleId: rule.value.id, revision: rule.value.revision, definition: definition.value })
+        saved = await replaceHookRule(api, { ruleId: rule.value.id, revision: rule.value.revision, definition: submitted })
       }
       catch (cause) {
         if (!(cause instanceof ApiError) || cause.status !== 409)
           throw cause
         const latest = await getHookRule(api, { ruleId: rule.value.id })
-        if (!latest.allowed.edit)
+        if (!latest.allowed.edit) {
+          rule.value = latest
           throw new Error('You can no longer edit this rule. Your draft is still here.')
+        }
+
         if (latest.version !== rule.value.version) {
           conflict.value = latest
           return
         }
 
         rule.value = latest
-        saved = await replaceHookRule(api, { ruleId: latest.id, revision: latest.revision, definition: definition.value })
+        saved = await replaceHookRule(api, { ruleId: latest.id, revision: latest.revision, definition: submitted })
       }
     }
     else {
-      saved = await createHookRule(api, { creationId, definition: definition.value, enabled: true })
+      creationDefinition.value ??= submitted
+      try {
+        saved = await createHookRule(api, { creationId, definition: creationDefinition.value, enabled: true })
+      }
+      catch (cause) {
+        if (cause instanceof ApiError && cause.status >= 400 && cause.status < 500 && cause.status !== 408)
+          creationDefinition.value = null
+        throw cause
+      }
+    }
+
+    if (typeof saved.id !== 'string' || !saved.id || !saved.definition || typeof saved.allowed?.edit !== 'boolean')
+      throw new Error('The save response was incomplete. Your draft is still here; retry saving.')
+    if (!sameRuleDefinition(saved.definition, definition.value)) {
+      rule.value = saved
+      conflict.value = saved.allowed.edit ? saved : null
+      error.value = 'Your save succeeded. Your later edits are preserved; save them as the next version.'
+      return
     }
 
     notify(rule.value ? 'Rule saved as a new version' : 'Rule created')
@@ -558,6 +595,19 @@ onBeforeUnmount(() => {
     <p v-else-if="!error" class="mt-6 text-sm text-muted" role="status">
       Loading the editor…
     </p>
+    <Modal v-if="removingId" title="Remove this step and its branches?" @close="removingId = null">
+      <p class="px-6 py-5 text-sm text-muted">
+        All steps inside this block will also be removed.
+      </p>
+      <footer class="flex justify-end gap-2 border-t border-line px-6 py-4">
+        <UiButton @click="removingId = null">
+          Keep the step
+        </UiButton>
+        <UiButton variant="danger" @click="confirmRemove">
+          Remove the block
+        </UiButton>
+      </footer>
+    </Modal>
     <Modal v-if="pendingLeave" title="Discard your unsaved changes?" @close="pendingLeave = null">
       <div class="px-6 py-5 text-sm text-muted">
         Your rule has changes that have not been saved yet.
