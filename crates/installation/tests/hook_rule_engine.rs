@@ -1433,53 +1433,6 @@ async fn a_claim_error_does_not_abort_another_triggerings_in_flight_tool() {
     assert_eq!(states, 2);
 }
 
-#[tokio::test]
-async fn conversation_actions_and_predicates_fail_explicitly_until_ticket_g() {
-    for nodes in [
-        json!([{
-            "type": "action",
-            "id": "start",
-            "action": {
-                "type": "startAgent",
-                "agentId": MAIN_AGENT_ID,
-                "prompt": { "type": "literal", "value": "hello" },
-            },
-        }]),
-        json!([{
-            "type": "if",
-            "id": "exists",
-            "condition": {
-                "type": "conversationExists",
-                "key": { "type": "literal", "value": "key" },
-            },
-            "then": [],
-            "otherwise": [],
-        }]),
-    ] {
-        let f = granted().await;
-        let mut nodes = nodes.as_array().unwrap().clone();
-        nodes.insert(0, remember_seen());
-        let rule = rule(&f, OWNER, json!(nodes), 60).await;
-        emit(
-            &f,
-            "conversation-stub",
-            json!({ "channel": "support", "author": "alice" }),
-        )
-        .await;
-        engine::tick(&f.s).await.unwrap();
-        let listed = history(&f, OWNER, &rule).await;
-        let failed = detail(&f, OWNER, &listed["triggerings"][0]).await;
-        assert_eq!(failed["status"], "failed", "{failed}");
-        assert!(
-            failed["error"]
-                .as_str()
-                .unwrap()
-                .contains("conversation keys"),
-            "{failed}"
-        );
-    }
-}
-
 fn remember_seen() -> Value {
     json!({
         "type": "action", "id": "remember",

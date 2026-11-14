@@ -110,7 +110,7 @@ fn chat(db: &Db<'_>, id: &str) -> Result<Value> {
     required(db.conversation_boundary(id)?, "Chat not found")
 }
 
-fn conversation(db: &Db<'_>, id: &str) -> Result<Conversation> {
+pub(crate) fn conversation(db: &Db<'_>, id: &str) -> Result<Conversation> {
     required(db.conversation(id)?, "Chat not found")
 }
 
@@ -911,6 +911,8 @@ pub(crate) fn send(
         &saved.id,
         &crate::conversation_writers::EntryWriter::of(origin),
     )?;
+    // Cairn hooks retain the writer of the turn as well as its attestation.
+    crate::rules::engine::conversations::record_input(db, chat_id, &saved.id, origin)?;
     Ok(serde_json::to_value(saved)?)
 }
 
@@ -1034,6 +1036,8 @@ pub(crate) fn edit_as(
         &saved.id,
         &crate::conversation_writers::EntryWriter::of(origin),
     )?;
+    // Cairn hooks retain the writer of the turn as well as its attestation.
+    crate::rules::engine::conversations::record_input(db, chat_id, &saved.id, origin)?;
     Ok(serde_json::to_value(saved)?)
 }
 

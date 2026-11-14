@@ -20,4 +20,13 @@ export interface RuleCatalogLimits {
    * Event bytes retained by unresolved admissions and active triggerings, per rule.
    */
   maxPendingEventBytes?: number | null
+  /**
+   * Links Cairn follows in a chain where a rule's conversation action causes a Cairn
+   * hook that triggers a rule. A conversation action beyond it fails.
+   */
+  maxChainDepth?: number | null
+  /**
+   * Bytes of the values rules remember on one conversation.
+   */
+  maxConversationValuesBytes?: number | null
 }

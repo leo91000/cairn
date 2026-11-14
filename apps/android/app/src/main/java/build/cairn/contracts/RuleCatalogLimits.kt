@@ -7,6 +7,10 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class RuleCatalogLimits(
     val defaultLimits: HookRuleLimits,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val maxChainDepth: Long? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val maxConversationValuesBytes: Long? = null,
     val maxConversationsPerHour: Long,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val maxCursorBytes: Long? = null,
@@ -25,6 +29,8 @@ data class RuleCatalogLimits(
     val maxWaitSeconds: Long,
 ) {
     init {
+        maxChainDepth?.let { require(it >= 0L) }
+        maxConversationValuesBytes?.let { require(it >= 0L) }
         require(maxConversationsPerHour >= 0L)
         maxCursorBytes?.let { require(it >= 0L) }
         require(maxNodes >= 0L)

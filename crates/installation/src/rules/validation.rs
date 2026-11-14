@@ -306,7 +306,7 @@ pub(crate) fn check(db: &Db<'_>, request: &Request<'_>) -> Result<Checked> {
         }
     }
 
-    let warnings = warnings(db, definition)?;
+    let warnings = warnings(db, definition, &request.creator.account)?;
 
     Ok(Checked {
         problems: checker.problems,
@@ -320,16 +320,29 @@ pub(crate) fn check(db: &Db<'_>, request: &Request<'_>) -> Result<Checked> {
 pub(crate) fn warnings(
     db: &Db<'_>,
     definition: &HookRuleDefinition,
+    creator: &str,
 ) -> Result<Vec<HookRuleWarning>> {
     if tests_author(&definition.steps) {
         return Ok(Vec::new());
     }
     let mut started = BTreeSet::new();
-    visit_actions(&definition.steps, &mut |action| {
-        if let RuleAction::StartAgent { agent_id, .. } = action {
+    let mut directs = false;
+    visit_actions(&definition.steps, &mut |action| match action {
+        RuleAction::StartAgent { agent_id, .. } => {
             started.insert(agent_id.to_string());
         }
+        RuleAction::SteerConversation { .. } | RuleAction::AnswerQuestion { .. } => {
+            directs = true;
+        }
+        _ => {}
     });
+    // Steering or answering by key directs the agents of the creator's bound
+    // conversations as well.
+    if directs {
+        started.extend(crate::rules::engine::conversations::keyed_agents(
+            db, creator,
+        )?);
+    }
     let mut exposed = Vec::new();
     for id in &started {
         if let Some(profile) = db.agent(id)? {
@@ -697,10 +710,18 @@ impl Checker {
                     self.value(value, &format!("{path}/input/{}", pointer(key)), scope);
                 }
             }
-            RuleAction::StartAgent { prompt, key, .. } => {
+            RuleAction::StartAgent {
+                prompt,
+                key,
+                author,
+                ..
+            } => {
                 self.value(prompt, &format!("{path}/prompt"), scope);
                 if let Some(key) = key {
                     self.key(key, &format!("{path}/key"), scope);
+                }
+                if let Some(author) = author {
+                    self.author(author, &format!("{path}/author"), scope);
                 }
             }
             RuleAction::SteerConversation { key, message } => {

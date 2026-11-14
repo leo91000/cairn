@@ -34,7 +34,9 @@ never computed by a formula.
 
 Formulas read `payload` (the event), each top-level payload field by its own name
 (`threadId`), `steps`, `values` (the rule's remembered values), `event` (`id`, `hook`,
-`instanceId`, `receivedAt`), `now` and the item of each enclosing loop. They call the
+`instanceId`, `receivedAt`), `now` and the item of each enclosing loop. The payload of
+a [Cairn hook](#cairn-hooks) carries the values remembered on its conversation in
+`payload.values`. They call the
 CEL standard library, the lists extension, the string functions of the strings
 extension (`charAt`, `indexOf`, `lastIndexOf`, `lowerAscii`, `upperAscii`, `replace`,
 `split`, `join`, `substring`, `trim`), which Cairn implements with size checks, and these
@@ -54,20 +56,26 @@ to a payload field or formula (`equals`, `notEquals`, `contains`, `startsWith`,
 `endsWith`, `matches` a whole regular expression, `in` a list, `present`, `absent`,
 `greaterThan`, `lessThan`). `formula` is a boolean CEL expression. Cairn predicates:
 `authorIn` (the author is one of the chosen people, as plugin resources),
-`authorStartedConversation` (the author started the conversation of a key),
-`conversationExists` (a conversation is bound to a key) and `authorQuota` (the author
-triggered the rule fewer than `limit` times in `windowMinutes`).
+`authorStartedConversation` (the author recorded when a rule started the conversation
+of a key is this one), `conversationExists` (a conversation, not deleted, is bound to
+a key of the rule's creator) and `authorQuota` (the author triggered the rule fewer
+than `limit` times in `windowMinutes`). An author is text or a number of at most 200
+characters; a missing author makes these author predicates false. A key is text of 1
+to 200 characters, otherwise the triggering fails. A triggering counts for the
+authors its quota conditions examined once it runs an action, once per author; at
+most 20 authors per triggering.
 
 ### Actions
 
 `callTool` calls a plugin tool through the execution agent's grants, never a Cairn
 tool; its literal inputs are checked against the tool's input schema. `startAgent`
-starts an agent the creator may use, optionally bound to a key; it fails when the key
-is already bound, and the tree chooses to steer instead. `steerConversation`,
-`cancelConversation` and `answerQuestion` reach a conversation only by its key.
-`storeValue` remembers a value with the rule, or with the conversation of a key.
-`wait` waits from one second to seven days, then resumes the next steps; a loop cannot
-wait.
+starts an agent the creator may use with a prompt, in a project or not, optionally
+bound to a key and recording the external `author` it starts for; it fails when the
+key is already bound, and the tree chooses to steer instead. `steerConversation`,
+`cancelConversation` and `answerQuestion` reach a conversation only by its key (see
+[conversation keys](#conversation-keys)). `storeValue` remembers a value with the
+rule, or with the conversation of a key. `wait` waits from one second to seven days,
+then resumes the next steps; a loop cannot wait.
 
 A rule holds at most 200 blocks nested eight levels deep. One triggering runs at most
 500 blocks and iterations, actions excluded, and 50 tool calls.
@@ -145,11 +153,16 @@ Actions:
   and at most 16 MiB of event data across them; later events are refused only
   for that rule and counted as `notAdmitted` in its history, without retaining their
   payloads or blocking the shared instance queue.
-- Conversation actions and conditions about conversation keys come with ticket G
-  (#516). Until then they end the triggering. If an earlier action ran, its history
-  includes the error explaining that conversation keys are unavailable; otherwise
-  the triggering only increments `withoutEffect`, like other failures before the
-  first action.
+- Conversation actions (`startAgent`, `steerConversation`, `cancelConversation`,
+  `answerQuestion` and `storeValue` with the conversation scope) take effect in the
+  transaction that records them: an interruption leaves either both or neither, so
+  they are never ambiguous and never replayed. A refusal (a bound key, a lost access,
+  a person's pause, the chain depth, native authority) is recorded as the failed
+  action and ends the triggering; nothing it would have changed is kept. Their result
+  is `{conversationId, messageId, key}` for a start, `{conversationId, messageId}` for
+  a steer, `{conversationId, questionId, messageId}` for an answer,
+  `{conversationId, runId?, cancelled}` for a cancellation and the value for
+  `storeValue`.
 
 ### Budget
 
@@ -164,8 +177,22 @@ most 500 control steps and 50 tool calls (retries included). Each `if` or `forEa
 block counts once, and each loop iteration also counts once, including the first;
 actions do not count as control steps. A loop with only actions can therefore run
 at most 499 iterations within that limit.
-Ticket G (#516) adds the separate maximum depth for chains caused by Cairn hooks,
-together with those hooks; plugin events cannot supply or bypass a Cairn chain depth.
+Starting or steering a conversation also counts against the hourly conversation cap
+(default 10, at most 100), even from a progress triggering; beyond it, the action
+fails and the rule becomes `budgetExhausted` like the triggering cap. Lifting the
+budget gives both caps a fresh window. Triggerings of the `progress` hook, already
+paced by Cairn, do not count against the triggering cap.
+
+A chain is what Cairn can follow: a rule's conversation action causes a Cairn hook,
+whose triggering acts on a conversation, which causes another hook, and so on. A plugin
+event starts a chain at depth 0 and a person's input starts a new one; each start,
+steer, answer or cancellation by a rule makes the hooks of the turn it causes one link
+deeper, and a turn without new input (a wakeup, the end of a wait) keeps its
+conversation's depth. Cairn follows at most **8** links (`maxChainDepth` in the
+catalog): a conversation action that would make a ninth fails with an error naming
+the limit. Only Cairn records the depth, beside the event and outside its payload, so
+a plugin's payload cannot supply or lower it. A tool call that makes the service emit
+a plugin event again is not a chain Cairn can follow: the hourly caps bound it.
 
 ### History
 
@@ -177,6 +204,67 @@ owner and members with access to the execution agent of the version that trigger
 ran with. Cairn keeps the 200 newest triggerings of each rule, and every one still
 running, waiting or retrying. Hourly accounting is retained independently of this
 history, and lifting an exhausted budget gives subsequent triggerings a fresh window.
+
+## Conversation keys
+
+A key is text of 1 to 200 characters, usually a template such as `discord:{{threadId}}`.
+`startAgent` binds the conversation it starts to a key; keys belong to the rule's
+creator, so two creators using the same key name two conversations, and a rule only
+reaches its creator's keys. A key is free again once its conversation is deleted
+(moved to the trash or purged); a finished conversation keeps its key and can be
+steered again. Merging agents detaches the keys of the conversations the merge moves,
+with the values rules remembered on them: no rule reaches them anymore.
+
+Every action on the conversation of a key needs its creator's current access to that
+conversation's agent. Steering queues a message after the current turn. A conversation
+a person paused cannot be steered or answered until a person resumes it. Cairn pauses
+a conversation whose turn failed, or that a rule cancelled, until someone writes again:
+steering it continues it as Cairn would for a person, resuming the stopped turn first.
+Steering a conversation still stopping fails. `cancelConversation` stops the current
+turn like Stop in Cairn; with nothing working it only cancels a scheduled wakeup.
+`answerQuestion` answers the oldest pending question of the conversation's current
+run: a text answers every question of it, an object answers each question by its id
+with a text or `{selected, comment}`.
+
+Values remembered on a conversation (`storeValue` with the conversation scope) are
+shared by every rule that reaches it, at most 64 KiB each and 256 KiB per conversation,
+and are deleted with it. Cairn hooks carry them in `payload.values`.
+
+A conversation a rule starts has the rule's creator as author, without making it
+private ([ADR-0029](adr/0029-sharing-whole-installations.md)), and records its external
+origin: the rule, the hook, the plugin instance, the event and the `author` the action
+gave. Agents never write rules in a conversation a rule started or reached.
+
+### Native authority
+
+Each conversation action resolves an agent or a conversation: when that agent may only
+run natively, or the conversation runs natively, the action needs both the native
+authority saved with the rule's version and its creator's current native authority
+([ADR-0050](adr/0050-trusted-native-execution.md)); without them it fails. The
+conversation then carries that saved authority narrowed to the nodes where the creator
+still holds it, which bounds everything it later launches. Other conversations carry
+it too, so that an automatic agent may only reach a native node with it.
+
+## Cairn hooks
+
+Cairn emits four hooks for the conversations bound to a key, to the rules of the
+key's creator that listen to them (`{type: "cairn", hook}`), while that creator keeps
+access to the conversation's agent:
+
+| Hook | When | Payload, besides `key`, `conversationId`, `agentId`, `origin` and `values` |
+| --- | --- | --- |
+| `replyReady` | a turn completed | `text` (the agent's last message, at most 128 KiB, `truncated` when cut) and `deliverables` (at most 10: `id`, `name`, `title`, `mediaType`, `size`) |
+| `questionAsked` | the agent asks, once per question | `questionId`, `title`, `text` (every question with its options) and `fields` |
+| `progress` | about every 8 seconds of a working turn | `step`, a short step without detail |
+| `ended` | a turn completed, failed or was cancelled | `outcome` and, for a failure, `error` |
+
+`origin` says who started the turn: `{kind: "person", accountId}`,
+`{kind: "rule", ruleId, accountId}`, `agent` (a delegated task), `installation`
+(`cairn_installation`), `resume` (a turn without new input, such as a wakeup or the
+end of a wait) or `unknown`. A turn that fails and is retried reports only how its last
+attempt ended. Only one `progress` waits at a time per conversation: while a rule has
+not finished handling the previous one, Cairn emits none. Cairn hooks follow the same
+per-rule capacity, versions, membership checks and history as plugin events.
 
 ## Versions
 
@@ -229,7 +317,11 @@ tool or resource is no longer granted fails when it runs.
 When no condition of the tree tests the author, and the rule starts an agent with
 plugin rights, MCP connections, several projects, file writes or commands,
 delegation, native execution or installation access, the rule carries an
-`openToAnyone` warning naming the agent and its rights. Saving is still allowed.
+`openToAnyone` warning naming the agent and its rights. A rule that steers or answers
+by key warns the same way about the agents of the conversations bound to its creator's
+keys. Saving is still allowed. Listing the rules of an agent (`agentId`) also lists
+the rules that steer or answer by key while their creator has a conversation of that
+agent bound to a key.
 
 ## Rule templates
 

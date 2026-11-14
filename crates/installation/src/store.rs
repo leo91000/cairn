@@ -270,6 +270,10 @@ impl Store {
         }
         if !fresh && version == 33 {
             crate::conversation_writers::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 34 {
+            crate::rules::engine::conversations::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -316,6 +320,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::conversation_writers::SCHEMA)?;
             tx.execute_batch(crate::chats::storage::SCHEMA)?;
             tx.execute_batch(crate::chats::question_storage::SCHEMA)?;
+            tx.execute_batch(crate::rules::engine::conversations::SCHEMA)?;
             tx.execute_batch(crate::attachments::sql::SCHEMA)?;
             tx.execute_batch(crate::reads::sql::SCHEMA)?;
             tx.execute_batch(crate::artifacts::sql::SCHEMA)?;

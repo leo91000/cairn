@@ -263,6 +263,17 @@
               "format": "uuid",
               "type": "string"
             },
+            "author": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/RuleValue"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The external author the conversation is started for, recorded as its origin\nand tested by `authorStartedConversation`."
+            },
             "key": {
               "anyOf": [
                 {

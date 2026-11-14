@@ -2,7 +2,7 @@ pub(crate) mod checkpoint;
 
 use cairn_contracts::EventKind;
 
-mod control;
+pub(crate) mod control;
 mod execution;
 mod launch;
 mod output;

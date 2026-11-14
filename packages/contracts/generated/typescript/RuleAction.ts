@@ -19,6 +19,11 @@ export type RuleAction = {
   prompt: RuleValue
   projectId?: ProjectId | null
   key?: RuleValue | null
+  /**
+   * The external author the conversation is started for, recorded as its origin
+   * and tested by `authorStartedConversation`.
+   */
+  author?: RuleValue | null
 } | { type: 'steerConversation', key: RuleValue, message: RuleValue } | { type: 'cancelConversation', key: RuleValue } | { type: 'answerQuestion', key: RuleValue, answer: RuleValue } | {
   type: 'storeValue'
   scope: RuleValueScope

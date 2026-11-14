@@ -7,7 +7,7 @@
 //! blocks, its creator's membership and its budget again.
 use super::{
     evaluate::{self, Variables},
-    interpreter::Cursor,
+    interpreter::{Cursor, Facts},
     storage::{RuleRow, VersionRow},
     validation::{self, RESERVED},
 };
@@ -17,9 +17,13 @@ use crate::{
     service::Service,
     store::Db,
 };
-use cairn_contracts::{PluginContributionKind as Kind, RuleAction, RuleNode, RuleValueScope};
+use cairn_contracts::{
+    PluginContributionKind as Kind, RuleAction, RuleNode, RuleValue, RuleValueScope,
+};
 
 mod admissions;
+mod cairn_hooks;
+pub(crate) mod conversations;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -962,6 +966,15 @@ async fn sweep(s: &Service) -> Result<()> {
             if !maintenance {
                 return Ok(());
             }
+            // Quotas look back at most a week; the conversation cap an hour.
+            db.0.execute(
+                "DELETE FROM hook_rule_author_triggerings WHERE at<=?",
+                [now() - 7 * 86_400_000],
+            )?;
+            db.0.execute(
+                "DELETE FROM hook_rule_conversation_counts WHERE counted_at<=?",
+                [now() - 3_600_000],
+            )?;
             // Delivery receipts outlive quiet triggerings while another listener is
             // deferred. Counted receipts also meter the hour independently of history.
             db.0.execute(
@@ -1036,6 +1049,9 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
         }
         if let Err(error) = sweep(s).await {
             tracing::warn!(error = %error, "Rule history sweep failed");
+        }
+        if let Err(error) = cairn_hooks::observe(s).await {
+            tracing::warn!(error = %error, "Cairn hook observation failed");
         }
 
         let capacity = PARALLEL.saturating_sub(tasks.len());
@@ -1229,6 +1245,11 @@ fn count(db: &Db<'_>, t: &mut Triggering, row: &RuleRow, version: &VersionRow) -
     if t.counted_at.is_some() {
         return Ok(true);
     }
+    // Cairn already paces progress: its triggerings do not count against the cap.
+    if t.event["cairn"].is_object() && t.event["hook"] == "progress" {
+        t.counted_at = Some(now());
+        return Ok(true);
+    }
     let current = required(db.hook_rule(&row.id)?, "Rule not found")?;
     if current.budget_exhausted_at.is_some() {
         return Ok(false);
@@ -1264,6 +1285,10 @@ fn count(db: &Db<'_>, t: &mut Triggering, row: &RuleRow, version: &VersionRow) -
 pub(crate) fn reset_budget(db: &Db<'_>, rule: &str) -> Result<()> {
     db.0.execute(
         "UPDATE hook_rule_receipts SET counted_at=NULL WHERE rule_id=?",
+        [rule],
+    )?;
+    db.0.execute(
+        "DELETE FROM hook_rule_conversation_counts WHERE rule_id=?",
         [rule],
     )?;
     Ok(())
@@ -1519,6 +1544,7 @@ fn plan(
     mut cursor: Cursor,
     pending: Option<Pending>,
     mut base: Variables,
+    facts: &dyn Facts,
 ) -> Plan {
     if let Err(error) = evaluate::check_deadline() {
         return Plan::Fail(error);
@@ -1541,7 +1567,7 @@ fn plan(
         Ok(evaluator) => evaluator,
         Err(error) => return Plan::Fail(error),
     };
-    let node = match cursor.advance(steps, &evaluator) {
+    let node = match cursor.advance(steps, &evaluator, facts) {
         Ok(Some(node)) => node,
         Ok(None) => return Plan::Done,
         Err(error) => return Plan::Fail(error),
@@ -1562,10 +1588,7 @@ fn plan(
             ..
         } => evaluator.value(value, &items),
         RuleAction::Wait { seconds } => evaluator.value(seconds, &items),
-        _ => Err(format!(
-            "the {} action needs conversation keys, which are not available yet.",
-            action_kind(action)
-        )),
+        _ => conversation_input(action, &evaluator, &items),
     };
     match input {
         Ok(input)
@@ -1580,6 +1603,92 @@ fn plan(
             cursor,
         })),
         Err(error) => Plan::Fail(format!("{}: {error}", node.id())),
+    }
+}
+
+/// The evaluated input of a conversation action: its key, texts and author.
+fn conversation_input(
+    action: &RuleAction,
+    evaluator: &evaluate::Evaluator,
+    items: &Map<String, Json>,
+) -> std::result::Result<Json, String> {
+    let key = |value: &RuleValue| conversations::key(&evaluator.value(value, items)?);
+    let text = |value: &RuleValue, what: &str| match evaluator.value(value, items)? {
+        Json::String(text) => Ok(Json::String(text)),
+        _ => Err(format!("the {what} is not text.")),
+    };
+    Ok(match action {
+        RuleAction::StartAgent {
+            prompt,
+            key: bound,
+            author,
+            ..
+        } => {
+            let mut input = json!({ "prompt": text(prompt, "prompt")? });
+            if let Some(bound) = bound {
+                input["key"] = key(bound)?.into();
+            }
+            if let Some(author) = author {
+                let value = evaluator.value(author, items).unwrap_or(Json::Null);
+                input["author"] = conversations::author(&value)?.into();
+            }
+            input
+        }
+        RuleAction::SteerConversation {
+            key: bound,
+            message,
+        } => {
+            json!({ "key": key(bound)?, "message": text(message, "message")? })
+        }
+        RuleAction::CancelConversation { key: bound } => json!({ "key": key(bound)? }),
+        RuleAction::AnswerQuestion { key: bound, answer } => {
+            json!({ "key": key(bound)?, "answer": evaluator.value(answer, items)? })
+        }
+        RuleAction::StoreValue {
+            key: Some(bound),
+            value,
+            ..
+        } => json!({ "key": key(bound)?, "value": evaluator.value(value, items)? }),
+        _ => return Err("this action has no conversation key.".into()),
+    })
+}
+
+/// What Cairn predicates read, from the planner's blocking thread.
+struct EngineFacts {
+    store: crate::store::Store,
+    runtime: tokio::runtime::Handle,
+    rule: String,
+    creator: String,
+    triggering: String,
+}
+
+impl Facts for EngineFacts {
+    fn conversation(&self, key: &str) -> std::result::Result<Option<Option<String>>, String> {
+        let (creator, key) = (self.creator.clone(), key.to_owned());
+        self.runtime
+            .block_on(
+                self.store
+                    .read(move |db| conversations::bound_author(db, &creator, &key)),
+            )
+            .map_err(|error| error.message)
+    }
+
+    fn author_triggerings(
+        &self,
+        author: &str,
+        window_minutes: u32,
+    ) -> std::result::Result<u32, String> {
+        let (rule, author, triggering) = (
+            self.rule.clone(),
+            author.to_owned(),
+            self.triggering.clone(),
+        );
+        let since = now() - i64::from(window_minutes) * 60_000;
+        self.runtime
+            .block_on(self.store.read(move |db| {
+                conversations::author_triggerings(db, &rule, &author, since, &triggering)
+            }))
+            .map_err(|error| error.message)
     }
 }
 
@@ -1704,10 +1813,19 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
         triggering.pending.clone(),
     );
     let deadline = std::time::Instant::now() + EVALUATION;
+    let facts = EngineFacts {
+        store: s.store.clone(),
+        runtime: tokio::runtime::Handle::current(),
+        rule: row.id.clone(),
+        creator: row.creator_account_id.clone(),
+        triggering: triggering.id.clone(),
+    };
     let planned = tokio::time::timeout(
         EVALUATION,
         tokio::task::spawn_blocking(move || {
-            evaluate::with_deadline(deadline, || plan(&definition, cursor, pending, base))
+            evaluate::with_deadline(deadline, || {
+                plan(&definition, cursor, pending, base, &facts)
+            })
         }),
     )
     .await;
@@ -1783,6 +1901,25 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
     let agent = version.definition.execution_agent_id.to_string();
 
     match action {
+        RuleAction::StartAgent { .. }
+        | RuleAction::SteerConversation { .. }
+        | RuleAction::CancelConversation { .. }
+        | RuleAction::AnswerQuestion { .. }
+        | RuleAction::StoreValue {
+            scope: RuleValueScope::Conversation,
+            ..
+        } => {
+            let acting = Act {
+                triggering,
+                row,
+                version,
+                node: node.clone(),
+                position,
+                cursor,
+                input,
+            };
+            act(s, acting).await
+        }
         RuleAction::CallTool {
             instance_id, tool, ..
         } => {
@@ -1823,6 +1960,7 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                         )?;
                         return Ok(None);
                     }
+                    conversations::record_authors(db, &prepared)?;
                     let running = StepRecord {
                         status: "running",
                         input: Some(&recorded_input),
@@ -1994,6 +2132,7 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                     if !count(db, &mut stored, &row, &version)? {
                         return refuse(db, &triggering, "The rule reached its hourly limit of triggerings.");
                     }
+                    conversations::record_authors(db, &stored)?;
                     db.0.prepare_cached(
                         "INSERT INTO hook_rule_values VALUES(?1,?2,?3,?4) \
                          ON CONFLICT(rule_id,name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
@@ -2042,6 +2181,7 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                             "The rule reached its hourly limit of triggerings.",
                         );
                     }
+                    conversations::record_authors(db, &waiting)?;
                     let resumes = now() + (seconds * 1000.0) as i64;
                     let result = json!({ "resumesAt": resumes });
                     let completed = StepRecord {
@@ -2058,10 +2198,144 @@ async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
                 })
                 .await
         }
-        _ => Err(Error::internal(
-            "The planner returned an unsupported action.",
-        )),
     }
+}
+
+/// A conversation action and the triggering it belongs to.
+struct Act {
+    triggering: Triggering,
+    row: RuleRow,
+    version: VersionRow,
+    node: RuleNode,
+    position: u32,
+    cursor: Cursor,
+    input: Json,
+}
+
+/// Runs a conversation action. Its effect and its record share one transaction, so it
+/// is never ambiguous: a failure leaves nothing done and is recorded as such.
+async fn act(s: &Arc<Service>, acting: Act) -> Result<Step> {
+    let Act {
+        triggering,
+        row,
+        version,
+        node,
+        position,
+        cursor,
+        input,
+    } = acting;
+    let RuleNode::Action { action, .. } = &node else {
+        return Err(Error::internal("The interpreter stopped on a block."));
+    };
+    let action = action.clone();
+    let run = match conversations::prepare(s, &row, &action, &input).await {
+        Ok(run) => run,
+        Err(error) => {
+            let error = format!("{}: {}", node.id(), error.message);
+            finish(s, triggering, "failed", Some(error)).await?;
+            return Ok(Step::Done);
+        }
+    };
+    // Steering may resume a stopped turn, and cancelling stops one: both follow the
+    // worker's locks, like the same requests from a person.
+    let steering = matches!(action, RuleAction::SteerConversation { .. });
+    let preparation = match (&run, steering) {
+        (Some(run), true) => Some(s.worker.run_preparation_lock(run).await),
+        _ => None,
+    };
+    let _prepared = match &preparation {
+        Some(lock) => Some(lock.clone().lock_owned().await),
+        None => None,
+    };
+    let active = if steering || matches!(action, RuleAction::CancelConversation { .. }) {
+        Some(s.worker.active.lock().await)
+    } else {
+        None
+    };
+    let executing: HashSet<String> = active
+        .as_ref()
+        .map(|active| active.keys().cloned().collect())
+        .unwrap_or_default();
+    let depth = conversations::chain_depth(&triggering.event).saturating_add(1);
+    let meters = conversations::meters(&action);
+    let effect = action.clone();
+    let (step, result) = s
+        .store
+        .transaction(move |db| {
+            if db.hook_triggering(&triggering.id)?.is_none() || guard(db, &triggering)? {
+                return Ok((Step::Done, None));
+            }
+            let mut acting = triggering.clone();
+            acting.cursor = cursor;
+            acting.actions += 1;
+            if !count(db, &mut acting, &row, &version)? {
+                let error = "The rule reached its hourly limit of triggerings.";
+                return Ok((refuse(db, &triggering, error)?, None));
+            }
+            if meters && !conversations::count_conversation(db, &row, &version)? {
+                let error = "The rule reached its hourly limit of conversations.";
+                return Ok((refuse(db, &triggering, error)?, None));
+            }
+            conversations::record_authors(db, &acting)?;
+            let context = conversations::Acting {
+                row: &row,
+                version: &version,
+                event: &triggering.event,
+                depth,
+                executing: &executing,
+            };
+            db.0.execute_batch("SAVEPOINT rule_action")?;
+            match conversations::effect(db, &context, &effect, &input) {
+                Ok(result) => {
+                    db.0.execute_batch("RELEASE rule_action")?;
+                    if meters {
+                        conversations::record_conversation(db, &acting, position)?;
+                    }
+                    let completed = StepRecord {
+                        status: "completed",
+                        input: Some(&input),
+                        result: Some(&result),
+                        error: None,
+                    };
+                    db.record_step(&acting.id, position, &node, 1, completed)?;
+                    acting
+                        .cursor
+                        .steps
+                        .insert(node.id().to_owned(), result.clone());
+                    db.save_hook_triggering(&acting, "running", None, None)?;
+                    Ok((Step::Continue, Some(result)))
+                }
+                Err(error) => {
+                    db.0.execute_batch("ROLLBACK TO rule_action; RELEASE rule_action")?;
+                    let error = format!("{}: {}", node.id(), error.message);
+                    let failed = StepRecord {
+                        status: "failed",
+                        input: Some(&input),
+                        result: None,
+                        error: Some(&error),
+                    };
+                    db.record_step(&acting.id, position, &node, 1, failed)?;
+                    db.save_hook_triggering(&acting, "failed", None, Some(&error))?;
+                    Ok((Step::Done, None))
+                }
+            }
+        })
+        .await?;
+    if let (RuleAction::CancelConversation { .. }, Some(result)) = (&action, &result) {
+        if let Some(chat) = result["conversationId"].as_str() {
+            s.accepted_jobs.revoke_chat(chat);
+        }
+        if let (Some(active), Some(run)) = (&active, result["runId"].as_str())
+            && let Some(cancel) = active.get(run)
+        {
+            cancel.cancel();
+        }
+    }
+    drop(active);
+    if result.is_some() {
+        s.worker.notify();
+    }
+    Ok(step)
 }
 
 /// Whether a viewer sees a triggering's event, actions and errors.

@@ -322,7 +322,7 @@ fn answer_text(fields: &[QuestionField], answers: &BTreeMap<String, FieldAnswer>
     )
 }
 
-fn answer(
+pub(crate) fn answer(
     db: &Db<'_>,
     chat_id: &str,
     id: &str,

@@ -76,17 +76,7 @@ impl Worker {
             .store
             .transaction(move |db| {
                 authorize.authorize(db)?;
-                let chat = crate::chats::pause_in(db, &id, true)?;
-                if let Some(run_id) = chat["runId"].as_str() {
-                    crate::chats::coding_agent::cancel_in(db, run_id)?;
-                    crate::environment_expiration::cancel_continuation_in(db, run_id)?;
-                    crate::chats::continuation::cancel_for_run(db, run_id)?;
-                    let run = required(db.run_state(run_id)?, "Run not found")?;
-                    if run.status.is_active() {
-                        request_cancel(db, run_id, executing.contains(run_id))?;
-                    }
-                }
-                required(db.conversation_boundary(&id)?, "Chat not found")
+                stop_chat_in(db, &id, &executing)
             })
             .await?;
         s.accepted_jobs.revoke_chat(text(&chat, "id"));
@@ -285,6 +275,26 @@ impl Worker {
     }
 }
 
+/// Pauses queued follow-ups and requests the chat's current turn to stop, in the
+/// caller's transaction. `executing` holds the runs this process is executing.
+pub(crate) fn stop_chat_in(
+    db: &Db<'_>,
+    id: &str,
+    executing: &std::collections::HashSet<String>,
+) -> Result<Value> {
+    let chat = crate::chats::pause_in(db, id, true)?;
+    if let Some(run_id) = chat["runId"].as_str() {
+        crate::chats::coding_agent::cancel_in(db, run_id)?;
+        crate::environment_expiration::cancel_continuation_in(db, run_id)?;
+        crate::chats::continuation::cancel_for_run(db, run_id)?;
+        let run = required(db.run_state(run_id)?, "Run not found")?;
+        if run.status.is_active() {
+            request_cancel(db, run_id, executing.contains(run_id))?;
+        }
+    }
+    required(db.conversation_boundary(id)?, "Chat not found")
+}
+
 fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
     crate::environment_expiration::cancel_continuation_in(db, id)?;
     crate::chats::coding_agent::cancel_in(db, id)?;
@@ -329,7 +339,7 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
 }
 
 /// Queues a stopped run to continue its saved conversation.
-fn requeue(
+pub(crate) fn requeue(
     db: &Db<'_>,
     id: &str,
     expected_turn_id: Option<&str>,
