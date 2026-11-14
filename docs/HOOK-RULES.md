@@ -327,7 +327,9 @@ references never qualify. Skill history remains attached to the conversation whe
 turns stop selecting a skill. Installation skill reads, listings and archive exports
 record their exact revisions and canonical directories; reading an unrecorded or
 agent-written skill closes the conversation immediately. Native inheritance and removal changes count as instruction
-changes too.
+changes too, and so does the native rewrite a profile save makes when it changes engines:
+it belongs to whoever saved the profile. Codex compaction prompt files
+(`experimental_compact_prompt_file`) cannot be configured, like instruction files.
 Reading another conversation, run or task through `cairn_installation` (`list_chats`,
 `get_chat`, `read_chat_content`, `list_runs`, `get_run`, `read_run_content`, `get_task`)
 and delegating a task, whose report the conversation reads, count as agent entries.

@@ -171,6 +171,7 @@ pub(crate) fn save_profile(
     mut agent: cairn_contracts::Agent,
     owner_review: bool,
     native_reviews: &[String],
+    writer: &crate::conversation_writers::EntryWriter,
 ) -> Result<cairn_contracts::Agent> {
     let current = db.agent(&agent.id.to_string())?;
     let access = &agent.settings.access;
@@ -217,7 +218,7 @@ pub(crate) fn save_profile(
         owner_review,
         native_reviews,
     )?;
-    crate::coding_agent_configuration::synchronize_profile(db, &agent)?;
+    crate::coding_agent_configuration::synchronize_profile(db, &agent, writer)?;
     agent.revision = crate::config::id();
     db.save_agent(&agent)?;
     db.audit("agent.saved", &json!({ "id": agent.id }))?;

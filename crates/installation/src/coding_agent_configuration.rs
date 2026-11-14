@@ -355,13 +355,20 @@ fn clear_changed_profile_settings(
     Ok(changed)
 }
 
-pub(crate) fn synchronize_profile(db: &Db<'_>, agent: &Agent) -> Result<()> {
+/// Profile edits clear the native values they now own: that rewrite of the native
+/// document belongs to whoever saved the profile.
+pub(crate) fn synchronize_profile(
+    db: &Db<'_>,
+    agent: &Agent,
+    writer: &crate::conversation_writers::EntryWriter,
+) -> Result<()> {
     let Some(previous) = db.agent(&agent.id.to_string())? else {
         return Ok(());
     };
     let provider = Provider::from(agent.settings.provider);
     capture_legacy_defaults(db, provider, Some(agent.id))?;
     let mut own = record(db, provider, Some(agent.id))?;
+    let native_before = instruction_document(&own)?;
     if !clear_changed_profile_settings(&mut own, Some(&previous), agent)? {
         return Ok(());
     }
@@ -369,7 +376,16 @@ pub(crate) fn synchronize_profile(db: &Db<'_>, agent: &Agent) -> Result<()> {
         "UPDATE coding_agent_configurations SET document=?,removed=?,revision=? WHERE scope=? AND provider=?",
         params![render(provider, &own.value)?, serde_json::to_string(&own.removed)?, id(), agent.id.to_string(), provider.as_str()],
     )?;
-    Ok(())
+    let scope = agent.id.to_string();
+    let native_after = instruction_document(&record(db, provider, Some(agent.id))?)?;
+    crate::conversation_writers::record_native_instructions(
+        db,
+        &scope,
+        provider.as_str(),
+        &native_before,
+        &native_after,
+        writer,
+    )
 }
 
 pub(crate) fn next_selection(
@@ -539,6 +555,7 @@ fn instruction_references(provider: Provider, value: &Value) -> bool {
                     "instructions"
                         | "model_instructions_file"
                         | "experimental_instructions_file"
+                        | "experimental_compact_prompt_file"
                         | "config_file"
                 ))
                 || (provider == Provider::Claude
@@ -724,6 +741,7 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             "/shell_environment_policy",
             "/model_instructions_file",
             "/experimental_instructions_file",
+            "/experimental_compact_prompt_file",
             "/profile",
             "/profiles",
             "/notify",
@@ -1173,7 +1191,6 @@ pub(crate) fn edit_by(
         ));
     }
     let (before, inherited, own, agent, _) = effective(db, provider, input.agent_id)?;
-    let native_before = instruction_document(&own)?;
     let instruction_source_before = input
         .agent_id
         .map(|agent| instruction_source(db, provider, &agent.to_string()))
@@ -1349,7 +1366,7 @@ pub(crate) fn edit_by(
             .agent(&id)?
             .map(|profile| profile.settings.instructions)
             .unwrap_or_default();
-        let saved = crate::agent_grants::save_profile(db, agent, false, &[])?;
+        let saved = crate::agent_grants::save_profile(db, agent, false, &[], writer)?;
         crate::conversation_writers::record_instructions(
             db,
             &id,
@@ -1358,6 +1375,8 @@ pub(crate) fn edit_by(
             writer,
         )?;
     }
+    // After the profile save, whose own native rewrite already has its writer.
+    let native_before = instruction_document(&record(db, provider, input.agent_id)?)?;
     let scope = input.agent_id.map(|id| id.to_string());
     if mapped_profile {
         for (path, _) in mappings(provider) {

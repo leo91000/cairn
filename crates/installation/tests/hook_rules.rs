@@ -1887,6 +1887,95 @@ async fn public_mcp_members_have_entry_provenance_without_native_authority() {
 }
 
 #[tokio::test]
+async fn codex_compaction_prompt_files_cannot_be_configured() {
+    let f = granted().await;
+    person_provider(&f, "codex", "Human profile instructions").await;
+    let (_, current) = call(
+        &f,
+        OWNER,
+        "POST",
+        "/api/settings/coding-agents/read",
+        json!({ "provider": "codex", "agentId": null }),
+    )
+    .await;
+    let input = json!({
+        "provider": "codex",
+        "agentId": null,
+        "revision": current["revision"],
+        "document": "experimental_compact_prompt_file = \"/workspace/project/COMPACT.md\"\n",
+        "changes": [],
+        "reset": false,
+    });
+    let (status, saved) = call(
+        &f,
+        OWNER,
+        "PUT",
+        "/api/settings/coding-agents",
+        input.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{saved}");
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    assert!(refused(
+        &agent(&f, &bearer, "save_coding_agent_configuration", input).await
+    ));
+}
+
+#[tokio::test]
+async fn engine_changes_record_who_rewrote_the_native_document() {
+    let write =
+        |f: &Fixture| json!({ "definition": definition(f, MAIN_AGENT_ID), "enabled": false });
+    let codex = "developer_instructions = \"Human Codex agent text\"\n";
+    let f = granted().await;
+    person_provider(&f, "claude", "Human profile instructions").await;
+    native_configuration(&f, "codex", Some(MAIN_AGENT_ID), codex, None).await;
+    person_provider(&f, "codex", "Human profile instructions").await;
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    let created = agent(&f, &bearer, "create_hook_rule", write(&f)).await;
+    assert!(!refused(&created), "{created}");
+    native_configuration(
+        &f,
+        "codex",
+        Some(MAIN_AGENT_ID),
+        "show_raw_agent_reasoning = false\n",
+        None,
+    )
+    .await;
+    let (_, later) = person_conversation(&f, OWNER).await;
+    let created = agent(&f, &later, "create_hook_rule", write(&f)).await;
+    assert!(!refused(&created), "{created}");
+
+    // The person's engine change never launders what an agent or an unrecorded
+    // writer left in the document: the remaining compaction prompt keeps its history.
+    let kept = "developer_instructions = \"Codex text\"\ncompact_prompt = \"Compaction text\"\n";
+    let f = granted().await;
+    person_provider(&f, "claude", "Human profile instructions").await;
+    native_configuration(&f, "codex", Some(MAIN_AGENT_ID), kept, Some(&f.bearer)).await;
+    person_provider(&f, "codex", "Human profile instructions").await;
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write(&f)).await,
+        "follows instructions an agent wrote",
+    );
+    let f = granted().await;
+    person_provider(&f, "claude", "Human profile instructions").await;
+    native_configuration(&f, "codex", Some(MAIN_AGENT_ID), kept, None).await;
+    f.s.store
+        .transaction(|db| {
+            db.0.execute("DELETE FROM native_instruction_writers", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    person_provider(&f, "codex", "Human profile instructions").await;
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write(&f)).await,
+        "did not record who wrote",
+    );
+}
+
+#[tokio::test]
 async fn an_eligible_conversation_lifts_grant_protection_for_its_person_only() {
     let f = granted().await;
     common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
