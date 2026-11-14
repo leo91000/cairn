@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -591,6 +591,40 @@ impl Pool {
         }
     }
 
+    /// Foreground capacity preempts idle promises only after atomic admission
+    /// proves the requested image cannot fit. Active VMMs are never selected.
+    async fn reserve_image(
+        &self,
+        directory: &Path,
+        size: u64,
+        policy: &crate::storage::policy::Policy,
+    ) -> Result<crate::storage::reservation::Reservation> {
+        let _admission = self.admission.lock().await;
+        self.cancel_preparing().await?;
+        loop {
+            self.ensure_not_quarantined()?;
+            match crate::storage::reservation::reserve(&self.state, directory, size, policy).await {
+                Ok(reservation) => return Ok(reservation),
+                Err(error) if error.status == 507 => {
+                    let idle = {
+                        let mut slots = self.slots.lock().await;
+                        slots
+                            .retained
+                            .pop_front()
+                            .map(|idle| idle.reservation)
+                            .or_else(|| slots.ready.pop_front())
+                    };
+                    let Some(mut idle) = idle else {
+                        return Err(error);
+                    };
+                    idle.finish().await;
+                    tracing::info!(target: "cairn_performance", operation = "vm_retention", event = "evicted", reason = "foreground_disk_capacity");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Reap a retained VM before taking its disk lock; its local journal stays owned.
     pub async fn evict_conversation(&self, run: &str) -> Result<()> {
         self.evict_retained(run).await
@@ -979,10 +1013,7 @@ impl Reservation {
             let disk = self.owner.as_ref().unwrap().directory.clone();
             if !compatible {
                 let policy = crate::storage::policy::for_node(&plan.storage()["policy"])?;
-                self.disk_reservation = Some(
-                    crate::storage::reservation::reserve(&self.pool.state, &disk, size, &policy)
-                        .await?,
-                );
+                self.disk_reservation = Some(self.pool.reserve_image(&disk, size, &policy).await?);
                 crate::storage::image::prepare(&disk, size, plan.storage(), &stop).await?;
             }
             crate::storage::image::authorize(self.owner.as_ref().unwrap(), plan.storage()).await?;
@@ -1612,6 +1643,114 @@ mod tests {
         slots.occupied[1] = false;
         assert_eq!(slots.reserve(2), Some(1));
         assert_eq!(slots.reserve(2), None);
+    }
+
+    #[tokio::test]
+    async fn foreground_disk_promises_reclaim_idle_vms_and_preserve_active_work() {
+        const MIB: u64 = 1_048_576;
+        for anonymous in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let state = root.path();
+            let pool = Pool::new(state.into(), state.into(), CancellationToken::new(), 4)
+                .await
+                .unwrap();
+            let budget = Budget {
+                slots: 4,
+                limits: crate::nodes::Resources {
+                    cpu: 1,
+                    memory_mi_b: 2048,
+                    disk_mi_b: 50,
+                },
+            };
+            std::fs::write(
+                state.join(budget::FILE),
+                serde_json::to_vec(&budget).unwrap(),
+            )
+            .unwrap();
+            let policy = crate::storage::policy::Policy {
+                reserve_mi_b: 64,
+                reserve_percent: 1,
+                ..Default::default()
+            };
+            let mut active = pool.reserve(&cold_plan("active")).await.unwrap();
+            let active_directory = state.join("disks").join(crate::config::id());
+            active.disk_reservation = Some(
+                crate::storage::reservation::reserve(state, &active_directory, 8 * MIB, &policy)
+                    .await
+                    .unwrap(),
+            );
+            let mut idle = pool.reserve(&cold_plan("idle")).await.unwrap();
+            let idle_directory = state.join("environments").join(crate::config::id());
+            idle.disk_reservation = Some(
+                crate::storage::reservation::reserve(state, &idle_directory, 32 * MIB, &policy)
+                    .await
+                    .unwrap(),
+            );
+            std::fs::write(
+                idle_directory.join("data.ext4"),
+                b"retained conversation work",
+            )
+            .unwrap();
+            if anonymous {
+                idle.anonymous = Some(idle_directory.clone());
+                pool.slots.lock().await.ready.push_back(idle);
+            } else {
+                pool.slots
+                    .lock()
+                    .await
+                    .retained
+                    .push_back(retained::Retained {
+                        run: "idle".into(),
+                        budget: budget.clone(),
+                        key: serde_json::json!({}),
+                        expires: Instant::now() + Duration::from_secs(60),
+                        reservation: idle,
+                        _volume: None,
+                    });
+            }
+            let requested = state.join("disks").join(crate::config::id());
+            assert_eq!(
+                crate::storage::reservation::reserve(state, &requested, 33 * MIB, &policy)
+                    .await
+                    .err()
+                    .unwrap()
+                    .status,
+                507
+            );
+            let promise = pool
+                .reserve_image(&requested, 33 * MIB, &policy)
+                .await
+                .unwrap();
+            assert_eq!(
+                pool.health().await.occupied,
+                1,
+                "Only the active slot remains"
+            );
+            assert!(active_directory.join("image-reservation.json").is_file());
+            if anonymous {
+                assert!(!idle_directory.exists());
+            } else {
+                assert_eq!(
+                    std::fs::read(idle_directory.join("data.ext4")).unwrap(),
+                    b"retained conversation work"
+                );
+                assert!(!idle_directory.join("image-reservation.json").exists());
+            }
+            let impossible = state.join("disks").join(crate::config::id());
+            assert_eq!(
+                pool.reserve_image(&impossible, 64 * MIB, &policy)
+                    .await
+                    .err()
+                    .unwrap()
+                    .status,
+                507
+            );
+            assert!(active_directory.join("image-reservation.json").is_file());
+            promise.release().await.unwrap();
+            active.finish().await;
+            pool.drain().await;
+            assert_eq!(pool.health().await.occupied, 0);
+        }
     }
 
     #[tokio::test]

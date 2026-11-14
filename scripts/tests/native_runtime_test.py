@@ -66,6 +66,11 @@ def require_finalization_failure(path, wait_result):
     return proof
 
 
+def retained_workspace(state, run, project=None):
+    workspace = state / 'native-data' / run / 'data/workspaces'
+    return workspace / project if project else workspace
+
+
 def running_local_storage(api, run):
     def resumed():
         status = api('/disks/' + run + '/storage-status')
@@ -700,7 +705,10 @@ def main():
             if not legacy_required:
                 assert api('/disks/' + run + '/storage-status')['storage'] == 'local-directory-v1', 'Unknown reference storage format.'
             command('systemctl', 'stop', supervisor)
+            legacy_temporary = state / 'native' / run / 'tmp'
             if legacy_required:
+                legacy_temporary.mkdir(parents=True, exist_ok=True)
+                (legacy_temporary / 'obsolete-before-upgrade').write_bytes(b'old managed temporary data')
                 legacy_path.rename(legacy_path.parent / 'resize-source')
                 (legacy_path.parent / 'bootstrap.pending').write_bytes(b'resizing')
                 (legacy_path.parent / 'data.ext4').write_bytes(b'partly resized temporary image')
@@ -712,6 +720,7 @@ def main():
             fenced(run, first)
             assert not legacy_path.exists(), 'Verified migration retained its old journal.'
             assert not (legacy_path.parent / 'resize-source').exists(), 'Resize recovery retained its old source.'
+            assert not legacy_temporary.exists(), 'Migration retained obsolete managed temporary files.'
             metrics['legacyMigration'] = dict(legacyConversionExercised=legacy_required, referenceBinarySha256=hashlib.sha256(legacy_binary.read_bytes()).hexdigest(),
                 candidateBinarySha256=hashlib.sha256(binary.read_bytes()).hexdigest(), retainedWorkspace=True,
                 retainedClaudeSession=True, legacyResourcesRemoved=True)
@@ -1064,7 +1073,7 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
             # Policy scheduling/offline manager retries are covered by the backend
             # lifecycle suite; these cycles qualify their physical node operation.
             samples = []
-            peer_bytes = (state / 'native-data' / other / 'data/workspaces/persisted').read_bytes()
+            peer_bytes = (retained_workspace(state, other, base_projects.get(other)) / 'persisted').read_bytes()
             for cycle in range(5):
                 current = create()
                 created = start(current, long=False)
@@ -1104,7 +1113,7 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 assert (own / 'data/workspaces/persisted').read_text() == 'changed'
                 api('/disks/' + current + '/delete', dict(retirementId=str(uuid.uuid4()), attempts=[replacement]))
                 assert not own.exists()
-                assert (state / 'native-data' / other / 'data/workspaces/persisted').read_bytes() == peer_bytes
+                assert (retained_workspace(state, other, base_projects.get(other)) / 'persisted').read_bytes() == peer_bytes
                 samples.append(dict(cycle=cycle, workloadDirectories=0, privateDockerRuntimeDirectories=0,
                     environmentImages=0, activeRuns=api('/health', method='GET')['activeRuns'],
                     cleanupRetried=True, restart=True, replacementPreserved=True))

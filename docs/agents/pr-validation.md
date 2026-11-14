@@ -63,7 +63,13 @@ affected code and the full qualification workflows for specialist coverage:
   tests. Use disposable infrastructure with the required KVM/ublk capabilities.
 
 If the local host cannot execute a required qualification, run the appropriate
-GitHub workflow manually on the branch and wait for its result. A manual run can
+GitHub workflow manually on the branch and wait for its result.
+For a full validation-only run, `native-reference=<full SHA>` explicitly selects
+the immutable native comparison. Without it a manual run compares its first
+parent, which may already use the candidate's storage format. Legacy-conversion
+qualification must name a known journal-format reference; record both exact SHAs.
+The reference selector validates a nonzero full SHA and archives that revision's
+fixture, without modifying its lifecycle assertions. A manual run can
 provide test evidence for the PR; it cannot supply reusable release provenance.
 
 For direct-storage development, `ci-diagnostic=storage`, `validation-only=true`

@@ -30,7 +30,11 @@ sparse ou si le guest effectue un discard. Le budget distingue ces promesses des
 octets physiquement alloués. Une époque d’admission fige l’enveloppe physique hors
 écritures des VM ; une surveillance séparée suspend ou arrête les écritures si la
 réserve physique devient indisponible. L’admission peut attendre malgré une faible
-occupation des images. Après arrêt confirmé et flush terminé, elle libère la
+occupation des images. Avant de refuser une promesse d’écriture demandée par une
+exécution, elle récupère les promesses des VM inactives éligibles, y compris la VM
+anonyme préparée et les conversations retenues. Chaque VMM est arrêté et son
+image synchronisée avant cette libération ; les images de conversation restent
+retenues. Les promesses des exécutions actives ne sont jamais reprises. Après arrêt confirmé et flush terminé, elle libère la
 promesse inutilisée ; l’image retenue est alors facturée à son allocation réelle. L’image est retenue après arrêt, et la même node la
 rouvre au tour suivant. Aucun journal applicatif, transport ublk, copie distante ou
 consolidation périodique ne s’interpose entre ces nouveaux environnements et leur
@@ -108,3 +112,10 @@ est vérifié sans écrasement. Après publication durable du format, le nettoya
 d’une intention résiduelle conserve les modifications utilisateur ultérieures.
 Les temporaires et les données Docker éphémères sont aussi retirés lors de la
 récupération d’une exécution interrompue, avant son acquittement.
+
+Après conversion native, l’ancien temporaire géré `state/native/<run>/tmp`
+ne doit pas rester hors du nouveau quota. Sa retraite vérifie le sous-arbre exact,
+son identité et ses consommateurs après l’arrêt de l’exécution. Un consommateur
+inconnu conserve les fichiers et une erreur récupérable ; cette vérification ne
+signale aucun processus. L’effacement et le fsync du parent précèdent la bascule
+de migration, et la récupération des formats déjà publiés rejoue ce nettoyage.

@@ -390,6 +390,7 @@ async fn migrate(
         tokio::fs::File::open(&workload).await?.sync_all().await?;
         tokio::fs::File::open(root).await?.sync_all().await?;
     }
+    retire_legacy_temporary(root).await?;
     let _replacement = storage::runtime::replacement(&owner.directory).await?;
     atomic_write(&owner.directory.join("directory.json"), &serde_json::to_vec(&json!({
         "backend": "native", "storage": STORAGE, "os": "linux", "arch": "x86_64", "runtimeId": plan["runtimeId"]
@@ -801,7 +802,24 @@ async fn retire_temporary(workload: &Path, control: &Path) -> Result<()> {
     if workload.exists() {
         tokio::fs::File::open(workload).await?.sync_all().await?;
     }
+    retire_legacy_temporary(control).await?;
     remove_temporary(&control.join("docker-runtime")).await?;
+    tokio::fs::File::open(control).await?.sync_all().await?;
+    Ok(())
+}
+
+async fn retire_legacy_temporary(control: &Path) -> Result<()> {
+    let temporary = control.join("tmp");
+    match tokio::fs::symlink_metadata(&temporary).await {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            super::systemd::directory_consumers::require_unused_legacy_temporary(&temporary)
+                .await?;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    remove_temporary(&temporary).await?;
     tokio::fs::File::open(control).await?.sync_all().await?;
     Ok(())
 }

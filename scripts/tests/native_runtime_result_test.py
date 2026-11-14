@@ -14,6 +14,19 @@ runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
 
 
+class RetainedWorkspaceTest(unittest.TestCase):
+    def test_prepared_peer_canary_uses_its_project_directory_after_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            project = 'prepared-project'
+            prepared = state / 'native-data/peer/data/workspaces' / project
+            prepared.mkdir(parents=True)
+            (prepared / 'persisted').write_bytes(b'peer work')
+            self.assertEqual((runtime.retained_workspace(state, 'peer', project) / 'persisted').read_bytes(), b'peer work')
+            self.assertEqual(runtime.retained_workspace(state, 'ordinary'), state / 'native-data/ordinary/data/workspaces')
+            self.assertFalse((prepared.parent / 'persisted').exists())
+
+
 class FixtureDiskReservationsTest(unittest.TestCase):
     def test_online_grant_and_stale_replay_keep_future_resume_reservations(self):
         reservations = runtime.FixtureDiskReservations()

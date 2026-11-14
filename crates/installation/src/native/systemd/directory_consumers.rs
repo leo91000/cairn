@@ -20,7 +20,7 @@ struct Source {
     directory: File,
     device: String,
     filesystem_root: PathBuf,
-    project: u32,
+    project: Option<u32>,
 }
 
 fn vanished(error: &io::Error) -> bool {
@@ -72,6 +72,10 @@ fn origin(path: &Path, device: &str, mounts: &str) -> io::Result<PathBuf> {
 
 impl Source {
     fn open(path: &Path) -> Result<Self> {
+        Self::open_tree(path, true)
+    }
+
+    fn open_tree(path: &Path, quota: bool) -> Result<Self> {
         crate::native::workspace::require_no_mounts(path)?;
         let directory = directory(path)?;
         let metadata = directory.metadata()?;
@@ -81,7 +85,11 @@ impl Source {
             libc::minor(metadata.dev())
         );
         let filesystem_root = origin(path, &device, &read(Path::new("/proc/self/mountinfo"))?)?;
-        let project = crate::native::quota::owned_project(path, &directory)?;
+        let project = if quota {
+            Some(crate::native::quota::owned_project(path, &directory)?)
+        } else {
+            None
+        };
         Ok(Self {
             path: path.to_owned(),
             directory,
@@ -99,7 +107,9 @@ impl Source {
                 "Native consumer inventory belongs to a replaced directory.",
             ));
         }
-        if crate::native::quota::owned_project(&self.path, &self.directory)? != self.project {
+        if let Some(project) = self.project
+            && crate::native::quota::owned_project(&self.path, &self.directory)? != project
+        {
             return Err(Error::conflict("Native consumer quota identity changed."));
         }
         Ok(())
@@ -362,6 +372,11 @@ fn remaining(source: &Source) -> io::Result<usize> {
                     .collect::<io::Result<Vec<_>>>()?,
             );
             let mut files = false;
+            let mounts = if source.project.is_none() {
+                read(&path.join("mountinfo"))?
+            } else {
+                String::new()
+            };
             for (path, filesystem_reference) in descriptors {
                 let target = match fs::read_link(&path) {
                     Ok(target) => target,
@@ -376,7 +391,7 @@ fn remaining(source: &Source) -> io::Result<usize> {
                     }
                     continue;
                 }
-                if name == current.as_str() && !filesystem_reference || source.project == 0 {
+                if name == current.as_str() && !filesystem_reference || source.project == Some(0) {
                     continue;
                 }
                 let metadata = match fs::metadata(&path) {
@@ -398,9 +413,12 @@ fn remaining(source: &Source) -> io::Result<usize> {
                     Err(error) if vanished(&error) => continue,
                     Err(error) => return Err(error),
                 };
-                if crate::native::quota::project_io(&file)? == source.project {
-                    files = true;
-                }
+                let owned = match source.project {
+                    Some(project) => crate::native::quota::project_io(&file)? == project,
+                    None => source
+                        .owns_mount(&source.device, &origin(&target, &source.device, &mounts)?),
+                };
+                files |= owned;
             }
             Ok((held, files))
         };
@@ -434,6 +452,25 @@ async fn scopes(source: &Arc<Source>) -> Result<BTreeMap<String, Scope>> {
         .await
         .map_err(Error::internal)?
         .map_err(Into::into)
+}
+
+/// Legacy managed temporary files live on the control filesystem, without a
+/// project quota. After execution fencing, prove their exact pinned subtree is
+/// unused. This inventory never signals processes or shared-filesystem peers.
+pub(in crate::native) async fn require_unused_legacy_temporary(path: &Path) -> Result<()> {
+    let source = Arc::new(Source::open_tree(path, false)?);
+    source.revalidate()?;
+    let observing = source.clone();
+    let remaining = tokio::task::spawn_blocking(move || remaining(&observing))
+        .await
+        .map_err(Error::internal)??;
+    source.revalidate()?;
+    if remaining != 0 {
+        return Err(Error::conflict(
+            "Legacy native temporary files still have consumers; cleanup will retry.",
+        ));
+    }
+    Ok(())
 }
 
 /// Workload and daemon fencing precede this call. Only a positively attributed
@@ -529,7 +566,7 @@ mod tests {
             directory: directory(root.path()).unwrap(),
             device: "8:1".into(),
             filesystem_root: "/native/ours/workload".into(),
-            project: 1,
+            project: Some(1),
         };
         let id = "a".repeat(64);
         let line = |path: &str| format!("1 0 8:1 {path} /etc/hosts rw - ext4 /dev/test rw\n");
@@ -563,6 +600,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_temporary_identity_uses_its_exact_filesystem_subtree_without_a_project() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("tmp");
+        fs::create_dir(&path).unwrap();
+        let source = Source::open_tree(&path, false).unwrap();
+        assert!(source.project.is_none());
+        source.revalidate().unwrap();
+        let mounts = format!(
+            "1 0 {} {} /tmp rw - ext4 /dev/test rw\n",
+            source.device,
+            source.filesystem_root.display()
+        );
+        assert!(source.owns_mount(
+            &source.device,
+            &origin(Path::new("/tmp/work"), &source.device, &mounts).unwrap()
+        ));
+        let peer = source
+            .filesystem_root
+            .parent()
+            .unwrap()
+            .join("other/tmp/work");
+        assert!(!source.owns_mount(&source.device, &peer));
+        fs::rename(&path, root.path().join("retired")).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(source.revalidate().is_err());
+    }
+
+    #[test]
     fn replaced_directory_invalidates_a_saved_consumer_inventory() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("workload");
@@ -572,7 +637,7 @@ mod tests {
             directory: directory(&path).unwrap(),
             device: "8:1".into(),
             filesystem_root: "/workload".into(),
-            project: 1,
+            project: Some(1),
         };
         fs::rename(&path, root.path().join("old")).unwrap();
         fs::create_dir(&path).unwrap();

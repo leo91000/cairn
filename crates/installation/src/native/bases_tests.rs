@@ -662,6 +662,13 @@ async fn kernel_prepared_base_admission_and_recovery() {
         // must clean them even if no conversation ever resumes afterward.
         private_dir(&workload.join("tmp")).await.unwrap();
         private_dir(&control.join("docker-runtime")).await.unwrap();
+        private_dir(&control.join("tmp")).await.unwrap();
+        tokio::fs::write(
+            control.join("tmp/legacy-interrupted-output"),
+            b"old temporary",
+        )
+        .await
+        .unwrap();
         tokio::fs::write(workload.join("tmp/interrupted-output"), b"temporary")
             .await
             .unwrap();
@@ -671,6 +678,31 @@ async fn kernel_prepared_base_admission_and_recovery() {
         )
         .await
         .unwrap();
+        let peer_temporary = state.join("foreign-legacy-tmp");
+        private_dir(&peer_temporary).await.unwrap();
+        tokio::fs::write(peer_temporary.join("peer-work"), b"foreign temporary")
+            .await
+            .unwrap();
+        let mut peer_consumer = tokio::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&peer_temporary)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut consumer = tokio::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(control.join("tmp"))
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        assert!(
+            super::directory::recover_completed(&state, &run, &attempt)
+                .await
+                .is_err()
+        );
+        assert!(control.join("tmp/legacy-interrupted-output").is_file());
+        consumer.kill().await.unwrap();
+        consumer.wait().await.unwrap();
         super::directory::recover_completed(&state, &run, &attempt)
             .await
             .unwrap();
@@ -679,6 +711,17 @@ async fn kernel_prepared_base_admission_and_recovery() {
             .unwrap();
         assert!(!workload.join("tmp").exists());
         assert!(!control.join("docker-runtime").exists());
+        assert!(!control.join("tmp").exists());
+        assert_eq!(
+            tokio::fs::read(peer_temporary.join("peer-work"))
+                .await
+                .unwrap(),
+            b"foreign temporary"
+        );
+        assert!(peer_consumer.try_wait().unwrap().is_none());
+        peer_consumer.kill().await.unwrap();
+        peer_consumer.wait().await.unwrap();
+        tokio::fs::remove_dir_all(&peer_temporary).await.unwrap();
         assert_eq!(
             std::fs::read(
                 workload

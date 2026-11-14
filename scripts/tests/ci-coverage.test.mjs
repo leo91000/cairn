@@ -528,6 +528,16 @@ describe('parallel CI coverage', () => {
     }
   })
 
+  it('allows a pinned legacy reference in full validation without changing normal release comparisons', () => {
+    expect(quality.on.workflow_dispatch.inputs['native-reference']).toMatchObject({ type: 'string', default: '' })
+    const reference = quality.jobs['native-runtime'].steps.find(step => step.id === 'native-reference-key')
+    expect(reference.env.EVENT_REFERENCE_SHA).toContain('inputs.validation-only == true && inputs.native-reference')
+    expect(reference.env.EVENT_REFERENCE_SHA).toContain('inputs.ci-diagnostic == \'native\' && inputs.diagnostic-reference')
+    expect(reference.env.EVENT_REFERENCE_SHA).toContain('github.event.pull_request.base.sha')
+    expect(reference.env.EVENT_REFERENCE_SHA).toContain('github.event.before')
+    expect(reference.run).toContain('python3 scripts/native_reference.py')
+  })
+
   it('keeps shared Rust preparation cold and preserves only exact native reference caching', () => {
     expect(existsSync(new URL('../../.github/actions/cache-rust/action.yaml', import.meta.url))).toBe(false)
     for (const name of ['build', 'rust-check', 'backend', 'cli-qualification', 'node-checks']) {
