@@ -66,7 +66,13 @@ class PluginResourcePreparationsTest {
                         val page =
                             listPluginGrantResources(
                                 api,
-                                ListPluginResourcesInput(instance, 1, "large-pages", "", "channel"),
+                                ListPluginResourcesInput(
+                                    instanceId = instance,
+                                    page = 1,
+                                    pluginId = "large-pages",
+                                    query = "",
+                                    resourceType = "channel",
+                                ),
                             )
                         resolvePluginResourcePage(api, "large-pages", instance, page.items)
                     }
