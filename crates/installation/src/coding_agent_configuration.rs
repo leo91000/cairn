@@ -492,6 +492,18 @@ pub(crate) fn instruction_source(
     ))
 }
 
+/// The source each engine follows for this agent. A profile save can move an engine
+/// from the profile to a native document without changing any text.
+pub(crate) fn followed_sources(
+    db: &Db<'_>,
+    agent: &str,
+) -> Result<Vec<(crate::conversation_writers::InstructionSource, String)>> {
+    Provider::ALL
+        .into_iter()
+        .map(|provider| instruction_source(db, provider, agent))
+        .collect()
+}
+
 /// Attribute every editable native setting: providers may introduce instruction
 /// keys outside the profile's plain instructions field.
 fn instruction_document(record: &Record) -> Result<String> {

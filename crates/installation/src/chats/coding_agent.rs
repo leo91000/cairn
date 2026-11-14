@@ -535,6 +535,7 @@ async fn advance(
                 &snapshot,
                 execution,
             )?;
+            crate::conversation_writers::record_relaunch(db, run_id, text(&chat, "id"))?;
             db.change_run(
                 run_id,
                 crate::runs::RunChanges {

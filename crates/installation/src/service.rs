@@ -274,10 +274,23 @@ impl Service {
             crate::coding_agent_configuration::validate_profile(db, &agent)?;
             crate::agent_grants::validate(db, &agent, &accepts_agents)?;
             let before = current.as_ref().map(|profile| profile.settings.instructions.clone()).unwrap_or_default();
+            let followed_before = current.as_ref()
+                .map(|profile| crate::coding_agent_configuration::followed_sources(db, &profile.id.to_string()))
+                .transpose()?;
             let plugin_instruction_digests =
                 crate::conversation_writers::plugin_instruction_digests(db)?;
             let agent = crate::agent_grants::save_profile(db, agent, owner_review, &review.native_node_reviews, &writer)?;
-            crate::conversation_writers::record_instructions(db, &agent.id.to_string(), &before, &agent.settings.instructions, &writer)?;
+            let agent_id = agent.id.to_string();
+            crate::conversation_writers::record_instructions(db, &agent_id, &before, &agent.settings.instructions, &writer)?;
+            // An engine change can move conversations from the profile to a native
+            // document without changing any text: whoever saved the profile reached them.
+            if let Some(before) = followed_before
+                && before != crate::coding_agent_configuration::followed_sources(db, &agent_id)?
+            {
+                for chat in db.conversations()?.into_iter().filter(|chat| chat.agent_id == agent_id) {
+                    crate::conversation_writers::record_entry(db, &chat.id, &writer)?;
+                }
+            }
             crate::conversation_writers::record_plugin_instruction_changes(
                 db,
                 &plugin_instruction_digests,

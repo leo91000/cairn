@@ -1415,21 +1415,21 @@ fn launch_turn(
         operation: None,
         previous: None,
     };
-    // A wakeup resumes a turn; only a message launches one.
+    // A wakeup resumes a turn; only a message launches one. Both record what they freeze.
     let launched_by = (!waking).then(|| execution.message_id.clone());
-    if let Some(run) = run {
+    let run_id = if let Some(run) = run {
         continue_run(db, &chat, &run, &snapshot, execution)?;
-        if let Some(message) = &launched_by {
-            crate::conversation_writers::record_turn(db, text(&run, "id"), message)?;
-        }
+        text(&run, "id").to_owned()
     } else {
         crate::native::policy::apply(&mut snapshot, &serde_json::to_value(&chat)?);
         snapshot["chatExecution"] = serde_json::to_value(execution)?;
         crate::runs::admit_prepared(db, &snapshot, None)?;
         chat.run_id = Some(text(&snapshot, "id").to_owned());
-        if let Some(message) = &launched_by {
-            crate::conversation_writers::record_turn(db, text(&snapshot, "id"), message)?;
-        }
+        text(&snapshot, "id").to_owned()
+    };
+    match &launched_by {
+        Some(message) => crate::conversation_writers::record_turn(db, &run_id, message)?,
+        None => crate::conversation_writers::record_relaunch(db, &run_id, &chat.id)?,
     }
     chat.cancelled_by_deletion = false;
     chat.session_restart_requested = false;

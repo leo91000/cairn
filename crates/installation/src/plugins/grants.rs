@@ -300,9 +300,7 @@ fn resources_cover(current: &[PluginResourceRef], proposed: &[PluginResourceRef]
             })
 }
 
-/// Rules are read in the same publication transaction. Until Cairn records who writes
-/// conversations, no agent writes for an eligible person: every current account's use
-/// is protected, including the owner's and disabled or blocked rules.
+/// Rules are read in the same publication transaction.
 /// An agent never reduces a grant that a rule of a current account uses on this agent,
 /// whatever the rule's state. In an eligible conversation, the rules of its own person
 /// are no longer protected; those of every other current account stay protected.

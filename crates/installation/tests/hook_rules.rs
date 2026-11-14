@@ -9,6 +9,7 @@ use cairn_installation::{
     validation::text,
 };
 use common::AgentFixture;
+use common::account_fixture::AccountFixtures;
 use serde_json::{Value, json};
 
 #[path = "fixtures/plugin_grants.rs"]
@@ -1973,6 +1974,228 @@ async fn engine_changes_record_who_rewrote_the_native_document() {
         &agent(&f, &bearer, "create_hook_rule", write(&f)).await,
         "did not record who wrote",
     );
+}
+
+async fn finish_turn(f: &Fixture, chat: &str) -> String {
+    let detail = f.s.chat_detail(chat).await.unwrap();
+    let run = text(&detail["run"], "id").to_owned();
+    f.s.store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                recovery_pending: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    run
+}
+
+#[tokio::test]
+async fn wakeups_record_the_skills_they_freeze_for_good() {
+    let f = granted().await;
+    let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+    let (chat, bearer) = person_conversation(&f, OWNER).await;
+    cairn_installation::waits::schedule(
+        &f.s,
+        &bearer,
+        &json!({ "conditions": [{ "type": "delay", "seconds": 420 }], "reason": "Wait for CI" }),
+    )
+    .await
+    .unwrap();
+    // Another agent writes a skill while the conversation sleeps.
+    let saved = agent(
+        &f,
+        &f.bearer,
+        "save_skill",
+        json!({
+            "scope": "global",
+            "name": "helper",
+            "content": skill_content("helper", "Agent instructions"),
+        }),
+    )
+    .await;
+    assert!(!refused(&saved), "{saved}");
+    let run = finish_turn(&f, &chat).await;
+    let mut due = f.s.conversation_boundary(&chat).await.unwrap();
+    due["wakeup"]["wakeAt"] = (cairn_installation::config::now() - 1000).into();
+    f.s.store.save_conversation_boundary(due).await.unwrap();
+    f.s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let woken = f.s.store.run(&run).await.unwrap();
+    assert_eq!(woken["status"], "queued", "{woken}");
+    assert!(
+        woken["snapshot"]["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|skill| skill["name"] == "helper"),
+        "{woken}"
+    );
+    // Deleting the skill before the person's next turn does not erase the wakeup.
+    let (status, deleted) = call(
+        &f,
+        OWNER,
+        "DELETE",
+        "/api/skills/global/helper",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    finish_turn(&f, &chat).await;
+    let later = next_person_turn(&f, &chat).await;
+    let after = f.s.store.run(&run).await.unwrap();
+    assert!(
+        !after["snapshot"]["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|skill| skill["name"] == "helper")
+    );
+    let refusal = agent(&f, &later, "create_hook_rule", write).await;
+    assert!(refused(&refusal), "{refusal}");
+    assert!(refusal.to_string().contains("helper"), "{refusal}");
+}
+
+#[tokio::test]
+async fn engine_switches_record_the_instructions_they_freeze_for_good() {
+    let f = granted().await;
+    let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+    person_provider(&f, "codex", "Human profile instructions").await;
+    // Claude turns would follow native defaults that an agent wrote.
+    native_configuration(
+        &f,
+        "claude",
+        None,
+        r#"{"alwaysThinkingEnabled":true}"#,
+        Some(&f.bearer),
+    )
+    .await;
+    let (chat, bearer) = person_conversation(&f, OWNER).await;
+    let created = agent(&f, &bearer, "create_hook_rule", write.clone()).await;
+    assert!(!refused(&created), "{created}");
+    let detail = f.s.chat_detail(&chat).await.unwrap();
+    let run = text(&detail["run"], "id").to_owned();
+    let turn = f.s.store.run(&run).await.unwrap()["chatExecution"]["messageId"].clone();
+    f.s.store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Queued),
+                account_wait_reason: Some(Some(
+                    "Waiting for a Codex account with available usage.".into(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut account = serde_json::to_value(
+        f.s.accounts
+            .create(
+                &f.s,
+                cairn_installation::provider::Provider::Claude,
+                "Alternative",
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    account["state"] = "ready".into();
+    f.s.store.save_account_fixture(account).await.unwrap();
+    let (status, accepted) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/chats/{chat}/coding-agent"),
+        json!({
+            "requestId": cairn_installation::config::id(),
+            "runId": run,
+            "turnId": turn,
+            "provider": "claude",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    f.s.worker.tick(&f.s).await.unwrap();
+    common::eventually(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(20),
+        async || {
+            let switched = f.s.store.run(&run).await.unwrap();
+            (switched["snapshot"]["agent"]["provider"] == "claude").then_some(())
+        },
+    )
+    .await;
+    // The person's next turn returns to Codex, which follows human instructions only.
+    finish_turn(&f, &chat).await;
+    let (status, sent) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/chats/{chat}/messages"),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Back to Codex.",
+            "provider": "codex",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let later = fixture::running_conversation(&f.s, &chat).await;
+    let back = f.s.store.run(&run).await.unwrap();
+    assert_eq!(back["snapshot"]["agent"]["provider"], "codex");
+    refused_because(
+        &agent(&f, &later, "create_hook_rule", write).await,
+        "An earlier turn followed instructions without a recorded human writer",
+    );
+}
+
+#[tokio::test]
+async fn profile_engine_changes_reach_conversations_whose_source_moves() {
+    for by_agent in [false, true] {
+        let f = granted().await;
+        common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+        let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+        person_provider(&f, "codex", "Human profile instructions").await;
+        native_instructions(&f, "Owner native text", None).await;
+        let (_, bearer) = person_conversation(&f, MEMBER).await;
+        let created = agent(&f, &bearer, "create_hook_rule", write.clone()).await;
+        assert!(!refused(&created), "{created}");
+        // Codex conversations now follow the owner's native document instead of the
+        // profile, although no text changed.
+        let current = f.s.store.agent(MAIN_AGENT_ID).await.unwrap().unwrap();
+        let mut settings = serde_json::to_value(&current.settings).unwrap();
+        settings["provider"] = "claude".into();
+        settings["model"] = "".into();
+        let input = json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current.revision,
+            "settings": settings,
+            "review": {},
+        });
+        if by_agent {
+            let saved = agent(&f, &f.bearer, "replace_agent", input).await;
+            assert!(!refused(&saved), "{saved}");
+        } else {
+            let (status, saved) = call(
+                &f,
+                OWNER,
+                "PUT",
+                &format!("/api/agents/{MAIN_AGENT_ID}"),
+                input,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{saved}");
+        }
+        refused_because(
+            &agent(&f, &bearer, "create_hook_rule", write).await,
+            "Another writer reached this conversation",
+        );
+    }
 }
 
 #[tokio::test]

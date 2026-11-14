@@ -328,7 +328,11 @@ turns stop selecting a skill. Installation skill reads, listings and archive exp
 record their exact revisions and canonical directories; reading an unrecorded or
 agent-written skill closes the conversation immediately. Native inheritance and removal changes count as instruction
 changes too, and so does the native rewrite a profile save makes when it changes engines:
-it belongs to whoever saved the profile. Codex compaction prompt files
+it belongs to whoever saved the profile. A profile save that moves an engine to another
+instruction source, even without changing any text, reaches that agent's conversations
+as an entry of whoever saved it. Wakeups and engine switches never launch a qualifying
+turn, but the instructions and skills they freeze join the conversation's permanent
+history like any launch. Codex compaction prompt files
 (`experimental_compact_prompt_file`) cannot be configured, like instruction files.
 Reading another conversation, run or task through `cairn_installation` (`list_chats`,
 `get_chat`, `read_chat_content`, `list_runs`, `get_run`, `read_run_content`, `get_task`)

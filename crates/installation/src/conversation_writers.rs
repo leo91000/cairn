@@ -358,6 +358,22 @@ pub(crate) fn record_message(
 /// A message starts a turn of the conversation's run. A message requeued after an
 /// interrupted turn keeps its first launch: delivering it again is a recovery.
 pub(crate) fn record_turn(db: &Db<'_>, run: &str, message: &str) -> Result<()> {
+    let chat: String = db.0.query_row(
+        "SELECT chat_id FROM chat_messages WHERE id=?",
+        [message],
+        |row| row.get(0),
+    )?;
+    record_followed(db, run, message, &chat)
+}
+
+/// A wakeup or an engine switch freezes instructions and skills again without a new
+/// entry. They join the conversation's permanent history under a key that no launch
+/// grant binds, so such a turn still never qualifies.
+pub(crate) fn record_relaunch(db: &Db<'_>, run: &str, chat: &str) -> Result<()> {
+    record_followed(db, run, &format!("relaunch:{}", crate::config::id()), chat)
+}
+
+fn record_followed(db: &Db<'_>, run: &str, entry: &str, chat: &str) -> Result<()> {
     let stored = required(db.run(run)?, "Run not found")?;
     let provider = crate::provider::Provider::of_run(&stored)?;
     let agent = text(&stored["snapshot"]["agent"], "id");
@@ -386,20 +402,15 @@ pub(crate) fn record_turn(db: &Db<'_>, run: &str, message: &str) -> Result<()> {
         followed_digest: digest(followed.as_bytes()),
         sources,
     };
-    let chat: String = db.0.query_row(
-        "SELECT chat_id FROM chat_messages WHERE id=?",
-        [message],
-        |row| row.get(0),
-    )?;
     if frozen.sources.iter().any(|source| !source.attested) {
         db.0.execute(
             "UPDATE conversation_writers SET instruction_tainted=1 WHERE chat_id=? AND instruction_tainted=0",
-            [&chat],
+            [chat],
         )?;
     }
     db.0.prepare_cached(
         "INSERT INTO conversation_turn_entries VALUES(?,?,NULL,?,?) ON CONFLICT(run_id,message_id) DO NOTHING",
-    )?.execute(params![run,message,serde_json::to_string(&frozen)?,chat])?;
+    )?.execute(params![run,entry,serde_json::to_string(&frozen)?,chat])?;
     for skill in stored["snapshot"]["skills"]
         .as_array()
         .into_iter()
