@@ -1607,7 +1607,11 @@ pub(crate) fn pause_in(db: &Db<'_>, id: &str, paused: bool) -> Result<Value> {
     }
     chat.paused = paused;
     chat.updated_at = now();
-    Ok(serde_json::to_value(db.save_conversation(&chat)?)?)
+    let saved = serde_json::to_value(db.save_conversation(&chat)?)?;
+    // A rule that cancels pauses again after this; any other pause or resumption
+    // takes the conversation back from the rule's cancellation.
+    crate::rules::engine::conversations::release_pause(db, id)?;
+    Ok(saved)
 }
 
 /// Preparation happens outside the writer. A merge may have transferred the

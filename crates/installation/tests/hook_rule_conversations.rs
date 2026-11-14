@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 mod fixture;
 
 use common::agent_fixture::AgentFixture;
+use common::node_fixture::StoreNodeFixture;
 use fixture::{Fixture, contribution, support};
 
 const OWNER: &str = "fixture-owner";
@@ -147,13 +148,13 @@ async fn rule_on(
                 "name": "Conversations",
                 "trigger": trigger,
                 "executionAgentId": MAIN_AGENT_ID,
-                "steps": steps,
+                "steps": &steps,
                 "limits": limits,
             },
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{rule}");
+    assert_eq!(status, StatusCode::OK, "{rule} {steps}");
     text(&rule, "id").to_owned()
 }
 
@@ -246,7 +247,8 @@ async fn event(f: &Fixture, run: &str, kind: &str, text: &str, payload: Option<V
         .unwrap();
 }
 
-/// A whole turn of a delivered message that ends with a reply.
+/// A whole turn of a delivered message that ends with a reply, in the order Claude's
+/// adapter records it: no turn start.
 async fn replied(f: &Fixture, run: &str, message: &str, reply: &str) {
     event(
         f,
@@ -256,7 +258,6 @@ async fn replied(f: &Fixture, run: &str, message: &str, reply: &str) {
         Some(json!({ "messageId": message })),
     )
     .await;
-    event(f, run, "turn.started", "", None).await;
     let item = json!({ "item": { "type": "agent_message", "text": reply } });
     event(f, run, "item.completed", reply, Some(item)).await;
     event(f, run, "turn.completed", "", None).await;
@@ -499,16 +500,7 @@ async fn cairn_hooks_report_the_reply_question_progress_and_end_of_keyed_turns()
     assert_eq!(depth_of(&f, &reply).await, [1]);
 
     // A person's message starts a new chain with their origin.
-    f.s.chat_send(
-        &chat,
-        json!({ "id": uuid::Uuid::new_v4().to_string(), "text": "thanks" }),
-    )
-    .await
-    .unwrap();
-    let message = {
-        let detail = f.s.chat_detail(&chat).await.unwrap();
-        text(detail["messages"].as_array().unwrap().last().unwrap(), "id").to_owned()
-    };
+    let message = person_sends(&f, &chat, "thanks").await;
     replied(&f, &run, &message, "You're welcome.").await;
     engine::tick(&f.s).await.unwrap();
     assert_eq!(values(&f, &reply).await["reply"], "You're welcome.");
@@ -993,4 +985,626 @@ fn version_33_adds_the_conversation_tables_and_reopens_without_changing_them() {
             );
         }
     }
+}
+
+/// A person writes in the conversation from the apps.
+async fn person_sends(f: &Fixture, chat: &str, text: &str) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    let (status, sent) = call(
+        f,
+        OWNER,
+        "POST",
+        &format!("/api/chats/{chat}/messages"),
+        json!({ "message": { "id": id, "text": text } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    id
+}
+
+/// The message a rule's start delivered, as the first entry of the conversation.
+async fn first_message(f: &Fixture, chat: &str) -> String {
+    let detail = f.s.chat_detail(chat).await.unwrap();
+    text(&detail["messages"][0], "id").to_owned()
+}
+
+async fn last_message(f: &Fixture, chat: &str) -> String {
+    let detail = f.s.chat_detail(chat).await.unwrap();
+    text(detail["messages"].as_array().unwrap().last().unwrap(), "id").to_owned()
+}
+
+#[tokio::test]
+async fn claude_and_codex_turns_report_their_reply_end_and_origin() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), start_or_steer(), limits()).await;
+    let reply = rule_on(
+        &f,
+        OWNER,
+        cairn("replyReady"),
+        json!([
+            remember("text", "reply", "text"),
+            remember("origin", "origin", "origin.kind"),
+        ]),
+        limits(),
+    )
+    .await;
+    let ended = rule_on(
+        &f,
+        OWNER,
+        cairn("ended"),
+        json!([remember("outcome", "outcome", "outcome")]),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+
+    // Claude's adapter records the session, the delivered message and the end only.
+    let session = json!({ "thread_id": uuid::Uuid::new_v4().to_string() });
+    event(&f, &run, "thread.started", "", Some(session)).await;
+    replied(&f, &run, &first_message(&f, &chat).await, "Hi.").await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(values(&f, &reply).await["reply"], "Hi.");
+    assert_eq!(values(&f, &ended).await["outcome"], "completed");
+
+    // A failed Claude turn ends once the run stops.
+    emit(&f, "second", message("alice", "again")).await;
+    engine::tick(&f.s).await.unwrap();
+    let delivered = json!({ "messageId": last_message(&f, &chat).await });
+    event(&f, &run, "chat.user", "", Some(delivered)).await;
+    let failure = json!({ "error": { "message": "Boom" } });
+    event(&f, &run, "turn.failed", "Boom", Some(failure)).await;
+    event(&f, &run, "status", "failed", None).await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(values(&f, &ended).await["outcome"], "failed");
+
+    // Codex may notify its turn before Cairn records the message that starts it.
+    emit(&f, "third", message("alice", "once more")).await;
+    engine::tick(&f.s).await.unwrap();
+    event(&f, &run, "turn.started", "", None).await;
+    let delivered = json!({ "messageId": last_message(&f, &chat).await });
+    event(&f, &run, "chat.user", "", Some(delivered)).await;
+    let item = json!({ "item": { "type": "agent_message", "text": "Third." } });
+    event(&f, &run, "item.completed", "Third.", Some(item)).await;
+    event(&f, &run, "turn.completed", "", None).await;
+    engine::tick(&f.s).await.unwrap();
+    let remembered = values(&f, &reply).await;
+    assert_eq!(remembered["reply"], "Third.");
+    assert_eq!(remembered["origin"], "rule");
+    assert_eq!(depth_of(&f, &reply).await, [1, 1]);
+}
+
+#[tokio::test]
+async fn a_question_asked_by_a_turn_that_ends_in_the_same_pass_is_answered() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let answering = rule_on(
+        &f,
+        OWNER,
+        cairn("questionAsked"),
+        json!([action(
+            "answer",
+            &json!({
+                "type": "answerQuestion",
+                "key": { "type": "formula", "expression": "key" },
+                "answer": { "type": "literal", "value": "Blue" },
+            })
+        )]),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    let delivered = json!({ "messageId": first_message(&f, &chat).await });
+    event(&f, &run, "chat.user", "", Some(delivered)).await;
+    // The question tool returns at once and the agent ends its turn.
+    let question = "a".repeat(64);
+    f.s.question_receive(
+        &run,
+        json!({
+            "id": question,
+            "blocking": false,
+            "fields": [{ "id": "color", "title": "Which color?", "options": [] }],
+        }),
+    )
+    .await
+    .unwrap();
+    let item = json!({ "item": { "type": "agent_message", "text": "Waiting for you." } });
+    event(&f, &run, "item.completed", "", Some(item)).await;
+    event(&f, &run, "turn.completed", "", None).await;
+    engine::tick(&f.s).await.unwrap();
+
+    let answered = triggerings(&f, &answering).await;
+    assert_eq!(answered.len(), 1, "{answered:?}");
+    assert_eq!(answered[0]["status"], "completed", "{answered:?}");
+    assert_eq!(answered[0]["steps"][0]["result"]["questionId"], question);
+}
+
+#[tokio::test]
+async fn installation_and_unattributed_input_stay_in_the_rules_chain() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let reply = rule_on(
+        &f,
+        OWNER,
+        cairn("replyReady"),
+        json!([remember("text", "reply", "text")]),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    let token = fixture::running_conversation(&f.s, &chat).await;
+    let item = json!({ "item": { "type": "agent_message", "text": "One." } });
+    event(&f, &run, "item.completed", "", Some(item)).await;
+    event(&f, &run, "turn.completed", "", None).await;
+    engine::tick(&f.s).await.unwrap();
+
+    // The agent writes to its own conversation through `cairn_installation`.
+    let sent = f
+        .mcp(
+            "/mcp-installation",
+            &token,
+            "send_chat_message",
+            json!({
+                "chatId": chat,
+                "message": { "id": uuid::Uuid::new_v4().to_string(), "text": "Follow up" },
+            }),
+        )
+        .await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    replied(&f, &run, &last_message(&f, &chat).await, "Two.").await;
+    engine::tick(&f.s).await.unwrap();
+
+    // An entry Cairn did not attribute stays in the conversation's chain too.
+    let unknown = json!({ "messageId": uuid::Uuid::new_v4().to_string() });
+    event(&f, &run, "chat.user", "", Some(unknown)).await;
+    let item = json!({ "item": { "type": "agent_message", "text": "Three." } });
+    event(&f, &run, "item.completed", "", Some(item)).await;
+    event(&f, &run, "turn.completed", "", None).await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(values(&f, &reply).await["reply"], "Three.");
+    assert_eq!(depth_of(&f, &reply).await, [1, 1, 1]);
+
+    // Only a person starts a new chain.
+    let message = person_sends(&f, &chat, "thanks").await;
+    replied(&f, &run, &message, "Four.").await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(depth_of(&f, &reply).await, [1, 1, 1, 0]);
+}
+
+#[tokio::test]
+async fn only_the_rules_own_cancellation_lets_it_steer_a_paused_conversation() {
+    let f = granted().await;
+    let steering = rule_on(
+        &f,
+        OWNER,
+        plugin(&f),
+        json!([{
+            "type": "if",
+            "id": "bound",
+            "condition": { "type": "conversationExists", "key": key() },
+            "then": [{
+                "type": "if",
+                "id": "stop",
+                "condition": { "type": "formula", "expression": "large == \"stop\"" },
+                "then": [action("cancel", &json!({ "type": "cancelConversation", "key": key() }))],
+                "otherwise": [steer("steer", &key(), &json!({ "type": "formula", "expression": "large" }))],
+            }],
+            "otherwise": [start("start")],
+        }]),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    fixture::running_conversation(&f.s, &chat).await;
+
+    // The rule cancels, then steers its own cancellation away.
+    emit(&f, "stop", message("alice", "stop")).await;
+    engine::tick(&f.s).await.unwrap();
+    set_status(&f, &run, cairn_contracts::RunStatus::Cancelled).await;
+    emit(&f, "resume", message("alice", "go on")).await;
+    engine::tick(&f.s).await.unwrap();
+    let latest = &triggerings(&f, &steering).await[0];
+    assert_eq!(latest["status"], "completed", "{latest}");
+    assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], false);
+
+    // A person's later pause holds rules back, on the same run.
+    set_status(&f, &run, cairn_contracts::RunStatus::Running).await;
+    emit(&f, "stop-again", message("alice", "stop")).await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], true);
+    set_status(&f, &run, cairn_contracts::RunStatus::Cancelled).await;
+    f.s.chat_pause(&chat, false).await.unwrap();
+    f.s.chat_pause(&chat, true).await.unwrap();
+    emit(&f, "after-person", message("alice", "still there?")).await;
+    engine::tick(&f.s).await.unwrap();
+    let latest = &triggerings(&f, &steering).await[0];
+    assert_eq!(latest["status"], "failed", "{latest}");
+    assert!(text(latest, "error").contains("paused"), "{latest}");
+
+    // So does a person's entry after a rule cancelled.
+    f.s.chat_pause(&chat, false).await.unwrap();
+    set_status(&f, &run, cairn_contracts::RunStatus::Running).await;
+    emit(&f, "stop-third", message("alice", "stop")).await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], true);
+    set_status(&f, &run, cairn_contracts::RunStatus::Cancelled).await;
+    person_sends(&f, &chat, "I take it from here").await;
+    emit(&f, "after-entry", message("alice", "hello?")).await;
+    engine::tick(&f.s).await.unwrap();
+    let latest = &triggerings(&f, &steering).await[0];
+    assert_eq!(latest["status"], "failed", "{latest}");
+
+    // A failed run gives rules no way around a person's pause either.
+    f.s.chat_pause(&chat, false).await.unwrap();
+    set_status(&f, &run, cairn_contracts::RunStatus::Failed).await;
+    f.s.chat_pause(&chat, true).await.unwrap();
+    emit(&f, "after-failure", message("alice", "anyone?")).await;
+    engine::tick(&f.s).await.unwrap();
+    let latest = &triggerings(&f, &steering).await[0];
+    assert_eq!(latest["status"], "failed", "{latest}");
+    assert!(text(latest, "error").contains("paused"), "{latest}");
+}
+
+async fn set_status(f: &Fixture, run: &str, status: cairn_contracts::RunStatus) {
+    f.s.store
+        .change_run(
+            run,
+            cairn_installation::runs::RunChanges {
+                status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// A native node where the owner may or may not run natively.
+async fn native_node(f: &Fixture, accounts: &Value) -> Value {
+    let node = json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "name": "Shared desktop",
+        "local": false,
+        "accepting": true,
+        "revoked": false,
+        "nativeEnabled": true,
+        "nativeAccounts": accounts,
+        "lastSeen": cairn_installation::config::now(),
+        "executionReady": true,
+        "runtimeId": "development",
+        "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
+        "capabilities": {
+            "nativeModeProtocol": 1,
+            "backend": "native",
+            "ublk": true,
+            "os": "linux",
+            "arch": "x86_64",
+            "cpu": 4,
+            "memoryMiB": 8192,
+            "diskMiB": 100000,
+            "diskTotalMiB": 100000,
+        },
+    });
+    f.s.store.put_node_fixture(node.clone()).await.unwrap();
+    f.s.store
+        .set(
+            "native-authority",
+            json!({
+                "observedAt": cairn_installation::config::now(),
+                "accounts": { OWNER: { "email": "owner@example.test", "accessId": OWNER } },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    node
+}
+
+fn start_or_steer_agent(agent: &str) -> Value {
+    json!([{
+        "type": "if",
+        "id": "bound",
+        "condition": { "type": "conversationExists", "key": key() },
+        "then": [steer("steer", &key(), &json!({ "type": "formula", "expression": "large" }))],
+        "otherwise": [action("start", &json!({
+            "type": "startAgent",
+            "agentId": agent,
+            "prompt": { "type": "formula", "expression": "large" },
+            "key": key(),
+        }))],
+    }])
+}
+
+#[tokio::test]
+async fn native_conversations_need_the_versions_and_the_creators_native_authority() {
+    let f = granted().await;
+    let mut node = native_node(&f, &json!([])).await;
+    let agent =
+        f.s.agent_fixture(
+            json!({ "name": "Native", "access": { "backend": "native", "nodes": [node["id"]] } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let agent = text(&agent, "id").to_owned();
+    // Saved while its creator held no native authority.
+    let unauthorized = rule_on(
+        &f,
+        OWNER,
+        plugin(&f),
+        json!([{
+            "type": "if",
+            "id": "bound",
+            "condition": { "type": "conversationExists", "key": key() },
+            "then": [action("note", &json!({
+                "type": "storeValue", "scope": "conversation", "key": key(), "name": "seen",
+                "value": { "type": "literal", "value": true },
+            }))],
+            "otherwise": [],
+        }]),
+        limits(),
+    )
+    .await;
+    node["nativeAccounts"] = json!([OWNER]);
+    f.s.store.put_node_fixture(node.clone()).await.unwrap();
+    let authorized = rule_on(
+        &f,
+        OWNER,
+        plugin(&f),
+        start_or_steer_agent(&agent),
+        limits(),
+    )
+    .await;
+
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice")
+        .await
+        .expect("started natively");
+    let stored = f.s.conversation_boundary(&chat).await.unwrap();
+    assert_eq!(
+        stored["nativeAuthorityNodes"],
+        json!([node["id"]]),
+        "{stored}"
+    );
+    assert_eq!(stored["nativeProvenanceUnknown"], false);
+
+    emit(&f, "second", message("alice", "again")).await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(triggerings(&f, &authorized).await[0]["status"], "completed");
+    let refused = &triggerings(&f, &unauthorized).await[0];
+    assert_eq!(refused["status"], "failed", "{refused}");
+    assert!(
+        text(refused, "error").contains("saved without native authority"),
+        "{refused}"
+    );
+
+    // Its creator no longer holds native authority on the node.
+    node["nativeAccounts"] = json!([]);
+    f.s.store.put_node_fixture(node.clone()).await.unwrap();
+    emit(&f, "third", message("alice", "still?")).await;
+    emit(&f, "other", message("bob", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let history = triggerings(&f, &authorized).await;
+    for refused in &history[..2] {
+        assert_eq!(refused["status"], "failed", "{refused}");
+        assert!(
+            text(refused, "error").contains("native authority"),
+            "{refused}"
+        );
+    }
+    assert!(bound(&f, OWNER, "chat:bob").await.is_none());
+}
+
+#[tokio::test]
+async fn an_automatic_agent_placed_natively_needs_native_authority_to_be_reached() {
+    let f = granted().await;
+    let mut node = native_node(&f, &json!([OWNER])).await;
+    let agent =
+        f.s.agent_fixture(
+            json!({ "name": "Automatic", "access": { "backend": "auto", "nodes": [node["id"]] } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let agent = text(&agent, "id").to_owned();
+    let rule = rule_on(
+        &f,
+        OWNER,
+        plugin(&f),
+        start_or_steer_agent(&agent),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    // The run was placed on the native node.
+    let mut snapshot = f.s.store.run(&run).await.unwrap()["snapshot"].clone();
+    snapshot["agent"]["access"]["backend"] = "native".into();
+    f.s.store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    node["nativeAccounts"] = json!([]);
+    f.s.store.put_node_fixture(node).await.unwrap();
+    emit(&f, "second", message("alice", "again")).await;
+    engine::tick(&f.s).await.unwrap();
+    let refused = &triggerings(&f, &rule).await[0];
+    assert_eq!(refused["status"], "failed", "{refused}");
+    assert!(text(refused, "error").contains("native"), "{refused}");
+}
+
+#[tokio::test]
+async fn losing_access_to_the_conversations_agent_stops_its_actions_and_hooks() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let helper =
+        f.s.agent_fixture(json!({ "name": "Helper" }), None)
+            .await
+            .unwrap();
+    let helper = text(&helper, "id").to_owned();
+    common::relay_fixture::allow_member(&f.s, MEMBER, &helper).await;
+    let when_acting = |id: &str, act: Value| {
+        json!([{
+            "type": "if",
+            "id": format!("{id}_when"),
+            "condition": { "type": "formula", "expression": "large == \"act\"" },
+            "then": [action(id, &act)],
+            "otherwise": [],
+        }])
+    };
+    rule_on(
+        &f,
+        MEMBER,
+        plugin(&f),
+        json!([{
+            "type": "if",
+            "id": "bound",
+            "condition": { "type": "conversationExists", "key": key() },
+            "then": [],
+            "otherwise": [action("start", &json!({
+                "type": "startAgent",
+                "agentId": helper,
+                "prompt": { "type": "formula", "expression": "large" },
+                "key": key(),
+            }))],
+        }]),
+        limits(),
+    )
+    .await;
+    let mut acting = Vec::new();
+    for (id, act) in [
+        (
+            "steer",
+            json!({ "type": "steerConversation", "key": key(), "message": { "type": "literal", "value": "hi" } }),
+        ),
+        (
+            "cancel",
+            json!({ "type": "cancelConversation", "key": key() }),
+        ),
+        (
+            "answer",
+            json!({ "type": "answerQuestion", "key": key(), "answer": { "type": "literal", "value": "Blue" } }),
+        ),
+        (
+            "store",
+            json!({
+                "type": "storeValue", "scope": "conversation", "key": key(), "name": "seen",
+                "value": { "type": "literal", "value": true },
+            }),
+        ),
+    ] {
+        acting.push(rule_on(&f, MEMBER, plugin(&f), when_acting(id, act), limits()).await);
+    }
+    let reply = rule_on(
+        &f,
+        MEMBER,
+        cairn("replyReady"),
+        json!([remember("text", "reply", "text")]),
+        limits(),
+    )
+    .await;
+
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, MEMBER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    replied(&f, &run, &first_message(&f, &chat).await, "One.").await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(triggerings(&f, &reply).await.len(), 1);
+
+    let (agent, account) = (helper.clone(), MEMBER.to_owned());
+    f.s.store
+        .transaction(move |db| {
+            db.0.execute(
+                "DELETE FROM agent_account_access WHERE agent_id=?1 AND account_id=?2",
+                [agent, account],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    emit(&f, "act", message("alice", "act")).await;
+    engine::tick(&f.s).await.unwrap();
+    for rule in &acting {
+        let refused = &triggerings(&f, rule).await[0];
+        assert_eq!(refused["status"], "failed", "{refused}");
+        assert!(
+            text(refused, "error").contains("no longer has access"),
+            "{refused}"
+        );
+    }
+
+    // Its hooks no longer reach the creator's rules either.
+    f.s.chat_send(
+        &chat,
+        json!({ "id": uuid::Uuid::new_v4().to_string(), "text": "still there?" }),
+    )
+    .await
+    .unwrap();
+    replied(&f, &run, &last_message(&f, &chat).await, "Two.").await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(triggerings(&f, &reply).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_progress_triggering_does_not_act_once_its_rule_is_exhausted() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let progress = rule_on(
+        &f,
+        OWNER,
+        cairn("progress"),
+        json!([remember("step", "step", "step")]),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    let delivered = json!({ "messageId": first_message(&f, &chat).await });
+    event(&f, &run, "chat.user", "", Some(delivered)).await;
+    event(&f, &run, "turn.started", "", None).await;
+    engine::tick(&f.s).await.unwrap();
+    // The triggering is admitted, then the rule's budget runs out before it acts.
+    let chat_id = chat.clone();
+    f.s.store
+        .transaction(move |db| {
+            age_progress(db, &chat_id)?;
+            db.0.execute(
+                "CREATE TEMP TRIGGER exhaust AFTER INSERT ON hook_rule_triggerings \
+                 BEGIN UPDATE hook_rules SET budget_exhausted_at=1 WHERE id=NEW.rule_id; END",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    engine::tick(&f.s).await.unwrap();
+    // Refused before its first action, it leaves no history and remembers nothing.
+    let history = triggerings(&f, &progress).await;
+    assert!(
+        history.iter().all(|t| t["status"] != "completed"),
+        "{history:?}"
+    );
+    assert!(values(&f, &progress).await.get("step").is_none());
 }

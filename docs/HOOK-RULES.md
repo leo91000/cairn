@@ -185,10 +185,12 @@ paced by Cairn, do not count against the triggering cap.
 
 A chain is what Cairn can follow: a rule's conversation action causes a Cairn hook,
 whose triggering acts on a conversation, which causes another hook, and so on. A plugin
-event starts a chain at depth 0 and a person's input starts a new one; each start,
+event starts a chain at depth 0 and only a person's input starts a new one; each start,
 steer, answer or cancellation by a rule makes the hooks of the turn it causes one link
-deeper, and a turn without new input (a wakeup, the end of a wait) keeps its
-conversation's depth. Cairn follows at most **8** links (`maxChainDepth` in the
+deeper. Any other input keeps the chain it stands in: a turn without new input (a
+wakeup, the end of a wait or of a delegated task), an entry of the agent through
+`cairn_installation` (at least as deep as the run that wrote it) and an entry Cairn did
+not attribute keep the conversation's depth. Cairn follows at most **8** links (`maxChainDepth` in the
 catalog): a conversation action that would make a ninth fails with an error naming
 the limit. Only Cairn records the depth, beside the event and outside its payload, so
 a plugin's payload cannot supply or lower it. A tool call that makes the service emit
@@ -216,12 +218,14 @@ steered again. Merging agents detaches the keys of the conversations the merge m
 with the values rules remembered on them: no rule reaches them anymore.
 
 Every action on the conversation of a key needs its creator's current access to that
-conversation's agent. Steering queues a message after the current turn. A conversation
-a person paused cannot be steered or answered until a person resumes it. Cairn pauses
-a conversation whose turn failed, or that a rule cancelled, until someone writes again:
-steering it continues it as Cairn would for a person, resuming the stopped turn first.
-Steering a conversation still stopping fails. `cancelConversation` stops the current
-turn like Stop in Cairn; with nothing working it only cancels a scheduled wakeup.
+conversation's agent. Steering queues a message that Cairn delivers after the current
+turn, as for a person who writes again, also after a failed or stopped turn. A paused
+conversation cannot be steered or answered until a person resumes it.
+`cancelConversation` stops the current turn like Stop in Cairn, which pauses the
+conversation; the rules of the same creator may steer it again, which resumes it, until
+a person pauses, resumes, stops or writes in it. Steering a conversation still
+stopping fails. With nothing working, `cancelConversation` only cancels a scheduled
+wakeup.
 `answerQuestion` answers the oldest pending question of the conversation's current
 run: a text answers every question of it, an object answers each question by its id
 with a text or `{selected, comment}`.
@@ -254,11 +258,12 @@ access to the conversation's agent:
 | Hook | When | Payload, besides `key`, `conversationId`, `agentId`, `origin` and `values` |
 | --- | --- | --- |
 | `replyReady` | a turn completed | `text` (the agent's last message, at most 128 KiB, `truncated` when cut) and `deliverables` (at most 10: `id`, `name`, `title`, `mediaType`, `size`) |
-| `questionAsked` | the agent asks, once per question | `questionId`, `title`, `text` (every question with its options) and `fields` |
+| `questionAsked` | the agent asks, once per question still pending, also when its turn already ended; before that turn's `replyReady` and `ended` | `questionId`, `title`, `text` (every question with its options) and `fields` |
 | `progress` | about every 8 seconds of a working turn | `step`, a short step without detail |
 | `ended` | a turn completed, failed or was cancelled | `outcome` and, for a failure, `error` |
 
-`origin` says who started the turn: `{kind: "person", accountId}`,
+A turn starts when Cairn delivers its input or wakes the conversation, whatever its
+provider notifies. `origin` says who started the turn: `{kind: "person", accountId}`,
 `{kind: "rule", ruleId, accountId}`, `agent` (a delegated task), `installation`
 (`cairn_installation`), `resume` (a turn without new input, such as a wakeup or the
 end of a wait) or `unknown`. A turn that fails and is retried reports only how its last

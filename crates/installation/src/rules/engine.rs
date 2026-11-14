@@ -1245,14 +1245,14 @@ fn count(db: &Db<'_>, t: &mut Triggering, row: &RuleRow, version: &VersionRow) -
     if t.counted_at.is_some() {
         return Ok(true);
     }
+    let current = required(db.hook_rule(&row.id)?, "Rule not found")?;
+    if current.budget_exhausted_at.is_some() {
+        return Ok(false);
+    }
     // Cairn already paces progress: its triggerings do not count against the cap.
     if t.event["cairn"].is_object() && t.event["hook"] == "progress" {
         t.counted_at = Some(now());
         return Ok(true);
-    }
-    let current = required(db.hook_rule(&row.id)?, "Rule not found")?;
-    if current.budget_exhausted_at.is_some() {
-        return Ok(false);
     }
     let cap = i64::from(version.definition.limits.triggerings_per_hour);
     let used: i64 = db
@@ -2228,26 +2228,13 @@ async fn act(s: &Arc<Service>, acting: Act) -> Result<Step> {
         return Err(Error::internal("The interpreter stopped on a block."));
     };
     let action = action.clone();
-    let run = match conversations::prepare(s, &row, &action, &input).await {
-        Ok(run) => run,
-        Err(error) => {
-            let error = format!("{}: {}", node.id(), error.message);
-            finish(s, triggering, "failed", Some(error)).await?;
-            return Ok(Step::Done);
-        }
-    };
-    // Steering may resume a stopped turn, and cancelling stops one: both follow the
-    // worker's locks, like the same requests from a person.
-    let steering = matches!(action, RuleAction::SteerConversation { .. });
-    let preparation = match (&run, steering) {
-        (Some(run), true) => Some(s.worker.run_preparation_lock(run).await),
-        _ => None,
-    };
-    let _prepared = match &preparation {
-        Some(lock) => Some(lock.clone().lock_owned().await),
-        None => None,
-    };
-    let active = if steering || matches!(action, RuleAction::CancelConversation { .. }) {
+    if let Err(error) = conversations::prepare(s, &row, &action, &input).await {
+        let error = format!("{}: {}", node.id(), error.message);
+        finish(s, triggering, "failed", Some(error)).await?;
+        return Ok(Step::Done);
+    }
+    // Cancelling stops a turn: it follows the worker's lock, like Stop from a person.
+    let active = if matches!(action, RuleAction::CancelConversation { .. }) {
         Some(s.worker.active.lock().await)
     } else {
         None

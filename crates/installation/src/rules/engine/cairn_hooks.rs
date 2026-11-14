@@ -22,7 +22,7 @@ const MAX_DELIVERABLES: i64 = 10;
 /// Questions remembered as reported, per conversation.
 const MAX_ASKED: usize = 100;
 
-/// The entry that will start the next turn, or that joined the current one.
+/// Who wrote a delivered entry, and how deep in a chain it stands.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Input {
@@ -37,9 +37,11 @@ struct Watch {
     open: bool,
     origin: Json,
     depth: u32,
-    pending: Option<Input>,
     /// The event that opened the turn.
     started: i64,
+    /// The turn opened at its provider's notification, before its input was delivered.
+    /// Codex may notify the turn before Cairn records the message that starts it.
+    awaiting_input: bool,
     /// A failure that a retry may still continue.
     failed: Option<i64>,
     error: Option<String>,
@@ -95,6 +97,21 @@ fn load(db: &Db<'_>, chat: &str) -> Result<Option<Bound>> {
             })
         })
         .optional()?)
+}
+
+/// Who wrote a delivered message, when Cairn recorded it.
+fn recorded_input(db: &Db<'_>, message: &str) -> Result<Option<Input>> {
+    Ok(db
+        .0
+        .prepare_cached("SELECT origin,depth FROM hook_rule_turn_origins WHERE message_id=?")?
+        .query_row([message], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+        })
+        .optional()?
+        .map(|(origin, depth)| Input {
+            origin: serde_json::from_str(&origin).unwrap_or(Json::Null),
+            depth,
+        }))
 }
 
 /// Whether some rule of the creator listens to this Cairn hook.
@@ -253,9 +270,10 @@ impl Watch {
         });
     }
 
-    fn open(&mut self, event: i64, at: i64) {
-        let input = self.pending.take().unwrap_or_else(|| Input {
-            // A turn without new input resumes the chain it belongs to.
+    /// Opens a turn with its input, or as a resumption of the chain it belongs to.
+    fn open(&mut self, event: i64, at: i64, input: Option<Input>) {
+        self.awaiting_input = input.is_none();
+        let input = input.unwrap_or_else(|| Input {
             origin: json!({ "kind": "resume" }),
             depth: self.depth,
         });
@@ -268,6 +286,51 @@ impl Watch {
         self.progress_at = at;
     }
 
+    /// Delivered input starts a turn, or joins the working one. The first input of a
+    /// turn opened before its delivery is the one that started it.
+    fn deliver(&mut self, event: i64, at: i64, input: Input, emissions: &mut Vec<Emission>) {
+        if self.open && self.failed.is_some() {
+            // Writing again after a failure no retry continued starts a new turn.
+            self.end(emissions, "failed");
+        }
+        if !self.open {
+            self.open(event, at, Some(input));
+        } else if self.awaiting_input {
+            self.awaiting_input = false;
+            self.origin = input.origin;
+            self.depth = input.depth;
+        } else {
+            // Input that joins a working turn extends its chain.
+            self.depth = self.depth.max(input.depth);
+        }
+    }
+
+    /// Reports the agent's pending questions not reported yet, asked up to `until`.
+    fn ask(
+        &mut self,
+        emissions: &mut Vec<Emission>,
+        questions: &[cairn_contracts::ChatQuestion],
+        until: Option<i64>,
+    ) {
+        for question in questions {
+            if self.asked.contains(&question.id)
+                || until.is_some_and(|until| question.created_at.unwrap_or(0) > until)
+            {
+                continue;
+            }
+            self.emit(
+                emissions,
+                CairnHookKind::QuestionAsked,
+                self::question(question),
+            );
+            self.asked.push(question.id.clone());
+        }
+        if self.asked.len() > MAX_ASKED {
+            let excess = self.asked.len() - MAX_ASKED;
+            self.asked.drain(..excess);
+        }
+    }
+
     fn end(&mut self, emissions: &mut Vec<Emission>, outcome: &str) {
         let mut fields = json!({ "outcome": outcome });
         if outcome == "failed"
@@ -277,6 +340,7 @@ impl Watch {
         }
         self.emit(emissions, CairnHookKind::Ended, fields);
         self.open = false;
+        self.awaiting_input = false;
         self.failed = None;
         self.error = None;
     }
@@ -299,19 +363,33 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
     let Some(run) = conversation.run_id.clone() else {
         return Ok(None);
     };
-    let mut watch = bound.watch.clone();
-    let mut cursor = if bound.run.as_deref() == Some(run.as_str()) {
-        bound.cursor
+    let same_run = bound.run.as_deref() == Some(run.as_str());
+    let mut watch = if same_run {
+        bound.watch.clone()
     } else {
-        0
+        // Another run starts afresh, in the chain the conversation stands in.
+        Watch {
+            depth: bound.watch.depth,
+            ..Watch::default()
+        }
     };
+    let mut cursor = if same_run { bound.cursor } else { 0 };
     let mut emissions = Vec::new();
+    let questions: Vec<_> = db
+        .questions(chat)?
+        .into_iter()
+        .filter(|question| {
+            question.status == cairn_contracts::QuestionStatus::Pending && question.run_id == run
+        })
+        .collect();
 
+    // Delivered input and wakeups open turns whatever the provider notifies: Claude's
+    // adapter reports no turn start.
     let events = db
         .0
         .prepare_cached(
-            "SELECT id,type,text,payload FROM events WHERE run_id=?1 AND id>?2 AND (type IN \
-             ('chat.user','turn.started','turn.completed','turn.failed','retry.scheduled') \
+            "SELECT id,type,text,payload,created_at FROM events WHERE run_id=?1 AND id>?2 AND (type IN \
+             ('chat.user','chat.wakeup','turn.started','turn.completed','turn.failed','retry.scheduled') \
              OR (type='status' AND text IN ('failed','cancelled','interrupted'))) ORDER BY id LIMIT ?3",
         )?
         .query_map(params![run, cursor, EVENTS], |row| {
@@ -320,39 +398,40 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let complete = (events.len() as i64) < EVENTS;
-    for (id, kind, text, payload) in events {
+    for (id, kind, text, payload, created_at) in events {
         let payload: Json = payload
             .and_then(|payload| serde_json::from_str(&payload).ok())
             .unwrap_or(Json::Null);
+        // The questions a turn asked are reported before it ends.
+        if matches!(kind.as_str(), "turn.completed" | "status") && watch.open {
+            watch.ask(&mut emissions, &questions, Some(created_at));
+        }
         match kind.as_str() {
             "chat.user" => {
-                let input =
-                    db.0.prepare_cached(
-                        "SELECT origin,depth FROM hook_rule_turn_origins WHERE message_id=?",
-                    )?
-                    .query_row([payload["messageId"].as_str().unwrap_or_default()], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
-                    })
-                    .optional()?
-                    .map_or_else(
-                        || Input {
-                            origin: json!({ "kind": "unknown" }),
-                            depth: 0,
-                        },
-                        |(origin, depth)| Input {
-                            origin: serde_json::from_str(&origin).unwrap_or(Json::Null),
-                            depth,
-                        },
-                    );
-                if watch.open {
-                    // Input that joins a working turn extends its chain.
-                    watch.depth = watch.depth.max(input.depth);
-                } else {
-                    watch.pending = Some(input);
+                let message = payload["messageId"].as_str().unwrap_or_default();
+                let input = recorded_input(db, message)?.unwrap_or_else(|| Input {
+                    // Input Cairn did not attribute stays in the conversation's chain.
+                    origin: json!({ "kind": "unknown" }),
+                    depth: watch.depth,
+                });
+                watch.deliver(id, at, input, &mut emissions);
+            }
+            "chat.wakeup" => {
+                if watch.failed.is_some() {
+                    watch.end(&mut emissions, "failed");
+                }
+                if !watch.open {
+                    // A wakeup resumes the chain without new input.
+                    let resume = Input {
+                        origin: json!({ "kind": "resume" }),
+                        depth: watch.depth,
+                    };
+                    watch.open(id, at, Some(resume));
                 }
             }
             "turn.started" => {
@@ -360,7 +439,7 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                     watch.end(&mut emissions, "failed");
                 }
                 if !watch.open {
-                    watch.open(id, at);
+                    watch.open(id, at, None);
                 }
             }
             "retry.scheduled" => watch.failed = None,
@@ -406,40 +485,20 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
         watch.end(&mut emissions, "failed");
     }
 
-    if watch.open {
-        for question in db.questions(chat)? {
-            if question.status != cairn_contracts::QuestionStatus::Pending
-                || question.run_id != run
-                || watch.asked.contains(&question.id)
-            {
-                continue;
-            }
-            watch.emit(
-                &mut emissions,
-                CairnHookKind::QuestionAsked,
-                self::question(&question),
-            );
-            watch.asked.push(question.id.clone());
-        }
-        if watch.asked.len() > MAX_ASKED {
-            let excess = watch.asked.len() - MAX_ASKED;
-            watch.asked.drain(..excess);
-        }
-        if at - watch.progress_at >= PROGRESS_INTERVAL
-            && listened(db, &bound.creator, CairnHookKind::Progress)?
-            && !progress_pending(db, watch.progress_event.as_deref())?
-        {
-            let step = json!({ "step": step(db, &run, watch.started)? });
-            watch.emit(&mut emissions, CairnHookKind::Progress, step);
-            watch.progress_at = at;
-        }
+    // A question stays answerable after its turn ended: it is reported whenever Cairn
+    // sees it, in the chain of the turn that asked it.
+    watch.ask(&mut emissions, &questions, None);
+    if watch.open
+        && at - watch.progress_at >= PROGRESS_INTERVAL
+        && listened(db, &bound.creator, CairnHookKind::Progress)?
+        && !progress_pending(db, watch.progress_event.as_deref())?
+    {
+        let step = json!({ "step": step(db, &run, watch.started)? });
+        watch.emit(&mut emissions, CairnHookKind::Progress, step);
+        watch.progress_at = at;
     }
 
-    if bound.run.as_deref() == Some(run.as_str())
-        && cursor == bound.cursor
-        && watch == bound.watch
-        && emissions.is_empty()
-    {
+    if same_run && cursor == bound.cursor && watch == bound.watch && emissions.is_empty() {
         return Ok(None);
     }
     Ok(Some(Advanced {

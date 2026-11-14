@@ -218,13 +218,45 @@ pub(super) fn origin_of(origin: &Origin) -> Json {
 
 /// Records who wrote an entry of a conversation bound to a key, so that the Cairn hooks
 /// of the turn it starts report it. Other conversations record nothing.
+///
+/// Only a person's entry starts a new chain, and takes back from rules a conversation
+/// a rule cancelled. Any other entry stays in the chain of the conversation, and of the
+/// run that caused it: an agent's delegated task, or `cairn_installation`.
 pub(crate) fn record_input(db: &Db<'_>, chat: &str, message: &str, origin: &Origin) -> Result<()> {
+    let causing = match origin {
+        Origin::Run(run) | Origin::DelegatedTask(run) => Some(run.as_str()),
+        _ => None,
+    };
+    let person = matches!(origin, Origin::Human(_));
     db.0.prepare_cached(
         "INSERT INTO hook_rule_turn_origins(message_id,chat_id,origin,depth) \
-         SELECT ?1,?2,?3,0 WHERE EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=?2 AND key IS NOT NULL) \
+         SELECT ?1,?2,?3,CASE WHEN ?4 THEN 0 ELSE max( \
+          coalesce(json_extract(k.watch,'$.depth'),0), \
+          coalesce((SELECT max(json_extract(o.watch,'$.depth')) FROM hook_rule_conversations o \
+           JOIN conversations c ON c.id=o.chat_id WHERE ?5 IS NOT NULL AND c.run_id=?5),0)) END \
+         FROM hook_rule_conversations k WHERE k.chat_id=?2 AND k.key IS NOT NULL \
          ON CONFLICT(message_id) DO UPDATE SET origin=excluded.origin,depth=excluded.depth",
     )?
-    .execute(params![message, chat, origin_of(origin).to_string()])?;
+    .execute(params![
+        message,
+        chat,
+        origin_of(origin).to_string(),
+        person,
+        causing
+    ])?;
+    if person {
+        release_pause(db, chat)?;
+    }
+    Ok(())
+}
+
+/// A person paused, resumed, stopped or wrote: a rule's cancellation no longer accounts
+/// for the conversation's pause.
+pub(crate) fn release_pause(db: &Db<'_>, chat: &str) -> Result<()> {
+    db.0.prepare_cached(
+        "UPDATE hook_rule_conversations SET cancelled_run=NULL WHERE chat_id=? AND cancelled_run IS NOT NULL",
+    )?
+    .execute([chat])?;
     Ok(())
 }
 
@@ -397,7 +429,7 @@ pub(super) struct Acting<'a> {
     pub event: &'a Json,
     /// The chain depth of the hooks this action causes.
     pub depth: u32,
-    /// Runs this process executes, read under the worker's lock.
+    /// Runs this process executes, read under the worker's lock when cancelling.
     pub executing: &'a HashSet<String>,
 }
 
@@ -480,9 +512,9 @@ fn start(
     Ok(json!({ "conversationId": chat, "messageId": message, "key": key }))
 }
 
-/// Sends a message to the conversation of a key. A conversation a person paused stays
-/// paused; one whose turn failed, or that a rule cancelled, continues as Cairn would
-/// continue it for a person who writes again.
+/// Sends a message to the conversation of a key, which Cairn delivers after its current
+/// turn, as for a person who writes again. A paused conversation stays paused, unless
+/// the rule's own cancellation paused it.
 fn steer(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
     require_depth(acting.depth)?;
     let key = text_input(input, "key", "conversation key")?;
@@ -500,31 +532,19 @@ fn steer(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
         .flatten();
     let status = run.as_ref().and_then(RunStatus::of);
     let run_id = run.as_ref().map(|run| text(run, "id").to_owned());
-    // A rule's cancellation pauses the conversation like Stop; a failed turn pauses it
-    // until someone writes again. Only a person's pause holds rules back.
+    // A rule's cancellation pauses the conversation like Stop. Any later pause,
+    // resumption or entry of a person releases that mark: only the rule's own pause
+    // lets it steer a paused conversation.
     let cancelled_by_rule = bound.cancelled_run.is_some() && bound.cancelled_run == run_id;
-    let failed = matches!(status, Some(RunStatus::Failed | RunStatus::Interrupted));
-    if chat.paused && !(cancelled_by_rule || failed) {
+    if chat.paused && !cancelled_by_rule {
         return Err(Error::conflict(
-            "A person paused this conversation. Rules can steer it again once a person resumes it.",
+            "This conversation is paused. Rules can steer it again once a person resumes it.",
         ));
     }
     if cancelled_by_rule && status.is_some_and(RunStatus::is_active) {
         return Err(Error::unavailable(
             "This conversation is still stopping. The rule can steer it once it stopped.",
         ));
-    }
-    if let (Some(run), Some(status)) = (&run_id, status)
-        && status.is_resumable()
-        && !chat.cancelled_by_deletion
-        && !chat.session_restart_requested
-    {
-        if acting.executing.contains(run) {
-            return Err(Error::unavailable(
-                "This conversation is still stopping. The rule can steer it once it stopped.",
-            ));
-        }
-        crate::worker::control::requeue(db, run, None, None, None, None)?;
     }
     if chat.paused {
         crate::chats::pause_in(db, &chat.id, false)?;
@@ -617,7 +637,7 @@ fn answer(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
     let Reached { chat, origin, .. } = reach(db, acting.row, acting.version, &key)?;
     if chat.paused {
         return Err(Error::conflict(
-            "A person paused this conversation. Rules can answer it again once a person resumes it.",
+            "This conversation is paused. Rules can answer it again once a person resumes it.",
         ));
     }
     let question = db
@@ -725,32 +745,30 @@ pub(super) fn record_conversation(db: &Db<'_>, t: &Triggering, position: u32) ->
     Ok(())
 }
 
-/// What a conversation action resolves before its transaction: the run whose worker
-/// locks it takes, and the native authority observation it refreshes.
+/// Refreshes the native authority observation a conversation action checks, before its
+/// transaction.
 pub(super) async fn prepare(
     s: &Service,
     row: &RuleRow,
     action: &RuleAction,
     input: &Json,
-) -> Result<Option<String>> {
+) -> Result<()> {
     if let RuleAction::StartAgent { agent_id, .. } = action {
         if let Some(snapshot) = s.store.agent_snapshot(&agent_id.to_string()).await? {
             crate::native::policy::refresh_for(s, &snapshot).await?;
         }
-        return Ok(None);
+        return Ok(());
     }
     let Ok(key) = key(&input["key"]) else {
-        return Ok(None);
+        return Ok(());
     };
     let creator = row.creator_account_id.clone();
     let chat = s
         .store
         .read(move |db| Ok(bound(db, &creator, &key)?.map(|bound| bound.chat)))
         .await?;
-    let Some(chat) = chat else {
-        return Ok(None);
-    };
-    crate::native::policy::refresh_chat(s, &chat).await?;
-    let detail = s.conversation_boundary(&chat).await?;
-    Ok(detail["runId"].as_str().map(str::to_owned))
+    if let Some(chat) = chat {
+        crate::native::policy::refresh_chat(s, &chat).await?;
+    }
+    Ok(())
 }
