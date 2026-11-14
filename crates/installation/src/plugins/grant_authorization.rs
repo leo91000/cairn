@@ -691,7 +691,7 @@ impl ResourceAuthorization<'_> {
     }
 }
 
-/// Ticket F calls this before delivering an event. Unknown hooks, schema-invalid,
+/// The rule engine calls this before delivering an event. Unknown hooks, schema-invalid,
 /// uncovered, undesignated and unresolved payload resources are refused.
 pub async fn authorize_hook_delivery(
     s: &Service,

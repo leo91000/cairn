@@ -77,7 +77,15 @@ class CairnMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         val identifiers =
             message.data.filterKeys {
-                it in setOf("accountId", "installationId", "chatId", "questionId", "alertId")
+                it in
+                    setOf(
+                        "accountId",
+                        "installationId",
+                        "chatId",
+                        "questionId",
+                        "alertId",
+                        "ruleId",
+                    )
             }
         val request =
             OneTimeWorkRequestBuilder<NativeMessageWorker>()

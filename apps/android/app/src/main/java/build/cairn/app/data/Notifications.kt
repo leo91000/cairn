@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.map
 
 const val QUESTION_CHANNEL = "cairn-questions"
 const val EXECUTION_CHANNEL = "cairn-execution"
+const val INSTALLATION_NOTIFICATION_TARGET = "@installation"
 const val NATIVE_PUSH_REENROLLMENT_MESSAGE =
     "Les notifications push ont été désactivées. Confirmez votre identité par e-mail ou passkey dans les réglages du compte, puis réactivez-les."
 private val enabledKey = booleanPreferencesKey("notifications")

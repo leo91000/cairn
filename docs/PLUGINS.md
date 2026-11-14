@@ -1324,9 +1324,9 @@ expire after 30 days, carry the instance revision and approved package digest, a
 are invalidated by revision/package changes. Instance deletion cascades to events
 and receipts. The existing script event pump never delivers hook events.
 
-Ticket F can use `Db::plugin_hooks(instance, revision, digest, now)` to read current
-events and `Db::remove_plugin_hook(instance, id)` to acknowledge them in its own
-transaction; receipts remain intact. Ticket C can use the manifest's
+The rule engine reads current events with `Db::plugin_hooks(instance, revision,
+digest, now)` and acknowledges them with `Db::remove_plugin_hook(instance, id)`;
+receipts remain intact. Ticket C can use the manifest's
 `resourceFields`/argument `resourceType` and prepare resource resolution with
 the caller's captured authority (`plugins::resources::prepare_resolve`).
 Trusted host callers also have the synchronous `plugins::resources::resolve`
@@ -1482,9 +1482,13 @@ Deferred project/skill source results also retain their initiating authority and
 all bound source-instance/project proofs for polling; later delivery revalidates
 them. Completing the work does not turn its private results into an unguarded cache.
 
-Ticket F must call `plugins::grant_authorization::authorize_hook_delivery` with
-the execution agent, instance, declared hook name and payload before delivery; a
-refusal means no delivery. It does not consume or recreate A's durable queue.
+The [rule engine](HOOK-RULES.md#the-engine) consumes the hook queue: it authorizes
+each delivery for the rule's execution agent with
+`plugins::grant_authorization::authorize_hook_delivery`, then acknowledges the event.
+When a rule calls a tool, a result of exactly `{ retryAfter = seconds }` (optionally
+with `error`) means the service did nothing yet: only that action runs again later.
+Return it for a rate limit or a refusal before processing, never after an effect.
+
 `plugins::grants::rule_uses` reads the hook rule store: the tools and hooks each
 rule of a current membership uses on its execution agent, with the resources the
 agent holds now, regardless of rule state or budget. The reduction guard protects

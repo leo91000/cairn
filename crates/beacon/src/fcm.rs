@@ -22,6 +22,25 @@ pub struct FcmPushSender {
     access: Mutex<Option<(String, Instant)>>,
 }
 
+/// FCM transports identifiers only; display text stays on the installation.
+fn data_payload(payload: &Value) -> serde_json::Map<String, Value> {
+    [
+        "accountId",
+        "installationId",
+        "chatId",
+        "questionId",
+        "alertId",
+        "ruleId",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        payload[name]
+            .as_str()
+            .map(|value| (name.into(), value.into()))
+    })
+    .collect()
+}
+
 impl FcmPushSender {
     pub fn new(service_account: &str) -> Result<Self, &'static str> {
         let config: ServiceAccount =
@@ -132,20 +151,7 @@ impl PushSender for FcmPushSender {
             .endpoint
             .strip_prefix("fcm:")
             .ok_or(PushError::Gone)?;
-        let data: serde_json::Map<String, Value> = [
-            "accountId",
-            "installationId",
-            "chatId",
-            "questionId",
-            "alertId",
-        ]
-        .into_iter()
-        .filter_map(|name| {
-            payload[name]
-                .as_str()
-                .map(|value| (name.into(), value.into()))
-        })
-        .collect();
+        let data = data_payload(payload);
         let access = self.access_token().await?;
         let response = self
             .client
@@ -220,5 +226,22 @@ impl PushSender for AccountPushSender {
                 .send(subscription, payload)
                 .await
         }
+    }
+}
+
+#[cfg(test)]
+mod rule_payload_tests {
+    use super::*;
+
+    #[test]
+    fn rule_alert_identifiers_survive_without_private_display_text() {
+        let data = data_payload(&json!({
+            "accountId": "account", "installationId": "installation",
+            "ruleId": "rule", "alertId": "alert", "title": "private", "body": "private body",
+        }));
+        assert_eq!(data["ruleId"], "rule");
+        assert_eq!(data["alertId"], "alert");
+        assert!(!data.contains_key("title"));
+        assert!(!data.contains_key("body"));
     }
 }

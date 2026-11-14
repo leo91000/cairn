@@ -631,6 +631,10 @@ fn main() {
     export::<ValidateHookRuleInput>(root, &mut generator, Contract::Deserialize);
     export::<ValidateHookRuleOutput>(root, &mut generator, Contract::Serialize);
     export::<GetHookRuleCatalogInput>(root, &mut generator, Contract::Deserialize);
+    export::<HookRuleTriggering>(root, &mut generator, Contract::Serialize);
+    export::<ListHookRuleTriggeringsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListHookRuleTriggeringsOutput>(root, &mut generator, Contract::Serialize);
+    export::<HookRuleTriggeringInput>(root, &mut generator, Contract::Deserialize);
     export::<ListHookRuleTemplatesInput>(root, &mut generator, Contract::Deserialize);
     export::<ListHookRuleTemplatesOutput>(root, &mut generator, Contract::Serialize);
     export::<InstallHookRuleTemplateInput>(root, &mut generator, Contract::Deserialize);
@@ -643,6 +647,8 @@ fn main() {
         { "name": "installHookRuleTemplate", "input": "InstallHookRuleTemplateInput", "output": "InstallHookRuleTemplateOutput", "method": "POST", "path": "/hook-rules/templates/install" },
         { "name": "getHookRule", "input": "HookRuleInput", "output": "HookRule", "method": "GET", "path": "/hook-rules/{ruleId}" },
         { "name": "listHookRuleVersions", "input": "HookRuleInput", "output": "ListHookRuleVersionsOutput", "method": "GET", "path": "/hook-rules/{ruleId}/versions" },
+        { "name": "listHookRuleTriggerings", "input": "ListHookRuleTriggeringsInput", "output": "ListHookRuleTriggeringsOutput", "method": "GET", "path": "/hook-rules/{ruleId}/triggerings", "query": ["cursor"], "optionalQuery": ["cursor"] },
+        { "name": "getHookRuleTriggering", "input": "HookRuleTriggeringInput", "output": "HookRuleTriggering", "method": "GET", "path": "/hook-rule-triggerings/{triggeringId}" },
         { "name": "createHookRule", "input": "CreateHookRuleInput", "output": "HookRule", "method": "POST", "path": "/hook-rules" },
         { "name": "replaceHookRule", "input": "ReplaceHookRuleInput", "output": "HookRule", "method": "PUT", "path": "/hook-rules/{ruleId}" },
         { "name": "setHookRuleEnabled", "input": "SetHookRuleEnabledInput", "output": "HookRule", "method": "POST", "path": "/hook-rules/{ruleId}/enabled" },

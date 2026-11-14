@@ -250,13 +250,54 @@
           "minimum": 0,
           "type": "integer"
         },
+        "maxCursorBytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "maxNodes": {
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
+        "maxPending": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxPendingEventBytes": {
+          "description": "Event bytes retained by unresolved admissions and active triggerings, per rule.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxRecordedBytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxRuleValuesBytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "maxSteps": {
-          "description": "Blocks and iterations one triggering may run, waits excluded.",
+          "description": "Control-step limit: each if/forEach block and every loop iteration count; actions do not.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"

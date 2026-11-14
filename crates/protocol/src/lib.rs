@@ -125,6 +125,9 @@ pub enum NotificationKind {
         alert_id: String,
         title: String,
         body: String,
+        /// An installation-level rule alert, with no synthetic conversation target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rule_id: Option<String>,
     },
 }
 

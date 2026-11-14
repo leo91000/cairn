@@ -95,6 +95,80 @@ abstract class NativePushCases {
         manager.cancelAll()
     }
 
+    fun ruleBudgetAlertsReachTheirCreatorWithoutAConversation() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.cancelAll()
+        val account = UUID.randomUUID().toString()
+        val installation = UUID.randomUUID().toString()
+        val rule = UUID.randomUUID().toString()
+        val creator = java.util.concurrent.atomic.AtomicReference(account)
+        val exhausted = java.util.concurrent.atomic.AtomicBoolean(true)
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        assertTrue(
+                            request.getHeader("Cookie").orEmpty().contains("cairn_session=fixture")
+                        )
+                        return when (request.path) {
+                            "/api/account/session" ->
+                                MockResponse()
+                                    .setBody(
+                                        """{"authenticated":true,"csrf":"csrf","account":{"id":"$account","email":"creator@example.test"},"installations":[{"id":"$installation","name":"Installation","role":"member","online":true}]}"""
+                                    )
+                            "/api/installations/$installation/api/hook-rules/$rule" ->
+                                MockResponse()
+                                    .setBody(
+                                        """{"creatorAccountId":"${creator.get()}","blocks":${if (exhausted.get()) """[{"kind":"budgetExhausted"}]""" else "[]"}}"""
+                                    )
+                            else -> MockResponse().setResponseCode(404)
+                        }
+                    }
+                }
+            server.start()
+            val origin = server.url("/").toString()
+            val vault = sessionVault(context)
+            vault.write(origin, "cairn_session=fixture; Path=/; Max-Age=3600")
+            val preferences = NotificationPreferences(context)
+            preferences.setEnabled(true)
+            val receiver = NativeNotificationReceiver(context, vault, origin)
+            fun message() =
+                mapOf(
+                    "accountId" to account,
+                    "installationId" to installation,
+                    "ruleId" to rule,
+                    "alertId" to UUID.randomUUID().toString(),
+                    "title" to "UNTRUSTED TEXT",
+                )
+            assertTrue(receiver.receive(message()))
+            awaitNotificationCount(manager, 1)
+            assertEquals(
+                "Une règle a atteint sa limite horaire",
+                deliveredNotifications(manager)
+                    .single()
+                    .notification
+                    .extras
+                    .getString("android.title"),
+            )
+            assertFalse(
+                deliveredNotifications(manager)
+                    .single()
+                    .notification
+                    .extras
+                    .toString()
+                    .contains("UNTRUSTED TEXT")
+            )
+            creator.set(UUID.randomUUID().toString())
+            assertFalse(receiver.receive(message()))
+            creator.set(account)
+            exhausted.set(false)
+            assertFalse(receiver.receive(message()))
+            preferences.setEnabled(false)
+        }
+        manager.cancelAll()
+    }
+
     // Android may add a group summary after the third message; it is not another delivery.
     private fun deliveredNotifications(manager: NotificationManager) =
         manager.activeNotifications.filter {

@@ -367,6 +367,13 @@ async fn rule_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
         ("GET", ["hook-rules", id, "versions"]) => {
             ("list_hook_rule_versions", json!({ "ruleId": id }))
         }
+        ("GET", ["hook-rules", id, "triggerings"]) => (
+            "list_hook_rule_triggerings",
+            json!({ "ruleId": id, "cursor": query("cursor") }),
+        ),
+        ("GET", ["hook-rule-triggerings", id]) => {
+            ("get_hook_rule_triggering", json!({ "triggeringId": id }))
+        }
         ("PUT", ["hook-rules", id]) => ("replace_hook_rule", same("ruleId", id)?),
         ("POST", ["hook-rules", id, "enabled"]) => ("set_hook_rule_enabled", same("ruleId", id)?),
         ("POST", ["hook-rules", id, "emergency-pause"]) => {

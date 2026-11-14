@@ -278,6 +278,11 @@ pub(crate) fn limits() -> RuleCatalogLimits {
         max_steps: validation::MAX_STEPS,
         max_tool_calls: validation::MAX_TOOL_CALLS,
         max_nodes: validation::MAX_NODES as u32,
+        max_recorded_bytes: Some(super::engine::MAX_RECORDED_BYTES as u32),
+        max_cursor_bytes: Some(super::engine::MAX_CURSOR_BYTES as u32),
+        max_rule_values_bytes: Some(super::engine::MAX_RULE_VALUES_BYTES as u32),
+        max_pending: Some(super::engine::MAX_PENDING as u32),
+        max_pending_event_bytes: Some(super::engine::MAX_PENDING_EVENT_BYTES as u32),
     }
 }
 

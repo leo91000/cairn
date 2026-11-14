@@ -326,7 +326,8 @@ come from verified authority, never command JSON. `get_task`, `list_tasks`,
 
 Hook rules ([guide](HOOK-RULES.md)) use the same definitions as HTTP and
 `cairn_installation`. `list_hook_rules`, `get_hook_rule`, `list_hook_rule_versions`,
-`get_hook_rule_catalog` and `validate_hook_rule` use the read scope. `create_hook_rule`,
+`get_hook_rule_catalog`, `validate_hook_rule`, `list_hook_rule_triggerings` and
+`get_hook_rule_triggering` use the read scope. `create_hook_rule`,
 `replace_hook_rule`, `set_hook_rule_enabled`, `set_hook_rule_emergency_pause`,
 `lift_hook_rule_budget`, `duplicate_hook_rule` and `delete_hook_rule` use manage. A rule
 created through the public MCP belongs to the owner who authorized the client; scopes

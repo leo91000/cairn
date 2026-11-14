@@ -23,7 +23,7 @@ pub(crate) const MAX_DEFINITION: usize = 120_000;
 pub(crate) const MAX_WAIT_SECONDS: u32 = 7 * 86_400;
 pub(crate) const MAX_TRIGGERINGS_PER_HOUR: u32 = 600;
 pub(crate) const MAX_CONVERSATIONS_PER_HOUR: u32 = 100;
-/// Blocks and iterations of one triggering, waits excluded.
+/// Blocks and iterations of one triggering, actions excluded.
 pub(crate) const MAX_STEPS: u32 = 500;
 pub(crate) const MAX_TOOL_CALLS: u32 = 50;
 
@@ -242,11 +242,13 @@ pub(crate) fn check(db: &Db<'_>, request: &Request<'_>) -> Result<Checked> {
                     db,
                     request,
                     &mut checker,
-                    &path,
-                    &agent,
-                    &instance,
-                    tool,
-                    input,
+                    &ToolCall {
+                        path: &path,
+                        agent: &agent,
+                        instance: &instance,
+                        tool,
+                        input,
+                    },
                 )?;
             }
             RuleAction::StartAgent {
@@ -419,17 +421,28 @@ fn trigger_payload(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A `callTool` action, located in its rule.
+struct ToolCall<'a> {
+    path: &'a str,
+    agent: &'a str,
+    instance: &'a str,
+    tool: &'a str,
+    input: &'a BTreeMap<String, RuleValue>,
+}
+
 fn check_tool(
     db: &Db<'_>,
     request: &Request<'_>,
     checker: &mut Checker,
-    path: &str,
-    agent: &str,
-    instance: &str,
-    tool: &str,
-    input: &BTreeMap<String, RuleValue>,
+    call: &ToolCall<'_>,
 ) -> Result<()> {
+    let ToolCall {
+        path,
+        agent,
+        instance,
+        tool,
+        input,
+    } = *call;
     let Some((connection, manifest)) = request.instances.manifest(instance) else {
         checker.problem(
             &format!("{path}/instanceId"),

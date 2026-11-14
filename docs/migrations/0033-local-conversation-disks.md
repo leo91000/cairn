@@ -50,10 +50,11 @@ the task allowance immediately at the swap; any remaining transient credit cover
 only the replaced files awaiting reclamation. VM and native accounting use the
 same rule.
 
-This change adds **no schema change**: `DATABASE_VERSION` remains 32, introduced
-by [detached publication acknowledgements](0032-detached-publication-acknowledgements.md).
-Managers using schema 31 cannot open this database. Managers supporting schema 32
-can technically open it, but that is not a rollback of this destructive migration.
+This storage migration does not itself change the SQLite schema. The same release
+also includes the [hook rule engine](0034-hook-rule-engine.md), which upgrades the
+installation database from schema 32 to 33. Once upgraded, managers supporting only
+schema 31 or 32 cannot open the database. Schema compatibility does not restore the
+conversation files removed by this destructive storage migration.
 A rollback requires an operator database backup taken before the
 update and the matching bucket. Only the last remotely published files can return.
 The supervisor does not take this database backup.

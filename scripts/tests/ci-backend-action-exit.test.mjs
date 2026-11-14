@@ -84,7 +84,10 @@ async function action(t, {
   numericRetirementControl = false,
   receiptMode = 'complete',
   uploaderStartupDelayMs = 0,
+  uploaderWorkDelayMs = 0,
+  uploadMs,
   sampleWorkMs = 0,
+  helperExitDelayMs = 0,
   cancel,
 } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-action-exit-'))
@@ -106,6 +109,7 @@ async function action(t, {
     fs.writeSync(3,'ready\\n');fs.closeSync(3);
     const admitted=await new Promise(resolve=>{let text='';process.stdin.on('data',bytes=>text+=bytes);process.stdin.on('end',()=>resolve(JSON.parse(text)))});
     Object.assign(process.env,admitted);
+    if(${uploaderWorkDelayMs})await new Promise(resolve=>setTimeout(resolve,${uploaderWorkDelayMs}));
     const p=JSON.parse(fs.readFileSync(process.env.INPUT_PATH));
     const owned={pid:process.pid,start:fs.readFileSync('/proc/self/stat','utf8').split(') ')[1].split(' ')[19]};
     fs.writeFileSync(${JSON.stringify(path.join(root, 'publication'))}+'/'+process.env.INPUT_NAME+'.pid',JSON.stringify(owned));
@@ -135,9 +139,22 @@ async function action(t, {
   const worker = path.join(root, 'worker.mjs')
   writeFileSync(worker, `
     import fs from 'node:fs';
+    import childProcess from 'node:child_process';
+    import {syncBuiltinESMExports} from 'node:module';
     import {artifactPublisher,runBackendAction} from ${JSON.stringify(durable)};
     import {foregroundAction} from ${JSON.stringify(foreground)};
     import {admittedUploader} from ${JSON.stringify(admission)};
+    if(${helperExitDelayMs}){
+      const spawn=childProcess.spawn;
+      childProcess.spawn=(command,args,options)=>{
+        if(command==='python3'&&args[0].endsWith('/ci-owned-command.py')){
+          const wrapper='import runpy,sys,time\\nsys.argv=sys.argv[1:]\\ntry: runpy.run_path(sys.argv[0],run_name="__main__")\\nfinally: time.sleep(${helperExitDelayMs / 1000})';
+          return spawn(command,['-c',wrapper,...args],options);
+        }
+        return spawn(command,args,options);
+      };
+      syncBuiltinESMExports();
+    }
     void foregroundAction(async()=>{
       process.on('SIGXFSZ',()=>{});
       const progress=console.log;
@@ -161,7 +178,9 @@ async function action(t, {
       }
       const startedAt=Date.now()-28*60000+${timeout ? 600 : 60000};
       const env={PATH:process.env.PATH,HOME:${JSON.stringify(root)},GITHUB_RUN_ATTEMPT:'1',CI_JOB_STARTED_AT:startedAt/1000,ACTIONS_RUNTIME_TOKEN:'synthetic-private-token'};
-      const publishArtifact=artifactPublisher({uploader:${JSON.stringify(uploader)},directory:${JSON.stringify(path.join(root, 'publication'))},env,uploadMs:300,closeMs:50});
+      // Only expiry controls shorten the production upload clock. The outer
+      // autonomous-exit assertion still bounds every successful fixture.
+      const publishArtifact=artifactPublisher({uploader:${JSON.stringify(uploader)},directory:${JSON.stringify(path.join(root, 'publication'))},env,uploadMs:${uploadMs ?? (['linger', 'periodic-expiry'].includes(sdk) || receiptMode === 'interrupted' ? 300 : 'undefined')},closeMs:50});
       let admissions=0;
       const admittedPublish=admittedUploader(publishArtifact,{uploader:${JSON.stringify(uploader)},env,deadline:Date.now()+2500,onSpawn:child=>{
         const fields=fs.readFileSync('/proc/'+child.pid+'/stat','utf8').split(') ')[1].split(' ');
@@ -200,7 +219,11 @@ async function action(t, {
         // Keep both real local-I/O waits inside the unchanged outer exit bound,
         // alongside the fixture's shortened guard and publisher waits.
         localCloseMs:${blockedTraceClose ? 100 : 'undefined'},
-        observeOptions:{sampleMs:20,graceMs:30,closeGraceMs:100,inventoryLimit:${incomplete ? 1 : 4096}}});
+        // Retain the real one-second close allowance: command completion and
+        // delivery of the helper's OS exit are separate scheduling boundaries.
+        // Only the sampling controls request a faster-than-production cadence;
+        // the public-pipe matrix qualifies exit without continuous host scans.
+        observeOptions:{sampleMs:${sampleWorkMs ? 20 : 'undefined'},graceMs:30,inventoryLimit:${incomplete ? 1 : 4096}}});
       fs.writeFileSync(${JSON.stringify(path.join(root, 'returned.json'))},JSON.stringify(result));
       fs.writeFileSync(${JSON.stringify(path.join(root, 'checkpoint-delivery.json'))},JSON.stringify(checkpointDelivery));
       return ${numericRetirementControl ? '125' : 'result'};
@@ -334,6 +357,21 @@ for (const mode of ['unread', 'stopped', 'slow', 'closed']) {
   }
 }
 
+it('awaits the owned helper exit after command completion under delayed scheduling', async (t) => {
+  const result = await action(t, { code: 0, volume: 1, helperExitDelayMs: 200 })
+  assert.equal(result.code, 0, JSON.stringify(result.returned))
+  assert.equal(result.returned.guardReturn.code, 0)
+  assert.equal(result.returned.ownedClosureVerified, true)
+  assert.equal(result.returned.trace.complete, true)
+})
+
+it('retains the production upload allowance for successful synthetic publication', async (t) => {
+  const result = await action(t, { code: 0, volume: 1, uploaderWorkDelayMs: 400 })
+  assert.equal(result.code, 0, JSON.stringify(result.returned))
+  assert.equal(result.returned.finalPublicationReturned, true)
+  assert.equal(result.returned.publisherClosureVerified, true)
+})
+
 // Model an inventory scan slower than its requested cadence while the real
 // workload pipe is ready. Keep the existing outer exit and publication bounds.
 // These controls defer artifact checkpoints to isolate inventory sampling; the
@@ -365,7 +403,7 @@ it('admits a slow-starting synthetic uploader before its unchanged publication c
   // This exceeds the real publisher's 300 ms fixture budget. Startup is not
   // publication; the protocol still runs with that budget and the same outer
   // autonomous-exit bound, while the real expiry control below stays non-green.
-  const result = await action(t, { volume: 1048576, uploaderStartupDelayMs: 350 })
+  const result = await action(t, { volume: 1048576, uploaderStartupDelayMs: 350, uploadMs: 300 })
   assert.equal(result.code, 7, JSON.stringify(result.returned))
   assert.equal(result.returned.guardReturn.code, 7)
   assert.equal(result.returned.trace.complete, true)

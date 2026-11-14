@@ -14,6 +14,7 @@ import build.cairn.app.MainActivity
 import build.cairn.app.R
 import java.util.UUID
 import kotlinx.coroutines.flow.first
+import kotlinx.serialization.json.*
 
 private val nativeSeenKey = stringSetPreferencesKey("native_push_seen")
 
@@ -26,11 +27,17 @@ class NativeNotificationReceiver(
     suspend fun receive(data: Map<String, String>): Boolean {
         val account = data["accountId"] ?: return false
         val installationId = data["installationId"] ?: return false
-        val chat = data["chatId"] ?: return false
-        if (
-            listOf(account, installationId, chat).any {
-                runCatching { UUID.fromString(it).toString() == it }.getOrDefault(false).not()
+        val rule =
+            data["ruleId"]?.takeIf {
+                runCatching { UUID.fromString(it).toString() == it }.getOrDefault(false)
             }
+        if (data.containsKey("ruleId") && rule == null) return false
+        val chat = data["chatId"].orEmpty()
+        if (
+            (listOf(account, installationId) + if (rule == null) listOf(chat) else emptyList())
+                .any {
+                    runCatching { UUID.fromString(it).toString() == it }.getOrDefault(false).not()
+                }
         )
             return false
         val question = data["questionId"]?.takeIf { Regex("[a-f0-9]{64}").matches(it) }
@@ -38,7 +45,7 @@ class NativeNotificationReceiver(
             data["alertId"]?.takeIf {
                 runCatching { UUID.fromString(it).toString() == it }.getOrDefault(false)
             }
-        if ((question == null) == (alert == null)) return false
+        if ((question == null) == (alert == null) || (rule != null && alert == null)) return false
         if (beaconOrigin.isBlank()) return false
         val preferences = NotificationPreferences(context)
         if (!preferences.enabled.first() || !notificationsAllowed(context)) return false
@@ -48,7 +55,19 @@ class NativeNotificationReceiver(
         val session = api.get<Session>("/account/session")
         if (!session.authenticated || session.account?.id != account) return false
         val installation = session.installations.find { it.id == installationId } ?: return false
-        if (alert != null && installation.role != InstallationRole.Owner) return false
+        if (alert != null && rule == null && installation.role != InstallationRole.Owner)
+            return false
+        if (rule != null) {
+            val ruleApi = CairnApi(origin, vault, installationId = installationId)
+            val current = ruleApi.get<JsonObject>("/hook-rules/${segment(rule)}")
+            val mine = current["creatorAccountId"]?.jsonPrimitive?.contentOrNull == account
+            val exhausted =
+                (current["blocks"] as? JsonArray).orEmpty().any {
+                    (it as? JsonObject)?.get("kind")?.jsonPrimitive?.contentOrNull ==
+                        "budgetExhausted"
+                }
+            if (!mine || !exhausted) return false
+        }
         val receipt = "$account:$installationId:${question ?: alert}"
         if (receipt in context.dataStore.data.first()[nativeSeenKey].orEmpty()) return false
         if (
@@ -69,9 +88,15 @@ class NativeNotificationReceiver(
         val cacheScope = "$origin$installationId"
         val intent =
             Intent(context, MainActivity::class.java)
-                .setAction("build.cairn.app.OPEN_CHAT")
+                .setAction(
+                    if (rule == null) "build.cairn.app.OPEN_CHAT"
+                    else "build.cairn.app.OPEN_INSTALLATION"
+                )
                 .setData(
-                    "cairn-manager://chat/${segment(chat)}?origin=${segment(cacheScope)}&account=${segment(account)}"
+                    (if (rule == null)
+                            "cairn-manager://chat/${segment(chat)}?origin=${segment(cacheScope)}&account=${segment(account)}"
+                        else
+                            "cairn-manager://installation/${segment(installationId)}?origin=${segment(cacheScope)}&account=${segment(account)}&rule=${segment(rule)}")
                         .toUri()
                 )
                 .putExtra("chat", chat)
@@ -82,11 +107,13 @@ class NativeNotificationReceiver(
             NotificationCompat.Builder(context, channel)
                 .setSmallIcon(R.drawable.ic_cairn)
                 .setContentTitle(
-                    if (question != null) "Cairn attend votre réponse"
+                    if (rule != null) "Une règle a atteint sa limite horaire"
+                    else if (question != null) "Cairn attend votre réponse"
                     else "Une conversation requiert votre attention"
                 )
                 .setContentText(
-                    if (question != null) "Une question vous attend dans une conversation."
+                    if (rule != null) "Ouvrez Cairn pour consulter ses règles."
+                    else if (question != null) "Une question vous attend dans une conversation."
                     else "Consultez son état dans Cairn."
                 )
                 .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
@@ -101,7 +128,7 @@ class NativeNotificationReceiver(
                 .setAutoCancel(true)
                 .build()
         manager.notify(
-            "$account:$installationId:$chat",
+            "$account:$installationId:${if (rule != null) "rule:$rule" else chat}",
             if (question != null) 1 else 2,
             notification,
         )
