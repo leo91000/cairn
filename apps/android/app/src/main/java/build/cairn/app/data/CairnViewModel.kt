@@ -255,9 +255,9 @@ constructor(
         clearDrafts()
 
         if (forgetSession) {
-            withContext(Dispatchers.IO) { ruleDrafts.clear() }
             connection?.clearSession()
             accountConnection?.clearSession()
+            withContext(Dispatchers.IO) { ruleDrafts.clear() }
         }
 
         if (scheduleNotifications != null) schedule(getApplication(), scheduleNotifications)
