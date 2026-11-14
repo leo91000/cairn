@@ -890,7 +890,12 @@ fun typedComparisonRight(value: JsonElement?, expects: String): JsonObject {
                     ?: (runCatching { wireJson.parseToJsonElement(text) }.getOrNull() as? JsonArray)
                     ?: JsonArray(emptyList())
             )
-        else -> held
+        else ->
+            if (held.text("type") == "literal" && (raw !is JsonPrimitive || !raw.isString))
+                literalRuleValue(
+                    JsonPrimitive((raw as? JsonPrimitive)?.contentOrNull ?: raw.toString())
+                )
+            else held
     }
 }
 

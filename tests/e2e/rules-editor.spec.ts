@@ -397,3 +397,36 @@ test('retrying a committed replacement recovers its version without a duplicate 
   await expect(page.getByRole('heading', { name: 'Recovered replacement', exact: true })).toBeVisible()
   expect((await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
 })
+
+test('changing a numeric compared field to text also converts its fixed value', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const rule = await workspace.api('/api/hook-rules', 'POST', {
+    definition: {
+      ...fixture.definition,
+      steps: [{
+        type: 'if',
+        id: 'fieldchange',
+        condition: {
+          type: 'compare',
+          left: { type: 'formula', expression: 'payload.count' },
+          operator: 'equals',
+          right: { type: 'literal', value: 5 },
+        },
+        then: fixture.definition.steps,
+        otherwise: [],
+      }],
+    },
+    enabled: true,
+  })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit fieldchange', exact: true }).click()
+  await page.getByRole('button', { name: 'Insert a variable into Field', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Variables for Field', exact: true }).getByRole('button').filter({ has: page.getByText('content', { exact: true }) }).click()
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  expect((await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0].condition.right).toEqual({ type: 'literal', value: '5' })
+  workspace.service.emitHook(fixture.instanceId, 'message', { content: '5', author: 'alice', channel: 'support' }, 'text-field-change')
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]?.status).toBe('completed')
+})

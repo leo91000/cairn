@@ -70,14 +70,25 @@ fun RuleEditorScreen(
     back: () -> Unit,
 ) {
     val cacheScope = vm.api.cacheScope
-    var draft by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
-    var original by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
+    val draftSession =
+        rememberSaveable(cacheScope, ruleId) { java.util.UUID.randomUUID().toString() }
+    val retained =
+        rememberSaveable(
+            cacheScope,
+            ruleId,
+            draftSession,
+            saver = vm.ruleDrafts.saver(cacheScope, draftSession),
+        ) {
+            vm.ruleDrafts.fresh(cacheScope, draftSession)
+        }
+    var draft by retained.draft
+    var original by retained.original
     var revision by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
     var loadedVersion by rememberSaveable(cacheScope, ruleId) { mutableIntStateOf(0) }
     var conflict by remember(cacheScope, ruleId) { mutableStateOf<JsonObject?>(null) }
     var comparingConflict by remember { mutableStateOf(false) }
     var recoveredRuleId by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
-    var creationDefinition by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
+    var creationDefinition by retained.creation
     val targetRuleId = ruleId.ifBlank { recoveredRuleId }
     val creationId = rememberSaveable(cacheScope, ruleId) { java.util.UUID.randomUUID().toString() }
     var selected by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
@@ -101,7 +112,11 @@ fun RuleEditorScreen(
         }
     val dirty = draft.isNotBlank() && draft != original
     fun leave() {
-        if (dirty) discard = true else back()
+        if (dirty) discard = true
+        else {
+            vm.ruleDrafts.discard(cacheScope, draftSession, retained)
+            back()
+        }
     }
     BackHandler { leave() }
     LaunchedEffect(ruleId, cacheScope) {
@@ -257,6 +272,7 @@ fun RuleEditorScreen(
                 vm.notify(
                     if (targetRuleId.isBlank()) "Règle créée" else "Nouvelle version enregistrée"
                 )
+                vm.ruleDrafts.discard(cacheScope, draftSession, retained)
                 saved(result.text("id"))
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -293,6 +309,14 @@ fun RuleEditorScreen(
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (error.isNotBlank())
             Text(error, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
+        if (retained.problem.value.isNotBlank()) {
+            Text(
+                retained.problem.value,
+                Modifier.padding(16.dp),
+                color = MaterialTheme.colorScheme.error,
+            )
+            CopyButton("Copier le brouillon", draft, sensitive = true)
+        }
         if (!canEdit)
             Text(
                 "Seul le créateur peut modifier cette règle. Dupliquez-la pour en créer une à vous.",
@@ -600,6 +624,7 @@ fun RuleEditorScreen(
                 TextButton(
                     onClick = {
                         discard = false
+                        vm.ruleDrafts.discard(cacheScope, draftSession, retained)
                         back()
                     }
                 ) {

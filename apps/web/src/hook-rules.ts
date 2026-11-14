@@ -695,6 +695,8 @@ export function typedComparisonRight(value: RuleValue | null | undefined, expect
     return { type: 'literal', value: [] }
   }
 
+  if (value?.type === 'literal' && typeof value.value !== 'string')
+    return { type: 'literal', value: typeof value.value === 'object' ? JSON.stringify(value.value) : String(value.value) }
   return value ?? { type: 'template', text: '' }
 }
 

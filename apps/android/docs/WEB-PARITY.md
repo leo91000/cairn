@@ -60,9 +60,21 @@ the complete draft; web keeps its fields accessible for copying.
 
 Web uses an adjacent step inspector on wide screens and a sheet on phones.
 Android uses native Compose cards and bottom sheets, with a two-pane list on
-tablets. Android retains drafts across recreation; web confirms navigation or
+tablets. Android retains drafts across recreation with a short saved-state reference to
+an account/installation-scoped encrypted private snapshot, rather than putting
+the definition copies in Binder. Saving or explicitly discarding removes the
+snapshot; signing out clears retained rule drafts. Web confirms navigation or
 page exit while changes are unsaved. Existing history uses expandable data
 sections on both platforms; raw data appears only when inspecting an execution.
+
+
+Presentation differences: Android edits fixed waits in seconds; web offers an
+amount with seconds/minutes/hours/days. Android history uses an ordered list of
+executed steps and their data; web also overlays their status on the flow.
+Web versions add the native-authority and “by you” notes, and its hook picker
+previews payload fields; Android exposes event fields through the variable
+picker instead. Both resource pickers browse names; web retains a resolved-name
+chip after selection, while Android currently keeps the identifier in the input.
 
 
 ## Search during workspace startup (2026-11-13)

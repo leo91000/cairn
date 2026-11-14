@@ -87,6 +87,7 @@ constructor(
     private val beaconOrigin: String = BuildConfig.BEACON_SERVICE_ORIGIN,
 ) : AndroidViewModel(application) {
     val historyCache = HistoryCache.encrypted(application)
+    val ruleDrafts by lazy { RuleDraftStore.encrypted(application) }
     private val retentionPreferences = application.getSharedPreferences("conversation-cache", 0)
 
     suspend fun acceptCacheRevision(revision: String?) {
@@ -254,6 +255,7 @@ constructor(
         clearDrafts()
 
         if (forgetSession) {
+            withContext(Dispatchers.IO) { ruleDrafts.clear() }
             connection?.clearSession()
             accountConnection?.clearSession()
         }

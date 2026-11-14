@@ -103,6 +103,11 @@ describe('visual rule editing', () => {
 })
 
 describe('rule definition recovery and condition depth', () => {
+  it('converts old numeric, boolean and list literals when a comparison becomes text', () => {
+    for (const [value, text] of [[5, '5'], [true, 'true'], [['alice', 'bob'], '["alice","bob"]']] as const)
+      expect(typedComparisonRight({ type: 'literal', value }, 'text')).toEqual({ type: 'literal', value: text })
+  })
+
   it('compares client drafts without depending on property order and retains null data', () => {
     const original: HookRuleDefinition = { ...definition(), steps: [action] }
     const reordered = Object.fromEntries(Object.entries(original).reverse()) as HookRuleDefinition

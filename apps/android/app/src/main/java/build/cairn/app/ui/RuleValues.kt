@@ -58,9 +58,13 @@ internal fun RuleValueEditor(
     LaunchedEffect(text) {
         if (editorInput.text != text) editorInput = TextFieldValue(text, TextRange(text.length))
     }
+    val declaredSchemaKind = schema?.takeIf { it["type"] != null }?.let { schemaKind(it, JsonNull) }
     val modes =
         if (expects in setOf("field", "formula")) listOf("formula" to "Variable ou formule")
-        else if (expects in setOf("number", "integer", "boolean"))
+        else if (
+            expects in setOf("number", "integer", "boolean") ||
+                (declaredSchemaKind != null && declaredSchemaKind != "string")
+        )
             listOf("literal" to "Valeur", "formula" to "Formule")
         else listOf("template" to "Texte", "literal" to "Valeur", "formula" to "Formule")
     Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
@@ -73,23 +77,7 @@ internal fun RuleValueEditor(
                         if (kind == mode) return@FilterChip
                         change(
                             when (kind) {
-                                "literal" ->
-                                    literalRuleValue(
-                                        if (schema != null) defaultRuleLiteral(schema)
-                                        else
-                                            when (expects) {
-                                                "number" ->
-                                                    JsonPrimitive(text.toDoubleOrNull() ?: 0.0)
-                                                "integer" ->
-                                                    JsonPrimitive(text.toLongOrNull() ?: 0L)
-                                                "boolean" -> JsonPrimitive(true)
-                                                "json" -> runCatching {
-                                                        wireJson.parseToJsonElement(text)
-                                                    }
-                                                        .getOrElse { JsonPrimitive(text) }
-                                                else -> JsonPrimitive(text)
-                                            }
-                                    )
+                                "literal" -> literalRuleValue(fixedRuleValue(text, expects, schema))
                                 "formula" ->
                                     formulaRuleValue(
                                         when (mode) {
@@ -162,23 +150,24 @@ internal fun RuleValueEditor(
                     else MaterialTheme.typography.bodyMedium,
                 shape = RoundedCornerShape(14.dp),
             )
-        val typed = expects in setOf("number", "integer", "boolean")
+        val expected =
+            declaredSchemaKind
+                ?: when (expects) {
+                    "text" -> "string"
+                    "number",
+                    "integer",
+                    "boolean" -> expects
+                    else -> null
+                }
         val literal = held["value"]
         val wrongType =
-            typed &&
+            expected != null &&
                 mode != "formula" &&
-                (mode != "literal" ||
-                    if (expects == "boolean")
-                        literal !is JsonPrimitive ||
-                            literal.isString ||
-                            literal.booleanOrNull == null
-                    else
-                        literal !is JsonPrimitive ||
-                            literal.isString ||
-                            literal.doubleOrNull == null)
+                (if (mode == "template") expected != "string"
+                else !matchesRuleType(literal, expected))
         if (wrongType)
             Text(
-                "Choisissez une valeur ${if (expects == "boolean") "vraie ou fausse" else "numérique"} ou une formule de ce type.",
+                "Choisissez une valeur du type attendu ou une formule de ce type.",
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -274,6 +263,35 @@ internal fun RuleValueEditor(
             },
             { browsing = false },
         )
+}
+
+private fun matchesRuleType(value: JsonElement?, type: String): Boolean =
+    when (type) {
+        "string" -> value is JsonPrimitive && value.isString
+        "boolean" -> value is JsonPrimitive && !value.isString && value.booleanOrNull != null
+        "integer" -> value is JsonPrimitive && !value.isString && value.longOrNull != null
+        "number" ->
+            value is JsonPrimitive && !value.isString && value.doubleOrNull?.isFinite() == true
+        "array" -> value is JsonArray
+        "object" -> value is JsonObject
+        else -> true
+    }
+
+private fun fixedRuleValue(text: String, expects: String, schema: JsonObject?): JsonElement {
+    val proposed =
+        when (expects) {
+            "number" ->
+                text.toLongOrNull()?.let(::JsonPrimitive)
+                    ?: JsonPrimitive(text.toDoubleOrNull()?.takeIf { it.isFinite() } ?: 0.0)
+            "integer" -> JsonPrimitive(text.toLongOrNull() ?: 0L)
+            "boolean" -> JsonPrimitive(true)
+            "json" ->
+                runCatching { wireJson.parseToJsonElement(text) }.getOrElse { JsonPrimitive(text) }
+            else -> JsonPrimitive(text)
+        }
+    return if (schema != null && !matchesRuleType(proposed, schemaKind(schema, proposed)))
+        defaultRuleLiteral(schema)
+    else proposed
 }
 
 private fun schemaKind(schema: JsonObject, value: JsonElement): String {

@@ -204,7 +204,7 @@ function outside(event: PointerEvent) {
 document.addEventListener('pointerdown', outside)
 onBeforeUnmount(() => document.removeEventListener('pointerdown', outside))
 
-const expectedKind = computed(() => props.expects === 'number' || props.expects === 'boolean' ? props.expects : props.schema ? resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type : null)
+const expectedKind = computed(() => props.expects === 'text' ? 'string' : props.expects === 'number' || props.expects === 'boolean' ? props.expects : props.schema ? resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type : null)
 const typeMismatch = computed(() => {
   const expected = expectedKind.value
   if (!expected || model.value.type === 'formula')

@@ -379,4 +379,63 @@ abstract class RulesEditorCases {
         compose.onNodeWithText("Valeur").performClick()
         compose.runOnIdle { assertEquals(literalRuleValue(JsonPrimitive(5)), value) }
     }
+
+    @Test
+    fun comparisonTextValuesFollowFieldChangesInBothDirections() {
+        assertEquals(
+            literalRuleValue(JsonPrimitive("5")),
+            typedComparisonRight(literalRuleValue(JsonPrimitive(5)), "text"),
+        )
+        assertEquals(
+            literalRuleValue(JsonPrimitive("true")),
+            typedComparisonRight(literalRuleValue(JsonPrimitive(true)), "text"),
+        )
+        val list = JsonArray(listOf(JsonPrimitive("alice"), JsonPrimitive("bob")))
+        assertEquals(
+            literalRuleValue(JsonPrimitive(list.toString())),
+            typedComparisonRight(literalRuleValue(list), "text"),
+        )
+    }
+
+    @Test
+    fun schemaObjectFieldsOfferValuesAndFormulasWithoutTextMode() {
+        var value by mutableStateOf(literalRuleValue(JsonObject(emptyMap())))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor(
+                    "Options",
+                    value,
+                    emptyList(),
+                    { value = it },
+                    expects = "json",
+                    schema =
+                        ruleObject(
+                            "type" to JsonPrimitive("object"),
+                            "properties" to JsonObject(emptyMap()),
+                        ),
+                )
+            }
+        }
+        compose.onNodeWithText("Texte", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("Formule").assertIsDisplayed()
+    }
+
+    @Test
+    fun schemaTextKeepsItsContentsWhenSwitchingFromTextToValue() {
+        val text = "Received: {{content}}"
+        var value by mutableStateOf(templateValue(text))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor(
+                    "Message",
+                    value,
+                    emptyList(),
+                    { value = it },
+                    schema = ruleObject("type" to JsonPrimitive("string")),
+                )
+            }
+        }
+        compose.onNodeWithText("Valeur").performClick()
+        compose.runOnIdle { assertEquals(literalRuleValue(JsonPrimitive(text)), value) }
+    }
 }
