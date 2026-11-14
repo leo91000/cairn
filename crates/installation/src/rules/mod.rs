@@ -923,7 +923,9 @@ pub(crate) async fn duplicate(
         .transaction(move |db| {
             actor.authorize(db)?;
             let mut writer = author.writer(db)?;
-            writer.source = HookRuleSource::Duplicate;
+            if !author.agent() {
+                writer.source = HookRuleSource::Duplicate;
+            }
             let viewer = writer.viewer();
             if let Some(existing) = db.hook_rule(&copy)? {
                 if existing.creator_account_id != writer.creator.account {
@@ -936,6 +938,11 @@ pub(crate) async fn duplicate(
             author.unblocked(db, &writer)?;
             fresh_identity(db, &copy)?;
             let (source_row, version) = current(db, &source)?;
+            if author.agent() && source_row.creator_account_id != writer.creator.account {
+                return Err(Error::forbidden(
+                    "An agent duplicates only rules of the person of its conversation.",
+                ));
+            }
             if author.agent()
                 && (source_row.emergency_paused_at.is_some()
                     || source_row.budget_exhausted_at.is_some())

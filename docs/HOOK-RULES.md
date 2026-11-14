@@ -330,8 +330,8 @@ skill write is recorded before it happens, so a skill an agent ever wrote never
 qualifies.
 
 In such a conversation the agent creates, replaces, duplicates, enables, disables and
-deletes this person's rules only, saved with the source `installationAgent` (or
-`duplicate`) and the conversation's identifier, and never with native authority.
+deletes this person's rules only, saved with the source `installationAgent` and the
+conversation's identifier, and never with native authority.
 Installing a template through `cairn_installation` follows the same limits. While a
 rule of this person is paused in an emergency or out of budget, the agent only disables
 their rules. It never pauses or resumes a rule in an emergency, never resumes a budget,
