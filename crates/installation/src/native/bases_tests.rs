@@ -112,7 +112,7 @@ async fn prepared_directory_base_is_verified_and_private_copies_survive_cache_re
     assert!(!source.join("lazy").exists());
     let private = bases.state.join("private-copy");
     private_dir(&private).await.unwrap();
-    super::directory::copy_verified(
+    super::directory::copy_unbudgeted(
         &source.join("contents"),
         &private,
         &CancellationToken::new(),
@@ -584,11 +584,11 @@ async fn kernel_prepared_base_admission_and_recovery() {
             "storage": { "owner": run, "policy": policy },
             "nativeProjectArchives": [archive], "nativeProjectBase": ready.key
         });
+        let intent = directory.join(format!(
+            "native-base-initializing-v1.{}.{}.pin",
+            ready.key, attempt
+        ));
         if phase != "fresh" {
-            let intent = directory.join(format!(
-                "native-base-initializing-v1.{}.{}.pin",
-                ready.key, attempt
-            ));
             tokio::fs::hard_link(source.join("pin"), &intent)
                 .await
                 .unwrap();
@@ -603,7 +603,7 @@ async fn kernel_prepared_base_admission_and_recovery() {
                     .unwrap();
             } else {
                 private_dir(&workload.join("data")).await.unwrap();
-                super::directory::copy_verified(
+                super::directory::copy_unbudgeted(
                     &source.join("contents"),
                     &workload.join("data"),
                     &stop,
@@ -626,6 +626,28 @@ async fn kernel_prepared_base_admission_and_recovery() {
             // durable initialization pin and therefore its cache source.
             recover_pins(&bases.data).await.unwrap();
             assert!(intent.exists());
+        }
+        if phase == "copying" {
+            let path = state.join("storage-policy.json");
+            let previous = std::fs::read(&path).ok();
+            let (total, _) =
+                crate::storage::policy::physical_space(&super::workspace::data_root(&state))
+                    .unwrap();
+            let reserved = json!({ "reserveMiB": total / disk::MIB + 1, "reservePercent": 1 });
+            super::atomic_write(&path, &serde_json::to_vec(&reserved).unwrap())
+                .await
+                .unwrap();
+            assert!(bases.initialize(&plan, &stop).await.is_err());
+            assert!(
+                intent.exists(),
+                "Capacity refusal must preserve the initialization intent and source pin"
+            );
+            assert!(!directory.join("directory.json").exists());
+            if let Some(bytes) = previous {
+                super::atomic_write(&path, &bytes).await.unwrap();
+            } else {
+                tokio::fs::remove_file(&path).await.unwrap();
+            }
         }
         let expected_clone = phase != "committed";
         assert_eq!(

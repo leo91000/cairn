@@ -476,6 +476,13 @@ impl Bases {
         let data = workload.join("data");
         let staging = workload.join("base.partial");
         let source = self.root().join(&ready.key).join("contents");
+        let capacity = super::directory::CopyCapacity::new(
+            &self.state,
+            &workload,
+            ready.metadata_bytes,
+            crate::storage::policy::for_node(&plan["storage"]["policy"])?,
+        );
+        capacity.check().await?;
         let existing_data = match tokio::fs::symlink_metadata(&data).await {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,
             Ok(_) => {
@@ -489,13 +496,22 @@ impl Bases {
         if existing_data && std::fs::read_dir(&data)?.next().is_some() {
             // Rename may have completed before the format marker. Verify only;
             // never overwrite retained files while replaying initialization.
-            super::directory::verify_copy(&source, &data, stop).await?;
+            super::directory::verify_copy(&source, &data, stop, &capacity).await?;
         } else {
             if staging.exists() {
                 tokio::fs::remove_dir_all(&staging).await?;
             }
             private_dir(&staging).await?;
-            super::directory::copy_verified(&source, &staging, stop).await?;
+            if let Err(error) =
+                super::directory::copy_verified(&source, &staging, stop, &capacity).await
+            {
+                // The source pin and initialization intent remain replayable;
+                // a settled, failed private copy need not consume scarce space.
+                workspace::require_no_mounts(&staging)?;
+                tokio::fs::remove_dir_all(&staging).await?;
+                tokio::fs::File::open(&workload).await?.sync_all().await?;
+                return Err(error);
+            }
             tokio::fs::rename(&staging, &data).await?;
         }
         tokio::fs::File::open(&workload).await?.sync_all().await?;

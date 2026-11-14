@@ -363,7 +363,7 @@ async fn migrate(
             )
             .await?;
             private_dir(&staging).await?;
-            let capacity = MigrationCapacity {
+            let capacity = CopyCapacity {
                 state: state.to_owned(), workload: workload.clone(), required, fallback,
             };
             copy_verified_with_capacity(&source, &staging, stop, Some(&capacity)).await?;
@@ -622,15 +622,29 @@ fn hash_conversion_attributes(path: &Path, hash: &mut blake3::Hasher) -> std::io
     Ok(())
 }
 
-struct MigrationCapacity {
+pub(super) struct CopyCapacity {
     state: PathBuf,
     workload: PathBuf,
     required: u64,
     fallback: storage::policy::Policy,
 }
 
-impl MigrationCapacity {
-    async fn check(&self) -> Result<()> {
+impl CopyCapacity {
+    pub(super) fn new(
+        state: &Path,
+        workload: &Path,
+        required: u64,
+        fallback: storage::policy::Policy,
+    ) -> Self {
+        Self {
+            state: state.to_owned(),
+            workload: workload.to_owned(),
+            required,
+            fallback,
+        }
+    }
+
+    pub(super) async fn check(&self) -> Result<()> {
         let workload = self.workload.clone();
         let allocated = tokio::task::spawn_blocking(move || quota::usage(&workload))
             .await
@@ -696,6 +710,16 @@ pub(super) async fn copy_verified(
     source: &Path,
     target: &Path,
     stop: &CancellationToken,
+    capacity: &CopyCapacity,
+) -> Result<()> {
+    copy_verified_with_capacity(source, target, stop, Some(capacity)).await
+}
+
+#[cfg(test)]
+pub(super) async fn copy_unbudgeted(
+    source: &Path,
+    target: &Path,
+    stop: &CancellationToken,
 ) -> Result<()> {
     copy_verified_with_capacity(source, target, stop, None).await
 }
@@ -704,7 +728,7 @@ async fn copy_verified_with_capacity(
     source: &Path,
     target: &Path,
     stop: &CancellationToken,
-    capacity: Option<&MigrationCapacity>,
+    capacity: Option<&CopyCapacity>,
 ) -> Result<()> {
     let mut copy = tokio::process::Command::new("rsync");
     // The exec child retains ownership/xattr privileges but cannot bypass quotas.
@@ -731,15 +755,16 @@ pub(super) async fn verify_copy(
     source: &Path,
     target: &Path,
     stop: &CancellationToken,
+    capacity: &CopyCapacity,
 ) -> Result<()> {
-    verify_copy_with_capacity(source, target, stop, None).await
+    verify_copy_with_capacity(source, target, stop, Some(capacity)).await
 }
 
 async fn verify_copy_with_capacity(
     source: &Path,
     target: &Path,
     stop: &CancellationToken,
-    capacity: Option<&MigrationCapacity>,
+    capacity: Option<&CopyCapacity>,
 ) -> Result<()> {
     let mut verify = tokio::process::Command::new("rsync");
     verify
@@ -761,7 +786,7 @@ async fn verify_copy_with_capacity(
 async fn rsync_status(
     mut command: tokio::process::Command,
     stop: &CancellationToken,
-    capacity: Option<&MigrationCapacity>,
+    capacity: Option<&CopyCapacity>,
 ) -> Result<()> {
     use tokio::io::AsyncReadExt;
     if let Some(capacity) = capacity {
@@ -1444,10 +1469,11 @@ mod tests {
         let root = workspace::directory(&state, &run).unwrap();
         private_dir(&root).await.unwrap();
         let workload = workspace::workload(&state, &run).unwrap();
+        private_dir(&workload).await.unwrap();
         quota::prepare(&state, &workload, 128 * super::super::disk::MIB)
             .await
             .unwrap();
-        let capacity = MigrationCapacity {
+        let capacity = CopyCapacity {
             state: state.clone(),
             workload: workload.clone(),
             required: 96 * super::super::disk::MIB,
