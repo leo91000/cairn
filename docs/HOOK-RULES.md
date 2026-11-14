@@ -138,8 +138,11 @@ Actions:
   A rule can hold at most 1,000 active triggerings; later events are refused only
   for that rule and counted as `notAdmitted` in its history, without retaining their
   payloads or blocking the shared instance queue.
-- Conversation actions and conditions about conversation keys come with conversation
-  keys; until then they fail the triggering with a message saying so.
+- Conversation actions and conditions about conversation keys come with ticket G
+  (#516). Until then they end the triggering. If an earlier action ran, its history
+  includes the error explaining that conversation keys are unavailable; otherwise
+  the triggering only increments `withoutEffect`, like other failures before the
+  first action.
 
 ### Budget
 
