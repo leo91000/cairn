@@ -223,7 +223,8 @@ turn, as for a person who writes again, also after a failed or stopped turn. A p
 conversation cannot be steered or answered until a person resumes it.
 `cancelConversation` stops the current turn like Stop in Cairn, which pauses the
 conversation; the rules of the same creator may steer it again, which resumes it, until
-a person pauses, resumes, stops or writes in it. Steering a conversation still
+a person pauses, resumes, stops or writes in it. A conversation a person already paused
+or stopped stays theirs when a rule cancels its turn. Steering a conversation still
 stopping fails. With nothing working, `cancelConversation` only cancels a scheduled
 wakeup.
 `answerQuestion` answers the oldest pending question of the conversation's current
@@ -260,7 +261,7 @@ access to the conversation's agent:
 | `replyReady` | a turn completed | `text` (the agent's last message, at most 128 KiB, `truncated` when cut) and `deliverables` (at most 10: `id`, `name`, `title`, `mediaType`, `size`) |
 | `questionAsked` | the agent asks, once per question still pending, also when its turn already ended; before that turn's `replyReady` and `ended` | `questionId`, `title`, `text` (every question with its options) and `fields` |
 | `progress` | about every 8 seconds of a working turn | `step`, a short step without detail |
-| `ended` | a turn completed, failed or was cancelled | `outcome` and, for a failure, `error` |
+| `ended` | a turn completed, failed or was cancelled, also when its run stops without the turn reporting it (a queued wakeup cancelled before it started) | `outcome` and, for a failure, `error` (the turn's or the run's, such as an exceeded time limit) |
 
 A turn starts when Cairn delivers its input or wakes the conversation, whatever its
 provider notifies. `origin` says who started the turn: `{kind: "person", accountId}`,
@@ -268,7 +269,10 @@ provider notifies. `origin` says who started the turn: `{kind: "person", account
 (`cairn_installation`), `resume` (a turn without new input, such as a wakeup or the
 end of a wait) or `unknown`. A turn that fails and is retried reports only how its last
 attempt ended. Only one `progress` waits at a time per conversation: while a rule has
-not finished handling the previous one, Cairn emits none. Cairn hooks follow the same
+not finished handling the previous one, Cairn emits none, nor once the run no longer
+works. A hook whose recorded event would exceed the recorded-data budget (a reply near
+128 KiB of characters JSON escapes, with large remembered values) is refused whole:
+each rule that would have received it counts it as `notAdmitted`, without its payload. Cairn hooks follow the same
 per-rule capacity, versions, membership checks and history as plugin events.
 
 ## Versions

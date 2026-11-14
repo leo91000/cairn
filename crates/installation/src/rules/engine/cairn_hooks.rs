@@ -99,6 +99,14 @@ fn load(db: &Db<'_>, chat: &str) -> Result<Option<Bound>> {
         .optional()?)
 }
 
+/// A failure's message as the `ended` hook reports it.
+fn failure(message: &Json) -> Option<String> {
+    message
+        .as_str()
+        .filter(|message| !message.is_empty())
+        .map(|message| message.chars().take(1000).collect())
+}
+
 /// Who wrote a delivered message, when Cairn recorded it.
 fn recorded_input(db: &Db<'_>, message: &str) -> Result<Option<Input>> {
     Ok(db
@@ -445,10 +453,8 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
             "retry.scheduled" => watch.failed = None,
             "turn.failed" if watch.open => {
                 watch.failed = Some(id);
-                let error = payload["error"]["message"]
-                    .as_str()
-                    .unwrap_or(text.as_str());
-                watch.error = Some(error.chars().take(1000).collect());
+                watch.error =
+                    failure(&payload["error"]["message"]).or_else(|| failure(&text.into()));
             }
             "turn.completed" if watch.open => {
                 let reply = reply(db, &run, watch.started, id)?;
@@ -459,6 +465,11 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                 let outcome = if text == "cancelled" {
                     "cancelled"
                 } else {
+                    // A run that fails without a failed turn, such as one over its time
+                    // limit, says why on its status.
+                    if watch.error.is_none() {
+                        watch.error = failure(&payload["error"]["message"]);
+                    }
                     "failed"
                 };
                 watch.end(&mut emissions, outcome);
@@ -477,18 +488,34 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
         cursor = cursor.max(last);
     }
 
-    // A failure that no retry continued ends the turn once the run stops working.
+    // Once every event is read and the run no longer works, a turn still open ends as
+    // its run did: a failure no retry continued, or a run stopped or failed without its
+    // turn reporting it, such as a queued wakeup cancelled before it started. A run that
+    // succeeded still reports its turn's end.
     let state = db.run(&run)?.unwrap_or(Json::Null);
-    let working =
-        RunStatus::of(&state).is_some_and(RunStatus::is_active) || state["recoveryPending"] == true;
-    if complete && watch.failed.is_some() && !working {
-        watch.end(&mut emissions, "failed");
+    let status = RunStatus::of(&state);
+    let working = status.is_some_and(RunStatus::is_active) || state["recoveryPending"] == true;
+    if complete && watch.open && !working {
+        let outcome = match status {
+            Some(RunStatus::Cancelled) => Some("cancelled"),
+            Some(RunStatus::Failed | RunStatus::Interrupted) => Some("failed"),
+            _ if watch.failed.is_some() => Some("failed"),
+            _ => None,
+        };
+        if let Some(outcome) = outcome {
+            watch.ask(&mut emissions, &questions, None);
+            if outcome == "failed" && watch.error.is_none() {
+                watch.error = failure(&state["error"]);
+            }
+            watch.end(&mut emissions, outcome);
+        }
     }
 
     // A question stays answerable after its turn ended: it is reported whenever Cairn
     // sees it, in the chain of the turn that asked it.
     watch.ask(&mut emissions, &questions, None);
     if watch.open
+        && working
         && at - watch.progress_at >= PROGRESS_INTERVAL
         && listened(db, &bound.creator, CairnHookKind::Progress)?
         && !progress_pending(db, watch.progress_event.as_deref())?
@@ -541,9 +568,12 @@ fn fanout(
     });
     let recorded = record.to_string();
     let recorded_bytes = recorded.len() + 256;
-    if recorded_bytes > MAX_RECORDED_BYTES - ERROR_RESERVE {
+    // A hook over the recorded-data budget, such as a long escaped reply with large
+    // remembered values, is refused whole: each rule that would receive it counts it as
+    // not admitted, without its payload.
+    let oversized = recorded_bytes > MAX_RECORDED_BYTES - ERROR_RESERVE;
+    if oversized {
         tracing::warn!(chat = %bound.chat, hook = hook.key(), "A Cairn hook exceeds the recorded-data budget");
-        return Ok(None);
     }
     let mut delivered = false;
     for rule in rules {
@@ -564,6 +594,10 @@ fn fanout(
             owner: row.creator_owner,
         };
         if !creator.uses_agent(db, &bound.agent)? {
+            continue;
+        }
+        if oversized {
+            db.record_admission_refusal(&rule, &event)?;
             continue;
         }
         if db.refuse_admission(&rule, &event, recorded.len())? {

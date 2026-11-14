@@ -564,7 +564,7 @@ fn steer(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
 fn cancel(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
     require_depth(acting.depth)?;
     let key = text_input(input, "key", "conversation key")?;
-    let Reached { chat, .. } = reach(db, acting.row, acting.version, &key)?;
+    let Reached { bound, chat, .. } = reach(db, acting.row, acting.version, &key)?;
     let active = chat
         .run_id
         .as_deref()
@@ -572,6 +572,10 @@ fn cancel(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
         .transpose()?
         .flatten()
         .is_some_and(|run| run.status.is_active());
+    // Only a pause the rules' own cancellation made lets them steer again: a person's
+    // pause or Stop, even one still stopping the turn, stays theirs.
+    let rule_owns_pause =
+        !chat.paused || (bound.cancelled_run.is_some() && bound.cancelled_run == chat.run_id);
     let Some(run) = chat.run_id.as_deref().filter(|_| active) else {
         // Nothing is working: only a scheduled continuation remains to cancel, and the
         // conversation stays open to later steering.
@@ -582,9 +586,9 @@ fn cancel(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
     };
     crate::worker::control::stop_chat_in(db, &chat.id, acting.executing)?;
     db.0.execute(
-        "UPDATE hook_rule_conversations SET cancelled_run=?2,\
+        "UPDATE hook_rule_conversations SET cancelled_run=CASE WHEN ?4 THEN ?2 END,\
          watch=json_set(watch,'$.depth',max(coalesce(json_extract(watch,'$.depth'),0),?3)) WHERE chat_id=?1",
-        params![chat.id, run, acting.depth],
+        params![chat.id, run, acting.depth, rule_owns_pause],
     )?;
     Ok(json!({ "conversationId": chat.id, "runId": run, "cancelled": true }))
 }

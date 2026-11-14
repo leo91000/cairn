@@ -1704,3 +1704,256 @@ async fn cairn_hooks_keep_their_cadence_during_a_continuous_flow_of_completions(
     );
     assert_eq!(values(&f, &reply).await["reply"], "Done.");
 }
+
+/// Starts Bob's conversation, then cancels or steers it on Alice's messages: "stop"
+/// cancels, anything else steers.
+async fn cancel_or_steer(f: &Fixture) -> String {
+    rule_on(
+        f,
+        OWNER,
+        plugin(f),
+        json!([{
+            "type": "if",
+            "id": "bound",
+            "condition": { "type": "conversationExists", "key": { "type": "literal", "value": "chat:bob" } },
+            "then": [{
+                "type": "if",
+                "id": "stop",
+                "condition": { "type": "formula", "expression": "large == \"stop\"" },
+                "then": [action("cancel", &json!({
+                    "type": "cancelConversation",
+                    "key": { "type": "literal", "value": "chat:bob" },
+                }))],
+                "otherwise": [steer(
+                    "steer",
+                    &json!({ "type": "literal", "value": "chat:bob" }),
+                    &json!({ "type": "formula", "expression": "large" }),
+                )],
+            }],
+            "otherwise": [start("start")],
+        }]),
+        limits(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_rules_cancellation_never_takes_over_a_persons_pause_or_stop() {
+    let f = granted().await;
+    let rule = cancel_or_steer(&f).await;
+    emit(&f, "first", message("bob", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:bob").await.unwrap();
+    let run = launched(&f, &chat).await;
+    fixture::running_conversation(&f.s, &chat).await;
+
+    // A person pauses while the turn works; a rule then stops the turn.
+    f.s.chat_pause(&chat, true).await.unwrap();
+    emit(&f, "stop", message("alice", "stop")).await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(triggerings(&f, &rule).await[0]["status"], "completed");
+    set_status(&f, &run, cairn_contracts::RunStatus::Cancelled).await;
+    emit(&f, "steer", message("alice", "go on")).await;
+    engine::tick(&f.s).await.unwrap();
+    let refused = &triggerings(&f, &rule).await[0];
+    assert_eq!(refused["status"], "failed", "{refused}");
+    assert!(text(refused, "error").contains("paused"), "{refused}");
+    assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], true);
+
+    // A person's Stop still stopping the turn when a rule cancels it stays theirs.
+    f.s.chat_pause(&chat, false).await.unwrap();
+    set_status(&f, &run, cairn_contracts::RunStatus::Running).await;
+    let (status, stopped) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/chats/{chat}/stop"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    emit(&f, "stop-again", message("alice", "stop")).await;
+    engine::tick(&f.s).await.unwrap();
+    set_status(&f, &run, cairn_contracts::RunStatus::Cancelled).await;
+    emit(&f, "steer-again", message("alice", "go on")).await;
+    engine::tick(&f.s).await.unwrap();
+    let refused = &triggerings(&f, &rule).await[0];
+    assert_eq!(refused["status"], "failed", "{refused}");
+    assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], true);
+
+    // The rules' own pause stays theirs when a rule cancels it again while it stops.
+    f.s.chat_pause(&chat, false).await.unwrap();
+    set_status(&f, &run, cairn_contracts::RunStatus::Running).await;
+    emit(&f, "own-stop", message("alice", "stop")).await;
+    engine::tick(&f.s).await.unwrap();
+    emit(&f, "own-stop-again", message("alice", "stop")).await;
+    engine::tick(&f.s).await.unwrap();
+    set_status(&f, &run, cairn_contracts::RunStatus::Cancelled).await;
+    emit(&f, "own-steer", message("alice", "go on")).await;
+    engine::tick(&f.s).await.unwrap();
+    let steered = &triggerings(&f, &rule).await[0];
+    assert_eq!(steered["status"], "completed", "{steered}");
+    assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], false);
+}
+
+#[tokio::test]
+async fn a_turn_whose_run_stops_without_reporting_it_ends_as_its_run() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let ended = rule_on(
+        &f,
+        OWNER,
+        cairn("ended"),
+        json!([
+            remember("outcome", "outcome", "outcome"),
+            remember(
+                "error",
+                "error",
+                "has(payload.error) ? payload.error : \"\""
+            ),
+        ]),
+        limits(),
+    )
+    .await;
+    let progress = rule_on(
+        &f,
+        OWNER,
+        cairn("progress"),
+        json!([remember("step", "step", "step")]),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+
+    // A wakeup opens a turn on a queued run, which is cancelled before it starts:
+    // nothing records a status event.
+    let wakeup = json!({ "at": cairn_installation::config::now() });
+    event(
+        &f,
+        &run,
+        "chat.wakeup",
+        "Resuming after scheduled wait",
+        Some(wakeup),
+    )
+    .await;
+    set_status(&f, &run, cairn_contracts::RunStatus::Queued).await;
+    engine::tick(&f.s).await.unwrap();
+    set_status(&f, &run, cairn_contracts::RunStatus::Cancelled).await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(values(&f, &ended).await["outcome"], "cancelled");
+    // A run that no longer works reports no progress.
+    for _ in 0..2 {
+        f.s.store
+            .transaction({
+                let chat = chat.clone();
+                move |db| age_progress(db, &chat)
+            })
+            .await
+            .unwrap();
+        engine::tick(&f.s).await.unwrap();
+    }
+    assert!(triggerings(&f, &progress).await.is_empty());
+
+    // A run that fails without a failed turn ends it with the run's error.
+    let delivered = json!({ "messageId": first_message(&f, &chat).await });
+    event(&f, &run, "chat.user", "", Some(delivered)).await;
+    f.s.store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                error: Some(Some("The agent could not start.".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    engine::tick(&f.s).await.unwrap();
+    let remembered = values(&f, &ended).await;
+    assert_eq!(remembered["outcome"], "failed");
+    assert_eq!(remembered["error"], "The agent could not start.");
+    assert_eq!(triggerings(&f, &ended).await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_status_only_failure_reports_its_error() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let ended = rule_on(
+        &f,
+        OWNER,
+        cairn("ended"),
+        json!([
+            remember("outcome", "outcome", "outcome"),
+            remember("error", "error", "payload.error"),
+        ]),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    let delivered = json!({ "messageId": first_message(&f, &chat).await });
+    event(&f, &run, "chat.user", "", Some(delivered)).await;
+    // The worker fails a run over its time limit with only a status event.
+    let details = json!({ "error": { "message": "Run exceeded its time limit." } });
+    set_status(&f, &run, cairn_contracts::RunStatus::Failed).await;
+    event(&f, &run, "status", "failed", Some(details)).await;
+    engine::tick(&f.s).await.unwrap();
+    let remembered = values(&f, &ended).await;
+    assert_eq!(remembered["outcome"], "failed");
+    assert_eq!(remembered["error"], "Run exceeded its time limit.");
+}
+
+#[tokio::test]
+async fn a_cairn_hook_over_the_recorded_data_budget_is_counted_as_not_admitted() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let reply = rule_on(
+        &f,
+        OWNER,
+        cairn("replyReady"),
+        json!([remember("text", "reply", "truncated")]),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    // Remembered values at their limit, each escaping to six bytes per character.
+    let escaped = "\u{1}".repeat(10_000);
+    let stored = chat.clone();
+    f.s.store
+        .transaction(move |db| {
+            for name in ["a", "b", "c", "d"] {
+                db.0.execute(
+                    "INSERT INTO hook_rule_conversation_values VALUES(?1,?2,?3,0)",
+                    rusqlite::params![stored, name, Value::String(escaped.clone()).to_string()],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let run = launched(&f, &chat).await;
+    // The longest reply kept, made of characters JSON escapes.
+    let long = "\u{1}".repeat(128 * 1024);
+    replied(&f, &run, &first_message(&f, &chat).await, &long).await;
+    engine::tick(&f.s).await.unwrap();
+
+    let (status, listed) = call(
+        &f,
+        OWNER,
+        "GET",
+        &format!("/api/hook-rules/{reply}/triggerings"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["triggerings"], json!([]), "{listed}");
+    assert_eq!(listed["notAdmitted"], 1, "{listed}");
+}
