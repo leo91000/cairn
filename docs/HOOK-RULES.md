@@ -82,16 +82,16 @@ resumes, rather than copied into every persisted cursor.
 
 ## The engine
 
-Each queued plugin hook event becomes one triggering per rule that listens to that
-instance and hook, when nothing blocks the rule and the execution agent's hook grant
-covers every resource the payload designates. The triggering keeps the rule version it
-started with. Once every listening rule has its triggering, the event leaves the queue;
-an event no rule may receive is dropped, so a quiet queue never blocks later events.
-When the plugin cannot resolve the payload's resources for a moment, its admission
-waits privately for that rule and is tried again for ten minutes. The shared instance
-queue is acknowledged as soon as the admissions are durable, so other rules keep
-receiving later events. Resolution is limited to one operation per rule and eight
-in total, with a ten-second read deadline and backoff for the affected rule.
+Each queued plugin hook event is copied into a private admission for every eligible
+listening rule when capacity allows. The shared instance queue is acknowledged in the same transaction,
+so other rules keep receiving later events. An event no rule may receive is dropped.
+Once its execution agent's hook grant covers every resource the payload designates,
+the admission becomes a triggering, pinned to the rule version saved at fanout.
+Admissions wait at most ten minutes from fanout, including time waiting for a
+resolver slot. Expiry counts as `notAdmitted`, once, without retaining the payload;
+time spent in the transport queue before fanout does not consume this window.
+Resolution is limited to one operation per rule and eight in total, with a ten-second
+read deadline and backoff for the affected rule when resolution fails temporarily.
 The same event is never triggered twice for one rule.
 
 The engine walks the tree in order. Before every action it checks the rule again: a

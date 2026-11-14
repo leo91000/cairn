@@ -2433,3 +2433,118 @@ async fn three_hundred_value_actions_fit_the_block_and_iteration_budget() {
     assert_eq!(completed["steps"].as_array().unwrap().len(), 300);
     assert_eq!(completed["steps"][299]["result"], 299);
 }
+
+#[tokio::test]
+async fn old_transport_events_get_a_fresh_admission_window_and_expiry_is_counted_once() {
+    let f = granted().await;
+    f.marker("resolver-unavailable").await;
+    let rule = rule(&f, OWNER, json!([remember_seen()]), 60).await;
+    emit(
+        &f,
+        "old-transport",
+        json!({ "channel": "support", "author": "alice" }),
+    )
+    .await;
+    f.s.store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE plugin_hook_events SET created_at=?",
+                [cairn_installation::config::now() - 3_600_000],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    engine::tick(&f.s).await.unwrap();
+    let pending =
+        f.s.store
+            .read(|db| {
+                Ok(db
+                    .0
+                    .query_row("SELECT count(*) FROM hook_rule_admissions", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(
+        pending, 1,
+        "The old transport timestamp consumed the new admission window."
+    );
+    assert_eq!(history(&f, OWNER, &rule).await["notAdmitted"], 0);
+    let attempts = f.posts.load(Ordering::SeqCst);
+    assert!(attempts > 0);
+    f.s.store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE hook_rule_admissions SET created_at=?",
+                [cairn_installation::config::now() - 600_001],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    engine::tick(&f.s).await.unwrap();
+    engine::tick(&f.s).await.unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    assert_eq!(listed["notAdmitted"], 1);
+    assert_eq!(listed["withoutEffect"], 0);
+    assert!(listed["triggerings"].as_array().unwrap().is_empty());
+    assert_eq!(
+        f.posts.load(Ordering::SeqCst),
+        attempts,
+        "Expired admissions must not call the resolver."
+    );
+    let pending =
+        f.s.store
+            .read(|db| {
+                Ok(db
+                    .0
+                    .query_row("SELECT count(*) FROM hook_rule_admissions", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(pending, 0);
+}
+
+#[tokio::test]
+async fn a_resolution_that_finishes_after_its_admission_deadline_cannot_act() {
+    let f = granted().await;
+    f.marker("live-parent").await;
+    let rule = rule(&f, OWNER, json!([remember_seen()]), 60).await;
+    f.pause.store(true, Ordering::SeqCst);
+    emit(
+        &f,
+        "late-resolution",
+        json!({
+            "channel": "support", "thread": "support-thread", "author": "alice",
+        }),
+    )
+    .await;
+    let service = f.s.clone();
+    let worker = tokio::spawn(async move { engine::tick(&service).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+        .await
+        .unwrap();
+    f.s.store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE hook_rule_admissions SET created_at=?",
+                [cairn_installation::config::now() - 600_001],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.release.notify_one();
+    worker.await.unwrap().unwrap();
+    let listed = history(&f, OWNER, &rule).await;
+    assert!(
+        listed["triggerings"].as_array().unwrap().is_empty(),
+        "{listed}"
+    );
+    assert_eq!(listed["notAdmitted"], 1);
+    assert!(!has_seen(&f, &rule).await);
+}

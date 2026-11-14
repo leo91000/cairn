@@ -197,7 +197,7 @@
       ]
     },
     "notAdmitted": {
-      "description": "Events refused only for this rule's capacity in the last 24 hours. No payload is retained.",
+      "description": "Events refused for this rule's capacity or admission deadline in the last 24 hours. No payload is retained.",
       "format": "uint32",
       "minimum": 0,
       "type": [

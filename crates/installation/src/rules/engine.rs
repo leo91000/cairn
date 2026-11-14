@@ -471,6 +471,12 @@ impl Db<'_> {
         if !full {
             return Ok(false);
         }
+        self.record_admission_refusal(rule, event)?;
+        Ok(true)
+    }
+
+    /// A receipt makes capacity/deadline refusals observable exactly once.
+    fn record_admission_refusal(&self, rule: &str, event: &str) -> Result<()> {
         let recorded = self.0.execute(
             "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id) VALUES(?1,?2)",
             params![rule, event],
@@ -481,7 +487,7 @@ impl Db<'_> {
                  ON CONFLICT(rule_id,hour) DO UPDATE SET not_admitted=not_admitted+1", params![rule, now()/3_600_000],
             )?;
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Keeps the newest finished triggerings of a rule and a week of quiet hours.
@@ -658,10 +664,11 @@ async fn deliver_hook(
     fields: &[String],
     row: RuleRow,
     version: VersionRow,
+    admitted_at: i64,
 ) -> Result<Delivery> {
     let key = (event.id.clone(), row.id.clone());
     if s.rules.delivery_waiting(&key) {
-        return Ok(if now() - event.created_at < DELIVERY_PATIENCE {
+        return Ok(if now() - admitted_at < DELIVERY_PATIENCE {
             Delivery::Deferred
         } else {
             Delivery::Handled
@@ -697,7 +704,7 @@ async fn deliver_hook(
         Ok(()) => {}
         Err(error)
             if !matches!(error.status, 400 | 403 | 404)
-                && now() - event.created_at < DELIVERY_PATIENCE =>
+                && now() - admitted_at < DELIVERY_PATIENCE =>
         {
             s.rules.defer_delivery(key);
             return Ok(Delivery::Deferred);

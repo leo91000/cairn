@@ -35,12 +35,13 @@ pub(super) fn fanout(db: &Db<'_>, event: &HookEvent, fields: &[String]) -> Resul
             continue;
         }
         if !fits {
+            db.record_admission_refusal(&rule, &event.id)?;
             continue;
         }
         copied += db.0.execute(
             "INSERT OR IGNORE INTO hook_rule_admissions(rule_id,event_id,version,instance_id,event,fields,created_at) \
              VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![rule, event.id, version.version, event.instance_id, event_json, fields_json, event.created_at],
+            params![rule, event.id, version.version, event.instance_id, event_json, fields_json, now()],
         )?;
     }
     db.remove_plugin_hook(&event.instance_id, &event.id)?;
@@ -51,8 +52,8 @@ pub(super) fn fanout(db: &Db<'_>, event: &HookEvent, fields: &[String]) -> Resul
 pub(super) fn eligible(db: &Db<'_>, rule: &str, event: &str, version: u32) -> Result<bool> {
     let source: Option<(String, String, String)> = db.0.query_row(
         "SELECT instance_id,json_extract(event,'$.revision'),json_extract(event,'$.packageDigest') \
-         FROM hook_rule_admissions WHERE rule_id=?1 AND event_id=?2",
-        params![rule, event], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+         FROM hook_rule_admissions WHERE rule_id=?1 AND event_id=?2 AND created_at>?3",
+        params![rule, event, now() - DELIVERY_PATIENCE], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional()?;
     let Some((instance, revision, digest)) = source else {
         return Ok(false);
@@ -130,11 +131,19 @@ pub(super) async fn pending(
 }
 
 fn discard(db: &Db<'_>, rule: &str, event: &str) -> Result<()> {
-    db.0.execute(
-        "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id) \
-         SELECT rule_id,event_id FROM hook_rule_admissions WHERE rule_id=?1 AND event_id=?2",
-        params![rule, event],
+    let expired: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hook_rule_admissions WHERE rule_id=?1 AND event_id=?2 AND created_at<=?3)",
+        params![rule, event, now() - DELIVERY_PATIENCE], |row| row.get(0),
     )?;
+    if expired {
+        db.record_admission_refusal(rule, event)?;
+    } else {
+        db.0.execute(
+            "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id) \
+             SELECT rule_id,event_id FROM hook_rule_admissions WHERE rule_id=?1 AND event_id=?2",
+            params![rule, event],
+        )?;
+    }
     db.0.execute(
         "DELETE FROM hook_rule_admissions WHERE rule_id=?1 AND event_id=?2",
         params![rule, event],
@@ -147,20 +156,20 @@ pub(super) async fn deliver(s: &Arc<Service>, rule: &str, event: &str) -> Result
     let admission = s.store.read({
         let (rule, event) = (rule.clone(), event.clone());
         move |db| {
-            let row: Option<(u32, String, String)> = db.0.query_row(
-                "SELECT version,event,fields FROM hook_rule_admissions WHERE rule_id=?1 AND event_id=?2 AND created_at>?3 \
+            let row: Option<(u32, String, String, i64)> = db.0.query_row(
+                "SELECT version,event,fields,created_at FROM hook_rule_admissions WHERE rule_id=?1 AND event_id=?2 AND created_at>?3 \
                  AND NOT EXISTS(SELECT 1 FROM hook_rule_receipts r WHERE r.rule_id=?1 AND r.event_id=?2)",
-                params![rule, event, now() - DELIVERY_PATIENCE], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                params![rule, event, now() - DELIVERY_PATIENCE], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             ).optional()?;
-            let Some((number, payload, fields)) = row else { return Ok(None) };
+            let Some((number, payload, fields, admitted_at)) = row else { return Ok(None) };
             if !eligible(db, &rule, &event, number)? { return Ok(None) }
             let row = required(db.hook_rule(&rule)?, "Rule not found")?;
             let version = required(db.hook_rule_version(&rule, number)?, "Rule version not found")?;
-            Ok(Some((serde_json::from_str::<HookEvent>(&payload)?, serde_json::from_str::<Vec<String>>(&fields)?, row, version)))
+            Ok(Some((serde_json::from_str::<HookEvent>(&payload)?, serde_json::from_str::<Vec<String>>(&fields)?, row, version, admitted_at)))
         }
     }).await?;
     let outcome = match admission {
-        Some((event, fields, row, version)) => {
+        Some((event, fields, row, version, admitted_at)) => {
             // Check on-disk package approval as well as the source identity in SQLite.
             let current = s.store.plugin_instance(&event.instance_id).await?;
             let source_valid = if let Some(connection) = current {
@@ -176,7 +185,7 @@ pub(super) async fn deliver(s: &Arc<Service>, rule: &str, event: &str) -> Result
                 false
             };
             if source_valid {
-                deliver_hook(s, &event, &fields, row, version).await?
+                deliver_hook(s, &event, &fields, row, version, admitted_at).await?
             } else {
                 Delivery::Handled
             }
