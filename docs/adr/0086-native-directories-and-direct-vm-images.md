@@ -28,13 +28,23 @@ Sa taille borne sa capacité. Pendant que le VMM peut écrire, une réservation
 locale facture toute cette capacité au budget partagé, même si le fichier reste
 sparse ou si le guest effectue un discard. Le budget distingue ces promesses des
 octets physiquement alloués. Une époque d’admission fige l’enveloppe physique hors
-écritures des VM ; une surveillance séparée suspend ou arrête les écritures si la
+écritures des VM. Elle mémorise la réserve initiale pour appliquer la réserve
+courante à toute nouvelle admission et observation, sans prêter les trous des
+images actives. Une ancienne époque sans cette donnée refuse de nouvelles
+écritures jusqu’au retrait de ses propriétaires ; aucun contenu retenu n’est
+effacé. Une surveillance séparée suspend ou arrête les écritures si la
 réserve physique devient indisponible. Le démarrage surveille cette même réserve
 avant de lancer le VMM et toutes les 250 ms pendant l’attente du guest, puis
 jusqu’à la publication du lien vers l’exécution. Une observation invalide ou
 vieille de plus de cinq secondes échoue fermée ; le VMM est arrêté, récolté et
 son image synchronisée avant libération. La surveillance de l’exécution prend
-ensuite le relais. L’admission peut attendre malgré une faible
+ensuite le relais. Une surveillance liée au pidfd du VMM reste active pendant
+son préchauffage, son attente anonyme et ses exécutions : une observation invalide
+ou périmée arrête ce processus précis. Une VM encore anonyme est également
+arrêtée si la réserve devient insuffisante, sans attendre le nettoyage d’une autre
+VM dans le pool. Après attribution, la suspension de l’exécution traite cette
+pression récupérable. Son propriétaire conserve les
+verrous jusqu’à sa sortie confirmée et la synchronisation de l’image. L’admission peut attendre malgré une faible
 occupation des images. Avant de refuser une promesse d’écriture demandée par une
 exécution, elle récupère les promesses des VM inactives éligibles, y compris la VM
 anonyme préparée et les conversations retenues. Chaque VMM est arrêté et son

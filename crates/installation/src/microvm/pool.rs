@@ -357,22 +357,55 @@ impl Pool {
             .unwrap()
             .parent()
             .ok_or_else(|| Error::unavailable("Controller memory envelope is unavailable."))?;
-        let memory = budget::memory_usage(envelope)? / 1_048_576;
-        let disk = budget::disk_bytes(&self.state)?;
-        let (total, free) = crate::storage::policy::space(&self.state)?;
-        let policy = match std::fs::read(self.state.join("storage-policy.json")) {
-            Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                crate::storage::policy::Policy::default()
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let reserve = policy.reserve(total);
-        let pressure = budget::pressure(memory, budget.limits.memory_mi_b, free, reserve);
-        Ok((
-            serde_json::json!({ "memoryMiB": memory, "diskMiB": disk / 1_048_576 }),
-            pressure,
-        ))
+        let envelope = envelope.to_owned();
+        let state = self.state.clone();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || -> Result<_> {
+                let memory = budget::memory_usage(&envelope)? / 1_048_576;
+                let disk = budget::disk_bytes(&state)?;
+                let (total, free) = crate::storage::policy::space(&state)?;
+                let policy = match std::fs::read(state.join("storage-policy.json")) {
+                    Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        crate::storage::policy::Policy::default()
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let reserve = policy.reserve(total);
+                let pressure = budget::pressure(memory, budget.limits.memory_mi_b, free, reserve);
+                Ok((
+                    serde_json::json!({ "memoryMiB": memory, "diskMiB": disk / 1_048_576 }),
+                    pressure,
+                ))
+            }),
+        )
+        .await
+        .map_err(|_| Error::unavailable("VM pool resource observations are stale."))?
+        .map_err(Error::internal)?
+    }
+
+    async fn retire_failed_storage(&self) {
+        loop {
+            let failed = {
+                let mut slots = self.slots.lock().await;
+                let ready = slots.ready.iter().position(|reservation| {
+                    reservation.vm.as_ref().is_some_and(Vm::storage_failed)
+                });
+                if let Some(index) = ready {
+                    slots.ready.remove(index)
+                } else {
+                    let retained = slots.retained.iter().position(|idle| {
+                        idle.reservation.vm.as_ref().is_some_and(Vm::storage_failed)
+                    });
+                    retained
+                        .and_then(|index| slots.retained.remove(index))
+                        .map(|idle| idle.reservation)
+                }
+            };
+            let Some(mut failed) = failed else { return };
+            failed.finish().await;
+        }
     }
 
     pub async fn monitor(self: Arc<Self>) {
@@ -386,6 +419,7 @@ impl Pool {
                 () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             }
 
+            self.retire_failed_storage().await;
             if Instant::now() >= next_image_gc {
                 next_image_gc = Instant::now() + Duration::from_secs(600);
                 if let Err(error) = super::images::collect(&self.state, &self.image).await {

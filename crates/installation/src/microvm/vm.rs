@@ -17,7 +17,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -149,6 +149,8 @@ pub struct Vm {
     jail: PathBuf,
     lock: Option<std::fs::File>,
     child: Option<tokio::process::Child>,
+    storage_watchdog: Option<StorageWatchdog>,
+    storage_stop: CancellationToken,
     reservation: Option<crate::storage::reservation::Reservation>,
     closing: bool,
     image_sync: Option<JoinHandle<std::io::Result<()>>>,
@@ -163,6 +165,93 @@ pub struct Vm {
     warmed: bool,
     idle: bool,
     memory_mib: u64,
+}
+
+/// Invalid/stale observations must stop even an unassigned ready VM. Pin the
+/// unreaped child rather than looking up a PID again when a later sample fails.
+struct StorageWatchdog {
+    unassigned: Arc<AtomicBool>,
+    failed: CancellationToken,
+    stop: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl StorageWatchdog {
+    fn start(
+        state: &Path,
+        child: &tokio::process::Child,
+        execution: CancellationToken,
+        unassigned: bool,
+    ) -> Result<Self> {
+        let pid = child
+            .id()
+            .ok_or_else(|| Error::unavailable("VMM already exited."))?;
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let process = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+        let state = state.to_owned();
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let failed = CancellationToken::new();
+        let failure = failed.clone();
+        let unassigned = Arc::new(AtomicBool::new(unassigned));
+        let background = unassigned.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let observation = tokio::select! {
+                    () = cancelled.cancelled() => return,
+                    result = crate::storage::image::capacity_blocked(&state) => result,
+                };
+                let error = match observation {
+                    Err(error) => Some(error),
+                    Ok(true) if background.load(Ordering::Acquire) => Some(Error::new(
+                        507,
+                        "Unassigned VM exhausted its physical reserve.",
+                    )),
+                    _ => None,
+                };
+                if let Some(error) = error {
+                    failure.cancel();
+                    execution.cancel();
+                    tracing::error!(pid, message = %error.message, "VMM storage observation failed; stopping its pinned process");
+                    let result = unsafe {
+                        libc::syscall(
+                            libc::SYS_pidfd_send_signal,
+                            process.as_raw_fd(),
+                            libc::SIGKILL,
+                            std::ptr::null::<libc::siginfo_t>(),
+                            0,
+                        )
+                    };
+                    if result != 0 {
+                        tracing::error!(pid, error = %std::io::Error::last_os_error(), "Could not stop pinned VMM; retaining its ownership for cleanup");
+                    }
+                    return;
+                }
+                // Valid pressure is handled by startup cancellation, the pool
+                // or attempt suspension. This guard only fences lost evidence.
+                tokio::select! {
+                    () = cancelled.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_millis(250)) => {}
+                }
+            }
+        });
+        Ok(Self {
+            unassigned,
+            failed,
+            stop,
+            task,
+        })
+    }
+}
+
+impl Drop for StorageWatchdog {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        self.task.abort();
+    }
 }
 
 impl Drop for Vm {
@@ -434,6 +523,8 @@ impl Vm {
             jail,
             lock: Some(lock),
             child: None,
+            storage_watchdog: None,
+            storage_stop: stop.clone(),
             reservation: reservation.take(),
             closing: false,
             image_sync: None,
@@ -506,6 +597,12 @@ impl Vm {
         let child = self
             .child
             .insert(jailer(id, self.uid, state, disk_bytes).spawn()?);
+        self.storage_watchdog = Some(StorageWatchdog::start(
+            state,
+            child,
+            self.storage_stop.clone(),
+            self.anonymous,
+        )?);
         self.consoles.push(console(
             child.stdout.take().unwrap(),
             state.join(format!("{id}.boot.log")),
@@ -599,6 +696,7 @@ impl Vm {
                 .map_err(|_| Error::unavailable("VMM exit is not confirmed."))??;
             self.child.take();
         }
+        self.storage_watchdog.take();
         if let Err(error) = super::suspension::finish_jail(&self.jail).await {
             tracing::warn!(vm_id = id, message = %error.message, "Could not finalize VM suspension accounting");
         }
@@ -670,6 +768,12 @@ impl Vm {
 
     /// Only a confirmed process exit permits retiring an unpublished idle VM.
     /// Uncertain process state keeps its physical ownership and journal pinned.
+    pub(super) fn storage_failed(&self) -> bool {
+        self.storage_watchdog
+            .as_ref()
+            .is_some_and(|watchdog| watchdog.failed.is_cancelled())
+    }
+
     pub(super) fn exited(&mut self) -> bool {
         self.child
             .as_mut()
@@ -734,6 +838,11 @@ impl Vm {
         state: &Path,
         stop: CancellationToken,
     ) -> Result<i32> {
+        if let Some(watchdog) = &self.storage_watchdog {
+            // The startup guard below covers binding until the broker can pause
+            // this execution. Never keep anonymous eviction after assignment.
+            watchdog.unassigned.store(false, Ordering::Release);
+        }
         let mut timing = Operation::new("guest_prepare", plan.run_id(), "clock_and_auth");
         let prepared = protect_startup(state, async {
             super::suspension::prepare_attempt(state, plan.id(), self.id()).await?;
@@ -1060,6 +1169,115 @@ mod tests {
     use super::*;
     use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    async fn unassigned_vmm_is_stopped_when_capacity_observations_fail() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), false).await;
+        let retained = root.path().join("data.ext4");
+        std::fs::write(&retained, b"retained-work").unwrap();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut other = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let watchdog =
+            StorageWatchdog::start(root.path(), &child, CancellationToken::new(), true).unwrap();
+        atomic_write(&root.path().join("storage-policy.json"), b"invalid")
+            .await
+            .unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(6), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!exit.success());
+        assert!(other.try_wait().unwrap().is_none());
+        assert_eq!(std::fs::read(&retained).unwrap(), b"retained-work");
+        assert!(!root.path().join("attempt.vm.json").exists());
+        drop(watchdog);
+        other.kill().await.unwrap();
+        other.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unassigned_vmm_is_stopped_when_capacity_observations_stall() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = tempfile::tempdir().unwrap();
+        let policy = root.path().join("storage-policy.json");
+        let name = std::ffi::CString::new(policy.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let watchdog =
+            StorageWatchdog::start(root.path(), &child, CancellationToken::new(), true).unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
+        // Release the read-only observation worker even if an assertion fails.
+        let mut writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(policy)
+            .unwrap();
+        std::io::Write::write_all(&mut writer, b"{}").unwrap();
+        drop(writer);
+        assert!(!exit.unwrap().unwrap().success());
+        assert!(watchdog.failed.is_cancelled());
+        drop(watchdog);
+    }
+
+    #[tokio::test]
+    async fn unassigned_vmm_enforces_pressure_without_waiting_for_pool_maintenance() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), false).await;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let watchdog =
+            StorageWatchdog::start(root.path(), &child, CancellationToken::new(), true).unwrap();
+        // No pool exists or can perform retirement while this standalone owner
+        // changes policy. The per-VMM watchdog must enforce valid pressure.
+        set_startup_policy(root.path(), true).await;
+        let exit = tokio::time::timeout(Duration::from_secs(6), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!exit.success());
+        assert!(watchdog.failed.is_cancelled());
+        drop(watchdog);
+    }
+
+    #[tokio::test]
+    async fn assigned_vmm_leaves_valid_pressure_to_attempt_suspension() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), false).await;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let watchdog =
+            StorageWatchdog::start(root.path(), &child, CancellationToken::new(), true).unwrap();
+        watchdog.unassigned.store(false, Ordering::Release);
+        set_startup_policy(root.path(), true).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(600), child.wait())
+                .await
+                .is_err()
+        );
+        assert!(!watchdog.failed.is_cancelled());
+        drop(watchdog);
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
 
     async fn set_startup_policy(state: &Path, blocked: bool) {
         let (total, _) = crate::storage::policy::physical_space(state).unwrap();

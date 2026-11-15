@@ -1589,6 +1589,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (volume, attempt, _) = controller_fixture(root.path()).await;
         let path = root.path().join("storage-policy.json");
+        std::fs::remove_file(&path).unwrap();
         let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         // Any policy-file read blocks indefinitely. CPU safety must rely on the
@@ -1608,6 +1609,11 @@ mod tests {
         let directory = root.join("disks/conversation");
         let context = json!({"master":"http://127.0.0.1:1/","grant":"fixture",
             "policy":{"reserveMiB":64,"reservePercent":1}});
+        std::fs::write(
+            root.join("storage-policy.json"),
+            serde_json::to_vec(&context["policy"]).unwrap(),
+        )
+        .unwrap();
         drop(
             create(
                 &directory.join("lazy"),
@@ -1936,6 +1942,11 @@ mod tests {
     #[tokio::test]
     async fn consolidation_scratch_is_excluded_for_vm_and_native_but_work_and_tmp_stay_capped() {
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
         let directory = root.path().join("disks/conversation");
         let block = 4 * 1024 * 1024u64;
         let manifest = json!({
@@ -2079,6 +2090,11 @@ mod tests {
     async fn task_backing_pressure_counts_journal_history_and_consolidates_before_resuming_writes()
     {
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
         let directory = root.path().join("disks/conversation");
         let block = 4 * 1024 * 1024u64;
         let manifest = json!({

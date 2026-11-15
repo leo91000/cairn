@@ -77,9 +77,37 @@ impl Replacement {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Epoch {
     capacity: u64,
+    // Older in-development epochs cannot safely reveal their original reserve.
+    #[serde(default)]
+    reserve: Option<u64>,
     device: u64,
     inode: u64,
     filesystem: Vec<u8>,
+}
+
+impl Epoch {
+    fn capacity_for(&self, reserve: u64) -> io::Result<u64> {
+        let original = self.reserve.ok_or_else(|| {
+            io::Error::other(
+                "VM reservation epoch predates reserve accounting; retire its owners first",
+            )
+        })?;
+        Ok(self
+            .capacity
+            .saturating_add(original)
+            .saturating_sub(reserve))
+    }
+}
+
+fn current_policy(
+    state: &Path,
+    fallback: &super::policy::Policy,
+) -> io::Result<super::policy::Policy> {
+    match fs::read(state.join("storage-policy.json")) {
+        Ok(bytes) => super::policy::from_persisted(&bytes).map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(fallback.clone()),
+        Err(error) => Err(error),
+    }
 }
 
 fn read(directory: &Path) -> io::Result<Option<Record>> {
@@ -301,10 +329,13 @@ pub(crate) async fn reserve_cancellable(
         budget::invalidate_disk_usage(&state)?;
         let charged = budget::committed_disk_bytes(&state)?;
         let metadata = fs::metadata(&state)?;
+        let policy = current_policy(&state, &policy)?;
+        let (total, free) = super::policy::physical_space(&state)?;
+        let reserve = policy.reserve(total);
         let epoch = if records(&state)?.is_empty() {
-            let (total, free) = super::policy::physical_space(&state)?;
             Epoch {
-                capacity: charged.saturating_add(free.saturating_sub(policy.reserve(total))),
+                capacity: charged.saturating_add(free.saturating_sub(reserve)),
+                reserve: Some(reserve),
                 device: metadata.dev(),
                 inode: metadata.ino(),
                 filesystem: super::policy::filesystem_id(&File::open(&state)?)?,
@@ -329,7 +360,7 @@ pub(crate) async fn reserve_cancellable(
         let added = size
             .saturating_sub(raw_bytes(&directory, replacement.as_ref())?)
             .saturating_add(MARGIN);
-        if charged.saturating_add(added) > configured.min(epoch.capacity) {
+        if charged.saturating_add(added) > configured.min(epoch.capacity_for(reserve)?) {
             return Err(Error::new(
                 507,
                 "Shared disk capacity and its reserve cannot promise this VM image allowance.",
@@ -397,7 +428,22 @@ pub(crate) fn epoch_capacity(state: &Path) -> io::Result<u64> {
     {
         return Err(io::Error::other("VM reservation filesystem changed"));
     }
-    Ok(epoch.capacity)
+    let reserve = match fs::read(state.join("storage-policy.json")) {
+        Ok(bytes) => {
+            let policy = super::policy::from_persisted(&bytes).map_err(io::Error::other)?;
+            let (total, _) = super::policy::physical_space(state)?;
+            policy.reserve(total)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            epoch.reserve.ok_or_else(|| {
+                io::Error::other(
+                    "VM reservation epoch predates reserve accounting; retire its owners first",
+                )
+            })?
+        }
+        Err(error) => return Err(error),
+    };
+    epoch.capacity_for(reserve)
 }
 
 pub(crate) fn reserved(directory: &Path) -> io::Result<bool> {
@@ -409,6 +455,65 @@ mod tests {
     use super::*;
     use crate::storage::Disk;
     use std::os::fd::AsRawFd;
+
+    #[tokio::test]
+    async fn existing_epoch_applies_current_reserve_to_new_promises() {
+        let (root, first, second, mut policy) = fixture();
+        configure_disk(root.path(), 1_000_000);
+        let (total, free) = super::super::policy::physical_space(root.path()).unwrap();
+        policy.reserve_percent = 1;
+        policy.reserve_mi_b = free / MARGIN - 32;
+        let save = |policy: &super::super::policy::Policy| {
+            fs::write(
+                root.path().join("storage-policy.json"),
+                serde_json::to_vec(policy).unwrap(),
+            )
+            .unwrap();
+        };
+        save(&policy);
+        let first_owner = reserve(root.path(), &first, 8 * MARGIN, &policy)
+            .await
+            .unwrap();
+        let original_capacity = epoch_capacity(root.path()).unwrap();
+        let original_reserve = policy.reserve(total);
+        // A stale caller must still use the newly persisted node policy.
+        let old_policy = policy.clone();
+        policy.reserve_mi_b += 24;
+        save(&policy);
+        assert_eq!(
+            epoch_capacity(root.path()).unwrap(),
+            original_capacity.saturating_sub(policy.reserve(total) - original_reserve)
+        );
+        assert_eq!(
+            reserve(root.path(), &second, 8 * MARGIN, &old_policy)
+                .await
+                .err()
+                .unwrap()
+                .status,
+            507
+        );
+        assert!(!second.join(RECORD).exists());
+        assert!(reserved(&first).unwrap());
+        save(&old_policy);
+        assert_eq!(epoch_capacity(root.path()).unwrap(), original_capacity);
+        let second_owner = reserve(root.path(), &second, 8 * MARGIN, &policy)
+            .await
+            .unwrap();
+        second_owner.release().await.unwrap();
+        first_owner.release().await.unwrap();
+    }
+
+    #[test]
+    fn legacy_epoch_without_reserve_is_refused_without_guessing_capacity() {
+        let epoch = Epoch {
+            capacity: 1024,
+            reserve: None,
+            device: 1,
+            inode: 1,
+            filesystem: vec![],
+        };
+        assert!(epoch.capacity_for(64).is_err());
+    }
 
     #[tokio::test]
     async fn admission_waits_for_an_inflight_capacity_change_and_preserves_owner_conflicts() {
