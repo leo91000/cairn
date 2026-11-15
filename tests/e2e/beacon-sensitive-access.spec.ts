@@ -9,15 +9,17 @@ type InstallationFixture = Awaited<ReturnType<typeof beaconRelayFixture>> & { em
 
 const test = base.extend<{ installation: InstallationFixture }>({
   installation: async ({ page }, use) => {
-    const fixture = await beaconRelayFixture(4394)
+    // journeys-beacon-notifications runs concurrently on 4394.
+    const fixture = await beaconRelayFixture(4393)
     const { root, url, messages } = fixture
     const schema = `sensitive_${randomUUID().replaceAll('-', '')}`
     const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
     executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
     database.searchParams.set('options', `-csearch_path=${schema}`)
-    fixture.beacon(database.toString())
+    const beacon = fixture.beacon(database.toString())
     try {
-      await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
+      // Another process answering on this port must not stand in for this Beacon.
+      await fixture.waitForBeacon(beacon, 7000)
       const email = `sensitive-${Date.now()}@example.test`
       await page.goto(url)
       await page.getByLabel('Email address').fill(email)
