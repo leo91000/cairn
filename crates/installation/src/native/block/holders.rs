@@ -92,11 +92,9 @@ fn namespace_holds(path: &Path, device: u64) -> io::Result<bool> {
             if has_device(&mounts, device) {
                 return Ok(true);
             }
-            for path in namespace_mounts(&mounts)? {
+            for reference in namespace_mounts(&mounts)? {
                 // Open while in the namespace that owns this path, before setns.
-                pending.push(fs::File::open(path).map_err(|error| {
-                    io::Error::other(format!("Cannot open retained namespace: {error}"))
-                })?);
+                pending.push(reference.open()?);
             }
         }
         Ok(false)
@@ -105,7 +103,32 @@ fn namespace_holds(path: &Path, device: u64) -> io::Result<bool> {
     .map_err(|_| io::Error::other("Mount namespace inspection panicked"))?
 }
 
-fn namespace_mounts(mounts: &str) -> io::Result<Vec<std::path::PathBuf>> {
+#[derive(Debug, PartialEq, Eq)]
+struct NamespaceMount {
+    path: std::path::PathBuf,
+    inode: u64,
+}
+
+impl NamespaceMount {
+    fn open(&self) -> io::Result<fs::File> {
+        let file = fs::File::open(&self.path).map_err(|error| {
+            io::Error::other(format!(
+                "Cannot open retained mount namespace at {}: {error}",
+                self.path.display()
+            ))
+        })?;
+        if file.metadata()?.ino() != self.inode
+            || unsafe { libc::ioctl(file.as_raw_fd(), 0xb703) } != libc::CLONE_NEWNS
+        {
+            return Err(io::Error::other(
+                "Retained mount namespace identity changed",
+            ));
+        }
+        Ok(file)
+    }
+}
+
+fn namespace_mounts(mounts: &str) -> io::Result<Vec<NamespaceMount>> {
     let mut paths = Vec::new();
     for line in mounts.lines() {
         let Some((fields, filesystem)) = line.split_once(" - ") else {
@@ -114,11 +137,35 @@ fn namespace_mounts(mounts: &str) -> io::Result<Vec<std::path::PathBuf>> {
         if filesystem.split_whitespace().next() != Some("nsfs") {
             continue;
         }
-        let path = fields
-            .split_whitespace()
-            .nth(4)
+        let fields = fields.split_whitespace().collect::<Vec<_>>();
+        let identity = fields
+            .get(3)
             .ok_or_else(|| io::Error::other("Invalid namespace mount"))?;
-        paths.push(mount_path(path));
+        let (kind, inode) = identity
+            .split_once(":[")
+            .and_then(|(kind, inode)| {
+                inode
+                    .strip_suffix(']')
+                    .and_then(|inode| inode.parse::<u64>().ok())
+                    .map(|inode| (kind, inode))
+            })
+            .filter(|(_, inode)| *inode > 0)
+            .ok_or_else(|| io::Error::other("Invalid namespace mount identity"))?;
+        match kind {
+            // Network and other non-mount namespaces retain no filesystem mount
+            // graph. Their paths can be hidden by a later /run overmount.
+            "net" | "uts" | "ipc" | "pid" | "pid_for_children" | "user" | "cgroup" | "time"
+            | "time_for_children" => continue,
+            "mnt" => {}
+            _ => return Err(io::Error::other("Unknown namespace mount type")),
+        }
+        let path = fields
+            .get(4)
+            .ok_or_else(|| io::Error::other("Invalid namespace mount"))?;
+        paths.push(NamespaceMount {
+            path: mount_path(path),
+            inode,
+        });
     }
     Ok(paths)
 }
@@ -390,7 +437,9 @@ pub(super) fn scan(device: u64, private_copies: bool) -> io::Result<Vec<Holder>>
                 "Native filesystem remains mounted in the host namespace; ownership retained",
             ));
         }
-        for path in namespace_mounts(&mounts)? {
+        for reference in namespace_mounts(&mounts)? {
+            let namespace = reference.open()?;
+            let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", namespace.as_raw_fd()));
             if namespace_holds(&path, device)? {
                 return Err(io::Error::other(
                     "Persistent mounted namespace retains the native filesystem",
@@ -686,6 +735,74 @@ mod tests {
 
     #[test]
     #[ignore = "requires CAP_SYS_ADMIN; disposable mount namespace only"]
+    fn covered_network_namespace_does_not_block_filesystem_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("run");
+        let path = runtime.join("netns");
+        fs::create_dir(&runtime).unwrap();
+        fs::File::create(&path).unwrap();
+        let target = path.clone();
+        let runtime_path = runtime.clone();
+        let namespace = std::thread::spawn(move || {
+            use std::os::unix::ffi::OsStrExt;
+            assert_eq!(
+                unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_FS) },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        std::ptr::null(),
+                        c"/".as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_REC | libc::MS_PRIVATE,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            let target = std::ffi::CString::new(target.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        c"/proc/thread-self/ns/net".as_ptr(),
+                        target.as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_BIND,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            let runtime_path = std::ffi::CString::new(runtime_path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        c"tmpfs".as_ptr(),
+                        runtime_path.as_ptr(),
+                        c"tmpfs".as_ptr(),
+                        0,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            assert!(fs::File::open(Path::new(target.to_str().unwrap())).is_err());
+            fs::File::open("/proc/thread-self/ns/mnt").unwrap()
+        })
+        .join()
+        .unwrap();
+        assert!(
+            !namespace_holds(
+                Path::new(&format!("/proc/self/fd/{}", namespace.as_raw_fd())),
+                libc::makedev(259, 199)
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_SYS_ADMIN; disposable mount namespace only"]
     fn private_mount_outside_a_chroot_is_not_lost() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().to_owned();
@@ -892,12 +1009,35 @@ mod tests {
 
     #[test]
     fn persistent_namespace_mount_paths_preserve_escaped_bytes() {
-        let mounts = "1 0 0:4 /mnt:[123] /saved\\040space rw - nsfs nsfs rw\n2 0 8:1 / / rw - ext4 /dev/root rw";
+        let mounts = "1 0 0:4 mnt:[123] /saved\\040space rw - nsfs nsfs rw\n2 0 8:1 / / rw - ext4 /dev/root rw";
         assert_eq!(
             namespace_mounts(mounts).unwrap(),
-            vec![std::path::PathBuf::from("/saved space")]
+            vec![NamespaceMount {
+                path: "/saved space".into(),
+                inode: 123
+            }]
         );
         assert!(namespace_mounts("invalid").is_err());
+        assert!(
+            namespace_mounts("1 0 0:4 net:[124] /hidden/run/netns rw - nsfs nsfs rw")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(namespace_mounts("1 0 0:4 unknown:[124] /hidden rw - nsfs nsfs rw").is_err());
+        assert!(namespace_mounts("1 0 0:4 mnt:[bad] /hidden rw - nsfs nsfs rw").is_err());
+        let identity = NamespaceMount {
+            path: "/proc/self/ns/mnt".into(),
+            inode: fs::metadata("/proc/self/ns/mnt").unwrap().ino(),
+        };
+        assert!(identity.open().is_ok());
+        assert!(
+            NamespaceMount {
+                inode: identity.inode + 1,
+                ..identity
+            }
+            .open()
+            .is_err()
+        );
     }
 
     #[test]

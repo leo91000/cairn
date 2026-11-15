@@ -27,6 +27,7 @@ const testNames = [
   'native::block::holders::tests::retained_namespace_without_procfs_still_reports_the_device',
   'native::block::holders::tests::private_mount_outside_a_chroot_is_not_lost',
   'native::block::holders::tests::covered_namespace_root_requires_independent_superblock_inventory',
+  'native::block::holders::tests::covered_network_namespace_does_not_block_filesystem_inventory',
 ]
 // A user namespace cannot create a block node on the host-backed temp directory.
 if (privileged) {

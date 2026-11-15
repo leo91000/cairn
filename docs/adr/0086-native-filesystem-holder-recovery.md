@@ -39,3 +39,9 @@ Unknown attachments and current-boot conflicts continue to fail closed.
 Raw block-device mappings retain their backing file after close(fd), while maps
 reports the device-node filesystem rather than the block rdev. Holder inspection
 also resolves file-backed map_files entries; denied inspection fails closed.
+
+Persisted nsfs mount roots carry the kernel namespace type and inode. Ignore
+known non-mount namespace types before resolving their paths: a Docker network
+namespace can be hidden under a newer private /run and cannot retain a filesystem
+mount graph. Unknown types fail closed. Mount namespaces still require an opened
+descriptor with the same inode and confirmed namespace type before traversal.
