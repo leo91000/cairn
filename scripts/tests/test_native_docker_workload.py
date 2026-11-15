@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import native_docker_workload as workload
 import native_runtime_test as runtime
+import native_administrator_network as network
 
 
 class ComposeReadinessTests(unittest.TestCase):
@@ -73,6 +74,30 @@ class ComposeReadinessTests(unittest.TestCase):
 
 
 class AdministratorNetworkQualificationTests(unittest.TestCase):
+    def test_owned_systemd_unit_has_explicit_sbin_tool_lookup(self):
+        arguments = network.unit_command('fixture.service', 'attempt', '/candidate/cairn',
+                                         '/candidate/rootfs.tar', '/candidate/go', '/candidate/tools')
+        environments = [argument.removeprefix('--setenv=') for argument in arguments
+                        if argument.startswith('--setenv=')]
+        environment = dict(value.split('=', 1) for value in environments)
+        self.assertEqual(environment['PATH'].split(':'), ['/usr/sbin', '/usr/bin', '/sbin', '/bin'])
+        # Ubuntu keeps iptables-save in /usr/sbin, whereas systemd's compiled
+        # default can omit it. A real subprocess lookup models that split.
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='native-tool-path-') as root:
+            root = Path(root)
+            for directory in ['usr/sbin', 'usr/bin', 'sbin', 'bin']:
+                (root / directory).mkdir(parents=True)
+            tool = root / 'usr/sbin/iptables-save'
+            tool.write_text('#!/bin/sh\nprintf fixture-tool\n')
+            tool.chmod(0o755)
+            with self.assertRaises(FileNotFoundError):
+                subprocess.run(['iptables-save'], env={'PATH': str(root / 'usr/bin')}, check=True)
+            path = ':'.join(str(root / directory.lstrip('/')) for directory in environment['PATH'].split(':'))
+            result = subprocess.run(['iptables-save'], env={'PATH': path}, check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout, 'fixture-tool')
+
     def test_failed_qualifier_preserves_bounded_synthetic_diagnostics(self):
         result = SimpleNamespace(returncode=1, stdout='fixture phase reached\n', stderr='fortified compiler failure\n')
         with patch.object(runtime.subprocess, 'run', return_value=result) as run:

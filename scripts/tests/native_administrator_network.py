@@ -204,6 +204,38 @@ def inside(arguments):
         raise
 
 
+def unit_command(unit, attempt, binary, archive, go, tools):
+    return [
+        "systemd-run",
+        "--quiet",
+        "--collect",
+        "--wait",
+        "--pipe",
+        "--unit=" + unit,
+        "--setenv=PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+        "--property=Delegate=yes",
+        "--property=DelegateSubgroup=runner",
+        "--property=KillMode=control-group",
+        "--property=TimeoutStopSec=10s",
+        "--property=RuntimeMaxSec=90s",
+        "--property=MemoryMax=1G",
+        "--property=CPUQuota=100%",
+        "/usr/bin/unshare",
+        "--mount",
+        "--net",
+        "--propagation",
+        "private",
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--inside",
+        attempt,
+        str(binary),
+        str(archive),
+        str(go),
+        str(tools),
+    ]
+
+
 def main():
     if sys.argv[1:2] == ["--inside"]:
         inside(sys.argv[2:])
@@ -250,34 +282,7 @@ def main():
         attempt = str(uuid.uuid4())
         unit = "cairn-native-" + attempt + ".service"
         go = root / "go"
-        command = [
-            "systemd-run",
-            "--quiet",
-            "--collect",
-            "--wait",
-            "--pipe",
-            "--unit=" + unit,
-            "--property=Delegate=yes",
-            "--property=DelegateSubgroup=runner",
-            "--property=KillMode=control-group",
-            "--property=TimeoutStopSec=10s",
-            "--property=RuntimeMaxSec=90s",
-            "--property=MemoryMax=1G",
-            "--property=CPUQuota=100%",
-            "/usr/bin/unshare",
-            "--mount",
-            "--net",
-            "--propagation",
-            "private",
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "--inside",
-            attempt,
-            str(binary),
-            str(root / "rootfs.tar"),
-            str(go),
-            str(tools),
-        ]
+        command = unit_command(unit, attempt, binary, root / "rootfs.tar", go, tools)
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
