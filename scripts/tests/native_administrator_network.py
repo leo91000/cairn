@@ -130,6 +130,7 @@ def inside(arguments):
     try:
         parent = command(binary, "native-administrator-docker-ready")
         assert resolver.read_bytes() == resolver_before, "Docker changed the outer resolver"
+        assert (foreign / "mounted").exists(), "A managed helper unmounted the parent's filesystem"
         daemon_pid = int(Path("/run/cairn-docker/dockerd.pid").read_text())
         relative_marker = foreign.relative_to("/") / "mounted"
         roots = live_thread_roots(daemon_pid)

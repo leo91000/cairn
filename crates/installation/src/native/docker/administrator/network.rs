@@ -264,6 +264,27 @@ pub fn daemon(args: &[String]) -> Result<()> {
     )))
 }
 
+// This runs after fork, before exec. Use only async-signal-safe syscalls and
+// errno capture: the parent runtime can have other threads holding Rust locks.
+fn isolate_slirp_mounts() -> std::io::Result<()> {
+    if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe {
+        libc::mount(
+            std::ptr::null(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_SLAVE,
+            std::ptr::null(),
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub(super) async fn start(pid: u32) -> Result<Child> {
     use std::os::unix::fs::MetadataExt;
 
@@ -285,7 +306,8 @@ pub(super) async fn start(pid: u32) -> Result<Child> {
             .create(true)
             .append(true)
             .open("/tmp/cairn-slirp.log")?;
-        let mut child = Command::new("/opt/cairn-docker/bin/slirp4netns")
+        let mut command = Command::new("/opt/cairn-docker/bin/slirp4netns");
+        command
             .args([
                 "--configure",
                 "--disable-host-loopback",
@@ -300,8 +322,14 @@ pub(super) async fn start(pid: u32) -> Result<Child> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(log))
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        // Slirp's sandbox makes only / private, then detaches the old tree.
+        // Shared submounts must become slaves before that recursive teardown,
+        // otherwise it can propagate their removal back to the supervisor.
+        unsafe {
+            command.pre_exec(isolate_slirp_mounts);
+        }
+        let mut child = command.spawn()?;
         let mut ready = [0];
         child
             .stdout
