@@ -9,10 +9,19 @@ import kotlinx.serialization.json.decodeFromJsonElement
 
 suspend fun CairnApi.listPluginResources(
     input: ListPluginResourcesInput
-): ListPluginResourcesOutput =
-    wireJson.decodeFromJsonElement(
+): ListPluginResourcesOutput {
+    val query =
+        listOfNotNull(
+                "resourceType" to input.resourceType.toString(),
+                "page" to input.page.toString(),
+                "query" to input.query.toString(),
+                input.agentId?.let { "agentId" to it.toString() },
+            )
+            .joinToString("&") { (key, value) -> "$key=${segment(value)}" }
+    return wireJson.decodeFromJsonElement(
         pluginOperation(
-            "/plugins/${segment(input.pluginId)}/connections/${segment(input.instanceId)}/resources?resourceType=${segment(input.resourceType.toString())}&page=${segment(input.page.toString())}&query=${segment(input.query.toString())}",
+            "/plugins/${segment(input.pluginId)}/connections/${segment(input.instanceId)}/resources${if (query.isEmpty()) "" else "?$query"}",
             method = "GET",
         )
     )
+}

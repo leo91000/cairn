@@ -44,7 +44,7 @@ const ROLLOUT: &str = "agent-access-rollout";
 pub(crate) const SUSPENDED: &str =
     "Its author no longer has access to this agent. It resumes once the owner gives access again.";
 
-const DENIED: &str =
+pub(crate) const DENIED: &str =
     "You don't have access to this agent. Ask the installation owner to give you access.";
 
 /// Version 29 to 30. Existing memberships keep the existing agents.
@@ -99,7 +99,12 @@ impl Db<'_> {
             .is_some())
     }
 
-    fn membership_uses_agent(&self, account: &str, access: &str, agent: &str) -> Result<bool> {
+    pub(crate) fn membership_uses_agent(
+        &self,
+        account: &str,
+        access: &str,
+        agent: &str,
+    ) -> Result<bool> {
         Ok(self
             .0
             .prepare_cached(
@@ -108,6 +113,17 @@ impl Db<'_> {
             .query_row([agent, account, access], |_| Ok(()))
             .optional()?
             .is_some())
+    }
+
+    /// The membership that holds a member's access to the agent.
+    pub(crate) fn member_agent_access(&self, account: &str, agent: &str) -> Result<Option<String>> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT access_id FROM agent_account_access WHERE agent_id=? AND account_id=?",
+            )?
+            .query_row([agent, account], |row| row.get(0))
+            .optional()?)
     }
 
     fn member_agents(&self, account: &str) -> Result<Vec<String>> {
@@ -301,6 +317,17 @@ pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -
     authorize(s, identity, move |db, identity| {
         let (method, path, body) = &*request;
         gate(db, identity, method, path, body)
+    })
+    .await
+}
+
+/// A member uses an agent outside a directing request, such as reading plugin resources
+/// through its grants: the same admission, with a membership check of its own.
+pub(crate) async fn authorize_member_agent(s: &Service, account: &str, agent: &str) -> Result<()> {
+    let identity = InstallationIdentity::trusted(InstallationRole::Member, account);
+    let agent = agent.to_owned();
+    authorize(s, identity, move |db, identity| {
+        require_agent(db, identity, &agent)
     })
     .await
 }

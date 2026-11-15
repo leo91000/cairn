@@ -199,7 +199,8 @@ pub(crate) async fn command_response(s: &Service, request: Request) -> Result<Re
     Ok(response)
 }
 
-/// Owner-only management API (enforced by the HTTP layer for `/api/plugins`).
+/// Owner-only management API (enforced by the HTTP layer for `/api/plugins`), except
+/// members' resource reads through an agent they may use.
 pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
     let parts = input
         .path
@@ -268,6 +269,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 "resourceType": input.query.get("resourceType").cloned().unwrap_or_default(),
                 "page": input.number("page", 1, 1, 10_000)?,
                 "query": input.query.get("query").cloned().unwrap_or_default(),
+                "agentId": input.query.get("agentId"),
             }),
         )),
         (
@@ -287,6 +289,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 "instanceId": instance,
                 "resourceType": input.query.get("resourceType").cloned().unwrap_or_default(),
                 "id": input.query.get("id").cloned().unwrap_or_default(),
+                "agentId": input.query.get("agentId"),
             }),
         )),
         ("GET", ["plugins", "resources", "operations", id]) => Some((
@@ -326,8 +329,11 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         _ => None,
     };
     if let Some((name, command)) = package_command {
-        return crate::capabilities::plugin_package_operation(name)
-            .unwrap()
+        let operation = crate::capabilities::plugin_package_operation(name).unwrap();
+        if let Some(account) = crate::capabilities::member_account(input.identity.as_ref()) {
+            return operation.invoke_member(s, command, account).await;
+        }
+        return operation
             .invoke(s, command, crate::capabilities::ResumeContext::http(input)?)
             .await;
     }

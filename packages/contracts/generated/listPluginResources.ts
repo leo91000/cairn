@@ -3,5 +3,11 @@ import type { ListPluginResourcesInput } from './typescript/ListPluginResourcesI
 import type { ListPluginResourcesOutput } from './typescript/ListPluginResourcesOutput'
 
 export function listPluginResources(request: <T>(path: string, options: RequestInit) => Promise<T>, input: ListPluginResourcesInput): Promise<ListPluginResourcesOutput> {
-  return request<ListPluginResourcesOutput>(`/plugins/${encodeURIComponent(input.pluginId)}/connections/${encodeURIComponent(input.instanceId)}/resources?${new URLSearchParams({ resourceType: String(input.resourceType), page: String(input.page), query: String(input.query) }).toString()}`, { method: 'GET' })
+  const query = new URLSearchParams({
+    resourceType: String(input.resourceType),
+    page: String(input.page),
+    query: String(input.query),
+    ...(input.agentId == null ? {} : { agentId: String(input.agentId) }),
+  }).toString()
+  return request<ListPluginResourcesOutput>(`/plugins/${encodeURIComponent(input.pluginId)}/connections/${encodeURIComponent(input.instanceId)}/resources${query ? `?${query}` : ''}`, { method: 'GET' })
 }

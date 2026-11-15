@@ -112,10 +112,10 @@ internal suspend fun resolvePluginResourcePath(
                     val resolved = withPluginResourcePreparation {
                         api.resolvePluginResource(
                             ResolvePluginResourceInput(
-                                root.id,
-                                instance,
-                                plugin,
-                                root.resourceType,
+                                id = root.id,
+                                instanceId = instance,
+                                pluginId = plugin,
+                                resourceType = root.resourceType,
                             )
                         )
                     }
@@ -790,7 +790,13 @@ private fun ResourceGrantPicker(
             val result =
                 listPluginGrantResources(
                     api,
-                    ListPluginResourcesInput(instance, page, plugin, query, type),
+                    ListPluginResourcesInput(
+                        instanceId = instance,
+                        page = page,
+                        pluginId = plugin,
+                        query = query,
+                        resourceType = type,
+                    ),
                 )
             val resolved = resolvePluginResourcePage(api, plugin, instance, result.items)
             items =

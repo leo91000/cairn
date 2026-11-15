@@ -24,6 +24,10 @@ fn invalid() -> Error {
     Error::bad_gateway("The plugin returned invalid or unresolved resources.")
 }
 
+fn not_granted() -> Error {
+    Error::forbidden("This agent is not granted that plugin instance.")
+}
+
 fn item(manifest: &Manifest, raw: Value, kind: &str) -> Result<PluginResource> {
     let resource: PluginResource = serde_json::from_value(raw).map_err(|_| invalid())?;
     let declaration = manifest.resource_type(kind).ok_or_else(invalid)?;
@@ -91,6 +95,23 @@ async fn instance(
     agent: Option<&str>,
     authority: Option<Authority>,
 ) -> Result<Read> {
+    // A read through an agent learns nothing of a package or instance the agent is
+    // not granted: neither whether it exists, nor its approval, types or state.
+    if let Some(agent) = agent {
+        let (agent, plugin, id) = (agent.to_owned(), plugin.to_owned(), instance.to_owned());
+        let granted = s
+            .store
+            .read(move |db| {
+                Ok(db
+                    .plugin_instance(&id)?
+                    .is_some_and(|connection| connection.plugin_id == plugin)
+                    && db.has_plugin_grant(&agent, &id)?)
+            })
+            .await?;
+        if !granted {
+            return Err(not_granted());
+        }
+    }
     let package = registry::active(s, plugin).await?;
     if package.manifest.resource_type(kind).is_none() {
         return Err(Error::not_found("This plugin has no such resource type."));
@@ -104,6 +125,9 @@ async fn instance(
 
     // Refresh publication and HTTP pre-send checks also need the expected
     // instance: revoking a plugin grant does not change its settings revision.
+    // A named agent retains its grant/package authority even when the caller is
+    // a person or public MCP client, without an installation bearer. Management
+    // checks this snapshot locally after asynchronous policy checks and waits.
     let authority = match authority {
         Some(authority) => {
             let snapshot = match (agent, authority.bearer.as_deref()) {
@@ -113,7 +137,10 @@ async fn instance(
                     )
                     .await?,
                 ),
-                _ => None,
+                (Some(agent), None) => Some(
+                    super::grant_authorization::Snapshot::capture(s, agent, None, &package).await?,
+                ),
+                (None, _) => None,
             };
             let managed = management::Authority::resource_read(authority, connection.clone());
             Some(match snapshot {
@@ -131,9 +158,7 @@ async fn instance(
             .read(move |db| db.has_plugin_grant(&agent_id, &instance_id))
             .await?;
         if !permitted {
-            return Err(Error::forbidden(
-                "This agent is not granted that plugin instance.",
-            ));
+            return Err(not_granted());
         }
         Scope::Agent {
             agent_id: agent.to_owned(),
@@ -327,5 +352,201 @@ impl Read {
             }
         }
         Err(invalid())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::MAIN_AGENT_ID,
+        plugin_grant_fixture::{Fixture, contribution, support},
+    };
+
+    #[tokio::test]
+    async fn named_agent_authority_survives_the_oauth_lock_wait() {
+        for revoke_package in [false, true] {
+            let f = Fixture::new().await;
+            f.set(json!([contribution("hook", "message", support())]))
+                .await;
+            let input: ListPluginResourcesInput = serde_json::from_value(json!({
+                "pluginId": "grant-probe",
+                "instanceId": f.instance,
+                "resourceType": "channel",
+                "agentId": MAIN_AGENT_ID,
+            }))
+            .unwrap();
+            let owner = Authority::human(&f.s, "fixture-owner").await.unwrap();
+            let read = prepare_list(&f.s, &input, Some(MAIN_AGENT_ID), Some(owner))
+                .await
+                .unwrap();
+            let Scope::Managed(_, authority) = &read.scope else {
+                panic!("the read retains the caller's authority");
+            };
+            let connection = connections::get(&f.s, "grant-probe", &f.instance)
+                .await
+                .unwrap();
+            f.s.vault
+                .set(
+                    &connections::credential_key(&f.instance),
+                    &json!({ "token": "synthetic-resource-credential" }),
+                )
+                .await
+                .unwrap();
+            let lock = f.s.plugins.oauth_flows.lock(&f.instance);
+            let held = lock.lock().await;
+            let access =
+                super::super::oauth::access_token_managed(&f.s, &connection, Some(authority));
+            tokio::pin!(access);
+            assert!(futures_util::poll!(&mut access).is_pending());
+
+            if revoke_package {
+                f.s.store
+                    .transaction(|db| {
+                        db.0.execute(
+                            "UPDATE plugin_approvals SET digest=?1 WHERE plugin_id='grant-probe'",
+                            ["0".repeat(64)],
+                        )?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            } else {
+                f.remove_for(MAIN_AGENT_ID).await;
+            }
+            drop(held);
+
+            let result = access.await;
+            assert!(
+                result.is_err(),
+                "OAuth must refuse the revoked named-agent authority after waiting (package={revoke_package})"
+            );
+            assert_eq!(
+                result.unwrap_err().status,
+                if revoke_package { 409 } else { 403 }
+            );
+            f.s.shutdown.cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn member_oauth_refresh_rechecks_remote_membership_after_the_lock_wait() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const MEMBER: &str = "resource-member";
+        for membership in ["current", "removed", "replaced", "removed-during-refresh"] {
+            let f = Fixture::new().await;
+            let mut manifest = f.manifest.clone();
+            manifest["version"] = "2".into();
+            manifest["credential"] = json!({
+                "label": "Probe OAuth",
+                "header": "authorization",
+                "prefix": "Bearer ",
+                "oauth": {
+                    "authorizationUrl": "https://service.example.test/authorize",
+                    "tokenUrl": "https://service.example.test/token",
+                    "clientIdSetting": "marker",
+                },
+            });
+            f.publish(&manifest).await.unwrap();
+            f.set(json!([contribution("hook", "message", support())]))
+                .await;
+            crate::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+            let input: ListPluginResourcesInput = serde_json::from_value(json!({
+                "pluginId": "grant-probe",
+                "instanceId": f.instance,
+                "resourceType": "channel",
+                "agentId": MAIN_AGENT_ID,
+            }))
+            .unwrap();
+            let member = Authority::member(&f.s, MEMBER, MAIN_AGENT_ID)
+                .await
+                .unwrap();
+            let read = prepare_list(&f.s, &input, Some(MAIN_AGENT_ID), Some(member))
+                .await
+                .unwrap();
+            let Scope::Managed(_, authority) = &read.scope else {
+                panic!("the member read retains its authority");
+            };
+            let connection = connections::get(&f.s, "grant-probe", &f.instance)
+                .await
+                .unwrap();
+            let saved = json!({
+                "token": "synthetic-expired-token",
+                "oauth": {
+                    "expiresAt": 0,
+                    "tokenUrl": "https://service.example.test/token",
+                    "refreshToken": "synthetic-refresh-token",
+                    "clientId": "fixture-client",
+                    "scope": "",
+                },
+            });
+            let key = connections::credential_key(&f.instance);
+            f.s.vault.set(&key, &saved).await.unwrap();
+            let posts = Arc::new(AtomicUsize::new(0));
+            let count = posts.clone();
+            let service = f.s.clone();
+            let (origin, server) = crate::common::serve_locally(axum::Router::new().route(
+                "/token",
+                axum::routing::post(move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let service = service.clone();
+                    async move {
+                        if membership == "removed-during-refresh" {
+                            crate::relay_fixture::remove_member(&service, MEMBER).await;
+                        }
+                        axum::Json(json!({
+                            "access_token": "synthetic-refreshed-token",
+                            "token_type": "Bearer",
+                            "expires_in": 3600,
+                        }))
+                    }
+                }),
+            ))
+            .await;
+            f.s.plugins.route_http_to(Some(origin));
+
+            let lock = f.s.plugins.oauth_flows.lock(&f.instance);
+            let held = lock.lock().await;
+            let access =
+                super::super::oauth::access_token_managed(&f.s, &connection, Some(authority));
+            tokio::pin!(access);
+            assert!(futures_util::poll!(&mut access).is_pending());
+            match membership {
+                "removed" => crate::relay_fixture::remove_member(&f.s, MEMBER).await,
+                "replaced" => {
+                    crate::relay_fixture::add_member(&f.s, MEMBER, "replacement-membership").await;
+                }
+                _ => {}
+            }
+            // Beacon changed while the call waited. No synchronization has
+            // removed the original local access row or changed the plugin grant.
+            let local_access =
+                f.s.store
+                    .read(|db| db.member_agent_access(MEMBER, MAIN_AGENT_ID))
+                    .await
+                    .unwrap();
+            assert_eq!(local_access.as_deref(), Some("membership-resource-member"));
+            drop(held);
+
+            let result = access.await;
+            if membership == "current" {
+                assert_eq!(posts.load(Ordering::SeqCst), 1);
+                assert!(result.unwrap().is_some());
+            } else {
+                let permitted_posts = usize::from(membership == "removed-during-refresh");
+                assert_eq!(
+                    posts.load(Ordering::SeqCst),
+                    permitted_posts,
+                    "a {membership} Beacon membership must fence OAuth effects and publication"
+                );
+                let error = result.unwrap_err();
+                assert_eq!(error.status, 403);
+                assert!(error.message.contains("membership changed"));
+                assert!(f.s.vault.get(&key).await.unwrap().as_ref() == Some(&saved));
+            }
+            server.abort();
+            f.s.shutdown.cancel();
+        }
     }
 }
