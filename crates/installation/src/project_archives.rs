@@ -142,11 +142,23 @@ pub(crate) async fn cached_allocation(
 }
 
 /// Native base preparation holds the shared storage lock throughout extraction.
+#[cfg(test)]
 pub(crate) async fn extract_cached(
     root: &Path,
     descriptor: &Archive,
     target: &Path,
     stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    extract_cached_checked(root, descriptor, target, stop, 4096, |_| Ok(())).await
+}
+
+pub(crate) async fn extract_cached_checked(
+    root: &Path,
+    descriptor: &Archive,
+    target: &Path,
+    stop: &tokio_util::sync::CancellationToken,
+    allocation_unit: u64,
+    mut admit: impl FnMut(u64) -> Result<()> + Send + 'static,
 ) -> Result<()> {
     let file = cached(root, descriptor)
         .await?
@@ -174,7 +186,14 @@ pub(crate) async fn extract_cached(
             return Err(Error::bad("Project archive checksum mismatch."));
         }
         file.rewind()?;
-        archive::extract_with_stop(file, &target, descriptor.logical_bytes, &stop)?;
+        archive::extract_checked(
+            file,
+            &target,
+            descriptor.logical_bytes,
+            &stop,
+            allocation_unit,
+            &mut admit,
+        )?;
         Ok(())
     })
     .await
@@ -285,22 +304,41 @@ pub(crate) async fn reclaim_for_foreground(
             data: root.to_owned(),
             state: crate::native::state_dir(),
             identity: (0, 0),
+            #[cfg(test)]
+            build_entered: None,
         };
         return Ok(freed.saturating_add(bases.trim(u64::MAX, needed - freed, None).await?));
     }
     Ok(freed)
 }
 
-pub(crate) async fn initialize(
+#[cfg(test)]
+async fn initialize(plan: &Value, source: &Path, target: &Path, budget: u64) -> Result<bool> {
+    initialize_admitted(
+        plan,
+        source,
+        target,
+        budget,
+        std::sync::Arc::new(std::sync::Mutex::new(|_| Ok(()))),
+    )
+    .await
+}
+
+pub(crate) async fn initialize_admitted<F>(
     plan: &Value,
     source: &Path,
     target: &Path,
     budget: u64,
-) -> Result<bool> {
+    admit: std::sync::Arc<std::sync::Mutex<F>>,
+) -> Result<bool>
+where
+    F: FnMut(u64) -> Result<()> + Send + 'static,
+{
     let Some(archives) = plan["nativeProjectArchives"].as_array() else {
         return Ok(false);
     };
     let mut remaining = budget;
+    admit.lock().map_err(Error::internal)?(5120)?;
     crate::skills::private_dir(target).await?;
     for value in archives {
         let descriptor: Archive = serde_json::from_value(value.clone())?;
@@ -312,7 +350,20 @@ pub(crate) async fn initialize(
             .join("project-archives")
             .join(format!("{}.zip", descriptor.project_id));
         let file = tokio::fs::File::open(path).await?.into_std().await;
-        let used = extract(file, &target.join(&descriptor.project_id), remaining).await?;
+        let target = target.join(&descriptor.project_id);
+        let check = admit.clone();
+        let used = tokio::task::spawn_blocking(move || {
+            archive::extract_checked(
+                file,
+                &target,
+                remaining,
+                &tokio_util::sync::CancellationToken::new(),
+                4096,
+                &mut |bytes| check.lock().map_err(Error::internal)?(bytes),
+            )
+        })
+        .await
+        .map_err(Error::internal)??;
         remaining = remaining.saturating_sub(used);
     }
     Ok(true)

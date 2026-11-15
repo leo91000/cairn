@@ -76,9 +76,11 @@ For direct-storage development, `ci-diagnostic=storage`, `validation-only=true`
 and `backend-only=false` run the dedicated project-quota lifecycle test and image
 persistence/admission tests on a disposable runner. The native kernel selection
 also verifies migration-copy headroom reduction and owned-copy process cleanup;
-all five exact cases must execute, without accepting an empty or ignored match. This does not replace the
-full native/node/VM qualifications. The quota fixture drops `CAP_SYS_RESOURCE`
-because Linux allows that capability to bypass project hard limits.
+all five original exact cases and the privileged-parent writer quota case must execute, without accepting an empty or ignored match. This does not replace the
+full native/node/VM qualifications. The original quota cases drop `CAP_SYS_RESOURCE` because Linux allows that
+capability to bypass project hard limits. The additional writer case deliberately
+retains it in the parent and requires the production ingress writer to enforce
+byte and inode quotas itself; dropping it for that whole test would mask a defect.
 
 To qualify VM storage in a full non-publishing run, also set
 `vm-storage-qualification=true`. The runner image is built into its local Docker

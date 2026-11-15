@@ -14,6 +14,7 @@ async fn fixture() -> (tempfile::TempDir, Bases, Archive, storage::policy::Polic
         data: root.path().join("data"),
         state: root.path().join("state"),
         identity: (unsafe { libc::geteuid() }, unsafe { libc::getegid() }),
+        build_entered: None,
     };
     private_dir(&bases.data.join("project-archives"))
         .await
@@ -292,7 +293,9 @@ async fn background_preparation_yields_to_foreground_intent_and_then_finishes_ch
 #[tokio::test]
 async fn active_background_build_releases_its_temporary_files_before_foreground_admission() {
     use std::{sync::Arc, time::Duration};
-    let (_root, bases, archive, policy) = fixture().await;
+    let (_root, mut bases, archive, policy) = fixture().await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    bases.build_entered = Some(entered.clone());
     super::atomic_write(
         &bases.state.join("storage-policy.json"),
         &serde_json::to_vec(&policy).unwrap(),
@@ -313,18 +316,9 @@ async fn active_background_build_releases_its_temporary_files_before_foreground_
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if std::fs::read_dir(bases.state.join("environments"))
-                .is_ok_and(|mut entries| entries.next().is_some())
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
     let foreground = tokio::time::timeout(Duration::from_secs(5), super::disk::lock(&bases.state))
         .await
         .unwrap()

@@ -27,6 +27,7 @@ const target = path.resolve('target')
 mkdirSync(target, { recursive: true })
 const fixture = mkdtempSync(path.join(target, 'quota-qualification-'))
 const tests = ['native::quota::tests::kernel_quota_lifecycle_qualification', 'native::bases_tests::kernel_prepared_base_admission_and_recovery', 'native::bases_tests::measure_prepared_native_bases', 'native::directory::tests::kernel_missing_conversion_replacement_preserves_original_journal', 'native::directory::tests::kernel_migration_copy_headroom']
+const privilegedWriterTest = 'native::ingress::tests::kernel_privileged_parent_cannot_bypass_writer_quotas'
 const script = `
 set -euo pipefail
 binary=$1
@@ -52,15 +53,19 @@ truncate -s 1G -- "$fixture/quota.ext4"
 mkfs.ext4 -q -F -O project,quota -E quotatype=prjquota "$fixture/quota.ext4"
 mount -o loop,prjquota -- "$fixture/quota.ext4" "$fixture/state/native-data"
 for test_name in "$@"; do
+quota_command=(setpriv --bounding-set=-sys_resource)
+if [ "$test_name" = "${privilegedWriterTest}" ]; then
+  quota_command=()
+fi
 env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME="$fixture/home" \\
   CAIRN_NODE_BACKEND=native RUNNER_STATE_DIR="$fixture/state" \\
   CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_QUOTA_TEST_STATE="$fixture/state" \\
   timeout --signal=TERM --kill-after=10s 180s \\
-  setpriv --bounding-set=-sys_resource "$binary" --exact "$test_name" --ignored --nocapture --test-threads=1 | tee "$fixture/test.log"
+  "\${quota_command[@]}" "$binary" --exact "$test_name" --ignored --nocapture --test-threads=1 | tee "$fixture/test.log"
 grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$fixture/test.log"
 done
 `
-const result = spawnSync('sudo', ['-n', 'unshare', '--mount', '--propagation', 'private', 'bash', '-c', script, 'cairn-quota-qualification', binary, fixture, ...tests], {
+const result = spawnSync('sudo', ['-n', 'unshare', '--mount', '--propagation', 'private', 'bash', '-c', script, 'cairn-quota-qualification', binary, fixture, ...tests, privilegedWriterTest], {
   stdio: 'inherit',
 })
 if (result.error)

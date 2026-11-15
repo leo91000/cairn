@@ -222,7 +222,11 @@ pub(super) fn limit(root_path: &Path, bytes: u64) -> Result<()> {
         ((u128::from(bytes) * u128::from(data_inodes)) / u128::from(total_bytes)).max(1) as u64;
     let mut current = Quota::default();
     operation(&root, 0x800007, project, &mut current)?;
-    let inode_limit = inode_limit.max(current.inodes);
+    if current.inodes > inode_limit {
+        return Err(Error::conflict(
+            "Native inode use exceeds the granted quota; retained data must be reconciled.",
+        ));
+    }
     let mut quota = Quota {
         block_hard: bytes / 1024,
         block_soft: bytes / 1024,

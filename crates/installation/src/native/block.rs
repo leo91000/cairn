@@ -645,7 +645,28 @@ fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> Result<()> {
+    initialize_admitted(
+        state,
+        run,
+        plan,
+        budget,
+        std::sync::Arc::new(std::sync::Mutex::new(|_| Ok(()))),
+    )
+    .await
+}
+
+pub(super) async fn initialize_admitted<F>(
+    state: &Path,
+    run: &str,
+    plan: &Value,
+    budget: u64,
+    admit: std::sync::Arc<std::sync::Mutex<F>>,
+) -> Result<()>
+where
+    F: FnMut(u64) -> Result<()> + Send + 'static,
+{
     let root = workspace::directory(state, run)?;
     let data = view(state, run).await?.filesystems[0].clone();
     if root.join("block-initialized").exists() {
@@ -659,21 +680,29 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
             tokio::fs::remove_dir_all(&staged).await?;
         }
         {
+            admit.lock().map_err(Error::internal)?(5120)?;
             private_dir(&staged).await?;
             let seed = crate::microvm::plan::Plan::new(plan.clone());
             let source = seed
                 .imports()
                 .find(|import| import.target == text(plan, "projectRoot"))
                 .ok_or_else(|| Error::bad("Missing native workspace seed."))?;
-            if !crate::project_archives::initialize(
+            if !crate::project_archives::initialize_admitted(
                 plan,
                 source.source,
                 &staged.join("workspaces"),
                 budget,
+                admit.clone(),
             )
             .await?
             {
-                workspace::copy(source.source, &staged.join("workspaces"), budget).await?;
+                workspace::copy_admitted(
+                    source.source,
+                    &staged.join("workspaces"),
+                    budget,
+                    &mut |bytes| admit.lock().map_err(Error::internal)?(bytes),
+                )
+                .await?;
             }
         }
         for name in ["home", "workspaces", "output"] {
@@ -684,10 +713,12 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
                 }
                 tokio::fs::rename(staged.join(name), &target).await?;
             } else {
+                admit.lock().map_err(Error::internal)?(5120)?;
                 private_dir(&target).await?;
             }
         }
         workspace::sync_directories(&data).await?;
+        admit.lock().map_err(Error::internal)?(5120)?;
         atomic_write(&data.join(".cairn-seed-complete"), run.as_bytes()).await?;
         sync(&data).await?;
         tokio::fs::remove_dir_all(staged).await?;

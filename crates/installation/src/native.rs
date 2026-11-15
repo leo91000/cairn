@@ -11,6 +11,7 @@ pub(crate) mod disk;
 pub mod docker;
 mod home;
 mod identity;
+mod ingress;
 pub(crate) mod limits;
 mod mode;
 pub mod policy;

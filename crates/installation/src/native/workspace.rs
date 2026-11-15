@@ -144,13 +144,33 @@ pub async fn execution_ownership(state: &Path, run: &str) -> Result<crate::file_
     Ok(owner)
 }
 
+#[cfg(test)]
 pub async fn copy(source: &Path, target: &Path, budget: u64) -> Result<()> {
+    copy_admitted(source, target, budget, &mut |_| Ok(())).await
+}
+
+pub(super) async fn copy_admitted(
+    source: &Path,
+    target: &Path,
+    budget: u64,
+    admit: &mut (impl FnMut(u64) -> Result<()> + Send),
+) -> Result<()> {
     let (mut writer, reader) = tokio::io::duplex(131072);
     let source = source.to_owned();
     let send = tokio::spawn(async move { files::send(&source, &mut writer).await });
-    let result = files::receive(&mut BufReader::new(reader), target, budget).await;
+    let result = files::receive_admitted(
+        &mut BufReader::new(reader),
+        target,
+        budget,
+        budget,
+        |_| std::future::ready(Ok(0)),
+        admit,
+    )
+    .await;
     if result.is_err() {
         send.abort();
+        let _ = send.await;
+        return result;
     }
     result?;
     send.await.map_err(Error::internal)??;

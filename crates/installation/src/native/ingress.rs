@@ -1,0 +1,344 @@
+//! Admission for a single owned preparation tree. Call before allocating, not
+//! after extraction: workload suspension does not stop controller writers.
+use super::{disk, workspace};
+use crate::{
+    error::{Error, Result},
+    storage,
+};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+/// An isolated runtime makes its blocking filesystem workers inherit the same
+/// quota boundary. Never drop capabilities on a reusable controller thread.
+/// The future must own its storage/access guards; dropping the receiver cannot
+/// release them while this runtime still has filesystem work to drain.
+pub(super) async fn write<T: Send + 'static, G: Send + 'static>(
+    owner: G,
+    operation: impl Future<Output = Result<T>> + Send + 'static,
+) -> Result<T> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("native-ingress".into())
+        .spawn(move || {
+            let owner = owner;
+            let result = (|| {
+                enforce_quota()?;
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let result = runtime.block_on(operation);
+                // Runtime drop waits for blocking filesystem operations before
+                // acknowledging completion to the controller.
+                drop(runtime);
+                result
+            })();
+            drop(owner);
+            let _ = send.send(result);
+        })?;
+    receive.await.map_err(Error::internal)?
+}
+
+fn enforce_quota() -> Result<()> {
+    #[repr(C)]
+    struct Header {
+        version: u32,
+        pid: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Capabilities {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    const SYS_RESOURCE: u32 = 1 << 24;
+    let header = Header {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let mut caps = [Capabilities::default(); 2];
+    if unsafe { libc::syscall(libc::SYS_capget, &header, caps.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if caps[0].permitted & (1 << 8) != 0
+        && unsafe { libc::prctl(libc::PR_CAPBSET_DROP, 24, 0, 0, 0) } != 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    caps[0].effective &= !SYS_RESOURCE;
+    caps[0].permitted &= !SYS_RESOURCE;
+    caps[0].inheritable &= !SYS_RESOURCE;
+    if unsafe { libc::syscall(libc::SYS_capset, &header, caps.as_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+pub(super) struct Admission {
+    data: PathBuf,
+    state: PathBuf,
+    target: PathBuf,
+    filesystem: PathBuf,
+    policy: storage::policy::Policy,
+    limit: u64,
+    initial_target: u64,
+    submitted: u64,
+    observation: Observation,
+}
+
+struct Observation {
+    at: Instant,
+    used: u64,
+    submitted: u64,
+    outstanding: u64,
+}
+
+impl Admission {
+    /// `target` is the exclusive operation's own tree, not an agent-controlled
+    /// path inferred from a request. `filesystem` must be the unrestricted pool
+    /// or controller filesystem: project statvfs can report a virtual quota.
+    pub fn new(
+        data: &Path,
+        state: &Path,
+        target: &Path,
+        filesystem: &Path,
+        limit: u64,
+        policy: &storage::policy::Policy,
+    ) -> Result<Self> {
+        let initial_target = allocated(target)?;
+        let used = disk::usage_sync(data, state)?;
+        Ok(Self {
+            data: data.to_owned(),
+            state: state.to_owned(),
+            target: target.to_owned(),
+            filesystem: filesystem.to_owned(),
+            policy: policy.clone(),
+            limit,
+            initial_target,
+            submitted: 0,
+            observation: Observation {
+                at: Instant::now(),
+                used,
+                submitted: 0,
+                outstanding: 0,
+            },
+        })
+    }
+
+    pub fn admit(&mut self, allocation: u64) -> Result<()> {
+        let policy = match std::fs::read(self.state.join("storage-policy.json")) {
+            Ok(bytes) => storage::policy::from_persisted(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.policy.clone(),
+            Err(error) => return Err(error.into()),
+        };
+        policy.validate().map_err(Error::bad)?;
+        let limit = match std::fs::read(self.state.join(crate::microvm::budget::FILE)) {
+            Ok(bytes) => {
+                let value = serde_json::from_slice(&bytes)?;
+                super::native_budget(&value)?.limits.disk_mi_b * disk::MIB
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.limit,
+            Err(error) => return Err(error.into()),
+        };
+
+        if self.observation.at.elapsed() >= Duration::from_millis(250) {
+            let started = Instant::now();
+            let used = disk::usage_sync(&self.data, &self.state)?;
+            let growth = allocated(&self.target)?.saturating_sub(self.initial_target);
+            // Delayed allocation and small-file overhead must not erase a
+            // debit merely because a new usage sample does not show it yet.
+            let outstanding = self.submitted.saturating_sub(growth);
+            if started.elapsed() > Duration::from_secs(5) {
+                return Err(Error::unavailable(
+                    "Native ingress capacity observation is stale.",
+                ));
+            }
+            self.observation = Observation {
+                at: Instant::now(),
+                used: used.saturating_add(outstanding),
+                submitted: self.submitted,
+                outstanding,
+            };
+        }
+        let since = self.submitted.saturating_sub(self.observation.submitted);
+        let pending = storage::cache::pending_write_bytes();
+        let projected = self
+            .observation
+            .used
+            .saturating_add(since)
+            .saturating_add(allocation);
+        let (total, free) = storage::policy::physical_space(&self.filesystem)?;
+        let physical = free
+            .saturating_sub(policy.reserve(total))
+            .saturating_sub(pending)
+            .saturating_sub(self.observation.outstanding)
+            .saturating_sub(since);
+        if allocation.saturating_add(disk::MIB) > physical
+            || projected.saturating_add(pending) > limit.saturating_sub(disk::MIB)
+        {
+            return Err(Error::new(
+                507,
+                "Native ingress exceeds the current physical reserve or shared allocated budget.",
+            ));
+        }
+        self.submitted = self.submitted.saturating_add(allocation);
+        Ok(())
+    }
+}
+
+fn allocated(path: &Path) -> Result<u64> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            workspace::measure(path, true)
+        }
+        Ok(_) => Err(Error::conflict("Native ingress target changed type.")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires the disposable ext4 quota pool with a privileged parent"]
+    async fn kernel_privileged_parent_cannot_bypass_writer_quotas() {
+        use std::io::Write;
+        assert_eq!(
+            std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),
+            Ok("1")
+        );
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+        let caps = status
+            .lines()
+            .find_map(|line| line.strip_prefix("CapEff:\t"))
+            .unwrap();
+        assert_ne!(
+            u64::from_str_radix(caps, 16).unwrap() & (1 << 24),
+            0,
+            "fixture masked the parent capability"
+        );
+        let state = PathBuf::from(std::env::var_os("CAIRN_NATIVE_QUOTA_TEST_STATE").unwrap());
+        super::super::quota::require(&state).unwrap();
+        for inodes in [false, true] {
+            let run = crate::config::id();
+            let control = state.join("native").join(&run);
+            crate::skills::private_dir(&control).await.unwrap();
+            let workload = super::super::workspace::workload(&state, &run).unwrap();
+            crate::skills::private_dir(&workload).await.unwrap();
+            super::super::quota::prepare(&state, &workload, 4 * disk::MIB)
+                .await
+                .unwrap();
+            let target = workload.clone();
+            write((), async move {
+                let error = if inodes {
+                    let mut failure = None;
+                    for index in 0..10_000 {
+                        if let Err(error) =
+                            std::fs::File::create(target.join(format!("entry-{index}")))
+                        {
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                    failure.expect("writer bypassed inode quota")
+                } else {
+                    let mut file = std::fs::File::create(target.join("payload"))?;
+                    let mut failure = None;
+                    for _ in 0..128 {
+                        if let Err(error) = file.write_all(&[42; 65536]) {
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                    failure.expect("writer bypassed byte quota")
+                };
+                assert!(matches!(
+                    error.raw_os_error(),
+                    Some(libc::EDQUOT | libc::ENOSPC)
+                ));
+                Ok(())
+            })
+            .await
+            .unwrap();
+            super::super::quota::retire(&control).await.unwrap();
+            assert!(!workload.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_writer_runtime_drains_work_before_releasing_ownership() {
+        struct Owner(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let checked = released.clone();
+        write(Owner(released.clone()), async move {
+            tokio::task::spawn_blocking(move || {
+                assert!(!checked.load(std::sync::atomic::Ordering::SeqCst));
+                let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+                let capabilities = status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("CapEff:\t"))
+                    .unwrap();
+                assert_eq!(
+                    u64::from_str_radix(capabilities, 16).unwrap() & (1 << 24),
+                    0
+                );
+            })
+            .await
+            .unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn preparation_debits_are_enforced_before_allocating_and_reserve_changes_are_immediate() {
+        let state = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let target = state.path().join("environments").join("private-build");
+        let policy = storage::policy::for_node(&serde_json::json!({
+            "reserveMiB": 64,
+            "reservePercent": 1,
+        }))
+        .unwrap();
+        let used = disk::usage_sync(data.path(), state.path()).unwrap();
+        let mut admission = Admission::new(
+            data.path(),
+            state.path(),
+            &target,
+            state.path(),
+            used + 3 * disk::MIB,
+            &policy,
+        )
+        .unwrap();
+        admission.admit(disk::MIB).unwrap();
+        admission.admit(disk::MIB).unwrap();
+        assert_eq!(admission.admit(1).unwrap_err().status, 507);
+        assert!(!target.exists(), "admission wrote a partial before refusal");
+        admission.observation.at = Instant::now() - Duration::from_secs(1);
+        assert_eq!(admission.admit(1).unwrap_err().status, 507);
+        assert_eq!(admission.observation.outstanding, 2 * disk::MIB);
+
+        let (total, _) = storage::policy::physical_space(state.path()).unwrap();
+        let mut reserve = policy.clone();
+        reserve.reserve_mi_b = total / disk::MIB + 1;
+        std::fs::write(
+            state.path().join("storage-policy.json"),
+            serde_json::to_vec(&reserve).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(admission.admit(0).unwrap_err().status, 507);
+    }
+}

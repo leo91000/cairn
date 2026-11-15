@@ -16,7 +16,9 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(crate) use block::{Completion, DISK_BUSY, free_bytes, initialize, recover_host_mounts, view};
+#[cfg(test)]
+pub(crate) use block::initialize;
+pub(crate) use block::{Completion, DISK_BUSY, free_bytes, recover_host_mounts, view};
 
 pub(crate) const STORAGE: &str = "local-directory-v1";
 
@@ -62,6 +64,7 @@ pub struct Handle {
     pub volume: Arc<Volume>,
     pub filesystem: Arc<AtomicU64>,
     pub mount: tokio::sync::Mutex<Mounted>,
+    pub(super) ingress: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Handle {
@@ -71,6 +74,7 @@ impl Handle {
             volume: mount.volume.clone(),
             filesystem: mount.filesystem.clone(),
             mount: tokio::sync::Mutex::new(mount),
+            ingress: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

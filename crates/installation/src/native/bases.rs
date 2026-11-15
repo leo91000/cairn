@@ -28,6 +28,8 @@ pub(crate) struct Bases {
     pub data: PathBuf,
     pub state: PathBuf,
     pub identity: (u32, u32),
+    #[cfg(test)]
+    pub build_entered: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -254,7 +256,9 @@ impl Bases {
         let capacity = workspace::filesystem(&self.state)?;
         let host_free = capacity.f_bavail.saturating_mul(capacity.f_frsize);
         if required > disk::available(limit, disk::used(&self.data, &self.state).await?)
-            || required.saturating_add(256 * disk::MIB) > host_free
+            || required
+                .saturating_add(policy.reserve(capacity.f_blocks.saturating_mul(capacity.f_frsize)))
+                > host_free
             || workspace::measure(&self.root(), true)?.saturating_add(estimated_base) > budget
         {
             return Ok(());
@@ -265,7 +269,7 @@ impl Bases {
         let temporary = self.state.join("environments").join(crate::config::id());
         private_dir(&temporary).await?;
         let result = self
-            .build(&temporary, archives, &inputs, policy, stop)
+            .build(&temporary, archives, &inputs, limit, policy, stop)
             .await;
         if let Err(error) = result {
             let _ = tokio::fs::remove_dir_all(&temporary).await;
@@ -319,25 +323,57 @@ impl Bases {
         temporary: &Path,
         archives: &[Archive],
         inputs: &Inputs,
+        limit: u64,
         policy: &storage::policy::Policy,
         stop: &CancellationToken,
     ) -> Result<()> {
         let contents = temporary.join("contents");
+        #[cfg(test)]
+        if let Some(entered) = &self.build_entered {
+            entered.notify_one();
+            stop.cancelled().await;
+            return Err(Error::unavailable("Native base preparation stopped."));
+        }
+        let filesystem = workspace::filesystem(&self.state)?;
+        let unit = filesystem.f_frsize.max(filesystem.f_bsize).max(4096);
+        let admission = std::sync::Arc::new(std::sync::Mutex::new(super::ingress::Admission::new(
+            &self.data,
+            &self.state,
+            temporary,
+            &self.state,
+            limit,
+            policy,
+        )?));
+        admission
+            .lock()
+            .map_err(Error::internal)?
+            .admit(unit.saturating_add(1024))?;
         for name in ["home", "output", "workspaces"] {
+            admission
+                .lock()
+                .map_err(Error::internal)?
+                .admit(unit.saturating_add(1024))?;
             private_dir(&contents.join(name)).await?;
         }
         for archive in archives {
-            crate::project_archives::extract_cached(
+            let admission = admission.clone();
+            crate::project_archives::extract_cached_checked(
                 &self.data,
                 archive,
                 &contents.join("workspaces").join(&archive.project_id),
                 stop,
+                unit,
+                move |bytes| admission.lock().map_err(Error::internal)?.admit(bytes),
             )
             .await?;
         }
+        admission
+            .lock()
+            .map_err(Error::internal)?
+            .admit(unit.saturating_add(1024))?;
         atomic_write(&contents.join(".cairn-seed-complete"), b"native-base-v1").await?;
         workspace::own_tree_with_stop(&contents, inputs.uid, inputs.gid, stop).await?;
-        policy.validate().map_err(Error::bad)?;
+        admission.lock().map_err(Error::internal)?.admit(0)?;
         super::block::sync(&contents).await?;
 
         Ok(())
@@ -810,6 +846,7 @@ mod payload_size_tests {
             data: fixture.path().join("data"),
             state: fixture.path().join("state"),
             identity: (unsafe { libc::geteuid() }, unsafe { libc::getegid() }),
+            build_entered: None,
         };
         let archive = Archive {
             project_id: crate::config::id(),
@@ -880,6 +917,7 @@ mod payload_size_tests {
             data: fixture.path().join("data"),
             state: fixture.path().join("state"),
             identity: (unsafe { libc::geteuid() }, unsafe { libc::getegid() }),
+            build_entered: None,
         };
         let archive = Archive {
             project_id: crate::config::id(),

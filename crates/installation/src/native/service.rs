@@ -404,6 +404,8 @@ impl Controller {
             data: self.data.clone(),
             state: self.state.clone(),
             identity: (self.identity.uid, self.identity.gid),
+            #[cfg(test)]
+            build_entered: None,
         }
     }
 
@@ -751,7 +753,10 @@ impl Controller {
                     let mut storage_close = StorageClose::new(live_access);
                     loop {
                         let result = storage_close
-                            .finish(async { mounted.mount.lock().await.close().await })
+                            .finish(async {
+                                let _ingress = mounted.ingress.lock().await;
+                                mounted.mount.lock().await.close().await
+                            })
                             .await;
                         match result {
                             Ok(completion) => {
@@ -1158,6 +1163,80 @@ impl Controller {
             .await;
     }
 
+    async fn prepare_files(
+        &self,
+        plan: Value,
+        identity: super::identity::Identity,
+        data: PathBuf,
+        mounted: Arc<block::Handle>,
+        trace: bootstrap::Trace,
+        stop: CancellationToken,
+    ) -> Result<Vec<super::home::Binding>> {
+        let controller = self.clone();
+        let ingress = mounted.ingress.clone().lock_owned().await;
+        super::ingress::write((mounted.clone(), ingress), async move {
+            let _mounted = mounted.mount.lock().await;
+            let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
+            let admission = super::ingress::Admission::new(
+                &controller.data,
+                &controller.state,
+                &data,
+                &workspace::data_root(&controller.state),
+                controller.disk_limit().await?,
+                &policy,
+            )?;
+            let check = std::sync::Arc::new(std::sync::Mutex::new(admission));
+            let copied = check.clone();
+            let admit = std::sync::Arc::new(std::sync::Mutex::new(move |bytes| {
+                if stop.is_cancelled() {
+                    return Err(Error::unavailable("Native preparation stopped."));
+                }
+                copied.lock().map_err(Error::internal)?.admit(bytes)
+            }));
+            trace.phase(Phase::FilesystemInitialize);
+            super::block::initialize_admitted(
+                &controller.state,
+                text(&plan, "runId"),
+                &plan,
+                controller
+                    .disk_budget(&plan)
+                    .min(controller.disk_growth().await?),
+                admit,
+            )
+            .await?;
+            trace.phase(Phase::TemporaryPrepare);
+            let temporary = block::temporary(&controller.state, text(&plan, "runId")).await?;
+            if temporary.exists() {
+                tokio::fs::remove_dir_all(&temporary).await?;
+            }
+            check.lock().map_err(Error::internal)?.admit(5120)?;
+            private_dir(&temporary).await?;
+            workspace::own_tree(&temporary, identity.uid(), identity.gid()).await?;
+            let stage = controller.data.join("runs").join(text(&plan, "runId"));
+            let bindings = super::home::prepare_for_identity_admitted(
+                &stage.join("home"),
+                &data,
+                &identity,
+                &trace,
+                &mut |bytes| check.lock().map_err(Error::internal)?.admit(bytes),
+            )
+            .await?;
+            let view = block::view(&controller.state, text(&plan, "runId")).await?;
+            let docker_data = view.docker_data()?;
+            check.lock().map_err(Error::internal)?.admit(5120)?;
+            tokio::fs::create_dir_all(&docker_data).await?;
+            std::os::unix::fs::lchown(
+                &docker_data,
+                Some(identity.root_uid),
+                Some(identity.root_gid),
+            )?;
+            tokio::fs::set_permissions(&docker_data, std::fs::Permissions::from_mode(0o700))
+                .await?;
+            Ok(bindings)
+        })
+        .await
+    }
+
     async fn execute(
         &self,
         id: &str,
@@ -1186,10 +1265,11 @@ impl Controller {
         let (disk_owner, from_base, mounted) = self
             .mount_after_release_observed(id, plan, &stop, DISK_RELEASE_WAIT, &trace)
             .await?;
-        self.mounted.lock().await.insert(
-            text(plan, "runId").to_owned(),
-            Arc::new(block::Handle::new(mounted)),
-        );
+        let mounted = Arc::new(block::Handle::new(mounted));
+        self.mounted
+            .lock()
+            .await
+            .insert(text(plan, "runId").to_owned(), mounted.clone());
         if stop.is_cancelled() {
             return Ok(143);
         }
@@ -1201,35 +1281,19 @@ impl Controller {
         }
         let view = block::view(&self.state, text(plan, "runId")).await?;
         let data = view.filesystems[0].clone();
-        trace.phase(Phase::FilesystemInitialize);
-        block::initialize(
-            &self.state,
-            text(plan, "runId"),
-            plan,
-            self.disk_budget(plan).min(self.disk_growth().await?),
-        )
-        .await?;
-        super::bases::release_pin(
-            &self.data.join("runs").join(text(plan, "runId")),
-            text(plan, "id"),
-        )
-        .await?;
-        if from_base || plan.get("nativeProjectBase").is_some() {
-            self.bases()
-                .trim(super::bases::cache_limit(self.disk_limit().await?), 0, None)
-                .await?;
-        }
-        trace.phase(Phase::TemporaryPrepare);
-        let temporary = block::temporary(&self.state, text(plan, "runId")).await?;
-        if temporary.exists() {
-            tokio::fs::remove_dir_all(&temporary).await?;
-        }
-        private_dir(&temporary).await?;
-        workspace::own_tree(&temporary, identity.uid(), identity.gid()).await?;
+        let bindings = self
+            .prepare_files(
+                plan.clone(),
+                identity.clone(),
+                data.clone(),
+                mounted,
+                trace.clone(),
+                stop.clone(),
+            )
+            .await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
-        let bindings =
-            super::home::prepare_for_identity(&stage.join("home"), &data, &identity, &trace)
-                .await?;
+        let temporary = block::temporary(&self.state, text(plan, "runId")).await?;
+        let docker_data = view.docker_data()?;
         // Keep the existing prepared-base admission marker. The authoritative
         // ownership mapping is stored inside the local filesystem.
         atomic_write(
@@ -1238,16 +1302,6 @@ impl Controller {
         )
         .await?;
         trace.phase(Phase::RuntimePrepare);
-        let docker_data = view.docker_data()?;
-        // Only namespace root may access raw daemon metadata. Engine access is
-        // exclusively through the mandatory authorization plugin.
-        tokio::fs::create_dir_all(&docker_data).await?;
-        std::os::unix::fs::lchown(
-            &docker_data,
-            Some(identity.root_uid),
-            Some(identity.root_gid),
-        )?;
-        tokio::fs::set_permissions(&docker_data, std::fs::Permissions::from_mode(0o700)).await?;
         let runtime = root.join("docker-runtime");
         if runtime.exists() {
             tokio::fs::remove_dir_all(&runtime).await?;
@@ -1262,6 +1316,16 @@ impl Controller {
             return Err(Error::conflict(
                 "Native preparation exceeds the shared node disk budget; local work is retained.",
             ));
+        }
+        super::bases::release_pin(
+            &self.data.join("runs").join(text(plan, "runId")),
+            text(plan, "id"),
+        )
+        .await?;
+        if from_base || plan.get("nativeProjectBase").is_some() {
+            self.bases()
+                .trim(super::bases::cache_limit(self.disk_limit().await?), 0, None)
+                .await?;
         }
         trace.phase(Phase::RuntimePrepare);
         let container = self.state.join("roots").join(id);
@@ -1695,7 +1759,7 @@ impl Controller {
 
     /// Admission is global before it is attempt-scoped: a queued pool waiter
     /// must never retain the guard needed by an unrelated physical close.
-    async fn with_live_access<T, F, Fut>(
+    async fn with_live_access<T: Send + 'static, F, Fut>(
         &self,
         id: &str,
         requested_run: Value,
@@ -1703,8 +1767,8 @@ impl Controller {
         operation: F,
     ) -> Result<T>
     where
-        F: FnOnce(Self, String, CancellationToken) -> Fut + Send,
-        Fut: std::future::Future<Output = Result<T>> + Send,
+        F: FnOnce(Self, String, CancellationToken) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + Send + 'static,
     {
         uuid(id)?;
         let pool = disk::lock(&self.state).await?;
@@ -1732,12 +1796,7 @@ impl Controller {
             }
             (attempt.run.clone(), attempt.stop.clone())
         };
-        // The existing non-GET handler owns this whole route in its task. A
-        // disconnected caller cannot drop these guards during a blocking open
-        // or buffered write; no second operation task is necessary.
-        let _pool = pool;
-        let _admitted = admitted;
-        operation(self.clone(), run, stop).await
+        super::ingress::write((pool, admitted), operation(self.clone(), run, stop)).await
     }
 
     async fn artifact_snapshot(
@@ -1829,10 +1888,25 @@ impl Controller {
                     let staged = tempfile::tempdir_in(data)?;
                     let received = staged.path().join("project");
                     let remaining = block::free_bytes(data)?;
-                    workspace::copy(
+                    let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
+                    let mut admission = super::ingress::Admission::new(
+                        &controller.data,
+                        &controller.state,
+                        staged.path(),
+                        &workspace::data_root(&controller.state),
+                        controller.disk_limit().await?,
+                        &policy,
+                    )?;
+                    workspace::copy_admitted(
                         &source,
                         &received,
                         remaining.min(controller.disk_growth().await?),
+                        &mut |bytes| {
+                            if stop.is_cancelled() {
+                                return Err(Error::conflict("Native project import stopped."));
+                            }
+                            admission.admit(bytes)
+                        },
                     )
                     .await?;
                     if stop.is_cancelled() {

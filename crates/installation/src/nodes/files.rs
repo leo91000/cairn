@@ -152,14 +152,30 @@ pub async fn receive(
 pub(crate) async fn receive_with_reclaim<F, Fut>(
     reader: &mut (impl AsyncBufRead + Unpin),
     root: &Path,
-    mut budget: u64,
+    budget: u64,
     maximum: u64,
-    mut reclaim: F,
+    reclaim: F,
 ) -> Result<()>
 where
     F: FnMut(u64) -> Fut + Send,
     Fut: std::future::Future<Output = Result<u64>> + Send,
 {
+    receive_admitted(reader, root, budget, maximum, reclaim, &mut |_| Ok(())).await
+}
+
+pub(crate) async fn receive_admitted<F, Fut>(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    root: &Path,
+    mut budget: u64,
+    maximum: u64,
+    mut reclaim: F,
+    admit: &mut (impl FnMut(u64) -> Result<()> + Send),
+) -> Result<()>
+where
+    F: FnMut(u64) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<u64>> + Send,
+{
+    admit(5120)?;
     crate::skills::private_dir(root).await?;
     let mut used = 0u64;
     let mut entries = 0u64;
@@ -180,6 +196,7 @@ where
         check_parents(root, relative).await?;
         let target = root.join(relative);
         let mode = entry["mode"].as_u64().unwrap_or(0o600) as u32 & 0o777;
+        admit(5120)?;
         match text(&entry, "kind") {
             "directory" => {
                 tokio::fs::create_dir(&target).await?;
@@ -207,7 +224,7 @@ where
                         return Err(Error::bad("Workspace exceeds node disk budget."));
                     }
                 }
-                receive_file(reader, &target, size, mode).await?;
+                receive_file(reader, &target, size, mode, admit).await?;
             }
             _ => return Err(Error::bad("Invalid workspace entry.")),
         }
@@ -220,6 +237,7 @@ async fn receive_file(
     target: &Path,
     size: u64,
     mode: u32,
+    admit: &mut (impl FnMut(u64) -> Result<()> + Send),
 ) -> Result<()> {
     let mut file = tokio::fs::OpenOptions::new()
         .create_new(true)
@@ -228,7 +246,7 @@ async fn receive_file(
         .custom_flags(libc::O_NOFOLLOW)
         .open(target)
         .await?;
-    receive_contents(reader, &mut file, size).await?;
+    receive_contents_admitted(reader, &mut file, size, admit).await?;
 
     // Creation applies the node's umask; restore the transmitted mode on the open file.
     file.set_permissions(std::fs::Permissions::from_mode(mode))
@@ -237,10 +255,20 @@ async fn receive_file(
     Ok(())
 }
 
+#[cfg(test)]
 async fn receive_contents(
     reader: &mut (impl AsyncBufRead + Unpin),
     file: &mut (impl tokio::io::AsyncWrite + Unpin),
+    left: u64,
+) -> Result<()> {
+    receive_contents_admitted(reader, file, left, &mut |_| Ok(())).await
+}
+
+async fn receive_contents_admitted(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    file: &mut (impl tokio::io::AsyncWrite + Unpin),
     mut left: u64,
+    admit: &mut (impl FnMut(u64) -> Result<()> + Send),
 ) -> Result<()> {
     let received = async {
         while left > 0 {
@@ -253,6 +281,7 @@ async fn receive_contents(
             if bytes.is_empty() || bytes.len() > CHUNK || bytes.len() as u64 > left {
                 return Err(Error::bad("Invalid workspace chunk size."));
             }
+            admit(bytes.len() as u64)?;
             file.write_all(&bytes).await?;
             left -= bytes.len() as u64;
         }
