@@ -98,11 +98,13 @@ pub fn daemon(args: &[String]) -> Result<()> {
                 std::ptr::null(),
                 c"/".as_ptr(),
                 std::ptr::null(),
-                libc::MS_REC | libc::MS_PRIVATE,
+                // Receive host unmounts for inherited views of other runs'
+                // disks, while preventing daemon mounts from reaching out.
+                libc::MS_REC | libc::MS_SLAVE,
                 std::ptr::null(),
             )
         },
-        "make mount propagation private",
+        "isolate outgoing mount propagation",
     )?;
     // Bind sources must belong to the newly cloned mount namespace. FDs
     // opened before unshare still refer to the ancestor's mount objects.

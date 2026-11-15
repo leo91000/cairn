@@ -19,6 +19,22 @@ import urllib.request
 import uuid
 
 
+def bind_directory(descriptor, target):
+    # util-linux otherwise resolves /proc/self/fd back to its old pathname,
+    # which may now refer to the empty tmpfs hiding the retained directory.
+    subprocess.run(
+        ["mount", "--no-canonicalize", "--bind", "/proc/self/fd/" + str(descriptor), target],
+        pass_fds=(descriptor,),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    retained, restored = os.fstat(descriptor), os.stat(target)
+    if (retained.st_dev, retained.st_ino) != (restored.st_dev, restored.st_ino):
+        raise AssertionError("Retained directory was not restored at " + str(target))
+
+
 def inside(arguments):
     attempt, binary, archive, go, tools = arguments
     assert Path("/proc/self/ns/mnt").stat().st_ino != Path("/proc/1/ns/mnt").stat().st_ino
@@ -52,24 +68,14 @@ def inside(arguments):
     command("mount", "-t", "sysfs", "sysfs", "/sys")
     mount("/sys/fs")
     Path("/sys/fs/cgroup").mkdir()
-    command(
-        "mount", "--bind", "/proc/self/fd/" + str(cgroups), "/sys/fs/cgroup", pass_fds=(cgroups,)
-    )
+    bind_directory(cgroups, "/sys/fs/cgroup")
     os.close(cgroups)
     Path("/opt/cairn-docker").mkdir()
-    command(
-        "mount", "--bind", "/proc/self/fd/" + str(docker), "/opt/cairn-docker", pass_fds=(docker,)
-    )
+    bind_directory(docker, "/opt/cairn-docker")
     os.close(docker)
     if alternatives is not None:
         Path("/etc/alternatives").mkdir()
-        command(
-            "mount",
-            "--bind",
-            "/proc/self/fd/" + str(alternatives),
-            "/etc/alternatives",
-            pass_fds=(alternatives,),
-        )
+        bind_directory(alternatives, "/etc/alternatives")
         os.close(alternatives)
     for directory in ["/run/cairn-docker", "/run/docker/plugins"]:
         Path(directory).mkdir(parents=True)
@@ -93,6 +99,13 @@ def inside(arguments):
     )
     Path("/run/cairn-docker/daemon.json").write_text('{"storage-driver":"vfs"}')
     Path("/run/rootfs.tar").write_bytes(archive_bytes)
+    # Model another run already mounted when this daemon starts. Only this
+    # synthetic /var/lib tree is shared, never the real host mount tree.
+    command("mount", "--make-shared", "/var/lib")
+    foreign = Path("/var/lib/foreign-run")
+    foreign.mkdir()
+    mount(str(foreign))
+    (foreign / "mounted").touch()
     command("ip", "link", "set", "lo", "up")
     firewall = command("iptables-save")
     links = command("ip", "-json", "link", "show")
@@ -101,6 +114,11 @@ def inside(arguments):
     try:
         parent = command(binary, "native-administrator-docker-ready")
         assert resolver.read_bytes() == resolver_before, "Docker changed the outer resolver"
+        daemon_pid = int(Path("/run/cairn-docker/dockerd.pid").read_text())
+        inherited = Path("/proc", str(daemon_pid), "root/var/lib/foreign-run/mounted")
+        assert inherited.exists(), "Foreign mount was not inherited before the test"
+        command("umount", str(foreign))
+        assert not inherited.exists(), "Docker retained another run's unmounted filesystem"
         client = "/opt/cairn-docker/bin/docker"
         env = dict(
             PATH="/usr/sbin:/usr/bin:/sbin:/bin",
@@ -194,7 +212,7 @@ def inside(arguments):
         reserve.bind(("127.0.0.1", port))
         reserve.close()
         print(
-            "PASS cgroup ancestry, TCP/UDP publication, private firewall/interfaces, freeze/thaw, natural exit, graceful stop and port release",
+            "PASS cgroup ancestry, TCP/UDP publication, private firewall/interfaces, foreign unmount propagation, freeze/thaw, natural exit, graceful stop and port release",
             flush=True,
         )
     except BaseException:

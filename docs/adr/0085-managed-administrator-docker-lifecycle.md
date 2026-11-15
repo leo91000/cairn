@@ -29,8 +29,11 @@ configures a named docker-container Buildx builder with no restart policy,
 private cgroup namespace, the current attempt parent and default image loading.
 Its requests pass the ordinary container API boundary. Pin the BuildKit image by
 digest so builder image verification does not require the refused embedded API.
-Run dockerd in private mount/network namespaces established before runtime
-threads. A private `/run` preserves only this attempt's Docker runtime/plugin
+Run dockerd in separate mount/network namespaces established before runtime
+threads. Mount propagation is recursively slave: daemon mounts cannot propagate
+out, while host unmounts retire inherited copies of other runs' filesystems.
+Making the whole tree private would pin those disks until this daemon exits.
+A private `/run` preserves only this attempt's Docker runtime/plugin
 bindings; it hides host Docker/containerd/DBus sockets, including firewalld.
 Record the host resolver's canonical target before hiding `/run`. For a target
 under `/run`, create only a private placeholder before binding the slirp resolver;
@@ -78,6 +81,7 @@ escaped legacy scope or a blocked kernel deletion.
 Qualification extends the disposable native runtime fixture with administrator
 containers that write to a bind of the run disk: verify service cgroup ancestry,
 resource charging, storage-pressure freeze/thaw, termination before unmount,
+retiring an earlier run's disk while a later administrator daemon stays live,
 reopening without implicit restart and return to the protected store. Unit tests
 cover saved metadata rewriting, lifecycle authorization and private-socket stop
 requests. Production services and disks are never used to reproduce the kernel

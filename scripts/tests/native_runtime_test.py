@@ -1112,8 +1112,7 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 administrator_parallel = start(docker_other, lease=300000, docker_script=administrator_script)
                 assert urllib.request.urlopen('http://127.0.0.1:' + managed_container['port'], timeout=5).read() == b'managed'
                 assert host_network_state() == host_network, 'Managed Docker changed host firewall or forwarding policy.'
-                api('/runs/' + administrator_parallel, method='DELETE')
-                fenced(docker_other, administrator_parallel)
+                parallel_container = json.loads((managed(docker_other) / 'administrator-docker.json').read_text())
                 writes = managed(docker_run) / 'docker-writes'
                 eventually(lambda: writes.exists() and writes.stat().st_size > 0)
                 pressure_policy = dict(contexts[docker_run]['policy'], reserveMiB=16 * 1024 * 1024)
@@ -1133,6 +1132,11 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 api('/runs/' + administrator_docker, method='DELETE')
                 fenced(docker_run, administrator_docker)
                 assert not Path('/proc', str(managed_pid)).exists(), 'Administrator Docker survived suspension.'
+                # Retire the earlier disk while the later-started daemon stays
+                # alive. A recursively private clone would retain its mount.
+                assert urllib.request.urlopen('http://127.0.0.1:' + parallel_container['port'], timeout=5).read() == b'managed'
+                api('/runs/' + administrator_parallel, method='DELETE')
+                fenced(docker_other, administrator_parallel)
                 # Reopen the same store: the prior container must remain stopped.
                 administrator_docker = start(docker_run, long=False, lease=300000, docker_script=administrator_script)
                 fenced(docker_run, administrator_docker)

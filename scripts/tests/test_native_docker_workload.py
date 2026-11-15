@@ -74,6 +74,21 @@ class ComposeReadinessTests(unittest.TestCase):
 
 
 class AdministratorNetworkQualificationTests(unittest.TestCase):
+    def test_retained_bind_rejects_a_replaced_directory_after_mount_success(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='native-bind-') as temporary:
+            original, replacement = Path(temporary) / 'original', Path(temporary) / 'replacement'
+            original.mkdir()
+            replacement.mkdir()
+            descriptor = os.open(original, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with patch.object(network.subprocess, 'run'):
+                    with self.assertRaisesRegex(AssertionError, 'Retained directory was not restored'):
+                        network.bind_directory(descriptor, str(replacement))
+            finally:
+                os.close(descriptor)
+
     def test_owned_systemd_unit_has_explicit_sbin_tool_lookup(self):
         arguments = network.unit_command('fixture.service', 'attempt', '/candidate/cairn',
                                          '/candidate/rootfs.tar', '/candidate/go', '/candidate/tools')
