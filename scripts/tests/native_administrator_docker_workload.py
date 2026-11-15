@@ -63,15 +63,9 @@ def main():
         "300",
         succeeds=False,
     )
-    command(
-        "docker",
-        "rm",
-        "-f",
-        "cairn-held",
-        succeeds=(
-            False if not command("docker", "ps", "-aq", "--filter=name=^/cairn-held$") else True
-        ),
-    )
+    previous = command("docker", "ps", "-aq", "--filter=name=^/cairn-held$").splitlines()
+    if previous:
+        command("docker", "rm", "-f", *previous)
     container = command(
         "docker",
         "run",
