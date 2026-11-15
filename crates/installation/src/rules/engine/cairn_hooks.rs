@@ -162,8 +162,8 @@ fn listeners(db: &Db<'_>, creator: &str, hook: CairnHookKind) -> Result<Vec<Stri
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// The agent's last message of a turn and the deliverables it published. A retried turn
-/// answers with its last attempt.
+/// The turn's final answer or proposed approach, and its deliverables. A Plan
+/// proposal takes precedence over surrounding commentary. Retries use their last attempt.
 fn reply(db: &Db<'_>, run: &str, started: i64, end: i64) -> Result<Json> {
     let answered: i64 = db.0.query_row(
         "SELECT coalesce(max(id),?2) FROM events WHERE run_id=?1 AND type='retry.scheduled' AND id>?2 AND id<?3",
@@ -174,7 +174,9 @@ fn reply(db: &Db<'_>, run: &str, started: i64, end: i64) -> Result<Json> {
         .0
         .query_row(
             "SELECT json_extract(payload,'$.item.text') FROM events WHERE run_id=?1 AND id>?2 AND id<?3 \
-             AND json_extract(payload,'$.item.type')='agent_message' ORDER BY id DESC LIMIT 1",
+             AND json_extract(payload,'$.item.type') IN ('agent_message','proposed_plan') \
+             AND json_type(payload,'$.item.text')='text' AND length(json_extract(payload,'$.item.text'))>0 \
+             ORDER BY (json_extract(payload,'$.item.type')='proposed_plan') DESC,id DESC LIMIT 1",
             params![run, answered, end],
             |row| row.get(0),
         )

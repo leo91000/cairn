@@ -2675,6 +2675,143 @@ async fn question_origin_follows_event_order_even_with_identical_or_reversed_tim
 }
 
 #[tokio::test]
+async fn reply_ready_includes_the_proposed_plan_of_a_human_plan_turn() {
+    use common::run_fixture::RunFixture;
+
+    for commentary in [false, true] {
+        let f = granted().await;
+        common::managed_codex_home(&f.s.config.home);
+        let (_, settings) = call(&f, OWNER, "GET", "/api/settings/chat-plan", Value::Null).await;
+        let (status, enabled) = call(
+            &f,
+            OWNER,
+            "PUT",
+            "/api/settings/chat-plan",
+            json!({
+                "enabled": true, "revision": settings["revision"],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{enabled}");
+        rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+        let reply = rule_on(
+            &f,
+            OWNER,
+            cairn("replyReady"),
+            json!([remember("reply", "reply", "text")]),
+            limits(),
+        )
+        .await;
+        emit(&f, "start", message("alice", "hello")).await;
+        engine::tick(&f.s).await.unwrap();
+        let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+        let run = launched(&f, &chat).await;
+        fixture::running_conversation(&f.s, &chat).await;
+        replied(
+            &f,
+            &run,
+            &first_message(&f, &chat).await,
+            "The first answer",
+        )
+        .await;
+        engine::tick(&f.s).await.unwrap();
+        set_status(&f, &run, cairn_contracts::RunStatus::Succeeded).await;
+        f.s.store
+            .change_run_fixture(
+                &run,
+                json!({
+                    "sessionId": "plan-session", "workspace": "/saved/workspace",
+                }),
+            )
+            .await
+            .unwrap();
+        f.s.store.save_checkpoint_boundary(&run, json!({
+            "completed": true, "launched": true, "prepared": { "workspace": "/saved/workspace" },
+        })).await.unwrap();
+        let message = uuid::Uuid::new_v4().to_string();
+        let (status, sent) = call(
+            &f,
+            OWNER,
+            "POST",
+            &format!("/api/chats/{chat}/messages"),
+            json!({
+                "message": { "id": message, "text": "Plan the next steps", "plan": true },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        assert_eq!(launched(&f, &chat).await, run);
+        assert_eq!(
+            f.s.store.run(&run).await.unwrap()["chatExecution"]["plan"],
+            true
+        );
+        event(
+            &f,
+            &run,
+            "chat.user",
+            "",
+            Some(json!({ "messageId": message })),
+        )
+        .await;
+        event(&f, &run, "turn.started", "", None).await;
+        if commentary {
+            event(
+                &f,
+                &run,
+                "item.completed",
+                "Preparing the approach.",
+                Some(json!({
+                    "item": { "type": "agent_message", "text": "Preparing the approach." },
+                })),
+            )
+            .await;
+        }
+        let plan = "First inspect the existing flow, then propose a reversible change.";
+        let item = cairn_installation::chat_process::chat_item(
+            json!({ "type": "plan", "text": plan }),
+            true,
+        );
+        assert_eq!(item["type"], "proposed_plan");
+        event(
+            &f,
+            &run,
+            "item.completed",
+            plan,
+            Some(json!({ "item": item })),
+        )
+        .await;
+        // An empty lifecycle item contributes no visible text and must not
+        // mask the complete approach, regardless of surrounding commentary.
+        event(
+            &f,
+            &run,
+            "item.started",
+            "",
+            Some(json!({
+                "item": { "type": "proposed_plan", "text": "" },
+            })),
+        )
+        .await;
+        if commentary {
+            event(
+                &f,
+                &run,
+                "item.completed",
+                "Ready for your approval.",
+                Some(json!({
+                    "item": { "type": "agent_message", "text": "Ready for your approval." },
+                })),
+            )
+            .await;
+        }
+        event(&f, &run, "turn.completed", "", None).await;
+        engine::tick(&f.s).await.unwrap();
+        assert_eq!(values(&f, &reply).await["reply"], plan);
+        assert_eq!(depth_of(&f, &reply).await, [1, 0]);
+    }
+}
+
+#[tokio::test]
 async fn native_conversation_actions_require_authority_on_the_runs_actual_node() {
     use common::run_fixture::RunFixture;
 
