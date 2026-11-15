@@ -685,6 +685,7 @@ constructor(
             preferences.selectInstallation(current.origin, accountId, installation.id)
             val next =
                 withContext(Dispatchers.IO) {
+                    ruleDrafts.sweep()
                     CairnApi(account.origin, vault, installationId = installation.id).also {
                         it.csrf = account.csrf
                     }

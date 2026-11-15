@@ -319,6 +319,18 @@ fun JsonElement.moved(path: String, offset: Int): JsonElement {
     return with(container, JsonArray(items))
 }
 
+private fun uniqueLoopItemName(definition: JsonElement): String {
+    val taken =
+        allNodes(definition.list("steps"))
+            .filter { it.text("type") == "forEach" }
+            .map { it.text("itemName") }
+            .toSet()
+    var name = "item"
+    var index = 2
+    while (name in taken) name = "item${index++}"
+    return name
+}
+
 private fun allNodes(nodes: List<JsonElement>): List<JsonElement> = nodes.flatMap { node ->
     listOf(node) +
         when (node.text("type")) {
@@ -386,7 +398,7 @@ fun newRuleStep(definition: JsonElement, kind: String, catalog: HookRuleCatalog?
                         put("expression", "payload.")
                     },
                 )
-                put("itemName", "item")
+                put("itemName", uniqueLoopItemName(definition))
                 put("body", JsonArray(emptyList()))
             }
         "callTool" -> {
@@ -628,7 +640,7 @@ fun ruleVariablesAt(
                 "Le résultat de « ${node.text("id")} ».",
             )
         } +
-        loops +
+        loops.asReversed().distinctBy { it.expression } +
         remembered +
         (catalog?.variables?.map {
             RuleVariable("Contexte", it.name, it.name, "valeur", it.description)
@@ -845,6 +857,14 @@ fun comparisonExpects(left: JsonElement?, operator: String, variables: List<Rule
                 else -> "value"
             }
         else "string"
+    if (
+        (type == null ||
+            type == "value" ||
+            type == "valeur" ||
+            type == "result" ||
+            type == "résultat") && operator in setOf("greaterThan", "lessThan")
+    )
+        return "number"
     return when (type) {
         "integer",
         "number" -> "number"

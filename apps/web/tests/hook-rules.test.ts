@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { reactive } from 'vue'
 import {
   comparisonExpects,
+  newStep,
   nodeAt,
   pathOfNode,
   ruleConditionDepth,
@@ -72,6 +73,23 @@ describe('visual rule editing', () => {
     const after = withInserted(tree, '/steps', 1, { ...action, id: 'after' })
     expect(variablesAt(after, '/steps/0/otherwise/0', null).map(value => value.expression)).not.toContain('steps.remember')
     expect(variablesAt(after, '/steps/1', null).map(value => value.expression)).toEqual(expect.arrayContaining(['steps.remember', 'steps.fallback']))
+  })
+  it('gives nested loops distinct item names and offers each scoped variable once', () => {
+    const first = withInserted(definition(), '/steps', 1, newStep(definition(), 'forEach', null))
+    const inner = newStep(first, 'forEach', null)
+    const nested = withInserted(first, '/steps/1/body', 0, inner)
+    expect(first.steps[1].type === 'forEach' && first.steps[1].itemName).toBe('item')
+    expect(inner.type === 'forEach' && inner.itemName).toBe('item2')
+    const legacy = structuredClone(nested)
+    if (legacy.steps[1].type === 'forEach' && legacy.steps[1].body[0].type === 'forEach')
+      legacy.steps[1].body[0].itemName = 'item'
+    expect(variablesAt(legacy, '/steps/1/body/0/body/0', null).filter(value => value.expression === 'item')).toHaveLength(1)
+  })
+  it('uses numbers for ordering a result or formula whose type is unknown', () => {
+    for (const expression of ['steps.fetch.count', 'size(payload.items)']) {
+      for (const operator of ['greaterThan', 'lessThan'] as const)
+        expect(comparisonExpects({ type: 'formula', expression }, operator, [])).toBe('number')
+    }
   })
   it('resolves input definitions and typed enum defaults for catalog-driven forms', () => {
     const root = { $defs: { options: { type: ['object', 'null'], properties: { notify: { type: 'boolean' } } } } }

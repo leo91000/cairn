@@ -82,6 +82,21 @@ abstract class RuleDraftStoreCases {
     }
 
     @Test
+    fun abandonedSnapshotsAreBoundedAndExpiredSnapshotsAreSweptOnStartup() {
+        val store = RuleDraftStore(root)
+        repeat(40) { index ->
+            val state =
+                store.fresh("account", "editor-$index").apply { draft.value = "draft-$index" }
+            with(store.saver("account", "editor-$index")) { saverScope.save(state) }
+        }
+        assertEquals(32, root.listFiles()!!.size)
+        val unrelated = File(root, "unrecognized").apply { writeText("preserve") }
+        root.listFiles()!!.filter { it != unrelated }.forEach { it.setLastModified(1) }
+        RuleDraftStore(root)
+        assertEquals(listOf(unrelated), root.listFiles()!!.toList())
+    }
+
+    @Test
     fun clearingTheStoreCannotResurrectAnOldProvider() {
         val store = RuleDraftStore(root)
         val state = store.fresh("account", "editor").apply { draft.value = "discarded" }

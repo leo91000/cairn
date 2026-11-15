@@ -935,6 +935,8 @@ share the 1,000-item and 16 MiB event-data limits across unresolved admissions a
 active triggerings. The server grants one action at a time per rule and shares
 executor slots between rules after each action. There is no platform difference.
 
+Rule editor recovery on Android retains at most 32 encrypted snapshots for seven days, swept on store creation and editor scope changes. Snapshot keys and authenticated encryption bind the account, installation and editor session. Web recovery uses the current editor session draft.
+
 ## Background job waits
 
 Web and Android identify a `job_finished` wait as background work and show its

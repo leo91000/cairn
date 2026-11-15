@@ -41,6 +41,44 @@ class RuleDraftStore(
         }
     private var generation = 0L
     private val maxBytes = 1024 * 1024
+    private val maxSnapshots = 32
+    private val maxAgeMillis = 7L * 24 * 60 * 60 * 1000
+    private val snapshotName = Regex("[0-9a-f]{64}(\\.bak|\\.new)?")
+
+    init {
+        sweep()
+    }
+
+    /**
+     * A saved-state token may survive process death, so retain recent snapshots with a fixed bound.
+     */
+    @Synchronized
+    fun sweep() {
+        runCatching { disk { prune() } }
+    }
+
+    private fun prune(keep: String? = null) {
+        val cutoff = System.currentTimeMillis() - maxAgeMillis
+        val groups =
+            root
+                .listFiles()
+                .orEmpty()
+                .filter { snapshotName.matches(it.name) }
+                .groupBy { it.name.take(64) }
+                .entries
+                .sortedWith(
+                    compareByDescending<Map.Entry<String, List<File>>> { it.key == keep }
+                        .thenByDescending { entry -> entry.value.maxOf { it.lastModified() } }
+                )
+        groups.forEachIndexed { index, entry ->
+            if (
+                entry.key != keep &&
+                    (index >= maxSnapshots || entry.value.all { it.lastModified() < cutoff })
+            ) {
+                AtomicFile(File(root, entry.key)).delete()
+            }
+        }
+    }
 
     private fun key(scope: String, session: String) =
         MessageDigest.getInstance("SHA-256")
@@ -96,6 +134,7 @@ class RuleDraftStore(
                 try {
                     output.write(encoded)
                     file.finishWrite(output)
+                    prune(key)
                 } catch (error: Exception) {
                     file.failWrite(output)
                     throw error
@@ -164,10 +203,7 @@ class RuleDraftStore(
         memory.clear()
         runCatching {
             disk {
-                root
-                    .listFiles()
-                    ?.filter { it.name.matches(Regex("[0-9a-f]{64}(\\.bak|\\.new)?")) }
-                    ?.forEach { it.delete() }
+                root.listFiles()?.filter { snapshotName.matches(it.name) }?.forEach { it.delete() }
             }
         }
     }
@@ -182,7 +218,10 @@ class RuleDraftStore(
     }
 
     companion object {
-        fun encrypted(context: Context): RuleDraftStore {
+        fun encrypted(
+            context: Context,
+            directory: File = File(context.noBackupFilesDir, "rule-drafts-v1"),
+        ): RuleDraftStore {
             fun key(): SecretKey {
                 val alias = "cairn.rule-drafts.v1"
                 val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -203,7 +242,7 @@ class RuleDraftStore(
                         .generateKey()
             }
             return RuleDraftStore(
-                File(context.noBackupFilesDir, "rule-drafts-v1"),
+                directory,
                 { scope, bytes ->
                     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                     cipher.init(Cipher.ENCRYPT_MODE, key())

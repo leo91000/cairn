@@ -40,9 +40,14 @@ const open = ref<string | null>(null)
 const detail = ref<HookRuleTriggering | null>(null)
 const now = ref(Date.now())
 const paged = ref(false)
+const paging = ref(false)
 let timer: ReturnType<typeof setInterval>
 
 async function load(more = false) {
+  if (paging.value)
+    return
+  if (more)
+    paging.value = true
   const asked = ++generation
   const ruleId = props.ruleId
   try {
@@ -58,10 +63,14 @@ async function load(more = false) {
     error.value = ''
   }
   catch (e) {
-    error.value = (e as Error).message
+    if (!disposed && asked === generation)
+      error.value = (e as Error).message
   }
   finally {
-    loading.value = false
+    if (asked === generation) {
+      loading.value = false
+      paging.value = false
+    }
   }
 }
 
@@ -103,6 +112,7 @@ watch(() => props.ruleId, () => {
   loading.value = true
   open.value = null
   paged.value = false
+  paging.value = false
   void load()
 })
 onMounted(() => {
@@ -112,7 +122,7 @@ onMounted(() => {
     if (!document.hidden) {
       if (open.value && detail.value && ['running', 'waiting', 'retrying'].includes(detail.value.status))
         void loadDetail(open.value)
-      else if (!open.value && !paged.value)
+      else if (!open.value && !paged.value && !paging.value)
         void load()
     }
   }, 5000)

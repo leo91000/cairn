@@ -299,6 +299,14 @@ export function uniqueId(definition: HookRuleDefinition, base: string) {
   }
 }
 
+function uniqueItemName(definition: HookRuleDefinition): string {
+  const taken = new Set(allNodes(definition.steps).filter(node => node.type === 'forEach').map(node => node.itemName))
+  let name = 'item'
+  for (let index = 2; taken.has(name); index++)
+    name = `item${index}`
+  return name
+}
+
 const idBases: Record<StepKind, string> = {
   callTool: 'call',
   startAgent: 'start',
@@ -332,7 +340,7 @@ export function newStep(definition: HookRuleDefinition, kind: StepKind, catalog:
         type: 'forEach',
         id,
         items: { type: 'formula', expression: 'payload.' },
-        itemName: 'item',
+        itemName: uniqueItemName(definition),
         body: [],
       }
     case 'callTool': {
@@ -541,7 +549,7 @@ function loopsAround(definition: HookRuleDefinition, path: string) {
     nodes = node?.[parts[index + 1]]
   }
 
-  return loops
+  return loops.reverse().filter((loop, index, all) => all.findIndex(other => other.name === loop.name) === index)
 }
 
 function rememberedNames(nodes: RuleNode[]): string[] {
@@ -615,6 +623,8 @@ export function comparisonExpects(left: RuleValue, operator: RuleOperator, varia
     : left.type === 'formula'
       ? variables.find(variable => variable.expression === left.expression || variable.expression === `payload.${left.expression}`)?.type
       : 'string'
+  if ((!type || type === 'value' || type === 'result') && ['greaterThan', 'lessThan'].includes(operator))
+    return 'number'
   return type === 'integer' || type === 'number' ? 'number' : type === 'boolean' ? 'boolean' : 'text'
 }
 

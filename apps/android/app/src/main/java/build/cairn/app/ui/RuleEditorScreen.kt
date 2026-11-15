@@ -21,8 +21,10 @@ import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleCatalog
 import build.cairn.contracts.HookRuleProblem
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
 private fun emptyRuleDefinition(
@@ -69,7 +71,7 @@ fun RuleEditorScreen(
     saved: (String) -> Unit,
     back: () -> Unit,
 ) {
-    val cacheScope = vm.api.cacheScope
+    val cacheScope = "${vm.api.cacheScope}:${state.session.account?.id.orEmpty()}"
     val draftSession =
         rememberSaveable(cacheScope, ruleId) { java.util.UUID.randomUUID().toString() }
     val retained =
@@ -81,6 +83,7 @@ fun RuleEditorScreen(
         ) {
             vm.ruleDrafts.fresh(cacheScope, draftSession)
         }
+    LaunchedEffect(cacheScope) { withContext(Dispatchers.IO) { vm.ruleDrafts.sweep() } }
     var draft by retained.draft
     var original by retained.original
     var revision by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }

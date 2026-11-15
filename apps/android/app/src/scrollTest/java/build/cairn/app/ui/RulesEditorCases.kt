@@ -52,6 +52,28 @@ abstract class RulesEditorCases {
     }
 
     @Test
+    fun nestedLoopsHaveUniqueNamesAndTheirVariablePickerDoesNotCrash() {
+        val empty = ruleObject("steps" to JsonArray(emptyList()))
+        val outer = newRuleStep(empty, "forEach", null)
+        val first = empty.inserted("/steps", 0, outer)
+        val inner = newRuleStep(first, "forEach", null)
+        assertEquals("item", outer.text("itemName"))
+        assertEquals("item2", inner.text("itemName"))
+        // Old drafts may already contain shadowed names; the innermost one wins.
+        val legacy =
+            first.inserted("/steps/0/body", 0, inner.patch("itemName" to JsonPrimitive("item")))
+        val variables = ruleVariablesAt(legacy, "/steps/0/body/0/body/0", null)
+        assertEquals(1, variables.count { it.expression == "item" })
+        var value by mutableStateOf(templateValue())
+        compose.setContent {
+            CairnTheme { RuleValueEditor("Message", value, variables, { value = it }) }
+        }
+        compose.onNodeWithText("+ Insérer une variable").performClick()
+        compose.onNodeWithText("Utiliser item").performClick()
+        compose.runOnIdle { assertEquals("{{item}}", value.text("text")) }
+    }
+
+    @Test
     fun variablePickerInsertsATemplateWithoutTypingAnExpression() {
         var value by mutableStateOf(templateValue("Bonjour "))
         compose.setContent {
@@ -178,6 +200,12 @@ abstract class RulesEditorCases {
                 RuleVariable("Événement", "payload.count", "count", "integer", ""),
                 RuleVariable("Événement", "payload.approved", "approved", "boolean", ""),
             )
+        for (expression in listOf("steps.fetch.count", "size(payload.items)")) {
+            for (operator in listOf("greaterThan", "lessThan")) assertEquals(
+                "number",
+                comparisonExpects(formulaRuleValue(expression), operator, emptyList()),
+            )
+        }
         val left = formulaRuleValue("payload.count")
         assertEquals("number", comparisonExpects(left, "greaterThan", variables))
         assertEquals(

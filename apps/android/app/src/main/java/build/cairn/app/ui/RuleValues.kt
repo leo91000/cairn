@@ -196,9 +196,12 @@ internal fun RuleValueEditor(
                 )
                 LazyColumn {
                     items(
-                        variables.filter {
-                            "${it.label} ${it.expression} ${it.description}".contains(search, true)
-                        },
+                        variables
+                            .distinctBy { "${it.group}:${it.expression}" }
+                            .filter {
+                                "${it.label} ${it.expression} ${it.description}"
+                                    .contains(search, true)
+                            },
                         key = { "${it.group}:${it.expression}" },
                     ) { variable ->
                         ListItem(
