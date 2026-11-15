@@ -1331,6 +1331,11 @@ mod tests {
             serde_json::to_vec(&budget).unwrap(),
         )
         .unwrap();
+        std::fs::write(
+            state.join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
         let pool = Pool::new(state, root.path().into(), CancellationToken::new(), 1)
             .await
             .unwrap();

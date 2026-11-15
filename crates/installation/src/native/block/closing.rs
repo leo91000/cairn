@@ -302,6 +302,11 @@ mod tests {
     async fn fenced_flush_consolidates_history_without_extending_the_task_allowance() {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().to_owned();
+        std::fs::write(
+            state.join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
         let (run, mut closing, operations, _workspace_owner) = fixture(&state, None).await;
         let volume = operations.volume.clone();
         let bytes = vec![9; 4096];

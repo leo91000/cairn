@@ -875,6 +875,11 @@ mod tests {
     async fn native_volume_admission_consolidates_overwrites_before_the_task_allowance_is_exhausted()
      {
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
         let directory = root.path().join("disks/native");
         let block = 4 * 1024 * 1024u64;
         let disk = storage::runtime::create(

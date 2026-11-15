@@ -1008,6 +1008,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let broker = fixture_broker(root.path()).await;
         let state = broker.state.clone();
+        std::fs::write(
+            state.join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
         let app = router(broker);
         for missing_base in [false, true] {
             let run = crate::config::id();
