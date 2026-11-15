@@ -377,6 +377,72 @@ fn records(state: &Path) -> stdio::Result<Vec<Record>> {
     Ok(records)
 }
 
+/// Verify a native stale attachment before holder cleanup changes a process.
+/// The durable nonce, boot and dead-owner checks also apply without a host mount.
+pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<bool> {
+    let current_boot = boot_id()?;
+    let mut found = false;
+    for record in records(state)? {
+        if record.vm_id != run || record.boot_id != current_boot {
+            continue;
+        }
+        let Some(id) = record.device_id else {
+            continue;
+        };
+        if record.owner.alive()? || vm_alive(state, &record)? {
+            return Err(stdio::Error::new(
+                stdio::ErrorKind::WouldBlock,
+                "Native backend remains active",
+            ));
+        }
+        let control = match UblkCtrlBuilder::default().id(id).build() {
+            Ok(control) => control,
+            Err(failure) => {
+                let failure = error(failure);
+                if matches!(failure.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) {
+                    continue;
+                }
+                return Err(failure);
+            }
+        };
+        if control.dev_info().ublksrv_flags != record.token {
+            continue;
+        }
+        let attachment =
+            fs::symlink_metadata(state.join("native-block").join(run).join("root/disk.blk"))?;
+        let address = fs::read_to_string(format!("/sys/class/block/ublkb{id}/dev"))?;
+        let (major, minor) = address
+            .trim()
+            .split_once(':')
+            .ok_or_else(|| stdio::Error::other("Invalid native block identity"))?;
+        let expected = libc::makedev(
+            major.parse().map_err(stdio::Error::other)?,
+            minor.parse().map_err(stdio::Error::other)?,
+        );
+        if !attachment.file_type().is_block_device() || attachment.rdev() != expected {
+            return Err(stdio::Error::other(
+                "Native block attachment differs from its owned device",
+            ));
+        }
+        found = true;
+    }
+    if !found {
+        let path = state.join("native-block").join(run).join("root/disk.blk");
+        let address = fs::symlink_metadata(path)?.rdev();
+        let sysfs = format!(
+            "/sys/dev/block/{}:{}",
+            libc::major(address),
+            libc::minor(address)
+        );
+        if Path::new(&sysfs).exists() {
+            return Err(stdio::Error::other(
+                "Native attachment device exists without a matching ownership receipt",
+            ));
+        }
+    }
+    Ok(found)
+}
+
 /// Native recovery owns both disk leases and has requested workload termination.
 /// Abort only dead, nonce-verified backends so blocked consumers can finish exiting;
 /// keep kernel devices and receipts until fencing and unmount are confirmed.
@@ -721,6 +787,16 @@ fn mount(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_native_attachment_without_a_receipt_has_no_owned_device() {
+        let root = tempfile::tempdir().unwrap();
+        let run = uuid::Uuid::new_v4().to_string();
+        let attachment = root.path().join("native-block").join(&run).join("root");
+        fs::create_dir_all(&attachment).unwrap();
+        fs::write(attachment.join("disk.blk"), b"obsolete attachment metadata").unwrap();
+        assert!(!verify_stale_host_disk(root.path(), &run).unwrap());
+    }
 
     #[test]
     #[ignore = "requires CAP_SYS_ADMIN; uses disposable private mount namespaces"]

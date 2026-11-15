@@ -5,6 +5,7 @@ Invoked through scripts/test-native-runtime.mjs with isolated fixture credential
 The loopback bridge exists only in this fixture; production remains Unix-only.
 """
 import base64
+from contextlib import contextmanager
 import http.client
 import http.server
 import importlib.util
@@ -161,6 +162,59 @@ def retained_health(api, run):
     # Health is a cached observation. Busy storage deliberately grants no
     # retained credit; wait for an idle sample and retain that exact snapshot.
     return eventually(sample)
+
+
+@contextmanager
+def escaped_docker_holder(root, docker_tools, disk):
+    """An independent legacy engine on this disposable host, outside any run."""
+    directory = root / 'legacy-docker'
+    directory.mkdir(mode=0o700)
+    unit = 'cairn-fixture-legacy-' + uuid.uuid4().hex + '.service'
+    endpoint = 'unix://' + str(directory / 'docker.sock')
+    environment = dict(os.environ, PATH=str(docker_tools / 'bin') + ':' + os.defpath,
+                       DOCKER_CONFIG=str(directory / 'client'))
+    (directory / 'daemon.json').write_text('{}')
+
+    def docker(*args):
+        return command(str(docker_tools / 'bin/docker'), '--host', endpoint, *args,
+                       env=environment).stdout.strip()
+
+    def ready():
+        try:
+            result = subprocess.run([str(docker_tools / 'bin/docker'), '--host', endpoint,
+                                     'info', '--format', '{{.CgroupDriver}}'],
+                                    env=environment, capture_output=True, text=True, timeout=5)
+            return result.returncode == 0 and result.stdout.strip() == 'systemd'
+        except subprocess.TimeoutExpired:
+            return False
+
+    try:
+        command('systemd-run', '--collect', '--unit=' + unit,
+                '--setenv=PATH=' + environment['PATH'],
+                str(docker_tools / 'bin/dockerd'), '--host=' + endpoint,
+                '--config-file=' + str(directory / 'daemon.json'),
+                '--data-root=' + str(directory / 'data'),
+                '--exec-root=' + str(directory / 'exec'),
+                '--pidfile=' + str(directory / 'pid'), '--storage-driver=vfs',
+                '--exec-opt=native.cgroupdriver=systemd', '--bridge=none',
+                '--iptables=false', '--ip6tables=false', '--ip-forward=false', '--ip-masq=false')
+        eventually(ready)
+        docker('pull', 'alpine:3.22.2')
+        container = docker('run', '-d', '--network=none', '--name=cairn-legacy-holder',
+                           '-v', str(disk) + ':/held', 'alpine:3.22.2', 'sh', '-c',
+                           'exec 3>/held/escaped-held; echo ready >&3; while :; do sleep 1; done')
+        info = json.loads(docker('inspect', container))[0]
+        pid = info['State']['Pid']
+        expected = '/system.slice/docker-' + container + '.scope'
+        assert Path('/proc', str(pid), 'cgroup').read_text().strip() == '0::' + expected
+        eventually(lambda: (disk / 'escaped-held').exists())
+        yield pid
+        assert not Path('/proc', str(pid)).exists(), 'Escaped legacy container survived disk retirement.'
+        assert json.loads(docker('inspect', container))[0]['State']['Running'] is False
+    finally:
+        # Stop only this fixture engine; normal daemon shutdown reaps any container
+        # left by an earlier assertion, without touching other Docker services.
+        command('systemctl', 'stop', unit)
 
 
 # Identical workload for the direct host reference and the actual sandbox engine.
@@ -1129,8 +1183,10 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                     partial.mkdir(mode=0o700)
                     if digit == 'e':
                         (partial / 'hostconfig.json').write_text('{')
-                api('/runs/' + administrator_docker, method='DELETE')
-                fenced(docker_run, administrator_docker)
+                with escaped_docker_holder(root, docker_tools, managed(docker_run)):
+                    api('/runs/' + administrator_docker, method='DELETE')
+                    fenced(docker_run, administrator_docker)
+                    metrics['legacyEscapedHolderRetired'] = True
                 assert not Path('/proc', str(managed_pid)).exists(), 'Administrator Docker survived suspension.'
                 # Retire the earlier disk while the later-started daemon stays
                 # alive. A recursively private clone would retain its mount.
