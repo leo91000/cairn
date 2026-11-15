@@ -3,6 +3,7 @@
 //! registration for verified startup cleanup; it never guesses that a VM died.
 mod io;
 mod namespace;
+mod observation;
 
 pub(crate) use namespace::BackendNamespace;
 
@@ -310,11 +311,10 @@ fn retire_with_mode(
     // subsequent control lookup proves absence or a different nonce.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        match UblkCtrlBuilder::default().id(device_id).build() {
+        match observation::native_control(device_id) {
             Ok(current) if current.dev_info().ublksrv_flags != record.token => return Ok(()),
             Ok(_) => {}
             Err(failure) => {
-                let failure = error(failure);
                 if matches!(failure.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) {
                     return Ok(());
                 }
@@ -380,10 +380,17 @@ fn cleanup_with_mode(
         }
         return forget(state, record);
     };
-    let control = match UblkCtrlBuilder::default().id(device_id).build() {
+    let opened = if native {
+        observation::native_control(device_id)
+    } else {
+        UblkCtrlBuilder::default()
+            .id(device_id)
+            .build()
+            .map_err(error)
+    };
+    let control = match opened {
         Ok(control) => control,
         Err(error) => {
-            let error = self::error(error);
             if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) {
                 return forget(state, record);
             }
@@ -472,10 +479,9 @@ pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<H
                 "Native backend remains active",
             ));
         }
-        let control = match UblkCtrlBuilder::default().id(id).build() {
+        let control = match observation::native_control(id) {
             Ok(control) => control,
             Err(failure) => {
-                let failure = error(failure);
                 if matches!(failure.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) {
                     continue;
                 }

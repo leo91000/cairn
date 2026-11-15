@@ -32,7 +32,7 @@ const testNames = [
 ]
 // A user namespace cannot create a block node on the host-backed temp directory.
 if (privileged) {
-  testNames.push('native::block::holders::tests::raw_block_device_descriptor_is_a_holder', 'native::block::holders::tests::mapped_raw_block_node_is_a_holder_after_its_descriptor_closes')
+  testNames.push('native::block::holders::tests::raw_block_device_descriptor_is_a_holder', 'native::block::holders::tests::mapped_raw_block_node_is_a_holder_after_its_descriptor_closes', 'storage::ublk::observation::tests::encoded_absence_is_not_replaced_by_a_legacy_opcode_error')
 }
 
 const listed = spawnSync(binary, ['--list', '--ignored'], { encoding: 'utf8' })

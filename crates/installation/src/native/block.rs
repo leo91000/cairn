@@ -1087,7 +1087,12 @@ impl closing::Operations for CloseOperations<'_> {
                 .close_native()
         })
         .await
-        .map_err(Error::internal)??;
+        .map_err(Error::internal)?
+        .map_err(|error| {
+            Error::unavailable(format!(
+                "Native kernel device retirement failed: {error}; ownership retained."
+            ))
+        })?;
         retire_attachment(self.jail).await
     }
 }

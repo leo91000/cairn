@@ -45,6 +45,12 @@ to their existing synchronous command on the same isolated owning worker. No
 fallback occurs for other failures. Native async deletion acknowledgements are followed by an explicit device
 identity/absence check; Cairn retains receipts on uncertainty. VM semantics stay
 unchanged.
+Native absence observation preserves the encoded kernel result: the pinned
+ublk library's legacy retry can mask `ENODEV` as `EOPNOTSUPP` on kernels without
+legacy opcodes. Only in that case, an independent read-only encoded query checks
+the kernel device registry. A missing sysfs entry or unsupported query alone
+never establishes retirement. Pending retirement errors reach the conversation
+with their native operation and cause instead of a generic internal error.
 
 The authenticated native result may attest that its workload was fenced while
 physical cleanup remains pending. It is not PhysicalFinalized. The manager stops
