@@ -54,6 +54,9 @@ struct Input {
 #[serde(rename_all = "camelCase", default)]
 struct Watch {
     open: bool,
+    /// Admission tracks terminal failures immediately; progress starts only
+    /// after delivery, a provider turn start or a real wakeup.
+    started_work: bool,
     /// Manual context maintenance is not a reply or a new user turn. Retain the
     /// marker through retries and restarts until real input opens the next turn.
     compacting: bool,
@@ -311,12 +314,20 @@ impl Watch {
             depth: self.depth,
         });
         self.open = true;
+        self.started_work = true;
         self.origin = input.origin;
         self.depth = input.depth;
         self.started = event;
         self.failed = None;
         self.error = None;
         self.progress_at = at;
+    }
+
+    fn begin_work(&mut self, at: i64) {
+        if !self.started_work {
+            self.progress_at = at;
+        }
+        self.started_work = true;
     }
 
     /// Delivered input starts a turn, or joins the working one. The first input of a
@@ -336,6 +347,7 @@ impl Watch {
             // Input that joins a working turn extends its chain.
             self.depth = self.depth.max(input.depth);
         }
+        self.begin_work(at);
     }
 
     /// Reports creations before the next event boundary, even if the question
@@ -370,6 +382,7 @@ impl Watch {
         }
         self.emit(emissions, CairnHookKind::Ended, fields);
         self.open = false;
+        self.started_work = false;
         self.awaiting_input = false;
         self.failed = None;
         self.error = None;
@@ -476,6 +489,7 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
         if kind == "status" && payload["chatOperation"] == crate::chats::COMPACT {
             watch.compacting = true;
             watch.open = false;
+            watch.started_work = false;
             watch.awaiting_input = false;
             watch.failed = None;
         }
@@ -517,6 +531,7 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                     return Err(Error::bad("Invalid admitted turn depth."));
                 }
                 watch.open(id, at, Some(input));
+                watch.started_work = false;
             }
             "status" if payload["hookRuleDepth"].is_number() => {
                 if let Some(depth) = payload["hookRuleDepth"]
@@ -548,6 +563,7 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                     };
                     watch.open(id, at, Some(resume));
                 }
+                watch.begin_work(at);
             }
             "turn.started" => {
                 if watch.failed.is_some() {
@@ -556,6 +572,7 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                 if !watch.open {
                     watch.open(id, at, None);
                 }
+                watch.begin_work(at);
             }
             "retry.scheduled" => watch.failed = None,
             "turn.failed" if watch.open => {
@@ -625,6 +642,7 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
         (!complete).then_some(cursor.saturating_add(1)),
     );
     if watch.open
+        && watch.started_work
         && working
         && at - watch.progress_at >= PROGRESS_INTERVAL
         && listened(db, &bound.creator, CairnHookKind::Progress)?

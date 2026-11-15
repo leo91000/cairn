@@ -2675,6 +2675,44 @@ async fn question_origin_follows_event_order_even_with_identical_or_reversed_tim
 }
 
 #[tokio::test]
+async fn an_admitted_turn_reports_progress_only_after_its_worker_starts() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let progress = rule_on(
+        &f,
+        OWNER,
+        cairn("progress"),
+        json!([remember("step", "step", "step")]),
+        limits(),
+    )
+    .await;
+    emit(&f, "start", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    assert_eq!(f.s.store.run(&run).await.unwrap()["status"], "queued");
+    engine::tick(&f.s).await.unwrap();
+    let checked = chat.clone();
+    f.s.store
+        .transaction(move |db| age_progress(db, &checked))
+        .await
+        .unwrap();
+    engine::tick(&f.s).await.unwrap();
+    assert!(triggerings(&f, &progress).await.is_empty());
+
+    fixture::running_conversation(&f.s, &chat).await;
+    engine::tick(&f.s).await.unwrap();
+    assert!(triggerings(&f, &progress).await.is_empty());
+    f.s.store
+        .transaction(move |db| age_progress(db, &chat))
+        .await
+        .unwrap();
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(triggerings(&f, &progress).await.len(), 1);
+    assert_eq!(values(&f, &progress).await["step"], "Thinking");
+}
+
+#[tokio::test]
 async fn a_first_turn_ending_before_delivery_reports_its_admitted_cause_once() {
     use common::run_fixture::RunFixture;
 
