@@ -177,7 +177,10 @@ async fn record_reading(s: &Service, run: &Value, name: &str, args: &Value) -> R
     if OUTSIDE_CONVERSATIONS.contains(&name) {
         return Ok(());
     }
-    let unattested_side_questions = name == "list_chat_side_questions";
+    let unattested_side_questions = matches!(
+        name,
+        "list_chat_side_questions" | "ask_chat_side_question" | "cancel_chat_side_question"
+    );
     let run_id = text(run, "id").to_owned();
     let (chat, target_run) = (
         args["chatId"].as_str().map(str::to_owned),
@@ -189,7 +192,8 @@ async fn record_reading(s: &Service, run: &Value, name: &str, args: &Value) -> R
                 return Ok(());
             };
             // Side questions have no writer attestation, even in this conversation.
-            // Their text and answers may come from another person or an agent.
+            // Listing, cancellation and idempotent asks can return retained text or
+            // answers from another person or an agent.
             let only_own = !unattested_side_questions
                 && (chat.is_some() || target_run.is_some())
                 && chat.as_ref().is_none_or(|chat| *chat == own.id)

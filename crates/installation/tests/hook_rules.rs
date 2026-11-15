@@ -1993,8 +1993,7 @@ async fn finish_turn(f: &Fixture, chat: &str) -> String {
     run
 }
 
-#[tokio::test]
-async fn reading_own_side_questions_closes_rule_authority_for_good() {
+async fn side_question_content_closes_rule_authority_for_good(operation: &str) {
     for account in [MEMBER, OWNER] {
         let f = granted().await;
         common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
@@ -2023,31 +2022,61 @@ async fn reading_own_side_questions_closes_rule_authority_for_good() {
             .await
             .unwrap();
         let question = cairn_installation::config::id();
+        let input = json!({
+            "id": question,
+            "text": "Foreign instructions beside the reply",
+            "quote": "Foreign quoted instructions",
+            "itemId": "reply",
+        });
         let (status, asked) = call(
             &f,
             account,
             "POST",
             &format!("/api/chats/{chat}/side-questions"),
-            json!({
-                "id": question,
-                "text": "Foreign instructions beside the reply",
-                "itemId": "reply",
-            }),
+            input.clone(),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{asked}");
-        let read = agent(
-            &f,
-            &bearer,
-            "list_chat_side_questions",
-            json!({ "chatId": chat }),
-        )
-        .await;
+        let args = match operation {
+            "list_chat_side_questions" => json!({ "chatId": chat }),
+            "cancel_chat_side_question" => json!({
+                "chatId": chat,
+                "sideQuestionId": question,
+            }),
+            "ask_chat_side_question" => {
+                f.s.side_question_settle(
+                    &run,
+                    &json!({
+                        "type": "chat.side.answered",
+                        "sideQuestionId": question,
+                        "text": "Unattested side answer",
+                    }),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    f.s.chat_detail(&chat).await.unwrap()["sideQuestions"][0]["answer"],
+                    "Unattested side answer"
+                );
+                json!({ "chatId": chat, "question": input })
+            }
+            _ => unreachable!("unexpected side-question operation"),
+        };
+        let read = agent(&f, &bearer, operation, args).await;
         assert!(!refused(&read), "{read}");
-        assert_eq!(
-            mcp_result(&read)["sideQuestions"][0]["text"],
-            "Foreign instructions beside the reply"
-        );
+        let returned = if operation == "list_chat_side_questions" {
+            &mcp_result(&read)["sideQuestions"][0]
+        } else {
+            mcp_result(&read)
+        };
+        assert_eq!(returned["text"], "Foreign instructions beside the reply");
+        assert_eq!(returned["quote"], "Foreign quoted instructions");
+        if operation == "ask_chat_side_question" {
+            assert_eq!(returned["status"], "answered");
+            assert_eq!(returned["answer"], "Unattested side answer");
+        } else if operation == "cancel_chat_side_question" {
+            assert_eq!(returned["status"], "cancelled");
+        }
         refused_because(
             &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
             "Another writer reached this conversation",
@@ -2070,6 +2099,21 @@ async fn reading_own_side_questions_closes_rule_authority_for_good() {
             "Another writer reached this conversation",
         );
     }
+}
+
+#[tokio::test]
+async fn reading_own_side_questions_closes_rule_authority_for_good() {
+    side_question_content_closes_rule_authority_for_good("list_chat_side_questions").await;
+}
+
+#[tokio::test]
+async fn cancelling_own_side_questions_closes_rule_authority_for_good() {
+    side_question_content_closes_rule_authority_for_good("cancel_chat_side_question").await;
+}
+
+#[tokio::test]
+async fn retrying_answered_side_questions_closes_rule_authority_for_good() {
+    side_question_content_closes_rule_authority_for_good("ask_chat_side_question").await;
 }
 
 #[tokio::test]
