@@ -171,6 +171,7 @@ fn mapped_block_device(
 ) -> io::Result<bool> {
     // maps reports the filesystem containing a device node, not its rdev.
     // Follow map_files while the VMA pins that exact file, even after close(fd).
+    let mut mapping_directory = None;
     for line in maps.lines() {
         if Instant::now() >= deadline {
             return Err(io::Error::new(
@@ -196,7 +197,16 @@ fn mapped_block_device(
         }) {
             return Err(io::Error::other("Invalid mapped file range"));
         }
-        match fs::metadata(task.join("map_files").join(range)) {
+        if mapping_directory.is_none() {
+            // A missing inventory is not a concurrently unmapped individual VMA.
+            // Keep the directory pinned and fail closed if procfs cannot supply it.
+            mapping_directory = Some(fs::File::open(task.join("map_files"))?);
+        }
+        let mapping_directory = mapping_directory.as_ref().unwrap();
+        let mapped =
+            std::path::PathBuf::from(format!("/proc/self/fd/{}", mapping_directory.as_raw_fd()))
+                .join(range);
+        match fs::metadata(mapped) {
             Ok(metadata) if metadata.file_type().is_block_device() && metadata.rdev() == device => {
                 return Ok(true);
             }
@@ -277,6 +287,27 @@ fn references(
     Ok(false)
 }
 
+fn task_directory(process: &Path, task: &Path, pid: u32) -> io::Result<fs::File> {
+    let tid = task
+        .file_name()
+        .ok_or_else(|| io::Error::other("Invalid task identity"))?;
+    let parent = process
+        .parent()
+        .ok_or_else(|| io::Error::other("Invalid process path"))?;
+    let alias = fs::File::open(parent.join(tid))?;
+    let pinned = std::path::PathBuf::from(format!("/proc/self/fd/{}", alias.as_raw_fd()));
+    let same_start = started(&read(pinned.join("stat"))?)? == started(&read(task.join("stat"))?)?;
+    let status = read(pinned.join("status"))?;
+    let group = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Tgid:"))
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    if !same_start || group != Some(pid) {
+        return Err(io::Error::other("Filesystem holder task identity changed"));
+    }
+    Ok(alias)
+}
+
 fn inspect(
     process: &Path,
     pid: u32,
@@ -295,7 +326,15 @@ fn inspect(
             ));
         }
         let task = task?.path();
-        match references(&task, device, namespace, private_copies, deadline) {
+        // The nested task directory omits map_files. The top-level TID alias
+        // includes it, even for a non-leader thread. Pin that alias before
+        // checking identity so TID reuse cannot switch the inspected task.
+        let inspect_task = || -> io::Result<bool> {
+            let alias = task_directory(process, &task, pid)?;
+            let pinned = std::path::PathBuf::from(format!("/proc/self/fd/{}", alias.as_raw_fd()));
+            references(&pinned, device, namespace, private_copies, deadline)
+        };
+        match inspect_task() {
             Ok(true) => {
                 held = true;
                 break;
@@ -518,11 +557,49 @@ mod tests {
     }
 
     #[test]
+    fn every_live_thread_uses_the_top_level_mapping_directory() {
+        std::thread::spawn(|| {
+            let pid = std::process::id();
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+            let process = std::path::PathBuf::from(format!("/proc/{pid}"));
+            let task = process.join(format!("task/{tid}"));
+            assert!(!task.join("map_files").exists());
+            let alias = task_directory(&process, &task, pid).unwrap();
+            let pinned = std::path::PathBuf::from(format!("/proc/self/fd/{}", alias.as_raw_fd()));
+            assert!(pinned.join("map_files").is_dir());
+            let file = tempfile::tempfile().unwrap();
+            file.set_len(4096).unwrap();
+            let mapping = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    libc::PROT_READ,
+                    libc::MAP_SHARED,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            assert_ne!(mapping, libc::MAP_FAILED);
+            drop(file);
+            let range = format!("{:x}-{:x}", mapping as usize, mapping as usize + 4096);
+            let entry = pinned.join("map_files").join(&range);
+            let observed = fs::symlink_metadata(entry);
+            assert_eq!(unsafe { libc::munmap(mapping, 4096) }, 0);
+            assert!(observed.unwrap().file_type().is_symlink());
+            assert!(task_directory(&process, &task, pid + 1).is_err());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
     fn malformed_or_unavailable_mapped_file_inventory_never_proves_absence() {
         let root = tempfile::tempdir().unwrap();
         let deadline = Instant::now() + Duration::from_secs(1);
         assert!(mapped_block_device(root.path(), "bad", 0, deadline).is_err());
         assert!(mapped_block_device(root.path(), "../x r--s 0 00:01 7", 0, deadline).is_err());
+        assert!(mapped_block_device(root.path(), "1000-2000 r--s 0 00:01 7", 0, deadline).is_err());
+        fs::create_dir(root.path().join("map_files")).unwrap();
         assert!(
             !mapped_block_device(root.path(), "1000-2000 r--s 0 00:01 7", 0, deadline).unwrap()
         );
@@ -559,15 +636,19 @@ mod tests {
 
     #[test]
     fn zombie_task_does_not_hide_a_live_sibling_or_block_empty_inventory() {
-        let root = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let process = directory.path().join("123");
+        fs::create_dir(&process).unwrap();
+        let root = process.as_path();
         let stat = |state| format!("123 (process) {state} {} 123 0", vec!["0"; 18].join(" "));
-        fs::create_dir_all(root.path().join("task/123")).unwrap();
-        fs::write(root.path().join("stat"), stat("Z")).unwrap();
-        fs::write(root.path().join("task/123/stat"), stat("Z")).unwrap();
+        fs::create_dir_all(root.join("task/123")).unwrap();
+        fs::write(root.join("stat"), stat("Z")).unwrap();
+        fs::write(root.join("status"), "Tgid:\t123\n").unwrap();
+        fs::write(root.join("task/123/stat"), stat("Z")).unwrap();
         let device = libc::makedev(259, 10);
         assert!(
             inspect(
-                root.path(),
+                root,
                 123,
                 device,
                 1,
@@ -577,22 +658,21 @@ mod tests {
             .unwrap()
             .is_none()
         );
-        fs::create_dir_all(root.path().join("task/124/ns")).unwrap();
-        fs::write(root.path().join("task/124/ns/mnt"), b"namespace").unwrap();
+        fs::create_dir_all(root.join("task/124/ns")).unwrap();
+        fs::write(root.join("task/124/stat"), stat("S")).unwrap();
+        fs::write(root.join("task/124/status"), "Tgid:\t123\n").unwrap();
+        std::os::unix::fs::symlink(root.join("task/124"), directory.path().join("124")).unwrap();
+        fs::write(root.join("task/124/ns/mnt"), b"namespace").unwrap();
         fs::write(
-            root.path().join("task/124/mountinfo"),
+            root.join("task/124/mountinfo"),
             b"1 0 259:10 / /disk rw - ext4 /dev/ublkb1 rw",
         )
         .unwrap();
-        fs::write(root.path().join("comm"), b"live sibling").unwrap();
-        fs::write(
-            root.path().join("cgroup"),
-            b"0::/system.slice/example.service",
-        )
-        .unwrap();
+        fs::write(root.join("comm"), b"live sibling").unwrap();
+        fs::write(root.join("cgroup"), b"0::/system.slice/example.service").unwrap();
         assert!(
             inspect(
-                root.path(),
+                root,
                 123,
                 device,
                 1,
