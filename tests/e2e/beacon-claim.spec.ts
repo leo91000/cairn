@@ -1,4 +1,4 @@
-import type { ChildProcess } from 'node:child_process'
+import type { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import {
@@ -12,8 +12,156 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
+import { setTimeout as delay } from 'node:timers/promises'
 import { expect, test } from '@playwright/test'
 import { relayProtocolVersion } from './relay-protocol'
+
+// Claim journeys must leave the automatic claim variable absent, even when inherited.
+function claimProcess(binary: string, args: string[], env: NodeJS.ProcessEnv) {
+  const childEnv = { ...process.env, ...env }
+  delete childEnv.CAIRN_INSTALLATION_CLAIM_CODE
+  const child = spawn(binary, args, { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] })
+  const began = Date.now()
+  let output = ''
+  let listener: string | undefined
+  let spawnError: Error | undefined
+  const retain = (chunk: Buffer) => {
+    output = (output + chunk.toString()).slice(-16384)
+    listener ??= output.match(/^Listening on (http:\/\/127\.0\.0\.1:\d+)\r?\n/m)?.[1]
+  }
+
+  child.stdout.on('data', retain)
+  child.stderr.on('data', retain)
+  child.on('error', error => spawnError = error)
+  const closed = new Promise<void>(resolve => child.once('close', () => resolve()))
+  const diagnostics = () => {
+    let safeOutput = output.replaceAll(/(https?:\/\/|postgres(?:ql)?:\/\/)[^\s/@][^\s/:@]*:[^\s/@]+@/gi, '$1<REDACTED>@')
+    for (const [key, value] of Object.entries(childEnv)) {
+      if (value && value.length >= 4 && /password|secret|token|credential|api.?key/i.test(key))
+        safeOutput = safeOutput.replaceAll(value, '<REDACTED>')
+    }
+
+    safeOutput = safeOutput.replaceAll(/\b[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}\b/g, '<REDACTED>')
+    return {
+      pid: child.pid,
+      elapsedMs: Date.now() - began,
+      exitCode: child.exitCode,
+      signal: child.signalCode,
+      listener,
+      spawnError: spawnError?.message,
+      output: safeOutput,
+    }
+  }
+
+  return Object.assign(child, { diagnostics, closed })
+}
+
+async function stopClaimProcess(child: ReturnType<typeof claimProcess>) {
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+    await child.closed
+    return
+  }
+
+  child.kill('SIGTERM')
+  const force = setTimeout(() => child.kill('SIGKILL'), 10000)
+  try {
+    await child.closed
+  }
+  finally {
+    clearTimeout(force)
+  }
+}
+
+async function waitForUnclaimed(child: ReturnType<typeof claimProcess>) {
+  const deadline = Date.now() + 7000
+  let status = 0
+  let requestError = ''
+  while (Date.now() < deadline) {
+    const state = child.diagnostics()
+    if (state.exitCode !== null || state.signal !== null || state.spawnError) {
+      await child.closed
+      throw new Error(`Unclaimed installation exited: ${JSON.stringify(child.diagnostics())}`)
+    }
+
+    const remainingMs = deadline - Date.now()
+    if (state.listener && remainingMs > 0) {
+      try {
+        const response = await fetch(`${state.listener}/api/chats`, { signal: AbortSignal.timeout(Math.min(1000, remainingMs)) })
+        status = response.status
+        await response.body?.cancel()
+      }
+      catch (error) {
+        requestError = (error as Error).name
+      }
+
+      const after = child.diagnostics()
+      if (status === 401 && Date.now() < deadline && after.exitCode === null && after.signal === null && !after.spawnError)
+        return
+    }
+
+    const waitMs = Math.min(100, deadline - Date.now())
+    if (waitMs > 0)
+      await delay(waitMs)
+  }
+
+  throw new Error(`Unclaimed installation did not become ready within 7000ms (HTTP ${status}, ${requestError}): ${JSON.stringify(child.diagnostics())}`)
+}
+
+test('an unclaimed installation starts without contacting automatic claim, even with an inherited code', async () => {
+  let claimRequests = 0
+  const beacon = createServer((_request, _response) => claimRequests++)
+  beacon.listen(0, '127.0.0.1')
+  await once(beacon, 'listening')
+  const root = await mkdtemp(join(tmpdir(), 'cairn-unclaimed-start-'))
+  const child = claimProcess('target/debug/cairn', [], {
+    DATA_DIR: join(root, 'data'),
+    AGENT_HOME: join(root, 'home'),
+    WORKSPACE_ROOTS: root,
+    NODE_ENV: 'test',
+    WORKER_ENABLED: 'false',
+    HOST: '127.0.0.1',
+    PORT: '0',
+    CAIRN_BEACON_ORIGIN: `http://127.0.0.1:${(beacon.address() as { port: number }).port}`,
+    CAIRN_INSTALLATION_CLAIM_CODE: 'inherited-fixture-only',
+  })
+  try {
+    await waitForUnclaimed(child)
+    expect(claimRequests).toBe(0)
+  }
+  finally {
+    // Release a mistakenly attempted automatic claim before stopping the process.
+    beacon.closeAllConnections()
+    await stopClaimProcess(child)
+    await new Promise<void>(resolve => beacon.close(() => resolve()))
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('unclaimed readiness rejects another listener and reports its own installation exit', async () => {
+  const occupant = createServer((_request, response) => response.writeHead(401).end())
+  occupant.listen(0, '127.0.0.1')
+  await once(occupant, 'listening')
+  const root = await mkdtemp(join(tmpdir(), 'cairn-unclaimed-bind-'))
+  const child = claimProcess('target/debug/cairn', [], {
+    DATA_DIR: join(root, 'data'),
+    AGENT_HOME: join(root, 'home'),
+    WORKSPACE_ROOTS: root,
+    NODE_ENV: 'test',
+    WORKER_ENABLED: 'false',
+    HOST: '127.0.0.1',
+    PORT: String((occupant.address() as { port: number }).port),
+  })
+  try {
+    await expect(waitForUnclaimed(child)).rejects.toThrow(/Unclaimed installation exited:.*Address already in use/)
+    expect(child.exitCode).toBe(1)
+  }
+  finally {
+    await stopClaimProcess(child)
+    occupant.closeAllConnections()
+    await new Promise<void>(resolve => occupant.close(() => resolve()))
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('claims, detaches and reclaims the same private installation through the app', async ({ page }) => {
   test.setTimeout(90000)
@@ -30,7 +178,7 @@ test('claims, detaches and reclaims the same private installation through the ap
   const root = await mkdtemp(join(tmpdir(), 'cairn-device-claim-'))
   await Promise.all([mkdir(join(root, 'home')), mkdir(join(root, 'data'))])
   const url = 'http://localhost:4401'
-  const children: ChildProcess[] = []
+  const children: ReturnType<typeof claimProcess>[] = []
   const managerEnv = {
     DATA_DIR: join(root, 'data'),
     AGENT_HOME: join(root, 'home'),
@@ -38,26 +186,15 @@ test('claims, detaches and reclaims the same private installation through the ap
     NODE_ENV: 'test',
     WORKER_ENABLED: 'false',
     HOST: '127.0.0.1',
-    PORT: '4402',
+    PORT: '0',
     CAIRN_BEACON_ORIGIN: url,
     CAIRN_INSTALLATION_NAME: 'Claimed machine',
   }
 
   function start(binary: string, args: string[], env: NodeJS.ProcessEnv) {
-    const child = spawn(binary, args, {
-      env: { ...process.env, ...env, CAIRN_INSTALLATION_CLAIM_CODE: '' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    const child = claimProcess(binary, args, env)
     children.push(child)
     return child
-  }
-
-  async function stop(child: ChildProcess) {
-    if (child.exitCode !== null || child.signalCode !== null)
-      return
-    const exited = once(child, 'exit')
-    child.kill('SIGTERM')
-    await exited
   }
 
   async function waitForOnlineInstallation(installationId: string) {
@@ -143,8 +280,8 @@ test('claims, detaches and reclaims the same private installation through the ap
     })
     expect(other.status()).toBe(201)
     const unclaimed = start('target/debug/cairn', [], managerEnv)
-    await expect.poll(() => fetch('http://localhost:4402/api/chats').then(response => response.status).catch(() => 0)).toBe(401)
-    await stop(unclaimed)
+    await waitForUnclaimed(unclaimed)
+    await stopClaimProcess(unclaimed)
     const old = await claim()
     let manager = start('target/debug/cairn', [], managerEnv)
     await page.getByRole('button', { name: /^Claimed machine · (Online|Offline)$/ }).click()
@@ -182,7 +319,7 @@ test('claims, detaches and reclaims the same private installation through the ap
     await page.waitForURL(`${url}/`)
     const denied = await page.request.get(`${url}/api/installations/${old.installationId}/api/chats`)
     expect(denied.status()).toBe(404)
-    await stop(manager)
+    await stopClaimProcess(manager)
     const renewed = await claim()
     expect(renewed.installationId).toBe(old.installationId)
     expect(renewed.token !== old.token).toBe(true)
@@ -210,7 +347,14 @@ test('claims, detaches and reclaims the same private installation through the ap
     expect(revoked.status()).toBe(404)
   }
   finally {
-    await Promise.all(children.map(stop))
+    if (test.info().status !== test.info().expectedStatus) {
+      await test.info().attach('claim-process-diagnostics', {
+        body: JSON.stringify(children.map(child => child.diagnostics())),
+        contentType: 'application/json',
+      })
+    }
+
+    await Promise.all(children.map(stopClaimProcess))
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   }
