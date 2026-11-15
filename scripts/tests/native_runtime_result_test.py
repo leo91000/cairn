@@ -1,5 +1,7 @@
 """Unprivileged checks of native exit records and retained health observations."""
 import ast
+import http.client
+import http.server
 from contextlib import redirect_stderr
 import importlib.util
 import io
@@ -7,6 +9,7 @@ import subprocess
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest.mock import Mock, call, patch
@@ -16,6 +19,30 @@ path = Path(__file__).with_name('native_runtime_test.py')
 spec = importlib.util.spec_from_file_location('native_runtime_test', path)
 runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
+
+
+class InstalledNodeMasterTest(unittest.TestCase):
+    def test_offline_master_observes_heartbeat_without_applying_configuration(self):
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), runtime.OfflineFixtureMaster)
+        server.heartbeat_seen = threading.Event()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for path in ['/internal/nodes/project-catalog', '/internal/nodes/heartbeat']:
+                connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                try:
+                    connection.request('POST', path, body=b'{}')
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 503)
+                    self.assertEqual(response.read(), b'')
+                    self.assertEqual(server.heartbeat_seen.is_set(), path.endswith('/heartbeat'))
+                finally:
+                    connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
 
 
 class RootfulDockerDiagnosticTest(unittest.TestCase):

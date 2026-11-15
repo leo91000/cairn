@@ -332,6 +332,21 @@ fn inspect_namespace(namespace: File, device: String, root: PathBuf) -> io::Resu
     .map_err(|_| io::Error::other("Native namespace inventory thread failed"))?
 }
 
+// Each task may have a separate descriptor table after unshare(CLONE_FILES).
+// Keep its proc directory pinned until every returned path has been inspected.
+fn task_descriptors(task: &File) -> io::Result<Vec<(PathBuf, bool)>> {
+    let task = descriptor(task);
+    let mut descriptors = fs::read_dir(task.join("fd"))?
+        .map(|entry| entry.map(|entry| (entry.path(), false)))
+        .collect::<io::Result<Vec<_>>>()?;
+    descriptors.extend([
+        (task.join("cwd"), true),
+        (task.join("root"), true),
+        (task.join("exe"), true),
+    ]);
+    Ok(descriptors)
+}
+
 fn remaining(source: &Source) -> io::Result<usize> {
     let mut namespaces = std::collections::BTreeMap::new();
     let mut remaining = 0;
@@ -346,26 +361,29 @@ fn remaining(source: &Source) -> io::Result<usize> {
             let process_file = directory(&process.path())?;
             let path = descriptor(&process_file);
             let mut held = Vec::new();
-            let mut filesystem_references = Vec::new();
+            let mut descriptors = Vec::new();
+            let mut pinned_tasks = Vec::new();
             for task in fs::read_dir(path.join("task"))? {
                 let task = task?;
-                filesystem_references.extend([
-                    task.path().join("cwd"),
-                    task.path().join("root"),
-                    task.path().join("exe"),
-                ]);
-                match File::open(task.path().join("ns/mnt")) {
+                let task = match directory(&task.path()) {
+                    Ok(task) => task,
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                match task_descriptors(&task) {
+                    Ok(paths) => descriptors.extend(paths),
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error),
+                }
+                match File::open(descriptor(&task).join("ns/mnt")) {
                     Ok(namespace) => held.push(namespace),
                     Err(error) if vanished(&error) => {}
                     Err(error) => return Err(error),
                 }
+                pinned_tasks.push(task);
             }
             // Include task-less namespaces pinned only by an FD, even those
             // held by the controller. Snapshot names before opening duplicates.
-            let mut descriptors = fs::read_dir(path.join("fd"))?
-                .map(|entry| entry.map(|entry| (entry.path(), false)))
-                .collect::<io::Result<Vec<_>>>()?;
-            descriptors.extend(filesystem_references.into_iter().map(|path| (path, true)));
             descriptors.extend(
                 fs::read_dir(path.join("map_files"))?
                     .map(|entry| entry.map(|entry| (entry.path(), true)))
@@ -531,6 +549,46 @@ pub(in crate::native) async fn stop(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_thread_descriptor_table_is_inventoried() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = root.path().join("payload");
+        fs::write(&payload, b"retained").unwrap();
+        let target = payload.clone();
+        let (ready, observed) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            assert_eq!(unsafe { libc::unshare(libc::CLONE_FILES) }, 0);
+            let _file = File::open(target).unwrap();
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+            ready.send(tid).unwrap();
+            released.recv().unwrap();
+        });
+        let tid = observed.recv().unwrap();
+        let task = directory(&PathBuf::from(format!("/proc/self/task/{tid}"))).unwrap();
+        let listed = task_descriptors(&task).unwrap();
+        let found = listed
+            .iter()
+            .any(|(path, _)| fs::read_link(path).ok().as_ref() == Some(&payload));
+        let leader = directory(
+            Path::new("/proc/self/task")
+                .join(std::process::id().to_string())
+                .as_path(),
+        )
+        .unwrap();
+        let leader_has_payload = task_descriptors(&leader)
+            .unwrap()
+            .iter()
+            .any(|(path, _)| fs::read_link(path).ok().as_ref() == Some(&payload));
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        assert!(found, "thread-only descriptor was omitted");
+        assert!(
+            !leader_has_payload,
+            "fixture did not separate descriptor tables"
+        );
+    }
 
     #[test]
     fn cgroup_attribution_never_returns_a_replacement_opened_after_its_proof() {

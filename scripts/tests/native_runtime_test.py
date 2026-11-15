@@ -216,6 +216,21 @@ print(json.dumps({'write':write,'readColdHint':reads[0],'readWarm':reads[1]}))
 '''
 
 
+class OfflineFixtureMaster(http.server.BaseHTTPRequestHandler):
+    """Exercise the installed node connector without issuing manager commands."""
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        self.rfile.read(length)
+        if self.path == '/internal/nodes/heartbeat':
+            self.server.heartbeat_seen.set()
+        self.send_response(503)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+
 def main():
     if os.environ.get('CAIRN_NATIVE_DISPOSABLE_HOST') != '1' or os.geteuid() != 0:
         raise RuntimeError('Requires root on an explicitly designated disposable host.')
@@ -323,6 +338,16 @@ def main():
             finally:
                 connection.close()
 
+        fixture_master = http.server.ThreadingHTTPServer(('127.0.0.1', 0), OfflineFixtureMaster)
+        fixture_master.daemon_threads = True
+        fixture_master.heartbeat_seen = threading.Event()
+        threading.Thread(target=fixture_master.serve_forever, daemon=True).start()
+        node_identity = root / 'node-identity'
+        node_identity.mkdir(mode=0o700)
+        (node_identity / 'identity.json').write_text(json.dumps(dict(
+            master='http://127.0.0.1:' + str(fixture_master.server_port),
+            nodeId=str(uuid.uuid4()), token='synthetic-offline-node-token')))
+
         policy_generation = 0
 
         def storage_policy(policy):
@@ -420,10 +445,20 @@ def main():
                 CAIRN_NATIVE_TOOLS=str(tools), CAIRN_NATIVE_USER=user, CAIRN_NODE_BACKEND='native',
                 CAIRN_NATIVE_DOCKER_TOOLS=str(docker_tools),
                 APP_RUNTIME_ID='synthetic', CAIRN_NATIVE_SUPERVISOR_UNIT=supervisor)
+            # Keep the immutable reference fixture unchanged. The candidate uses
+            # the real installed entry point, including its pre-Tokio IO setup.
+            candidate = active_binary == binary
+            entrypoint = ['node-daemon', str(node_identity)] if candidate else ['native-controller']
+            if candidate:
+                fixture_master.heartbeat_seen.clear()
             command('systemd-run', '--quiet', '--collect', '--service-type=exec', '--unit=' + supervisor,
                 '--property=LimitNOFILE=1024:524288',
-                *['--setenv=' + key + '=' + value for key, value in environment.items()], str(active_binary), 'native-controller')
+                *['--setenv=' + key + '=' + value for key, value in environment.items()], str(active_binary), *entrypoint)
             eventually(lambda: api('/health', method='GET').get('backend') == 'native')
+            if candidate:
+                eventually(fixture_master.heartbeat_seen.is_set)
+                metrics['candidateEntryPoint'] = 'node-daemon'
+                metrics['offlineMasterHeartbeatObserved'] = True
             assert (state / 'controller.sock').stat().st_mode & 0o777 == 0o600
             pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
             limits = Path('/proc/' + pid + '/limits').read_text().splitlines()
@@ -1255,7 +1290,7 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 assert writes.stat().st_size == size, 'Administrator Docker escaped the run freeze.'
                 storage_policy(contexts[docker_run]['policy'])
                 eventually(lambda: writes.stat().st_size > size)
-                administrator_store = state / 'native' / docker_run / 'data/docker-administrator'
+                administrator_store = state / 'native-data' / docker_run / 'data/docker-administrator'
                 for digit in ['d', 'e']:
                     partial = administrator_store / 'containers' / (digit * 64)
                     partial.mkdir(mode=0o700)
@@ -1405,6 +1440,8 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 helper.kill()
                 helper.wait()
             bridge.shutdown()
+            fixture_master.shutdown()
+            fixture_master.server_close()
             for server in mcp_servers.values():
                 server.shutdown()
                 server.server_close()

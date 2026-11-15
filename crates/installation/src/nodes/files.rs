@@ -338,6 +338,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn staging_reserve_increase_refuses_the_next_payload_chunk() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let state = root.path().join("state");
+        let target = data.join("seed");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let policy =
+            crate::storage::policy::for_node(&json!({"reserveMiB": 64, "reservePercent": 1}))
+                .unwrap();
+        std::fs::write(
+            state.join("storage-policy.json"),
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            state.join(crate::microvm::budget::FILE),
+            serde_json::to_vec(&json!({
+                "nativeModeProtocol": 1, "slots": 1,
+                "limits": {"cpu": 1, "memoryMiB": 1024, "diskMiB": 1024},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut admission =
+            crate::native::ingress::Admission::staging(&data, &state, &target).unwrap();
+        let mut stream = Vec::new();
+        wire::write(
+            &mut stream,
+            &json!({"path": "payload", "kind": "file", "size": 8}),
+        )
+        .await
+        .unwrap();
+        wire::write(&mut stream, &json!({"data": STANDARD.encode(b"kept")}))
+            .await
+            .unwrap();
+        wire::write(&mut stream, &json!({"data": STANDARD.encode(b"lost")}))
+            .await
+            .unwrap();
+        let mut payloads = 0;
+        let result = receive_admitted(
+            &mut stream.as_slice(),
+            &target,
+            8,
+            8,
+            |_| std::future::ready(Ok(0)),
+            &mut |bytes| {
+                if bytes == 4 {
+                    payloads += 1;
+                    if payloads == 2 {
+                        let (total, _) = crate::storage::policy::physical_space(&data)?;
+                        let mut raised = policy.clone();
+                        raised.reserve_mi_b = total / (1024 * 1024) + 1;
+                        std::fs::write(
+                            state.join("storage-policy.json"),
+                            serde_json::to_vec(&raised)?,
+                        )?;
+                    }
+                }
+                admission.admit(bytes)
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().status, 507);
+        assert_eq!(std::fs::read(target.join("payload")).unwrap(), b"kept");
+    }
+
+    #[tokio::test]
     async fn malformed_transfer_drains_accepted_writes_before_returning_its_error() {
         for (frame, error) in [
             (

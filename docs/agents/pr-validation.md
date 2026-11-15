@@ -58,6 +58,10 @@ affected code and the full qualification workflows for specialist coverage:
 - Native storage, process ownership, installation and update changes require
   the `node-checks` and `native-runtime` qualifications in that workflow, plus
   [storage measurements](../JOURNAL-RECOVERY.md#qualification) when applicable.
+  The native candidate fixture starts the installed `node-daemon` entry point
+  against an offline loopback master and observes its heartbeat; the immutable
+  reference keeps its original controller entry point. This exercises pre-runtime
+  legacy IO initialization during conversion without a production connection.
 - Firecracker changes require `scripts/test-firecracker-discard.sh` where
   relevant. Container/release changes require the corresponding image smoke
   tests. Use disposable infrastructure with the required KVM/ublk capabilities.

@@ -77,7 +77,7 @@ fn enforce_quota() -> Result<()> {
     Ok(())
 }
 
-pub(super) struct Admission {
+pub(crate) struct Admission {
     data: PathBuf,
     state: PathBuf,
     target: PathBuf,
@@ -97,6 +97,18 @@ struct Observation {
 }
 
 impl Admission {
+    /// Connector staging lives on the control filesystem, not the quota pool.
+    /// Require persisted controller authority rather than inventing a fallback.
+    pub(crate) fn staging(data: &Path, state: &Path, target: &Path) -> Result<Self> {
+        let policy =
+            storage::policy::from_persisted(&std::fs::read(state.join("storage-policy.json"))?)?;
+        policy.validate().map_err(Error::bad)?;
+        let budget =
+            serde_json::from_slice(&std::fs::read(state.join(crate::microvm::budget::FILE))?)?;
+        let limit = super::native_budget(&budget)?.limits.disk_mi_b * disk::MIB;
+        Self::new(data, state, target, data, limit, &policy)
+    }
+
     /// `target` is the exclusive operation's own tree, not an agent-controlled
     /// path inferred from a request. `filesystem` must be the unrestricted pool
     /// or controller filesystem: project statvfs can report a virtual quota.
@@ -193,6 +205,10 @@ fn allocated(path: &Path) -> Result<u64> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
             workspace::measure(path, true)
+        }
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            use std::os::unix::fs::MetadataExt;
+            Ok(metadata.blocks().saturating_mul(512))
         }
         Ok(_) => Err(Error::conflict("Native ingress target changed type.")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
