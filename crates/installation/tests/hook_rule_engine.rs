@@ -1341,12 +1341,23 @@ async fn the_end_of_a_creators_membership_stops_waiting_work() {
 async fn a_claim_error_does_not_abort_another_triggerings_in_flight_tool() {
     let f = granted().await;
     rule(&f, OWNER, steps(&json!([post("slow", &f, &json!({}))])), 60).await;
-    rule(&f, OWNER, json!([{
-        "type": "if", "id": "bob",
-        "condition": { "type": "authorIn", "author": { "type": "formula", "expression": "author" }, "people": [{ "resourceType": "person", "id": "bob" }] },
-        "then": [wait_step(1), post("afterWait", &f, &json!({}))],
-        "otherwise": [],
-    }]), 60).await;
+    let waiting_rule = rule(
+        &f,
+        OWNER,
+        json!([{
+            "type": "if",
+            "id": "bob",
+            "condition": {
+                "type": "authorIn",
+                "author": { "type": "formula", "expression": "author" },
+                "people": [{ "resourceType": "person", "id": "bob" }],
+            },
+            "then": [wait_step(600), post("afterWait", &f, &json!({}))],
+            "otherwise": [],
+        }]),
+        60,
+    )
+    .await;
     emit(
         &f,
         "wait-before-fault",
@@ -1355,16 +1366,41 @@ async fn a_claim_error_does_not_abort_another_triggerings_in_flight_tool() {
     .await;
     engine::tick(&f.s).await.unwrap();
     let worker = hold_first_tool(&f, "slow-during-fault").await;
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+
     let attempted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let signal = attempted.clone();
-    f.s.store.transaction(move |db| {
-        db.0.create_scalar_function("fail_claim", 0, rusqlite::functions::FunctionFlags::SQLITE_UTF8, move |_| -> rusqlite::Result<i64> {
-            signal.store(true, Ordering::SeqCst);
-            Err(rusqlite::Error::UserFunctionError(Box::new(std::io::Error::other("synthetic claim failure"))))
-        })?;
-        db.0.execute_batch("CREATE TRIGGER fail_claim BEFORE UPDATE ON hook_rule_triggerings WHEN OLD.status='waiting' AND NEW.status='running' BEGIN SELECT fail_claim(); END;")?;
-        Ok(())
-    }).await.unwrap();
+
+    // Only make the waiting triggering due after the other tool is in flight
+    // and the claim fault is installed, independent of fixture setup latency.
+    let resumed =
+        f.s.store
+            .transaction(move |db| {
+                db.0.create_scalar_function(
+                    "fail_claim",
+                    0,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                    move |_| -> rusqlite::Result<i64> {
+                        signal.store(true, Ordering::SeqCst);
+                        Err(rusqlite::Error::UserFunctionError(Box::new(
+                            std::io::Error::other("synthetic claim failure"),
+                        )))
+                    },
+                )?;
+                db.0.execute_batch(
+                    "CREATE TRIGGER fail_claim BEFORE UPDATE ON hook_rule_triggerings \
+                 WHEN OLD.status='waiting' AND NEW.status='running' \
+                 BEGIN SELECT fail_claim(); END;",
+                )?;
+                Ok(db.0.execute(
+                "UPDATE hook_rule_triggerings SET next_at=0 WHERE rule_id=?1 AND status='waiting'",
+                [&waiting_rule],
+            )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(resumed, 1, "The waiting triggering must still be pending.");
+    f.s.rules.notify_queued();
     let observed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while !attempted.load(Ordering::SeqCst) {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
