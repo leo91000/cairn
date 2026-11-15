@@ -46,6 +46,7 @@ async function installRulesFixture(workspace: Workspace) {
           tags: { type: 'array', items: { type: 'string' } },
           count: { type: 'integer' },
           counts: { type: 'array', items: { type: 'integer' } },
+          meta: { type: 'object' },
           approved: { type: 'boolean' },
         },
       },

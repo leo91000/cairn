@@ -481,6 +481,7 @@ export interface VariableOption {
   example?: string
   path?: string
   itemType?: string
+  schema?: any
   personId?: boolean
 }
 
@@ -503,6 +504,7 @@ export function schemaFields(schema: any, prefix: string, depth = 0, root = sche
       {
         path,
         itemType: typeOf(resolveRuleSchema(resolvedField?.items, root)),
+        schema: resolvedComparisonSchema(resolvedField, root),
         group: 'Event' as const,
         expression,
         label: expression.replace(/^payload\./, ''),
@@ -652,6 +654,8 @@ export function comparisonExpects(left: RuleValue, operator: RuleOperator, varia
     : left.type === 'formula'
       ? variables.find(variable => variable.expression === left.expression || variable.expression === `payload.${left.expression}`)?.type
       : 'string'
+  if (['equals', 'notEquals'].includes(operator) && (!type || ['object', 'array', 'value', 'result', 'item'].includes(type)))
+    return 'json'
   if ((!type || type === 'value' || type === 'result') && ['greaterThan', 'lessThan'].includes(operator))
     return 'number'
   return type === 'integer' || type === 'number' ? 'number' : type === 'boolean' ? 'boolean' : 'text'
@@ -665,9 +669,38 @@ export function ruleConditionDepth(condition: RuleCondition): number {
   return 1
 }
 
+function resolvedComparisonSchema(input: any, root: any, depth = 0): any {
+  if (depth > 8)
+    return {}
+  const schema = resolveRuleSchema(input, root)
+  const resolved = { ...schema }
+  if (schema.items)
+    resolved.items = resolvedComparisonSchema(schema.items, root, depth + 1)
+  if (schema.properties)
+    resolved.properties = Object.fromEntries(Object.entries(schema.properties).map(([name, field]) => [name, resolvedComparisonSchema(field, root, depth + 1)]))
+  return resolved
+}
+
+function literalComparisonSchema(value: unknown, depth = 0): any {
+  if (depth > 8 || value === null)
+    return {}
+  if (Array.isArray(value)) {
+    const candidates = value.map(item => literalComparisonSchema(item, depth + 1))
+    const items = candidates.length && candidates.every(item => JSON.stringify(item) === JSON.stringify(candidates[0])) ? candidates[0] : {}
+    return { type: 'array', items }
+  }
+
+  return { type: typeof value === 'object' ? 'object' : typeof value === 'string' ? 'string' : typeof value }
+}
+
 export function comparisonListSchema(left: RuleValue, variables: VariableOption[]) {
+  if (left.type === 'literal')
+    return { type: 'array', items: literalComparisonSchema(left.value) }
+  const field = left.type === 'formula' ? variables.find(variable => variable.expression === left.expression || variable.expression === `payload.${left.expression}`) : undefined
+  if (field?.schema)
+    return { type: 'array', items: field.schema }
   const type = comparisonExpects(left, 'equals', variables)
-  return { type: 'array', items: { type: type === 'text' ? 'string' : type } }
+  return { type: 'array', items: type === 'json' ? {} : { type: type === 'text' ? 'string' : type } }
 }
 
 // Only schema-level optional fields are normalized. Literal JSON data, including

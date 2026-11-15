@@ -150,6 +150,81 @@ abstract class RulesEditorCases {
     }
 
     @Test
+    fun equalityKeepsObjectsAndListsStructured() {
+        val fields =
+            schemaFields(
+                wireJson.parseToJsonElement(
+                    """{"properties":{"items":{"type":"array"},"meta":{"type":"object"}}}"""
+                ),
+                "payload",
+            )
+        for ((name, value) in
+            listOf(
+                "items" to wireJson.parseToJsonElement("[1,2]"),
+                "meta" to wireJson.parseToJsonElement("""{"ok":true}"""),
+            )) {
+            for (operator in listOf("equals", "notEquals")) {
+                val expected =
+                    comparisonExpects(formulaRuleValue("payload.$name"), operator, fields)
+                assertEquals("json", expected)
+                assertEquals(
+                    literalRuleValue(value),
+                    typedComparisonRight(literalRuleValue(value), expected, listOnly = false),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun unknownFormulaEqualityKeepsNumbersAndNestedMembershipKeepsItemTypes() {
+        for (expression in listOf("size(payload.items)", "steps.fetch.count")) {
+            for (operator in listOf("equals", "notEquals")) {
+                val expected =
+                    comparisonExpects(formulaRuleValue(expression), operator, emptyList())
+                assertEquals("json", expected)
+                assertEquals(
+                    literalRuleValue(JsonPrimitive(3)),
+                    typedComparisonRight(
+                        literalRuleValue(JsonPrimitive(3)),
+                        expected,
+                        listOnly = false,
+                    ),
+                )
+            }
+        }
+        val fields =
+            schemaFields(
+                wireJson.parseToJsonElement(
+                    """{"properties":{"counts":{"type":"array","items":{"type":"integer"}}}}"""
+                ),
+                "payload",
+            )
+        val schema = comparisonListSchema(formulaRuleValue("payload.counts"), fields)
+        assertEquals("integer", schema.obj("items")?.obj("items").text("type"))
+        var value by mutableStateOf<JsonElement>(wireJson.parseToJsonElement("[[1,2]]"))
+        compose.setContent { CairnTheme { RuleLiteralEditor(schema, value, { value = it }) } }
+        compose.onAllNodes(hasSetTextAction())[0].performTextReplacement("5")
+        compose.runOnIdle { assertEquals(wireJson.parseToJsonElement("[[5,2]]"), value) }
+    }
+
+    @Test
+    fun untypedJsonKeepsPartialTextWhileTypingAnObject() {
+        var value by mutableStateOf<JsonElement>(JsonObject(emptyMap()))
+        compose.setContent {
+            CairnTheme { RuleLiteralEditor(JsonObject(emptyMap()), value, { value = it }) }
+        }
+        val input = compose.onNode(hasSetTextAction())
+        input.performTextClearance()
+        var expected = ""
+        for (character in "{\"n\":1.5}") {
+            expected += character
+            input.performTextInput(character.toString())
+            input.assertTextContains(expected)
+        }
+        compose.runOnIdle { assertEquals(wireJson.parseToJsonElement("""{"n":1.5}"""), value) }
+    }
+
+    @Test
     fun fixedArrayItemsKeepTheirDeclaredBooleanType() {
         val schema =
             wireJson

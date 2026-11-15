@@ -308,7 +308,8 @@ private fun schemaKind(schema: JsonObject, value: JsonElement): String {
                 ?.content
                 .orEmpty()
         else ->
-            if (schema["properties"] != null || value is JsonObject) "object"
+            if (schema["properties"] == null && schema["items"] == null) "json"
+            else if (schema["properties"] != null || value is JsonObject) "object"
             else if (schema["items"] != null || value is JsonArray) "array" else "string"
     }
 }
@@ -401,22 +402,37 @@ internal fun RuleLiteralEditor(
                 }
             }
         }
-        kind == "object" -> {
-            val text =
-                (value as? JsonPrimitive)?.takeIf { it.isString }?.content ?: value.toString()
+        kind == "object" || kind == "json" -> {
+            fun display(value: JsonElement): String =
+                (value as? JsonPrimitive)?.takeIf { it.isString && kind != "json" }?.content
+                    ?: value.toString()
+            var draft by remember(kind) { mutableStateOf(display(value)) }
+            var emitted by remember(kind) { mutableStateOf(value) }
+            LaunchedEffect(value) {
+                if (value != emitted) {
+                    draft = display(value)
+                    emitted = value
+                }
+            }
             OutlinedTextField(
-                text,
+                draft,
                 { raw ->
+                    draft = raw
                     val parsed = runCatching { wireJson.parseToJsonElement(raw) }.getOrNull()
-                    change(if (parsed is JsonObject) parsed else JsonPrimitive(raw))
+                    emitted =
+                        if (kind == "json") parsed ?: JsonPrimitive(raw)
+                        else if (parsed is JsonObject) parsed else JsonPrimitive(raw)
+                    change(emitted)
                 },
                 Modifier.fillMaxWidth(),
-                label = { Text("Objet JSON") },
+                label = { Text(if (kind == "json") "Valeur JSON" else "Objet JSON") },
                 minLines = 3,
-                isError = value !is JsonObject,
+                isError = kind == "object" && value !is JsonObject,
                 supportingText = {
                     Text(
-                        if (value is JsonObject) "Propriétés et valeurs de l’objet en JSON."
+                        if (kind == "json")
+                            "Texte entre guillemets, nombre, booléen, objet ou liste JSON."
+                        else if (value is JsonObject) "Propriétés et valeurs de l’objet en JSON."
                         else "Saisissez un objet JSON valide."
                     )
                 },

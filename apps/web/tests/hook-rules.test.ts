@@ -5,6 +5,7 @@ import { reactive } from 'vue'
 import {
   authorVariable,
   comparisonExpects,
+  comparisonListSchema,
   newStep,
   nodeAt,
   pathOfNode,
@@ -174,4 +175,32 @@ it('preserves numeric boolean and object list members in contains comparisons', 
   expect(comparisonExpects({ type: 'formula', expression: 'payload.records' }, 'contains', fields)).toBe('json')
   expect(typedComparisonRight({ type: 'literal', value: 5 }, 'json', false)).toEqual({ type: 'literal', value: 5 })
   expect(typedComparisonRight({ type: 'literal', value: { id: 5 } }, 'json', false)).toEqual({ type: 'literal', value: { id: 5 } })
+})
+
+it('keeps equality operands and membership elements structured', () => {
+  const fields = schemaFields({ type: 'object', properties: { items: { type: 'array' }, meta: { type: 'object' } } }, 'payload')
+  expect(comparisonListSchema({ type: 'formula', expression: 'payload.meta' }, fields)).toEqual({ type: 'array', items: { type: 'object' } })
+  expect(comparisonListSchema({ type: 'formula', expression: 'payload.items' }, fields)).toEqual({ type: 'array', items: { type: 'array' } })
+  for (const [name, value] of [['items', [1, 2]], ['meta', { ok: true }]] as const) {
+    for (const operator of ['equals', 'notEquals'] as const) {
+      const expects = comparisonExpects({ type: 'formula', expression: `payload.${name}` }, operator, fields)
+      expect(expects).toBe('json')
+      expect(typedComparisonRight({ type: 'literal', value }, expects, false)).toEqual({ type: 'literal', value })
+    }
+  }
+})
+
+it('keeps unknown formula equality operands typed and retains nested membership schemas', () => {
+  for (const expression of ['size(payload.items)', 'steps.fetch.count']) {
+    for (const operator of ['equals', 'notEquals'] as const) {
+      const expects = comparisonExpects({ type: 'formula', expression }, operator, [])
+      expect(expects).toBe('json')
+      expect(typedComparisonRight({ type: 'literal', value: 3 }, expects, false)).toEqual({ type: 'literal', value: 3 })
+    }
+  }
+
+  const counts = { type: 'array', items: { type: 'integer' } }
+  const fields = schemaFields({ type: 'object', properties: { counts } }, 'payload')
+  expect(comparisonListSchema({ type: 'formula', expression: 'payload.counts' }, fields)).toEqual({ type: 'array', items: counts })
+  expect(comparisonListSchema({ type: 'literal', value: [1, 2] }, [])).toEqual({ type: 'array', items: { type: 'array', items: { type: 'number' } } })
 })

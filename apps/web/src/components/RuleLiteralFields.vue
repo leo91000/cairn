@@ -36,18 +36,19 @@ function inputNumber(raw: string) {
   model.value = emittedNumber
 }
 
+const untyped = computed(() => !resolved.value.type && !resolved.value.properties && !resolved.value.items)
 const objectDraft = ref('')
 let emittedObject: unknown = Symbol('initial')
 watch(() => model.value, (value) => {
   if (!Object.is(value, emittedObject))
-    objectDraft.value = typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 2)
+    objectDraft.value = typeof value === 'string' && !untyped.value ? value : JSON.stringify(value ?? null, null, 2)
 }, { immediate: true })
 
 function inputObject(raw: string) {
   objectDraft.value = raw
   try {
     const value = JSON.parse(raw)
-    emittedObject = value && typeof value === 'object' && !Array.isArray(value) ? value : raw
+    emittedObject = untyped.value || (value && typeof value === 'object' && !Array.isArray(value)) ? value : raw
   }
   catch {
     emittedObject = raw
@@ -134,16 +135,16 @@ function setItem(index: number, value: unknown) {
       <Icon :name="Plus" :size="13" />Add an item
     </button>
   </div>
-  <div v-else-if="resolved.type === 'object'" class="grid gap-1.5">
+  <div v-else-if="resolved.type === 'object' || untyped" class="grid gap-1.5">
     <textarea
       :value="objectDraft"
-      :aria-label="`${label} (JSON object)`"
+      :aria-label="`${label} (${untyped ? 'JSON' : 'JSON object'})`"
       rows="4"
       spellcheck="false"
       @input="inputObject(($event.target as HTMLTextAreaElement).value)"
     />
-    <small class="text-xs text-muted">Enter the object's key/value properties as JSON.</small>
-    <small v-if="!model || typeof model !== 'object' || Array.isArray(model)" class="text-xs text-coral" role="alert">Enter a valid JSON object.</small>
+    <small class="text-xs text-muted">{{ untyped ? 'Enter a JSON value: text in quotes, number, boolean, object or list.' : "Enter the object's key/value properties as JSON." }}</small>
+    <small v-if="!untyped && (!model || typeof model !== 'object' || Array.isArray(model))" class="text-xs text-coral" role="alert">Enter a valid JSON object.</small>
   </div>
   <textarea
     v-else-if="resolved.type === 'string' && (resolved.maxLength ?? 0) > 200"

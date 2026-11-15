@@ -275,7 +275,10 @@ test('numeric and boolean field comparisons save typed values and act on matchin
   await page.getByRole('button', { name: 'Edit typed', exact: true }).click()
   await page.getByRole('button', { name: 'Insert a variable into Field', exact: true }).first().click()
   await page.getByRole('dialog', { name: 'Variables for Field', exact: true }).getByRole('button').filter({ has: page.getByText('count', { exact: true }) }).click()
-  await page.getByRole('textbox', { name: 'Value', exact: true }).first().fill('5')
+  const numericValue = page.getByRole('textbox', { name: 'Value', exact: true }).first()
+  await numericValue.fill('')
+  await numericValue.pressSequentially('1.5')
+  await expect(numericValue).toHaveValue('1.5')
   await page.getByRole('button', { name: 'Insert a variable into Field', exact: true }).nth(1).click()
   await page.getByRole('dialog', { name: 'Variables for Field', exact: true }).getByRole('button').filter({ has: page.getByText('approved', { exact: true }) }).click()
   await page.getByRole('button', { name: 'Yes', exact: true }).click()
@@ -283,7 +286,7 @@ test('numeric and boolean field comparisons save typed values and act on matchin
   await page.getByRole('button', { name: 'Save version', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
   const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
-  expect(saved.definition.steps[0].condition.conditions.map((condition: any) => condition.right)).toEqual([{ type: 'literal', value: 5 }, { type: 'literal', value: true }])
+  expect(saved.definition.steps[0].condition.conditions.map((condition: any) => condition.right)).toEqual([{ type: 'literal', value: 1.5 }, { type: 'literal', value: true }])
   workspace.service.emitHook(fixture.instanceId, 'message', {
     author: 'alice',
     channel: 'support',

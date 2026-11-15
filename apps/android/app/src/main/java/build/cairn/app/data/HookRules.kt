@@ -505,6 +505,7 @@ data class RuleVariable(
     val example: String? = null,
     val path: String? = null,
     val itemType: String? = null,
+    val schema: JsonObject? = null,
     val personId: Boolean = false,
 )
 
@@ -546,6 +547,7 @@ fun schemaFields(
                 field.text("description"),
                 path = path,
                 itemType = schemaType(field.obj("items")),
+                schema = field as? JsonObject,
             )
         ) + schemaFields(field, expression, depth + 1, path)
     }
@@ -933,13 +935,22 @@ fun comparisonExpects(left: JsonElement?, operator: String, variables: List<Rule
                 ?.type
         else if (left.text("type") == "literal")
             when ((left as? JsonObject)?.get("value")) {
+                JsonNull -> "value"
                 is JsonPrimitive ->
                     if (((left as JsonObject)["value"] as JsonPrimitive).isString) "string"
                     else if (left["value"].flag() != null) "boolean"
                     else if (left["value"].number() != null) "number" else "string"
+                is JsonArray -> "array"
+                is JsonObject -> "object"
                 else -> "value"
             }
         else "string"
+    if (
+        operator in setOf("equals", "notEquals") &&
+            (type == null ||
+                type in setOf("array", "object", "value", "valeur", "result", "résultat", "item"))
+    )
+        return "json"
     if (
         (type == null ||
             type == "value" ||
@@ -956,12 +967,45 @@ fun comparisonExpects(left: JsonElement?, operator: String, variables: List<Rule
     }
 }
 
+private fun literalComparisonSchema(value: JsonElement?, depth: Int = 0): JsonObject {
+    if (depth > 8 || value == null || value == JsonNull) return JsonObject(emptyMap())
+    if (value is JsonArray) {
+        val candidates = value.map { literalComparisonSchema(it, depth + 1) }.distinct()
+        return buildJsonObject {
+            put("type", "array")
+            put("items", candidates.singleOrNull() ?: JsonObject(emptyMap()))
+        }
+    }
+    return buildJsonObject {
+        put(
+            "type",
+            when {
+                value is JsonObject -> "object"
+                value is JsonPrimitive && value.isString -> "string"
+                value.flag() != null -> "boolean"
+                else -> "number"
+            },
+        )
+    }
+}
+
 fun comparisonListSchema(left: JsonElement?, variables: List<RuleVariable>): JsonObject {
+    val field = variables.firstOrNull {
+        it.expression == left.text("expression") ||
+            it.expression == "payload.${left.text("expression")}"
+    }
     val expects = comparisonExpects(left, "equals", variables)
-    val itemType = if (expects == "text") "string" else expects
+    val itemSchema =
+        if (left.text("type") == "literal") {
+            literalComparisonSchema((left as? JsonObject)?.get("value"))
+        } else
+            field?.schema
+                ?: buildJsonObject {
+                    if (expects != "json") put("type", if (expects == "text") "string" else expects)
+                }
     return buildJsonObject {
         put("type", "array")
-        put("items", buildJsonObject { put("type", itemType) })
+        put("items", itemSchema)
     }
 }
 

@@ -55,6 +55,7 @@ const modes = computed(() => {
   return all
 })
 
+const literalDraft = ref<{ value: RuleValue, text: string } | null>(null)
 const text = computed({
   get: () => {
     const value = model.value
@@ -62,15 +63,22 @@ const text = computed({
       return value.text
     if (value.type === 'formula')
       return value.expression
+    if (literalDraft.value?.value === value)
+      return literalDraft.value.text
     return typeof value.value === 'string' ? value.value : JSON.stringify(value.value ?? null)
   },
   set: (next: string) => {
-    if (model.value.type === 'template')
+    if (model.value.type === 'template') {
       model.value = { type: 'template', text: next }
-    else if (model.value.type === 'formula')
+    }
+    else if (model.value.type === 'formula') {
       model.value = { type: 'formula', expression: next }
-    else
-      model.value = { type: 'literal', value: parseLiteral(next) }
+    }
+    else {
+      const value: RuleValue = { type: 'literal', value: parseLiteral(next) }
+      literalDraft.value = { value, text: next }
+      model.value = value
+    }
   },
 })
 

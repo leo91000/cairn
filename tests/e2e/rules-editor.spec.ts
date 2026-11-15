@@ -491,3 +491,101 @@ test('adding an author condition selects the nested person identifier', async ({
   const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
   expect(history.steps.some((step: any) => step.nodeId === 'post' && step.status === 'completed')).toBe(true)
 })
+
+test('changing equality operators preserves structured operands and matches the event', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const definition: any = structuredClone(fixture.definition)
+  definition.steps[0].condition = {
+    type: 'all',
+    conditions: [
+      {
+        type: 'compare',
+        left: { type: 'formula', expression: 'payload.counts' },
+        operator: 'equals',
+        right: { type: 'literal', value: [1, 2] },
+      },
+      {
+        type: 'compare',
+        left: { type: 'formula', expression: 'payload.meta' },
+        operator: 'equals',
+        right: { type: 'literal', value: { ok: true } },
+      },
+    ],
+  }
+  const rule = await workspace.api('/api/hook-rules', 'POST', { definition, enabled: true })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit trusted', exact: true }).click()
+  for (const index of [0, 1]) {
+    const select = page.getByRole('combobox', { name: 'Test', exact: true }).nth(index)
+    await select.selectOption('notEquals')
+    await select.selectOption('equals')
+  }
+
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
+  expect(saved.definition.steps[0].condition.conditions.map((condition: any) => condition.right.value)).toEqual([[1, 2], { ok: true }])
+  workspace.service.emitHook(fixture.instanceId, 'message', {
+    counts: [1, 2],
+    meta: { ok: true },
+    author: 'alice',
+    channel: 'support',
+    content: 'Structured equality',
+  }, 'structured-equality')
+  let triggering: any
+  await expect.poll(async () => {
+    triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+    return triggering?.status
+  }).toBe('completed')
+  const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+  expect(history.steps.some((step: any) => step.nodeId === 'post' && step.status === 'completed')).toBe(true)
+})
+
+test('formula equality and editing nested membership keep JSON types through execution', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const definition: any = structuredClone(fixture.definition)
+  definition.steps[0].condition = {
+    type: 'all',
+    conditions: [
+      {
+        type: 'compare',
+        left: { type: 'formula', expression: 'size(payload.counts)' },
+        operator: 'equals',
+        right: { type: 'literal', value: 2 },
+      },
+      {
+        type: 'compare',
+        left: { type: 'formula', expression: 'payload.counts' },
+        operator: 'in',
+        right: { type: 'literal', value: [[1, 2]] },
+      },
+    ],
+  }
+  const rule = await workspace.api('/api/hook-rules', 'POST', { definition, enabled: true })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit trusted', exact: true }).click()
+  const operator = page.getByRole('combobox', { name: 'Test', exact: true }).first()
+  await operator.selectOption('notEquals')
+  await operator.selectOption('equals')
+  await page.getByRole('textbox', { name: 'Values (a list) 1 1', exact: true }).fill('5')
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
+  expect(saved.definition.steps[0].condition.conditions.map((condition: any) => condition.right.value)).toEqual([2, [[5, 2]]])
+  workspace.service.emitHook(fixture.instanceId, 'message', {
+    counts: [5, 2],
+    author: 'alice',
+    channel: 'support',
+    content: 'Nested comparison',
+  }, 'nested-comparison')
+  let triggering: any
+  await expect.poll(async () => {
+    triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+    return triggering?.status
+  }).toBe('completed')
+  const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+  expect(history.steps.some((step: any) => step.nodeId === 'post' && step.status === 'completed')).toBe(true)
+})
