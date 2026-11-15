@@ -4,7 +4,7 @@ Version 34 upgrades to 35 automatically in `Store::open`, before the SQL actors 
 ([ADR-0075](../adr/0075-plugin-hooks-rules-and-scoped-grants.md), « Clé de conversation »,
 « Hooks de Cairn » and « Budget du moteur de règles »).
 
-One immediate transaction creates eight empty tables and advances `user_version`:
+One immediate transaction creates nine empty tables and advances `user_version`:
 
 - `hook_rule_conversations`: each conversation a rule started, with its creator, its
   key (unique per creator, released when the conversation is deleted or detached by a
@@ -24,6 +24,9 @@ One immediate transaction creates eight empty tables and advances `user_version`
   agent-created or edited scheduled work and with a mission run's admission. A
   mission cannot lose the chain of the conversation that started it, even if
   that conversation subsequently accepts another person's input or is deleted.
+- `hook_rule_reported_questions`: once-only question notifications, retained until
+  their question is deleted. Pending questionnaires are processed in bounded
+  batches without dropping deduplication at a cache limit or after restart.
 - `hook_rule_author_triggerings`: the triggerings each author caused, for quota
   conditions, kept a week.
 - `hook_rule_conversation_counts`: the conversations each rule started or steered in

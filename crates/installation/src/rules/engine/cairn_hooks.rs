@@ -8,7 +8,7 @@
 //! of the chain it belongs to, which only Cairn records.
 use super::conversations::{MAX_CHAIN_DEPTH, values};
 use super::*;
-use crate::run_status::RunStatus;
+use crate::{run_status::RunStatus, validation::text};
 use cairn_contracts::CairnHookKind;
 
 /// About how often a working turn reports a short step.
@@ -19,8 +19,9 @@ const EVENTS: i64 = 200;
 const MAX_REPLY_BYTES: usize = 128 * 1024;
 /// Deliverables reported with one reply.
 const MAX_DELIVERABLES: i64 = 10;
-/// Questions remembered as reported, per conversation.
-const MAX_ASKED: usize = 100;
+/// Pending questions loaded in one observation. Receipts, rather than this batch,
+/// remember every question already reported for the lifetime of its definition.
+const QUESTIONS_PER_PASS: usize = 100;
 
 /// Who wrote a delivered entry, and how deep in a chain it stands.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -48,6 +49,7 @@ struct Watch {
     /// A failure that a retry may still continue.
     failed: Option<i64>,
     error: Option<String>,
+    #[serde(skip)]
     asked: Vec<String>,
     progress_at: i64,
     /// The last progress hook, while a rule has yet to handle it.
@@ -336,10 +338,6 @@ impl Watch {
             );
             self.asked.push(question.id.clone());
         }
-        if self.asked.len() > MAX_ASKED {
-            let excess = self.asked.len() - MAX_ASKED;
-            self.asked.drain(..excess);
-        }
     }
 
     fn end(&mut self, emissions: &mut Vec<Emission>, outcome: &str) {
@@ -355,6 +353,26 @@ impl Watch {
         self.failed = None;
         self.error = None;
     }
+}
+
+/// One chronological page of pending questions not yet durably reported.
+fn pending_questions(
+    db: &Db<'_>,
+    chat: &str,
+    run: &str,
+    at: i64,
+    until: Option<i64>,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<String>> {
+    Ok(db.0.prepare_cached(
+        "SELECT q.id FROM chat_questions q WHERE q.chat_id=?1 AND q.run_id=?2 AND q.status='pending' \
+         AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?3) \
+         AND NOT EXISTS(SELECT 1 FROM hook_rule_reported_questions r WHERE r.question_id=q.id) \
+         AND (?4 IS NULL OR coalesce(q.created_at,0)<=?4) \
+         ORDER BY coalesce(q.created_at,0),q.id LIMIT ?6 OFFSET ?5",
+    )?.query_map(params![chat,run,at,until,offset as i64,limit as i64], |row|row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// Reads what happened in a bound conversation since the last pass. Pure over the
@@ -386,13 +404,12 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
     };
     let mut cursor = if same_run { bound.cursor } else { 0 };
     let mut emissions = Vec::new();
-    let questions: Vec<_> = db
-        .questions(chat)?
-        .into_iter()
-        .filter(|question| {
-            question.status == cairn_contracts::QuestionStatus::Pending && question.run_id == run
-        })
-        .collect();
+    let mut questions = Vec::new();
+    for id in pending_questions(db, chat, &run, at, None, 0, QUESTIONS_PER_PASS)? {
+        if let Some(question) = db.question(chat, &id)? {
+            questions.push(question);
+        }
+    }
 
     // Delivered input and wakeups open turns whatever the provider notifies: Claude's
     // adapter reports no turn start.
@@ -414,7 +431,8 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let complete = (events.len() as i64) < EVENTS;
+    let mut complete = (events.len() as i64) < EVENTS;
+    let mut observed_until = 0;
     for (id, kind, text, payload, created_at) in events {
         let payload: Json = payload
             .and_then(|payload| serde_json::from_str(&payload).ok())
@@ -430,12 +448,26 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                 watch.compacting = false;
             } else {
                 cursor = id;
+                observed_until = created_at;
                 continue;
             }
         }
         // The questions a turn asked are reported before it ends.
-        if matches!(kind.as_str(), "turn.completed" | "status") && watch.open {
+        let ends_turn = matches!(kind.as_str(), "turn.completed" | "status")
+            || (watch.failed.is_some()
+                && matches!(kind.as_str(), "chat.user" | "chat.wakeup" | "turn.started"));
+        if ends_turn && watch.open {
             watch.ask(&mut emissions, &questions, Some(created_at));
+            let included = questions
+                .iter()
+                .filter(|q| q.created_at.unwrap_or(0) <= created_at)
+                .count();
+            if !pending_questions(db, chat, &run, at, Some(created_at), included, 1)?.is_empty() {
+                // The next batch still belongs to this turn. Keep the boundary
+                // unread until its older questions have all been reported.
+                complete = false;
+                break;
+            }
         }
         match kind.as_str() {
             "chat.user" => {
@@ -495,6 +527,7 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
             _ => {}
         }
         cursor = id;
+        observed_until = created_at;
     }
     if complete {
         // Later events are not boundaries: the next pass need not read them again.
@@ -531,7 +564,11 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
 
     // A question stays answerable after its turn ended: it is reported whenever Cairn
     // sees it, in the chain of the turn that asked it.
-    watch.ask(&mut emissions, &questions, None);
+    watch.ask(
+        &mut emissions,
+        &questions,
+        (!complete).then_some(observed_until),
+    );
     if watch.open
         && working
         && at - watch.progress_at >= PROGRESS_INTERVAL
@@ -678,6 +715,12 @@ fn apply(db: &Db<'_>, chat: &str, at: i64) -> Result<bool> {
             payload[name] = value.clone();
         }
         let event = fanout(db, &bound, hook, &payload, depth)?;
+        if hook == CairnHookKind::QuestionAsked {
+            db.0.execute(
+                "INSERT OR IGNORE INTO hook_rule_reported_questions(question_id) VALUES(?)",
+                [text(&fields, "questionId")],
+            )?;
+        }
         if hook == CairnHookKind::Progress {
             watch.progress_event.clone_from(&event);
         }
@@ -704,10 +747,14 @@ pub(super) async fn observe(s: &Service) -> Result<bool> {
                      WHERE k.key IS NOT NULL AND c.lifecycle='active' AND c.run_id IS NOT NULL \
                      AND c.agent_id=k.agent_id AND (k.run_id IS NOT c.run_id \
                      OR json_extract(k.watch,'$.open')=1 OR json_extract(k.watch,'$.failed') IS NOT NULL \
-                     OR EXISTS(SELECT 1 FROM events e WHERE e.run_id=c.run_id AND e.id>k.cursor)) \
+                     OR EXISTS(SELECT 1 FROM events e WHERE e.run_id=c.run_id AND e.id>k.cursor) \
+                     OR EXISTS(SELECT 1 FROM chat_questions q WHERE q.chat_id=k.chat_id AND q.run_id=c.run_id \
+                       AND q.status='pending' AND NOT EXISTS(SELECT 1 FROM question_import_metadata m \
+                         WHERE m.question_id=q.id AND m.expires<=?1) \
+                       AND NOT EXISTS(SELECT 1 FROM hook_rule_reported_questions r WHERE r.question_id=q.id))) \
                      ORDER BY k.chat_id",
                 )?
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map([at], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut due = Vec::new();
             for chat in chats {

@@ -972,6 +972,7 @@ fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
          DROP TABLE hook_rule_chain_depths;
          DROP TABLE hook_rule_task_depths;
          DROP TABLE hook_rule_run_depths;
+         DROP TABLE hook_rule_reported_questions;
          DROP TABLE hook_rule_author_triggerings;
          DROP TABLE hook_rule_conversation_counts;
          PRAGMA user_version=34;",
@@ -991,6 +992,7 @@ fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
             "hook_rule_chain_depths",
             "hook_rule_task_depths",
             "hook_rule_run_depths",
+            "hook_rule_reported_questions",
             "hook_rule_author_triggerings",
             "hook_rule_conversation_counts",
         ] {
@@ -2364,4 +2366,92 @@ async fn a_mission_run_preserves_its_callers_chain_after_the_caller_starts_a_new
             .unwrap();
     }
     assert!(!triggerings(&f, &looping).await.is_empty());
+}
+
+#[tokio::test]
+async fn more_than_one_page_of_pending_questions_is_reported_once_across_restart() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let asked = rule_on(
+        &f,
+        OWNER,
+        cairn("questionAsked"),
+        json!([remember("question", "question", "questionId")]),
+        json!({
+            "triggeringsPerHour": 600, "conversationsPerHour": 100,
+        }),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    event(
+        &f,
+        &run,
+        "chat.user",
+        "",
+        Some(json!({ "messageId": last_message(&f, &chat).await })),
+    )
+    .await;
+    for index in 0..101 {
+        f.s.question_receive(
+            &run,
+            json!({
+                "id": format!("{index:064x}"), "blocking": false,
+                "fields": [{ "id": "answer", "title": format!("Question {index}"), "options": [] }],
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    // All questions belong to the old turn, even when the observer has to page
+    // through them after a person's next turn is already present in the log.
+    event(&f, &run, "turn.completed", "", None).await;
+    let next = person_sends(&f, &chat, "A new chain after these questions").await;
+    replied(&f, &run, &next, "Next answer").await;
+    for _ in 0..3 {
+        engine::tick(&f.s).await.unwrap();
+    }
+    let checked = asked.clone();
+    let count: u32 =
+        f.s.store
+            .read(move |db| {
+                Ok(db.0.query_row(
+                    "SELECT count(*) FROM hook_rule_receipts WHERE rule_id=?",
+                    [checked],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(count, 101);
+    let checked = asked.clone();
+    f.s.store.read(move |db| {
+        let wrong: u32 = db.0.query_row(
+            "SELECT count(*) FROM hook_rule_triggerings WHERE rule_id=? AND (json_extract(event,'$.cairn.depth')!=1 OR json_extract(event,'$.payload.origin.kind')!='rule')",
+            [checked], |row| row.get(0),
+        )?;
+        assert_eq!(wrong, 0);
+        Ok(())
+    }).await.unwrap();
+    let restarted = cairn_installation::service::Service::new(cairn_installation::config::Config {
+        runner_url: "http://runner:4311".into(),
+        ..common::config(f._root.path())
+    })
+    .await
+    .unwrap();
+    engine::tick(&restarted).await.unwrap();
+    let count: u32 = restarted
+        .store
+        .read(move |db| {
+            Ok(db.0.query_row(
+                "SELECT count(*) FROM hook_rule_receipts WHERE rule_id=?",
+                [asked],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 101);
 }
