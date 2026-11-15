@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest'
 const launcher = fileURLToPath(new URL('../test-native-namespace.mjs', import.meta.url))
 const testName = 'storage::ublk::namespace::tests::isolated_namespace_qualification'
 const namespaceTests = [testName, 'native::block::holders::tests::retained_namespace_without_procfs_still_reports_the_device', 'native::block::holders::tests::private_mount_outside_a_chroot_is_not_lost', 'native::block::holders::tests::covered_namespace_root_requires_independent_superblock_inventory']
-const privilegedTest = 'native::block::holders::tests::raw_block_device_descriptor_is_a_holder'
+const privilegedTests = ['native::block::holders::tests::raw_block_device_descriptor_is_a_holder', 'native::block::holders::tests::mapped_raw_block_node_is_a_holder_after_its_descriptor_closes']
 
 function invoke(args, overrides = {}) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-namespace-runner-'))
@@ -37,7 +37,7 @@ if (name === 'cargo') {
 }
 else if (name === 'installation-test') {
   if (!process.env.CAIRN_NAMESPACE_ABSENT) {
-    for (const test of ${JSON.stringify([...namespaceTests, privilegedTest])}) {
+    for (const test of ${JSON.stringify([...namespaceTests, ...privilegedTests])}) {
       if (test !== process.env.CAIRN_NAMESPACE_MISSING_TEST) console.log(test + ': test');
     }
   }
@@ -77,7 +77,7 @@ describe('native namespace qualification launcher', () => {
     expect(result.calls).toEqual([
       { name: 'cargo', args: ['test', '--locked', '--workspace', '--lib', '--no-run', '--message-format=json'] },
       { name: 'installation-test', args: ['--list', '--ignored'] },
-      ...[...namespaceTests, privilegedTest].map(name => ({ name: 'sudo', args: ['-n', 'unshare', '--mount', '--propagation', 'private', result.binary, '--exact', name, '--ignored', '--nocapture'] })),
+      ...[...namespaceTests, ...privilegedTests].map(name => ({ name: 'sudo', args: ['-n', 'unshare', '--mount', '--propagation', 'private', result.binary, '--exact', name, '--ignored', '--nocapture'] })),
     ])
   })
 
@@ -110,8 +110,10 @@ describe('native namespace qualification launcher', () => {
   })
 
   it('requires every selected case before entering a namespace', () => {
-    const result = invoke(['--sudo'], { CAIRN_NAMESPACE_MISSING_TEST: privilegedTest })
-    expect(result.status).not.toBe(0)
-    expect(result.calls.map(call => call.name)).toEqual(['cargo', 'installation-test'])
+    for (const missing of privilegedTests) {
+      const result = invoke(['--sudo'], { CAIRN_NAMESPACE_MISSING_TEST: missing })
+      expect(result.status).not.toBe(0)
+      expect(result.calls.map(call => call.name)).toEqual(['cargo', 'installation-test'])
+    }
   })
 })

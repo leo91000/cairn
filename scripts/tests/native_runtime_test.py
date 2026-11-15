@@ -165,7 +165,7 @@ def retained_health(api, run):
 
 
 @contextmanager
-def escaped_docker_holder(root, docker_tools, disk):
+def escaped_docker_holder(root, docker_tools, disk, raw_device=None, probe=None):
     """An independent legacy engine on this disposable host, outside any run."""
     # The controller shares the host mount namespace. Docker/runc must receive
     # the real host path, not a procfs magic link into another process's root.
@@ -218,9 +218,25 @@ def escaped_docker_holder(root, docker_tools, disk):
         expected = '/system.slice/docker-' + container + '.scope'
         assert Path('/proc', str(pid), 'cgroup').read_text().strip() == '0::' + expected
         eventually(lambda: (disk / 'escaped-held').exists())
+        mapped = None
+        if raw_device is not None:
+            mapped = docker('run', '-d', '--network=none',
+                            '--device', str(raw_device.resolve(strict=True)) + ':/dev/held:r',
+                            '-v', str(probe.resolve(strict=True)) + ':/probe:ro',
+                            'alpine:3.22.2', '/probe', 'raw-mmap', '/dev/held')
+            eventually(lambda: docker('logs', mapped).strip() == 'mapped')
+            mapped_pid = json.loads(docker('inspect', mapped))[0]['State']['Pid']
+            assert Path('/proc', str(mapped_pid), 'cgroup').read_text().strip() == '0::/system.slice/docker-' + mapped + '.scope'
+            address = raw_device.stat().st_rdev
+            for descriptor in Path('/proc', str(mapped_pid), 'fd').iterdir():
+                metadata = descriptor.stat()
+                assert not (stat.S_ISBLK(metadata.st_mode) and metadata.st_rdev == address), 'Raw probe kept its block descriptor open.'
         yield pid
         assert not Path('/proc', str(pid)).exists(), 'Escaped legacy container survived disk retirement.'
         assert json.loads(docker('inspect', container))[0]['State']['Running'] is False
+        if mapped is not None:
+            assert not Path('/proc', str(mapped_pid)).exists(), 'Raw device mapping survived retirement.'
+            assert json.loads(docker('inspect', mapped))[0]['State']['Running'] is False
     finally:
         # Stop only this fixture engine; normal daemon shutdown reaps any container
         # left by an earlier assertion, without touching other Docker services.
@@ -1151,8 +1167,8 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 metrics['dockerCgroup']['descendantNames'] = sorted(set(process_names))
                 assert int((group / 'memory.max').read_text()) == 1024 * 1024 * 1024
                 assert (group / 'cpu.max').read_text().split()[0] != 'max'
-                with socket.socket() as probe:
-                    assert probe.connect_ex(('127.0.0.1', 57431)) != 0, 'Docker published on the host network.'
+                with socket.socket() as network_probe:
+                    assert network_probe.connect_ex(('127.0.0.1', 57431)) != 0, 'Docker published on the host network.'
                 progress('docker-concurrent')
                 parallel = start(docker_other, lease=300000, docker_script=docker_script('other'))
                 owner_a = json.loads((state / 'native' / docker_run / 'data/.cairn-identity.json').read_text())
@@ -1209,10 +1225,12 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                     partial.mkdir(mode=0o700)
                     if digit == 'e':
                         (partial / 'hostconfig.json').write_text('{')
-                with escaped_docker_holder(root, docker_tools, managed(docker_run)):
+                with escaped_docker_holder(root, docker_tools, managed(docker_run),
+                                           state / 'native-block' / docker_run / 'root/disk.blk', probe):
                     api('/runs/' + administrator_docker, method='DELETE')
                     fenced(docker_run, administrator_docker)
                     metrics['legacyEscapedHolderRetired'] = True
+                    metrics['legacyRawMappingRetired'] = True
                 assert not Path('/proc', str(managed_pid)).exists(), 'Administrator Docker survived suspension.'
                 # Retire the earlier disk while the later-started daemon stays
                 # alive. A recursively private clone would retain its mount.

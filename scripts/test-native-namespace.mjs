@@ -29,8 +29,10 @@ const testNames = [
   'native::block::holders::tests::covered_namespace_root_requires_independent_superblock_inventory',
 ]
 // A user namespace cannot create a block node on the host-backed temp directory.
-if (privileged)
-  testNames.push('native::block::holders::tests::raw_block_device_descriptor_is_a_holder')
+if (privileged) {
+  testNames.push('native::block::holders::tests::raw_block_device_descriptor_is_a_holder', 'native::block::holders::tests::mapped_raw_block_node_is_a_holder_after_its_descriptor_closes')
+}
+
 const listed = spawnSync(binary, ['--list', '--ignored'], { encoding: 'utf8' })
 if (listed.error)
   throw listed.error

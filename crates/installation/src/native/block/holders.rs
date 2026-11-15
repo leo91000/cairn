@@ -163,6 +163,53 @@ fn mapped_device(maps: &str, device: u64) -> bool {
     })
 }
 
+fn mapped_block_device(
+    task: &Path,
+    maps: &str,
+    device: u64,
+    deadline: Instant,
+) -> io::Result<bool> {
+    // maps reports the filesystem containing a device node, not its rdev.
+    // Follow map_files while the VMA pins that exact file, even after close(fd).
+    for line in maps.lines() {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Mapped file inventory exceeded its deadline",
+            ));
+        }
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 5 {
+            return Err(io::Error::other("Invalid mapped file inventory"));
+        }
+        if fields[4] == "0" {
+            continue;
+        }
+        let range = fields[0];
+        if !range.split_once('-').is_some_and(|(start, end)| {
+            !start.is_empty()
+                && !end.is_empty()
+                && start
+                    .bytes()
+                    .chain(end.bytes())
+                    .all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            return Err(io::Error::other("Invalid mapped file range"));
+        }
+        match fs::metadata(task.join("map_files").join(range)) {
+            Ok(metadata) if metadata.file_type().is_block_device() && metadata.rdev() == device => {
+                return Ok(true);
+            }
+            Ok(_) => {}
+            // A mapping can disappear between maps and map_files. Any denied
+            // inspection remains unknown, never evidence that the disk is free.
+            Err(error) if disappeared(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
 fn references(
     task: &Path,
     device: u64,
@@ -188,7 +235,8 @@ fn references(
             Err(error) => return Err(error),
         }
     }
-    if mapped_device(&read(task.join("maps"))?, device) {
+    let maps = read(task.join("maps"))?;
+    if mapped_device(&maps, device) || mapped_block_device(task, &maps, device, deadline)? {
         return Ok(true);
     }
     for entry in fs::read_dir(task.join("fd"))? {
@@ -437,6 +485,48 @@ pub(super) fn signal(holder: &Holder, device: u64, signal: i32) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires CAP_MKNOD; disposable metadata fixture only"]
+    fn mapped_raw_block_node_is_a_holder_after_its_descriptor_closes() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("map_files")).unwrap();
+        let device = libc::makedev(259, 200);
+        let path = std::ffi::CString::new(
+            root.path()
+                .join("map_files/1000-2000")
+                .as_os_str()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe { libc::mknod(path.as_ptr(), libc::S_IFBLK | 0o600, device) },
+            0
+        );
+        let maps = "1000-2000 r--s 00000000 00:01 123 /private/disk.blk";
+        assert!(!mapped_device(maps, device));
+        assert!(
+            mapped_block_device(
+                root.path(),
+                maps,
+                device,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_or_unavailable_mapped_file_inventory_never_proves_absence() {
+        let root = tempfile::tempdir().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(mapped_block_device(root.path(), "bad", 0, deadline).is_err());
+        assert!(mapped_block_device(root.path(), "../x r--s 0 00:01 7", 0, deadline).is_err());
+        assert!(
+            !mapped_block_device(root.path(), "1000-2000 r--s 0 00:01 7", 0, deadline).unwrap()
+        );
+    }
 
     #[test]
     #[ignore = "requires CAP_MKNOD; disposable metadata fixture only"]

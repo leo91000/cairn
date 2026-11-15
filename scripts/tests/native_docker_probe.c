@@ -1,4 +1,4 @@
-/* Identical local host/container volume workload; no network or privileged IO. */
+/* Local volume workloads and a read-only raw mapping for disposable qualification. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
@@ -19,7 +20,15 @@ static double milliseconds(clockid_t clock) {
     return t.tv_sec * 1000.0 + t.tv_nsec / 1000000.0;
 }
 int main(int argc, char **argv) {
-    require(argc == 3); require(chdir(argv[2]) == 0);
+    require(argc == 3);
+    if (!strcmp(argv[1], "raw-mmap")) {
+        int fd = open(argv[2], O_RDONLY); require(fd >= 0);
+        void *mapping = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
+        require(mapping != MAP_FAILED); require(close(fd) == 0);
+        puts("mapped"); require(fflush(stdout) == 0);
+        for (;;) pause();
+    }
+    require(chdir(argv[2]) == 0);
     if (!strcmp(argv[1], "metadata-create")) {
         int fd = open("capability", O_CREAT | O_WRONLY | O_TRUNC, 0600); require(fd >= 0);
         require(write(fd, "fixture", 7) == 7); require(close(fd) == 0);

@@ -1,4 +1,5 @@
 """Unprivileged checks of native exit records and retained health observations."""
+import ast
 import importlib.util
 from pathlib import Path
 import sys
@@ -46,6 +47,13 @@ class FixtureDiskReservationsTest(unittest.TestCase):
 
 
 class LegacyDockerHolderTest(unittest.TestCase):
+    def test_probe_executable_binding_is_not_shadowed_before_holder_launch(self):
+        module = ast.parse(path.read_text())
+        main = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        assignments = [node for node in ast.walk(main) if isinstance(node, ast.Name)
+                       and isinstance(node.ctx, ast.Store) and node.id == 'probe']
+        self.assertEqual(len(assignments), 1, 'The executable path must retain its single binding.')
+
     def test_holder_uses_canonical_source_and_reports_daemon_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

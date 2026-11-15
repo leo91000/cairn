@@ -35,3 +35,7 @@ still refer to an old mounted filesystem. If its expected host path has no mount
 recovery removes only that private stale block-node entry, without inspecting or
 signalling any process and without controlling a possibly reused device number.
 Unknown attachments and current-boot conflicts continue to fail closed.
+
+Raw block-device mappings retain their backing file after close(fd), while maps
+reports the device-node filesystem rather than the block rdev. Holder inspection
+also resolves file-backed map_files entries; denied inspection fails closed.
