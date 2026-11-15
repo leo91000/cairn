@@ -470,10 +470,13 @@ async fn management(
                 .map(|identity| identity.account_id.clone());
             // Keep verified public callers separate from run-scoped delegation.
             // Box the dispatcher so nested task-local scopes keep a bounded stack.
-            crate::native::policy::CALLER
+            crate::auth::MCP_ACCOUNT
                 .scope(
-                    owner,
-                    Box::pin(call(s, identity, text(params, "name"), args)),
+                    identity.map(|identity| identity.account_id.clone()),
+                    crate::native::policy::CALLER.scope(
+                        owner,
+                        Box::pin(call(s, identity, text(params, "name"), args)),
+                    ),
                 )
                 .await
         }

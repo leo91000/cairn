@@ -294,6 +294,10 @@ OAuth scopes, trusted people, node permissions and administrator reviews still
 apply. Run-scoped installation tools retain their originating run's bounded
 delegation instead.
 
+Conversation provenance records the verified account of the public client. Beacon
+grants public MCP clients to the installation owner only; a member identity that a
+relay supplies is recorded the same way and carries no native authority.
+
 The application advertises protected-resource metadata at
 `/.well-known/oauth-protected-resource/mcp` and authorization-server metadata at
 `/.well-known/oauth-authorization-server`. OAuth supports public-client dynamic
@@ -333,7 +337,10 @@ Hook rules ([guide](HOOK-RULES.md)) use the same definitions as HTTP and
 created through the public MCP belongs to the owner who authorized the client; scopes
 alone give it no native authority. Plugin rule templates are listed with
 `list_hook_rule_templates` (read) and installed with `install_hook_rule_template`
-(manage), which creates ordinary rules for the same owner, all or none.
+(manage), which creates ordinary rules for the same owner, all or none. Through
+`cairn_installation`, an agent writes rules
+only for the person of an eligible conversation ([provenance
+conditions](HOOK-RULES.md#agents-with-installation-access)).
 
 `get_installation_settings`, `get_installation_overview` and `list_audit` use the
 read scope. S3 storage settings and probes are no longer exposed on HTTP, public

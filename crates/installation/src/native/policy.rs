@@ -25,6 +25,8 @@ pub(crate) struct PluginOrigin {
 #[derive(Clone, Default)]
 pub(crate) enum Origin {
     Human(String),
+    /// Public member identity is authorship only, never a native grant.
+    PublicAccount(String),
     Run(String),
     DelegatedTask(String),
     Plugin(PluginOrigin),
@@ -35,7 +37,7 @@ pub(crate) enum Origin {
 
 impl Origin {
     pub(crate) fn known(&self) -> bool {
-        !matches!(self, Self::Unknown)
+        !matches!(self, Self::Unknown | Self::PublicAccount(_))
     }
 }
 
@@ -46,11 +48,14 @@ pub(crate) fn origin() -> Origin {
     if let Ok(origin) = DELEGATION.try_with(Clone::clone) {
         return origin;
     }
-    CALLER
-        .try_with(Clone::clone)
-        .ok()
-        .flatten()
-        .map_or(Origin::Unknown, Origin::Human)
+    public_origin()
+}
+
+pub(crate) fn public_origin() -> Origin {
+    caller()
+        .map(Origin::Human)
+        .or_else(|| crate::auth::public_account().map(Origin::PublicAccount))
+        .unwrap_or(Origin::Unknown)
 }
 
 pub fn caller() -> Option<String> {
@@ -102,7 +107,7 @@ pub(crate) fn provenance(db: &Db<'_>, source: &Origin) -> Result<Value> {
         })
     };
     match source {
-        Origin::Unknown => Ok(unknown()),
+        Origin::Unknown | Origin::PublicAccount(_) => Ok(unknown()),
         Origin::Human(account) => {
             let nodes = db
                 .nodes_boundary()?

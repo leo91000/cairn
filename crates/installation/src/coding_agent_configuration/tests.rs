@@ -527,7 +527,13 @@ async fn ordinary_profile_edits_update_historical_conversation_defaults() {
                     _ => unreachable!(),
                 }
                 validate_profile(db, &profile)?;
-                crate::agent_grants::save_profile(db, profile.clone(), false, &[])?;
+                crate::agent_grants::save_profile(
+                    db,
+                    profile.clone(),
+                    false,
+                    &[],
+                    &crate::conversation_writers::EntryWriter::Unknown,
+                )?;
                 let next = followup(db, id, &legacy)?;
                 let settings = serde_json::to_value(&profile.settings)?;
                 assert_eq!(
@@ -579,10 +585,22 @@ async fn ordinary_profile_resets_clear_secondary_native_overrides_and_removals()
                 )?;
                 let mut profile = db.agent(&id.to_string())?.unwrap();
                 profile.settings.provider = AgentProvider::Claude;
-                crate::agent_grants::save_profile(db, profile, false, &[])?;
+                crate::agent_grants::save_profile(
+                    db,
+                    profile,
+                    false,
+                    &[],
+                    &crate::conversation_writers::EntryWriter::Unknown,
+                )?;
                 let mut profile = db.agent(&id.to_string())?.unwrap();
                 profile.settings.model = "sonnet".into();
-                let saved = crate::agent_grants::save_profile(db, profile, false, &[])?;
+                let saved = crate::agent_grants::save_profile(
+                    db,
+                    profile,
+                    false,
+                    &[],
+                    &crate::conversation_writers::EntryWriter::Unknown,
+                )?;
                 assert_eq!(
                     saved.coding_agent_defaults.as_ref().unwrap()["claude"].model,
                     "installation-model"
@@ -590,7 +608,13 @@ async fn ordinary_profile_resets_clear_secondary_native_overrides_and_removals()
                 let mut profile = db.agent(&id.to_string())?.unwrap();
                 profile.settings.model.clear();
                 validate_profile(db, &profile)?;
-                crate::agent_grants::save_profile(db, profile, false, &[])?;
+                crate::agent_grants::save_profile(
+                    db,
+                    profile,
+                    false,
+                    &[],
+                    &crate::conversation_writers::EntryWriter::Unknown,
+                )?;
                 let current = view(db, native_target)?;
                 let effective = parse(Provider::Claude, &current.document)?;
                 assert_eq!(effective["model"], "installation-model");
@@ -1459,4 +1483,33 @@ async fn transferred_conversations_keep_their_selection_until_target_preferences
         assert!(next_selection(db, &destination.to_string(), Some(&json!({ "snapshot": null })))?.is_none());
         Ok(())
     }).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_compaction_prompt_files_are_refused_and_never_attested_when_already_stored() {
+    let compact = json!({ "experimental_compact_prompt_file": "/workspace/project/COMPACT.md" });
+    let error = validate(Provider::Codex, &compact).unwrap_err().to_string();
+    assert!(
+        error.contains("experimental_compact_prompt_file"),
+        "{error}"
+    );
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(move |db| {
+            let id = agent(db, "codex")?;
+            let document = render(Provider::Codex, &compact)?;
+            db.0.execute(
+                "INSERT INTO coding_agent_configurations(scope,provider,agent_id,document,presentation,removed,revision) VALUES('','codex',NULL,?1,?1,'[]','stored')",
+                [document],
+            )?;
+            let sources = instruction_sources(db, Provider::Codex, &id.to_string())?;
+            assert!(sources.iter().any(|(source, _)| matches!(
+                source,
+                crate::conversation_writers::InstructionSource::Unknown
+            )));
+            Ok(())
+        })
+        .await
+        .unwrap();
 }

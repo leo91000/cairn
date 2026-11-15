@@ -355,13 +355,20 @@ fn clear_changed_profile_settings(
     Ok(changed)
 }
 
-pub(crate) fn synchronize_profile(db: &Db<'_>, agent: &Agent) -> Result<()> {
+/// Profile edits clear the native values they now own: that rewrite of the native
+/// document belongs to whoever saved the profile.
+pub(crate) fn synchronize_profile(
+    db: &Db<'_>,
+    agent: &Agent,
+    writer: &crate::conversation_writers::EntryWriter,
+) -> Result<()> {
     let Some(previous) = db.agent(&agent.id.to_string())? else {
         return Ok(());
     };
     let provider = Provider::from(agent.settings.provider);
     capture_legacy_defaults(db, provider, Some(agent.id))?;
     let mut own = record(db, provider, Some(agent.id))?;
+    let native_before = instruction_document(&own)?;
     if !clear_changed_profile_settings(&mut own, Some(&previous), agent)? {
         return Ok(());
     }
@@ -369,7 +376,16 @@ pub(crate) fn synchronize_profile(db: &Db<'_>, agent: &Agent) -> Result<()> {
         "UPDATE coding_agent_configurations SET document=?,removed=?,revision=? WHERE scope=? AND provider=?",
         params![render(provider, &own.value)?, serde_json::to_string(&own.removed)?, id(), agent.id.to_string(), provider.as_str()],
     )?;
-    Ok(())
+    let scope = agent.id.to_string();
+    let native_after = instruction_document(&record(db, provider, Some(agent.id))?)?;
+    crate::conversation_writers::record_native_instructions(
+        db,
+        &scope,
+        provider.as_str(),
+        &native_before,
+        &native_after,
+        writer,
+    )
 }
 
 pub(crate) fn next_selection(
@@ -433,6 +449,142 @@ fn effective(
     }
     let source_revision = format!("{}:{}", defaults.revision, saved.revision);
     Ok((value, defaults.value, own, Some(saved), source_revision))
+}
+
+/// The source that actually supplies instructions, before freezing a message.
+pub(crate) fn instruction_source(
+    db: &Db<'_>,
+    provider: Provider,
+    agent: &str,
+) -> Result<(crate::conversation_writers::InstructionSource, String)> {
+    use crate::conversation_writers::InstructionSource;
+    let profile = required(db.agent(agent)?, "Agent not found")?;
+    if provider != Provider::Codex
+        || Provider::from(profile.settings.provider) == provider
+            && !profile.settings.instructions.is_empty()
+    {
+        return Ok((
+            InstructionSource::Profile {
+                agent: agent.into(),
+            },
+            profile.settings.instructions,
+        ));
+    }
+    let own = record(db, provider, Some(profile.id))?;
+    if own
+        .removed
+        .iter()
+        .any(|path| path == "/developer_instructions")
+    {
+        return Ok((InstructionSource::Empty, String::new()));
+    }
+    let (scope, value) = if own.value.get("developer_instructions").is_some() {
+        (agent.to_owned(), own.value)
+    } else {
+        (String::new(), record(db, provider, None)?.value)
+    };
+    Ok((
+        InstructionSource::Native {
+            scope,
+            provider: provider.as_str().into(),
+        },
+        text(&value, "developer_instructions").into(),
+    ))
+}
+
+/// The source each engine follows for this agent. A profile save can move an engine
+/// from the profile to a native document without changing any text.
+pub(crate) fn followed_sources(
+    db: &Db<'_>,
+    agent: &str,
+) -> Result<Vec<(crate::conversation_writers::InstructionSource, String)>> {
+    Provider::ALL
+        .into_iter()
+        .map(|provider| instruction_source(db, provider, agent))
+        .collect()
+}
+
+/// Attribute every editable native setting: providers may introduce instruction
+/// keys outside the profile's plain instructions field.
+fn instruction_document(record: &Record) -> Result<String> {
+    if record
+        .value
+        .as_object()
+        .is_some_and(serde_json::Map::is_empty)
+        && record.removed.is_empty()
+    {
+        return Ok(String::new());
+    }
+    Ok(serde_json::to_string(&json!({
+        "document": record.value,
+        "removed": record.removed,
+    }))?)
+}
+
+pub(crate) fn instruction_sources(
+    db: &Db<'_>,
+    provider: Provider,
+    agent: &str,
+) -> Result<Vec<(crate::conversation_writers::InstructionSource, String)>> {
+    use crate::conversation_writers::InstructionSource;
+    let profile = required(db.agent(agent)?, "Agent not found")?;
+    let mut sources = vec![(
+        InstructionSource::Profile {
+            agent: agent.into(),
+        },
+        profile.settings.instructions,
+    )];
+    for scope in [None, Some(profile.id)] {
+        let record = record(db, provider, scope)?;
+        let document = instruction_document(&record)?;
+        sources.push((
+            InstructionSource::Native {
+                scope: scope.map(|id| id.to_string()).unwrap_or_default(),
+                provider: provider.as_str().into(),
+            },
+            document,
+        ));
+        // These settings load instruction files whose contents Cairn has not
+        // frozen or attributed. A human-authored path does not attest its target.
+        if instruction_references(provider, &record.value) {
+            sources.push((
+                InstructionSource::Unknown,
+                "unrecorded native instruction files".into(),
+            ));
+        }
+    }
+    Ok(sources)
+}
+
+fn instruction_references(provider: Provider, value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            let nonempty = value.as_str().is_some_and(|value| !value.is_empty())
+                || value.as_array().is_some_and(|value| !value.is_empty());
+            (nonempty
+                && matches!(
+                    key.as_str(),
+                    "instructions"
+                        | "model_instructions_file"
+                        | "experimental_instructions_file"
+                        | "experimental_compact_prompt_file"
+                        | "config_file"
+                ))
+                || (provider == Provider::Claude
+                    && key == "outputStyle"
+                    && value.as_str().is_some_and(|style| {
+                        !matches!(
+                            style,
+                            "" | "default" | "Default" | "Explanatory" | "Learning"
+                        )
+                    }))
+                || instruction_references(provider, value)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| instruction_references(provider, value)),
+        _ => false,
+    }
 }
 
 fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
@@ -601,6 +753,7 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             "/shell_environment_policy",
             "/model_instructions_file",
             "/experimental_instructions_file",
+            "/experimental_compact_prompt_file",
             "/profile",
             "/profiles",
             "/notify",
@@ -1009,10 +1162,27 @@ pub(crate) fn view(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn edit(
     db: &Db<'_>,
     input: &EditCodingAgentConfigurationInput,
     save: bool,
+) -> Result<CodingAgentConfiguration> {
+    edit_by(
+        db,
+        input,
+        save,
+        &crate::conversation_writers::EntryWriter::Unknown,
+    )
+}
+
+/// Edits the configuration, recording `writer` as the author of changed agent
+/// instructions.
+pub(crate) fn edit_by(
+    db: &Db<'_>,
+    input: &EditCodingAgentConfigurationInput,
+    save: bool,
+    writer: &crate::conversation_writers::EntryWriter,
 ) -> Result<CodingAgentConfiguration> {
     if input.changes.len() > 200
         || input.inherit_paths.len() > 1000
@@ -1033,6 +1203,10 @@ pub(crate) fn edit(
         ));
     }
     let (before, inherited, own, agent, _) = effective(db, provider, input.agent_id)?;
+    let instruction_source_before = input
+        .agent_id
+        .map(|agent| instruction_source(db, provider, &agent.to_string()))
+        .transpose()?;
     let mapped_profile = agent
         .as_ref()
         .is_some_and(|agent| Provider::from(agent.settings.provider) == provider);
@@ -1199,8 +1373,22 @@ pub(crate) fn edit(
     }
     capture_legacy_defaults(db, provider, input.agent_id)?;
     if let Some(agent) = changed_agent {
-        crate::agent_grants::save_profile(db, agent, false, &[])?;
+        let id = agent.id.to_string();
+        let before = db
+            .agent(&id)?
+            .map(|profile| profile.settings.instructions)
+            .unwrap_or_default();
+        let saved = crate::agent_grants::save_profile(db, agent, false, &[], writer)?;
+        crate::conversation_writers::record_instructions(
+            db,
+            &id,
+            &before,
+            &saved.settings.instructions,
+            writer,
+        )?;
     }
+    // After the profile save, whose own native rewrite already has its writer.
+    let native_before = instruction_document(&record(db, provider, input.agent_id)?)?;
     let scope = input.agent_id.map(|id| id.to_string());
     if mapped_profile {
         for (path, _) in mappings(provider) {
@@ -1216,6 +1404,27 @@ pub(crate) fn edit(
         "INSERT INTO coding_agent_configurations(scope,provider,agent_id,document,presentation,removed,revision) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(scope,provider) DO UPDATE SET document=excluded.document,presentation=excluded.presentation,removed=excluded.removed,revision=excluded.revision",
         params![scope.as_deref().unwrap_or(""), provider.as_str(), scope, stored_document, document, serde_json::to_string(&removed)?, id()],
     )?;
+    let native_after = instruction_document(&record(db, provider, input.agent_id)?)?;
+    crate::conversation_writers::record_native_instructions(
+        db,
+        scope.as_deref().unwrap_or(""),
+        provider.as_str(),
+        &native_before,
+        &native_after,
+        writer,
+    )?;
+    if let (Some(agent), Some(before)) = (input.agent_id, instruction_source_before) {
+        let agent = agent.to_string();
+        if before != instruction_source(db, provider, &agent)? {
+            for chat in db
+                .conversations()?
+                .into_iter()
+                .filter(|chat| chat.agent_id == agent)
+            {
+                crate::conversation_writers::record_entry(db, &chat.id, writer)?;
+            }
+        }
+    }
     db.audit(
         "coding-agent.configuration.saved",
         &json!({ "provider": provider, "agentId": input.agent_id }),

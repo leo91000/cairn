@@ -695,6 +695,7 @@ where
     };
     let owner = crate::relay::task_author_policy(s).await?;
     let origin = crate::native::policy::origin();
+    let writer = crate::conversation_writers::EntryWriter::of(&origin);
     let name = command.name.trim();
     if name.is_empty() || name.chars().count() > 100 {
         return Err(Error::bad("Enter a connection name."));
@@ -961,6 +962,8 @@ where
         .store
         .transaction(move |db| {
             authorize_management(db)?;
+            let plugin_instruction_digests =
+                crate::conversation_writers::plugin_instruction_digests(db)?;
             for expected in &prepared {
                 check_revision(db, expected)?;
             }
@@ -1032,6 +1035,11 @@ where
             } else if let Some(current) = db.plugin_instance(&connection.id)? {
                 connection.agent_ids = current.agent_ids;
             }
+            crate::conversation_writers::record_plugin_instruction_changes(
+                db,
+                &plugin_instruction_digests,
+                &writer,
+            )?;
             let value = public_view(&connection)?;
             db.audit(
                 "plugin.connection.saved",
@@ -1237,6 +1245,7 @@ where
     F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
 {
     get(s, plugin_id, connection_id).await?;
+    let writer = crate::conversation_writers::EntryWriter::of(&crate::native::policy::origin());
     let forgotten_instance = connection_id.to_owned();
     let connection_id = connection_id.to_owned();
     if let Some(authority) = &management {
@@ -1245,8 +1254,15 @@ where
     s.store
         .transaction(move |db| {
             authorize_management(db)?;
+            let plugin_instruction_digests =
+                crate::conversation_writers::plugin_instruction_digests(db)?;
             crate::agent_grants::forget_resource(db, crate::agent_grants::PLUGINS, &connection_id)?;
             db.remove_plugin_instance(&connection_id)?;
+            crate::conversation_writers::record_plugin_instruction_changes(
+                db,
+                &plugin_instruction_digests,
+                &writer,
+            )?;
             db.delete(&format!("mcp-secret:{}", credential_key(&connection_id)))?;
             db.delete(&format!("mcp-secret:{}", secrets_key(&connection_id)))?;
             db.audit("plugin.connection.deleted", &json!({ "id": connection_id }))
@@ -1336,6 +1352,7 @@ where
     F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
 {
     get(s, plugin_id, id).await?;
+    let writer = crate::conversation_writers::EntryWriter::of(&crate::native::policy::origin());
     let enabled = input.enabled;
     let oauth = if enabled {
         registry::active(s, plugin_id)
@@ -1355,6 +1372,8 @@ where
         .store
         .transaction(move |db| {
             authorize_management(db)?;
+            let plugin_instruction_digests =
+                crate::conversation_writers::plugin_instruction_digests(db)?;
             if enabled
                 && oauth
                 && db
@@ -1372,6 +1391,11 @@ where
             connection.enabled = enabled;
             connection.updated_at = now();
             db.save_plugin_instance(&connection)?;
+            crate::conversation_writers::record_plugin_instruction_changes(
+                db,
+                &plugin_instruction_digests,
+                &writer,
+            )?;
             db.audit(
                 "plugin.connection.enabled",
                 &json!({ "id": id, "enabled": enabled }),
