@@ -332,6 +332,12 @@ fn create(
         &origin,
     )?;
     let chat_id = text(&created, "id").to_owned();
+    // The requester reads this task's report: an agent entry in its conversation.
+    crate::conversation_writers::record_entry(
+        db,
+        &requesting.id,
+        &crate::conversation_writers::EntryWriter::Agent,
+    )?;
     let mut chat = required(db.conversation(&chat_id)?, "Chat not found")?;
     chat.requested_by = Some(ConversationRequester {
         run_id: text(&run, "id").into(),

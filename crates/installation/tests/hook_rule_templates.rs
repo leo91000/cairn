@@ -144,6 +144,30 @@ async fn rule_count(f: &Fixture) -> usize {
     listed["rules"].as_array().unwrap().len()
 }
 
+async fn person_conversation(f: &Fixture, account: &str) -> (String, String) {
+    let (status, created) = call(
+        f,
+        account,
+        "POST",
+        "/api/chats",
+        json!({ "agentId": MAIN_AGENT_ID }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let chat = text(&created, "id").to_owned();
+    let (status, sent) = call(
+        f,
+        account,
+        "POST",
+        &format!("/api/chats/{chat}/messages"),
+        json!({ "id": cairn_installation::config::id(), "text": "Install my support rules." }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let bearer = fixture::running_conversation(&f.s, &chat).await;
+    (chat, bearer)
+}
+
 const INSTALL: &str = "/api/hook-rules/templates/install";
 
 #[tokio::test]
@@ -370,8 +394,7 @@ async fn template_installation_follows_the_rule_authority() {
     assert_eq!(installed["rules"][0]["creatorAccountId"], MEMBER);
     assert_eq!(installed["rules"][0]["allowed"]["edit"], true);
 
-    // An installation agent lists templates, never installs one outside an eligible
-    // conversation.
+    // An installation agent lists templates without tainting its eligible conversation.
     let listed = f
         .mcp(
             "/mcp-installation",
@@ -385,16 +408,71 @@ async fn template_installation_follows_the_rule_authority() {
         mcp_result(&listed)["templates"][0]["template"]["name"],
         "support"
     );
-    let refused = f
+    let (chat, bearer) = person_conversation(&f, OWNER).await;
+    let installed = f
         .mcp(
             "/mcp-installation",
-            &f.bearer,
+            &bearer,
             "install_hook_rule_template",
             install(&f, &parameters(MAIN_AGENT_ID)),
         )
         .await;
-    assert_eq!(refused["result"]["isError"], true, "{refused}");
-    assert_eq!(rule_count(&f).await, 2);
+    assert_ne!(installed["result"]["isError"], true, "{installed}");
+    let agent_rules = mcp_result(&installed)["rules"].as_array().unwrap();
+    assert_eq!(agent_rules.len(), 2);
+    for rule in agent_rules {
+        assert_eq!(rule["creatorAccountId"], OWNER);
+        assert_eq!(rule["source"], "installationAgent");
+        assert_eq!(rule["conversationId"], chat);
+        assert_eq!(rule["nativeAuthority"], false);
+    }
+    assert_eq!(rule_count(&f).await, 4);
+
+    // A blocked rule prevents template installation; once the owner clears it, the
+    // agent can install a fresh set for the same eligible person.
+    let paused_id = text(&agent_rules[0], "id");
+    let (status, paused) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/hook-rules/{paused_id}/emergency-pause"),
+        json!({ "ruleId": paused_id, "paused": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{paused}");
+    let blocked = f
+        .mcp(
+            "/mcp-installation",
+            &bearer,
+            "install_hook_rule_template",
+            install(&f, &parameters(MAIN_AGENT_ID)),
+        )
+        .await;
+    assert_eq!(blocked["result"]["isError"], true, "{blocked}");
+    assert_eq!(rule_count(&f).await, 4);
+
+    let (status, _) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/hook-rules/{paused_id}/emergency-pause"),
+        json!({ "ruleId": paused_id, "paused": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let installed_again = f
+        .mcp(
+            "/mcp-installation",
+            &bearer,
+            "install_hook_rule_template",
+            install(&f, &parameters(MAIN_AGENT_ID)),
+        )
+        .await;
+    assert_ne!(
+        installed_again["result"]["isError"], true,
+        "{installed_again}"
+    );
+    assert_eq!(rule_count(&f).await, 6);
 
     // A public client needs the manage scope, and installs for the owner.
     let reader = common::relay_fixture::grant(&f.s, &["read"]).await;

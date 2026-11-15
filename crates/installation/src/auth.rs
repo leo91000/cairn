@@ -3,6 +3,17 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+// Verified public MCP account identity; this confers no native authority.
+tokio::task_local! { pub(crate) static MCP_ACCOUNT: Option<String>; }
+
+pub(crate) fn public_account() -> Option<String> {
+    MCP_ACCOUNT
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+        .filter(|account| !account.is_empty())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InstallationRole {
     Owner,

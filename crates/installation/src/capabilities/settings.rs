@@ -223,6 +223,7 @@ impl SettingsOperation {
                 | "preview_coding_agent_configuration"
                 | "save_coding_agent_configuration"
         ) {
+            let writer = crate::conversation_writers::EntryWriter::of_context(&context);
             let authority =
                 super::plugin_packages::Authority::for_grants(s, context, self.scope).await?;
             let authorize = crate::authorization::Authorization::live(s, authority);
@@ -234,10 +235,11 @@ impl SettingsOperation {
                     let result = if name == "get_coding_agent_configuration" {
                         crate::coding_agent_configuration::view(db, decode(input)?)?
                     } else {
-                        crate::coding_agent_configuration::edit(
+                        crate::coding_agent_configuration::edit_by(
                             db,
                             &decode(input)?,
                             name == "save_coding_agent_configuration",
+                            &writer,
                         )?
                     };
                     Ok(serde_json::to_value(result)?)

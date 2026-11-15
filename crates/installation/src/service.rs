@@ -154,6 +154,7 @@ impl Service {
         self.save_profile_live(
             command,
             editor,
+            crate::conversation_writers::EntryWriter::Unknown,
             crate::authorization::Authorization::once(authorize),
         )
         .await
@@ -163,6 +164,7 @@ impl Service {
         self: &Arc<Self>,
         command: crate::agents::SaveProfile,
         editor: AgentEditor,
+        writer: crate::conversation_writers::EntryWriter,
         authorize: crate::authorization::Authorization,
     ) -> Result<cairn_contracts::Agent> {
         authorize.recheck().await?;
@@ -271,7 +273,29 @@ impl Service {
             }
             crate::coding_agent_configuration::validate_profile(db, &agent)?;
             crate::agent_grants::validate(db, &agent, &accepts_agents)?;
-            let agent = crate::agent_grants::save_profile(db, agent, owner_review, &review.native_node_reviews)?;
+            let before = current.as_ref().map(|profile| profile.settings.instructions.clone()).unwrap_or_default();
+            let followed_before = current.as_ref()
+                .map(|profile| crate::coding_agent_configuration::followed_sources(db, &profile.id.to_string()))
+                .transpose()?;
+            let plugin_instruction_digests =
+                crate::conversation_writers::plugin_instruction_digests(db)?;
+            let agent = crate::agent_grants::save_profile(db, agent, owner_review, &review.native_node_reviews, &writer)?;
+            let agent_id = agent.id.to_string();
+            crate::conversation_writers::record_instructions(db, &agent_id, &before, &agent.settings.instructions, &writer)?;
+            // An engine change can move conversations from the profile to a native
+            // document without changing any text: whoever saved the profile reached them.
+            if let Some(before) = followed_before
+                && before != crate::coding_agent_configuration::followed_sources(db, &agent_id)?
+            {
+                for chat in db.conversations()?.into_iter().filter(|chat| chat.agent_id == agent_id) {
+                    crate::conversation_writers::record_entry(db, &chat.id, &writer)?;
+                }
+            }
+            crate::conversation_writers::record_plugin_instruction_changes(
+                db,
+                &plugin_instruction_digests,
+                &writer,
+            )?;
             for connection in &review.reapprove_delegations {
                 crate::plugins::connections::reapprove(db, connection, &agent, &origin)?;
             }

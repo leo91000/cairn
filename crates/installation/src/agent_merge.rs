@@ -173,6 +173,12 @@ pub(crate) fn merge(
         record["agentId"] = target_id.into();
         record["agentName"] = target.settings.name.clone().into();
         db.save_conversation_boundary(&record)?;
+        // A conversation moved to another agent never lets agents write rules again.
+        crate::conversation_writers::record_entry(
+            db,
+            text(&record, "id"),
+            &crate::conversation_writers::EntryWriter::Unknown,
+        )?;
         chats += 1;
     }
     // Keep each run's provider, model, instructions and access snapshot. Only its
