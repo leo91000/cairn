@@ -1227,8 +1227,23 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                         (partial / 'hostconfig.json').write_text('{')
                 with escaped_docker_holder(root, docker_tools, managed(docker_run),
                                            state / 'native-block' / docker_run / 'root/disk.blk', probe):
-                    api('/runs/' + administrator_docker, method='DELETE')
-                    fenced(docker_run, administrator_docker)
+                    try:
+                        api('/runs/' + administrator_docker, method='DELETE')
+                        fenced(docker_run, administrator_docker)
+                    except Exception:
+                        # Preserve the controller's exact holder/close refusal before
+                        # the context manager reaps this synthetic legacy engine.
+                        result = subprocess.run(
+                            ['journalctl', '--no-pager', '--output=cat', '--lines=100', '--unit=' + supervisor],
+                            capture_output=True, text=True, timeout=10)
+                        diagnostic = result.stdout + result.stderr
+                        for context in contexts.values():
+                            diagnostic = redact_fixture_diagnostics(diagnostic, token, context)
+                        evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
+                        evidence.mkdir(parents=True, exist_ok=True)
+                        (evidence / 'legacy-holder-close-failure.txt').write_text(diagnostic[-65536:])
+                        print(diagnostic[-65536:], file=sys.stderr)
+                        raise
                     metrics['legacyEscapedHolderRetired'] = True
                     metrics['legacyRawMappingRetired'] = True
                 assert not Path('/proc', str(managed_pid)).exists(), 'Administrator Docker survived suspension.'
