@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import native_docker_workload as workload
+import native_runtime_test as runtime
 
 
 class ComposeReadinessTests(unittest.TestCase):
@@ -69,6 +70,39 @@ class ComposeReadinessTests(unittest.TestCase):
         expired = subprocess.TimeoutExpired(['synthetic'], 10)
         with self.assertRaisesRegex(AssertionError, 'redis.*timed out'):
             self.run_probe([expired] * 5)
+
+
+class AdministratorNetworkQualificationTests(unittest.TestCase):
+    def test_failed_qualifier_preserves_bounded_synthetic_diagnostics(self):
+        result = SimpleNamespace(returncode=1, stdout='fixture phase reached\n', stderr='fortified compiler failure\n')
+        with patch.object(runtime.subprocess, 'run', return_value=result) as run:
+            with self.assertRaisesRegex(AssertionError, 'fortified compiler failure') as error:
+                runtime.qualify_administrator_network('/candidate/cairn', '/candidate/docker-tools')
+        self.assertIn('fixture phase reached', str(error.exception))
+        self.assertEqual(run.call_args.kwargs['timeout'], 150)
+
+    def test_success_requires_the_completed_probe_receipt(self):
+        for output, succeeds in [('', False), ('READY cgroup\n', False), ('PASS cgroup ancestry, TCP/UDP publication\n', True)]:
+            result = SimpleNamespace(returncode=0, stdout=output, stderr='')
+            with self.subTest(output=output), patch.object(runtime.subprocess, 'run', return_value=result):
+                if succeeds:
+                    runtime.qualify_administrator_network('/candidate/cairn', '/candidate/docker-tools')
+                else:
+                    with self.assertRaisesRegex(AssertionError, 'completion receipt=False'):
+                        runtime.qualify_administrator_network('/candidate/cairn', '/candidate/docker-tools')
+
+    def test_timeout_and_large_failure_keep_only_the_bounded_tail(self):
+        error = subprocess.TimeoutExpired(['fixture'], 150, output=b'early output\n', stderr=b'network still pending\n')
+        with patch.object(runtime.subprocess, 'run', side_effect=error):
+            with self.assertRaisesRegex(AssertionError, 'network still pending'):
+                runtime.qualify_administrator_network('/candidate/cairn', '/candidate/docker-tools')
+        result = SimpleNamespace(returncode=1, stdout='old output' + 'x' * 20000, stderr='last diagnostic')
+        with patch.object(runtime.subprocess, 'run', return_value=result):
+            with self.assertRaises(AssertionError) as captured:
+                runtime.qualify_administrator_network('/candidate/cairn', '/candidate/docker-tools')
+        self.assertLess(len(str(captured.exception)), 17000)
+        self.assertNotIn('old output', str(captured.exception))
+        self.assertIn('last diagnostic', str(captured.exception))
 
 
 if __name__ == '__main__':

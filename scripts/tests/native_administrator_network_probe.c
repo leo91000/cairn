@@ -40,7 +40,12 @@ int main(int argc, char **argv) {
       ssize_t length = recvfrom(listener, bytes, sizeof(bytes), 0,
                                 (void *)&peer, &size);
       if (length >= 0) {
-        sendto(listener, bytes, (size_t)length, 0, (void *)&peer, size);
+        ssize_t sent = sendto(listener, bytes, (size_t)length, 0,
+                              (void *)&peer, size);
+        if (sent != length) {
+          close(listener);
+          return 3;
+        }
       }
     } else {
       int client = accept(listener, 0, 0);
@@ -49,8 +54,13 @@ int main(int argc, char **argv) {
       }
       const char *reply = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n"
                           "Connection: close\r\n\r\nmanaged";
-      (void)write(client, reply, strlen(reply));
+      size_t expected = strlen(reply);
+      ssize_t sent = write(client, reply, expected);
       close(client);
+      if (sent < 0 || (size_t)sent != expected) {
+        close(listener);
+        return 3;
+      }
       if (once) {
         break;
       }

@@ -118,6 +118,24 @@ def command(*args, **options):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=60, **options)
 
 
+def qualify_administrator_network(binary, docker_tools):
+    arguments = [sys.executable, str(Path(__file__).with_name('native_administrator_network.py')),
+                 str(binary), '--docker-tools', str(docker_tools)]
+    try:
+        result = subprocess.run(arguments, capture_output=True, text=True, timeout=150)
+        output = (result.stdout or '') + (result.stderr or '')
+        passed = any(line.startswith('PASS cgroup ancestry,') for line in result.stdout.splitlines())
+        if result.returncode or not passed:
+            raise AssertionError('Administrator network qualification failed '
+                                 f'(exit {result.returncode}, completion receipt={passed}):\n' + output[-16384:])
+    except subprocess.TimeoutExpired as error:
+        def decoded(value):
+            return value.decode('utf-8', errors='replace') if isinstance(value, bytes) else (value or '')
+        output = decoded(error.stdout) + decoded(error.stderr)
+        raise AssertionError('Administrator network qualification exceeded its outer deadline:\n'
+                             + output[-16384:]) from error
+
+
 def eventually(check, timeout=60):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -242,7 +260,7 @@ def main():
         metrics['dockerProbe'] = dict(compiler=command('cc', '--version').stdout.splitlines()[0], flags='-static -O2 -Wall -Wextra -Werror', sourceSha256=hashlib.sha256(probe_source.read_bytes()).hexdigest())
         if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
             progress('administrator-network-qualification')
-            command(sys.executable, str(Path(__file__).with_name('native_administrator_network.py')), str(binary), '--docker-tools', str(docker_tools))
+            qualify_administrator_network(binary, docker_tools)
             metrics['administratorNetworkQualified'] = True
 
         (data / 'runner-secret').write_text(token)
