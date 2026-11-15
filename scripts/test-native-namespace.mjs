@@ -24,6 +24,7 @@ if (!binary)
 const privileged = process.argv.includes('--sudo')
 const testNames = [
   'storage::ublk::namespace::tests::isolated_namespace_qualification',
+  'storage::ublk::namespace::tests::recovery_template_drops_only_attested_private_copies',
   'native::block::holders::tests::retained_namespace_without_procfs_still_reports_the_device',
   'native::block::holders::tests::private_mount_outside_a_chroot_is_not_lost',
   'native::block::holders::tests::covered_namespace_root_requires_independent_superblock_inventory',
@@ -31,7 +32,7 @@ const testNames = [
 ]
 // A user namespace cannot create a block node on the host-backed temp directory.
 if (privileged) {
-  testNames.push('native::block::holders::tests::raw_block_device_descriptor_is_a_holder', 'native::block::holders::tests::mapped_raw_block_node_is_a_holder_after_its_descriptor_closes')
+  testNames.push('native::block::holders::tests::raw_block_device_descriptor_is_a_holder', 'native::block::holders::tests::mapped_raw_block_node_is_a_holder_after_its_descriptor_closes', 'storage::ublk::observation::tests::encoded_absence_is_not_replaced_by_a_legacy_opcode_error')
 }
 
 const listed = spawnSync(binary, ['--list', '--ignored'], { encoding: 'utf8' })

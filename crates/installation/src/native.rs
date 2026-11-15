@@ -6,6 +6,7 @@ mod bases_warmer;
 pub(crate) mod block;
 mod bootstrap;
 mod capacity;
+mod cleanup;
 pub(crate) mod disk;
 pub mod docker;
 mod home;

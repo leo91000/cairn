@@ -782,7 +782,16 @@ def main():
                 metrics['nativeFlushFailure'] = require_finalization_failure(exit_file, result)
             else:
                 match_controller_result(exit_file, result)
-            assert not (state / (attempt + '.active')).exists()
+            if (state / (attempt + '.active')).exists():
+                journal = subprocess.run(['journalctl', '--no-pager', '--output=cat', '--lines=120', '--unit=' + supervisor],
+                                         capture_output=True, text=True, timeout=10)
+                diagnostics = journal.stdout + journal.stderr
+                for context in contexts.values():
+                    diagnostics = redact_fixture_diagnostics(diagnostics, token, context)
+                evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
+                evidence.mkdir(parents=True, exist_ok=True)
+                (evidence / 'incomplete-retirement.txt').write_text(diagnostics[-65536:])
+                raise AssertionError('Native active marker survived wait: ' + exit_file.read_text())
             active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
             assert not (state / 'native' / run / 'data/workspaces/seed').exists(), 'Stopped conversation filesystem is still mounted.'

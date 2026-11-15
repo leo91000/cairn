@@ -124,12 +124,19 @@ where
         .and_then(|n| n.parse::<usize>().ok())
         .filter(|n| *n > 0 && *n <= 32)
         .unwrap_or(2);
+    let native_controller = args.first().is_some_and(|arg| arg == "native-controller");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
         .enable_all()
         .build()
         .expect("Tokio runtime");
-    match runtime.block_on(entry(args, router)) {
+    let result = runtime.block_on(entry(args, router));
+    if native_controller {
+        // Run-local owners live on retained native workers. A blocked host
+        // metadata read must not make node shutdown join an unkillable thread.
+        runtime.shutdown_timeout(Duration::from_secs(2));
+    }
+    match result {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Err(error) => {
             eprintln!("{}", error.message);

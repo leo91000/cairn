@@ -2,7 +2,10 @@
 use std::{
     fs::File,
     io,
-    os::{fd::AsRawFd, unix::fs::MetadataExt},
+    os::{
+        fd::AsRawFd,
+        unix::{ffi::OsStrExt, fs::MetadataExt},
+    },
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -82,8 +85,19 @@ impl BackendNamespace {
         Self(Arc::new(File::open("/dev/null").unwrap()))
     }
 
+    #[cfg(test)]
     pub(crate) fn create(state: &Path) -> io::Result<Self> {
+        Self::create_recovering(state, &[])
+    }
+
+    /// Detach only previously attested native copies in this private template.
+    /// Host mounts and their physical owners are untouched.
+    pub(crate) fn create_recovering(
+        state: &Path,
+        recoverable: &[(PathBuf, String)],
+    ) -> io::Result<Self> {
         let state = state.to_owned();
+        let recoverable = recoverable.to_vec();
         std::thread::spawn(move || {
             private()?;
             let mountinfo = std::fs::read_to_string("/proc/thread-self/mountinfo")?;
@@ -93,11 +107,26 @@ impl BackendNamespace {
                     .split_whitespace()
                     .nth(4)
                     .ok_or_else(|| io::Error::other("Invalid mount inventory"))?;
-                if mount_path(path).starts_with(&native) {
-                    return Err(io::Error::other(
-                        "Native mounts must be recovered before preparing backend namespace",
-                    ));
+                let path = mount_path(path);
+                if path.starts_with(&native) {
+                    let fields = line.split_whitespace().collect::<Vec<_>>();
+                    let expected = recoverable.iter().find(|(target, _)| target == &path);
+                    if expected.is_none_or(|(_, device)| fields.get(2) != Some(&device.as_str())) {
+                        return Err(io::Error::other(
+                            "Unattributed native mount in backend namespace",
+                        ));
+                    }
+                    let target = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+                    checked(unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) })?;
                 }
+            }
+            let remaining = std::fs::read_to_string("/proc/thread-self/mountinfo")?;
+            if remaining.lines().any(|line| {
+                line.split_whitespace()
+                    .nth(4)
+                    .is_some_and(|path| mount_path(path).starts_with(&native))
+            }) {
+                return Err(io::Error::other("Backend namespace retains a native mount"));
             }
             Ok(Self(Arc::new(File::open("/proc/thread-self/ns/mnt")?)))
         })
@@ -217,6 +246,43 @@ mod tests {
             backing_mounts(state, &read_only).unwrap()
         );
         assert!(backing_mounts(state, "malformed").is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a disposable private mount namespace"]
+    fn recovery_template_drops_only_attested_private_copies() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let source = root.path().join("source");
+        let target = state.join("native/run/data");
+        for path in [&source, &target] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(source.join("sentinel"), "retained").unwrap();
+        let mounted = Bind::new(&source, &target);
+        let metadata = std::fs::metadata(&target).unwrap();
+        let device = format!(
+            "{}:{}",
+            libc::major(metadata.dev()),
+            libc::minor(metadata.dev())
+        );
+        assert!(
+            BackendNamespace::create_recovering(&state, &[(target.clone(), "0:0".into())]).is_err()
+        );
+        let clean =
+            BackendNamespace::create_recovering(&state, &[(target.clone(), device)]).unwrap();
+        assert!(
+            target.join("sentinel").exists(),
+            "template cleanup changed the host mount"
+        );
+        let entry = clean.prepare(&state, &[&state]).unwrap();
+        std::thread::spawn(move || {
+            entry.enter().unwrap();
+            assert!(!target.join("sentinel").exists());
+        })
+        .join()
+        .unwrap();
+        drop(mounted);
     }
 
     #[test]

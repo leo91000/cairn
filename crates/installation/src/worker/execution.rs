@@ -112,25 +112,41 @@ async fn await_fixture_retirement(s: &Service, run_id: &str) -> Result<()> {
 
 /// Keeps the checkpoint and node lease current while the run executes.
 async fn heartbeat(s: Arc<Service>, checkpoint: Arc<Checkpoint>, stop: CancellationToken) {
+    let renewal_stop = stop.clone();
+    let renewal_service = s.clone();
+    let renewal_checkpoint = checkpoint.clone();
+    let renewal = tokio::spawn(async move {
+        let mut attempt = None;
+        let mut timer = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                () = renewal_stop.cancelled() => break,
+                _ = timer.tick() => {
+                    if let Some(saved) = renewal_checkpoint.try_snapshot() {
+                        attempt = saved.runner_id().map(str::to_owned);
+                    }
+                    let run_id = renewal_checkpoint.id.as_str();
+                    if let Some(attempt) = &attempt {
+                        let _ = crate::nodes::placement::renew_preparation(&renewal_service, run_id, attempt).await;
+                    }
+                    let _ = crate::nodes::placement::renew_local(&renewal_service, run_id).await;
+                }
+            }
+        }
+    });
     let mut timer = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
             () = stop.cancelled() => break,
             _ = timer.tick() => {
-                let run_id = checkpoint.id.as_str();
-                if let Some(attempt) = checkpoint.snapshot().await.runner_id() {
-                    let _ = crate::nodes::placement::renew_preparation(&s, run_id, attempt).await;
-                }
-                // This fails routinely once the run is stopping or revoked; the
-                // next beat retries and execution notices the revocation itself.
-                let _ = crate::nodes::placement::renew_local(&s, run_id).await;
                 let _ = checkpoint.refresh_pause(&s).await;
                 if let Err(error) = checkpoint.persist().await {
-                    tracing::warn!(run_id, error = %error, "Could not save the run checkpoint");
+                    tracing::warn!(run_id = checkpoint.id, error = %error, "Could not save the run checkpoint");
                 }
             }
         }
     }
+    let _ = renewal.await;
 }
 
 /// Last read of the same attempt before spending a replay or settling a failure.
@@ -458,7 +474,8 @@ async fn fence(s: &Service, checkpoint: &Checkpoint) -> Result<bool> {
         .read(|c| c.isolated() && c.runner_id().is_some())
         .await;
     if !has_runner
-        || recovery::fence(s, &s.store.run(run_id).await?)
+        || checkpoint
+            .fence(s, &s.store.run(run_id).await?)
             .await
             .is_ok()
     {
@@ -502,7 +519,7 @@ async fn release(
 ) -> Result<()> {
     let run_id = checkpoint.id.as_str();
     let saved = checkpoint.snapshot().await;
-    if fenced && saved.settled().is_some() {
+    if fenced && (saved.settled().is_some() || saved.finalization_failure_attempt.is_some()) {
         let id = run_id.to_owned();
         let mut expected = saved.clone();
         expected.process = None;
@@ -561,6 +578,119 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn delete_cleanup_evidence_survives_live_checkpoint_persistence() {
+        use axum::{Json, Router, routing::any};
+        let attempt = crate::config::id();
+        let response_attempt = attempt.clone();
+        let app = Router::new().fallback(any(move || {
+            let attempt = response_attempt.clone();
+            async move {
+                Json(json!({
+                    "StatusCode": 70, "FinalizationFailed": true,
+                    "NativeCleanup": { "attemptId": attempt, "workloadFenced": true,
+                        "message": "Disk held by valkey pid 42" }
+                }))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(
+            serde_json::from_value(json!({
+                "dataDir": root.path().join("data"), "home": root.path().join("home"),
+                "workspaceRoots": [root.path()], "publicUrl": "http://localhost:4310",
+                "host": "127.0.0.1", "port": 0, "codexBin": "unused", "concurrency": 1,
+                "runnerUrl": format!("http://{address}"), "workerEnabled": false, "logger": false,
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let id = crate::config::id();
+        let fixture_id = id.clone();
+        service
+            .store
+            .transaction(move |db| {
+                db.add_run_fixture(
+                    &json!({ "id": fixture_id, "taskId": fixture_id,
+                "status": "running", "isolated": true }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let saved = RunCheckpoint::from_value(json!({
+            "runnerId": attempt, "prepared": {"backend":"native", "isolated":true},
+            "remainingMs": null,
+        }))
+        .unwrap();
+        saved.store(&service.store, &id).await.unwrap();
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+        checkpoint
+            .fence(&service, &service.store.run(&id).await.unwrap())
+            .await
+            .unwrap();
+        checkpoint.persist().await.unwrap();
+        release(&service, &checkpoint, None, true).await.unwrap();
+        let state = service.store.run_state(&id).await.unwrap();
+        assert_eq!(state.status, RunStatus::Failed);
+        assert!(state.summary.contains("Disk held by valkey pid 42"));
+        let persisted = RunCheckpoint::load(&service.store, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.finalization_error(),
+            Some("Disk held by valkey pid 42")
+        );
+        assert_eq!(persisted.terminal_code(), Some(70));
+        assert_eq!(
+            checkpoint.snapshot().await.finalization_error(),
+            persisted.finalization_error()
+        );
+        assert!(!persisted.has_controller_recovery_reservation());
+        checkpoint
+            .update(|saved| {
+                saved.settled = Some(Some(Settled::failure(
+                    RunStatus::Failed,
+                    "Earlier transport failure",
+                )));
+            })
+            .await
+            .unwrap();
+        release(&service, &checkpoint, None, true).await.unwrap();
+        assert!(
+            service
+                .store
+                .run_state(&id)
+                .await
+                .unwrap()
+                .summary
+                .contains("Disk held by valkey pid 42")
+        );
+        service
+            .store
+            .change_run(
+                &id,
+                crate::runs::RunChanges {
+                    cancel_requested_at: Some(Some(now())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        release(&service, &checkpoint, None, true).await.unwrap();
+        assert_eq!(
+            service.store.run_state(&id).await.unwrap().status,
+            RunStatus::Cancelled
+        );
+        service.shutdown.cancel();
+        server.abort();
+    }
 
     #[tokio::test]
     async fn a_superseded_preparation_error_retries_the_current_choice_unless_stopped() {

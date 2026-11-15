@@ -65,6 +65,10 @@ affected code and the full qualification workflows for specialist coverage:
 If the local host cannot execute a required qualification, run the appropriate
 GitHub workflow manually on the branch and wait for its result. A manual run can
 provide test evidence for the PR; it cannot supply reusable release provenance.
+For `validation-only` runs on a multi-commit branch, set `native-reference` to
+the full reviewed PR base SHA when its first parent contains an intermediate
+failure. The default remains the event base or first parent. The override is
+ignored by publication runs and still passes the immutable-SHA selector checks.
 
 Full qualifications run the resolved OpenCode and Claude Code native adapters,
 plus the Plan boundary checks for the resolved Claude Code and Codex releases,
