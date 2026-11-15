@@ -553,6 +553,16 @@ describe('parallel CI coverage', () => {
     expect(runInNewContext(expression, { ...context, validationOnly: false })).toBe('pr-base')
   })
 
+  it('prepares the kernel driver before the native device observation test', () => {
+    const steps = quality.jobs.backend.steps
+    const driver = steps.findIndex(step => step.name === 'Prepare ublk for native device observation qualification')
+    const probe = steps.findIndex(step => step.run?.includes('node scripts/test-native-namespace.mjs --sudo'))
+    expect(driver).toBeGreaterThan(-1)
+    expect(probe).toBeGreaterThan(driver)
+    expect(steps[driver].run).toContain('sudo modprobe ublk_drv')
+    expect(steps[driver].run).toContain('test -c /dev/ublk-control')
+  })
+
   it('observes capacity around actual cold builds without introducing a cache or writer mode', () => {
     const action = parse(readFileSync(new URL('../../.github/actions/observe-rust-build/action.yaml', import.meta.url), 'utf8'))
     expect(Object.keys(action.inputs)).toEqual(['phase'])
