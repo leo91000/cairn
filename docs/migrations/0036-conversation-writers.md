@@ -1,4 +1,4 @@
-# 0035 — Conversation writers (SQLite schema 34)
+# 0036 — Conversation writers (SQLite schema 34)
 
 Version 33 upgrades to 34 automatically in `Store::open`, before the SQL actors start
 ([ADR-0075](../adr/0075-plugin-hooks-rules-and-scoped-grants.md), « Autorité des
