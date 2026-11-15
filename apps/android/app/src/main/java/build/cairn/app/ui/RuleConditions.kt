@@ -36,16 +36,7 @@ internal fun RuleConditionEditor(
     }
     fun add(kind: String) {
         if (!canAddCondition) return
-        val author =
-            formulaRuleValue(
-                variables
-                    .find {
-                        it.expression.endsWith("authorId") ||
-                            it.expression.endsWith("author.id") ||
-                            it.expression.endsWith("author")
-                    }
-                    ?.expression ?: "payload.author"
-            )
+        val author = formulaRuleValue(authorVariable(variables))
         val condition =
             when (kind) {
                 "all",
@@ -166,6 +157,8 @@ internal fun RuleConditionEditor(
                                                             condition.text("operator"),
                                                             variables,
                                                         ),
+                                                        listOnly =
+                                                            condition.text("operator") == "in",
                                                     )
                                                 else null,
                                         ),
@@ -191,6 +184,7 @@ internal fun RuleConditionEditor(
                                                         operator,
                                                         variables,
                                                     ),
+                                                    listOnly = operator == "in",
                                                 )
                                             else null,
                                     ),

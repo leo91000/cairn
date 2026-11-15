@@ -3,12 +3,14 @@ import type { RuleNode } from '../../../packages/contracts/generated/typescript/
 import { describe, expect, it } from 'vitest'
 import { reactive } from 'vue'
 import {
+  authorVariable,
   comparisonExpects,
   newStep,
   nodeAt,
   pathOfNode,
   ruleConditionDepth,
   sameRuleDefinition,
+  schemaFields,
   typedComparisonRight,
   variablesAt,
   withInserted,
@@ -147,4 +149,29 @@ describe('rule definition recovery and condition depth', () => {
       condition = { type: 'all', conditions: [condition] }
     expect(ruleConditionDepth({ type: 'all', conditions: [{ type: 'not', condition }] })).toBe(6)
   })
+})
+
+it('selects an author string identifier instead of the enclosing object', () => {
+  const fields = schemaFields({ type: 'object', properties: { author: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } } } }, 'payload')
+  expect(authorVariable(fields)).toBe('payload.author.id')
+  expect(authorVariable([...fields, {
+    group: 'Event',
+    expression: 'payload.sender',
+    label: 'sender',
+    type: 'string',
+    description: '',
+    personId: true,
+  }])).toBe('payload.sender')
+  expect(authorVariable(fields.filter(field => field.type === 'object'))).toBe('')
+})
+
+it('preserves numeric boolean and object list members in contains comparisons', () => {
+  const fields = schemaFields({ type: 'object', properties: { counts: { type: 'array', items: { type: 'integer' } }, flags: { type: 'array', items: { type: 'boolean' } }, records: { type: 'array', items: { type: 'object' } } } }, 'payload')
+  for (const expression of ['payload.counts', 'counts'])
+    expect(comparisonExpects({ type: 'formula', expression }, 'contains', fields)).toBe('number')
+  expect(comparisonExpects({ type: 'literal', value: [5] }, 'contains', [])).toBe('number')
+  expect(comparisonExpects({ type: 'formula', expression: 'payload.flags' }, 'contains', fields)).toBe('boolean')
+  expect(comparisonExpects({ type: 'formula', expression: 'payload.records' }, 'contains', fields)).toBe('json')
+  expect(typedComparisonRight({ type: 'literal', value: 5 }, 'json', false)).toEqual({ type: 'literal', value: 5 })
+  expect(typedComparisonRight({ type: 'literal', value: { id: 5 } }, 'json', false)).toEqual({ type: 'literal', value: { id: 5 } })
 })

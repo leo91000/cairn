@@ -114,6 +114,42 @@ abstract class RulesEditorCases {
     }
 
     @Test
+    fun freeObjectsCanBeEditedAsJsonAndKeepInvalidDraftsVisible() {
+        val schema = ruleObject("type" to JsonPrimitive("object"))
+        var value by mutableStateOf<JsonElement>(JsonObject(emptyMap()))
+        compose.setContent { CairnTheme { RuleLiteralEditor(schema, value, { value = it }) } }
+        compose.onNodeWithText("Objet JSON").performTextReplacement("{invalid")
+        compose.onNodeWithText("Saisissez un objet JSON valide.").assertIsDisplayed()
+        compose.runOnIdle { assertEquals(JsonPrimitive("{invalid"), value) }
+        compose
+            .onNodeWithText("Objet JSON")
+            .performTextReplacement("""{"to":["a@example.test"],"count":5}""")
+        compose.runOnIdle { assertEquals(JsonPrimitive(5), value.jsonObject["count"]) }
+    }
+
+    @Test
+    fun authorsAndListMembersUseTheirDeclaredTypes() {
+        val schema =
+            wireJson.parseToJsonElement(
+                """{"type":"object","properties":{"author":{"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"}}},"counts":{"type":"array","items":{"type":"integer"}},"flags":{"type":"array","items":{"type":"boolean"}}}}"""
+            )
+        val fields = schemaFields(schema, "payload")
+        assertEquals("payload.author.id", authorVariable(fields))
+        for (name in listOf("payload.counts", "counts")) assertEquals(
+            "number",
+            comparisonExpects(formulaRuleValue(name), "contains", fields),
+        )
+        assertEquals(
+            "boolean",
+            comparisonExpects(formulaRuleValue("payload.flags"), "contains", fields),
+        )
+        assertEquals(
+            literalRuleValue(JsonPrimitive(5)),
+            typedComparisonRight(literalRuleValue(JsonPrimitive(5)), "json", listOnly = false),
+        )
+    }
+
+    @Test
     fun fixedArrayItemsKeepTheirDeclaredBooleanType() {
         val schema =
             wireJson

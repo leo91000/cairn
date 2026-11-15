@@ -937,6 +937,8 @@ executor slots between rules after each action. There is no platform difference.
 
 Rule editor recovery on Android retains at most 32 encrypted snapshots for seven days, swept on store creation and editor scope changes. Snapshot keys and authenticated encryption bind the account, installation and editor session. Web recovery uses the current editor session draft.
 
+Rule literal inputs whose object schema declares no fields use a JSON object editor on both platforms; invalid JSON remains visible and is reported. List membership retains numeric/boolean element types, and author defaults prefer a declared person identifier.
+
 ## Background job waits
 
 Web and Android identify a `job_finished` wait as background work and show its

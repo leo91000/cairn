@@ -503,6 +503,9 @@ data class RuleVariable(
     val type: String,
     val description: String,
     val example: String? = null,
+    val path: String? = null,
+    val itemType: String? = null,
+    val personId: Boolean = false,
 )
 
 private fun schemaType(schema: JsonElement?): String {
@@ -518,7 +521,12 @@ private fun schemaType(schema: JsonElement?): String {
     }
 }
 
-fun schemaFields(schema: JsonElement?, prefix: String, depth: Int = 0): List<RuleVariable> {
+fun schemaFields(
+    schema: JsonElement?,
+    prefix: String,
+    depth: Int = 0,
+    pointer: String = "",
+): List<RuleVariable> {
     val resolved =
         if (depth == 0) resolveRuleSchema(schema as? JsonObject ?: JsonObject(emptyMap()))
         else schema
@@ -528,6 +536,7 @@ fun schemaFields(schema: JsonElement?, prefix: String, depth: Int = 0): List<Rul
         val expression =
             if (Regex("""^[A-Za-z_]\w*$""").matches(name)) "$prefix.$name"
             else "$prefix[${JsonPrimitive(name)}]"
+        val path = "$pointer/${name.replace("~", "~0").replace("/", "~1")}"
         listOf(
             RuleVariable(
                 "Événement",
@@ -535,8 +544,10 @@ fun schemaFields(schema: JsonElement?, prefix: String, depth: Int = 0): List<Rul
                 expression.removePrefix("payload."),
                 schemaType(field),
                 field.text("description"),
+                path = path,
+                itemType = schemaType(field.obj("items")),
             )
-        ) + schemaFields(field, expression, depth + 1)
+        ) + schemaFields(field, expression, depth + 1, path)
     }
 }
 
@@ -600,7 +611,19 @@ fun ruleVariablesAt(
             triggerKey(wireJson.encodeToJsonElement(it.trigger)) ==
                 triggerKey(definition.obj("trigger"))
         }
-    val fields = schemaFields(hook?.payloadSchema, "payload")
+    val fields =
+        schemaFields(hook?.payloadSchema, "payload").map { field ->
+            field.copy(
+                personId =
+                    hook?.resourceFields?.any { resource ->
+                        resource.path == field.path &&
+                            (resource.resourceType.contains("person", true) ||
+                                resource.resourceType.contains("user", true) ||
+                                resource.path.contains("author", true) ||
+                                resource.path.contains("sender", true))
+                    } == true
+            )
+        }
     val earlier = actionsBefore(definition.list("steps"), "/steps", path, BooleanArray(1))
     val remembered =
         rememberedRuleNames(definition.list("steps")).map { name ->
@@ -837,9 +860,69 @@ fun unwrapRuleTemplate(text: String): String {
     return JsonPrimitive(text).toString()
 }
 
+fun authorVariable(variables: List<RuleVariable>): String {
+    val strings = variables.filter { it.group == "Événement" && it.type == "string" }
+    return strings.firstOrNull { it.personId }?.expression
+        ?: strings
+            .firstOrNull {
+                Regex("""(?:^|\.)author(?:\.id|Id)$""", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(it.expression)
+            }
+            ?.expression
+        ?: strings
+            .firstOrNull {
+                Regex("""(?:^|\.)author$""", RegexOption.IGNORE_CASE).containsMatchIn(it.expression)
+            }
+            ?.expression
+        ?: if (
+            variables.any {
+                it.type == "object" &&
+                    Regex("""(?:^|\.)author$""", RegexOption.IGNORE_CASE)
+                        .containsMatchIn(it.expression)
+            }
+        )
+            ""
+        else "payload.author"
+}
+
 fun comparisonExpects(left: JsonElement?, operator: String, variables: List<RuleVariable>): String {
     if (operator == "in") return "json"
-    if (operator in setOf("matches", "startsWith", "endsWith", "contains")) return "text"
+    if (operator == "contains") {
+        val field = variables.firstOrNull {
+            it.expression == left.text("expression") ||
+                it.expression == "payload.${left.text("expression")}"
+        }
+        val items =
+            if (left.text("type") == "literal") (left as? JsonObject)?.get("value") as? JsonArray
+            else null
+        if (items != null || field?.type == "array") {
+            val types =
+                items
+                    ?.map { item ->
+                        when {
+                            item is JsonPrimitive && item.isString -> "string"
+                            item.flag() != null -> "boolean"
+                            item.number() != null -> "number"
+                            else -> "valeur"
+                        }
+                    }
+                    ?.distinct()
+            return when (if (items != null) types?.singleOrNull() else field?.itemType) {
+                "number",
+                "integer" -> "number"
+                "boolean" -> "boolean"
+                "string" -> "text"
+                else -> "json"
+            }
+        }
+        if (
+            left.text("type") == "formula" &&
+                (field == null || field.type in setOf("value", "valeur", "result", "résultat"))
+        )
+            return "json"
+        return "text"
+    }
+    if (operator in setOf("matches", "startsWith", "endsWith")) return "text"
     val type =
         if (left.text("type") == "formula")
             variables
@@ -882,7 +965,11 @@ fun comparisonListSchema(left: JsonElement?, variables: List<RuleVariable>): Jso
     }
 }
 
-fun typedComparisonRight(value: JsonElement?, expects: String): JsonObject {
+fun typedComparisonRight(
+    value: JsonElement?,
+    expects: String,
+    listOnly: Boolean = true,
+): JsonObject {
     val held = value as? JsonObject ?: templateValue()
     if (held.text("type") == "formula") return held
     if (held.text("type") == "template" && expects != "text") {
@@ -896,6 +983,11 @@ fun typedComparisonRight(value: JsonElement?, expects: String): JsonObject {
     val raw =
         if (held.text("type") == "literal") held["value"] else JsonPrimitive(held.text("text"))
     val text = (raw as? JsonPrimitive)?.contentOrNull.orEmpty()
+    if (expects == "json" && !listOnly)
+        return literalRuleValue(
+            if (held.text("type") == "literal") raw ?: JsonNull
+            else runCatching { wireJson.parseToJsonElement(text) }.getOrElse { JsonPrimitive(text) }
+        )
     return when (expects) {
         "number" ->
             literalRuleValue(

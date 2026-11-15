@@ -430,3 +430,64 @@ test('changing a numeric compared field to text also converts its fixed value', 
   workspace.service.emitHook(fixture.instanceId, 'message', { content: '5', author: 'alice', channel: 'support' }, 'text-field-change')
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]?.status).toBe('completed')
 })
+
+test('contains keeps a numeric member typed and runs the matching branch', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const definition: any = structuredClone(fixture.definition)
+  definition.steps[0].condition = {
+    type: 'compare',
+    left: { type: 'formula', expression: 'payload.counts' },
+    operator: 'equals',
+    right: { type: 'literal', value: 5 },
+  }
+  const rule = await workspace.api('/api/hook-rules', 'POST', { definition, enabled: true })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit trusted', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Test', exact: true }).selectOption('contains')
+  await expect(page.getByRole('textbox', { name: 'Value', exact: true })).toHaveValue('5')
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  expect((await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0].condition.right).toEqual({ type: 'literal', value: 5 })
+  workspace.service.emitHook(fixture.instanceId, 'message', {
+    counts: [5],
+    author: 'alice',
+    channel: 'support',
+    content: 'Typed list',
+  }, 'numeric-member')
+  let triggering: any
+  await expect.poll(async () => {
+    triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+    return triggering?.status
+  }).toBe('completed')
+  const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+  expect(history.steps.some((step: any) => step.nodeId === 'post' && step.status === 'completed')).toBe(true)
+})
+
+test('adding an author condition selects the nested person identifier', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const definition: any = structuredClone(fixture.definition)
+  definition.trigger.hook = 'nested-message'
+  definition.steps[0].condition = { type: 'all', conditions: [{ type: 'formula', expression: 'true' }] }
+  const rule = await workspace.api('/api/hook-rules', 'POST', { definition, enabled: true })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit trusted', exact: true }).click()
+  await page.getByRole('button', { name: 'Add a condition', exact: true }).click()
+  await page.getByRole('menuitem', { name: /The author is one of/ }).click()
+  await expect(page.getByRole('textbox', { name: 'Author field', exact: true })).toHaveValue('payload.author.id')
+  await page.getByRole('button', { name: 'Choose people…', exact: true }).click()
+  await page.getByRole('button', { name: 'Alice', exact: true }).click()
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  workspace.service.emitHook(fixture.instanceId, 'nested-message', { author: { id: 'alice', name: 'Alice' }, content: 'Nested author' }, 'nested-author')
+  let triggering: any
+  await expect.poll(async () => {
+    triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+    return triggering?.status
+  }).toBe('completed')
+  const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+  expect(history.steps.some((step: any) => step.nodeId === 'post' && step.status === 'completed')).toBe(true)
+})

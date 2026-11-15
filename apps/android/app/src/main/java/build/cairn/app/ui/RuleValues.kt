@@ -334,7 +334,7 @@ internal fun RuleLiteralEditor(
                 change(options.first { it.toString() == key })
             }
         kind == "boolean" -> Toggle("Oui", value.flag() == true) { change(JsonPrimitive(it)) }
-        kind == "object" && depth < 6 -> {
+        kind == "object" && !schema.obj("properties").isNullOrEmpty() && depth < 6 -> {
             val fields = schema.obj("properties").orEmpty()
             val current = value as? JsonObject ?: JsonObject(emptyMap())
             Column(
@@ -400,6 +400,28 @@ internal fun RuleLiteralEditor(
                     Text("+ Ajouter un élément")
                 }
             }
+        }
+        kind == "object" -> {
+            val text =
+                (value as? JsonPrimitive)?.takeIf { it.isString }?.content ?: value.toString()
+            OutlinedTextField(
+                text,
+                { raw ->
+                    val parsed = runCatching { wireJson.parseToJsonElement(raw) }.getOrNull()
+                    change(if (parsed is JsonObject) parsed else JsonPrimitive(raw))
+                },
+                Modifier.fillMaxWidth(),
+                label = { Text("Objet JSON") },
+                minLines = 3,
+                isError = value !is JsonObject,
+                supportingText = {
+                    Text(
+                        if (value is JsonObject) "Propriétés et valeurs de l’objet en JSON."
+                        else "Saisissez un objet JSON valide."
+                    )
+                },
+                shape = RoundedCornerShape(12.dp),
+            )
         }
         kind in setOf("number", "integer") ->
             RuleNumericField(value, kind == "integer", "Valeur") { change(it) }

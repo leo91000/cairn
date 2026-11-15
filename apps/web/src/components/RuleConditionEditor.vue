@@ -5,6 +5,7 @@ import type { RuleOperator } from '../../../../packages/contracts/generated/type
 import type { VariableOption } from '../hook-rules'
 import { computed, ref } from 'vue'
 import {
+  authorVariable,
   binaryOperator,
   comparisonExpects,
   comparisonListSchema,
@@ -43,7 +44,7 @@ const group = computed(() => model.value.type === 'all' || model.value.type === 
 const operators = Object.entries(operatorTitles) as Array<[RuleOperator, string]>
 const adding = ref(false)
 
-const authorField = computed(() => props.variables.find(option => /(?:^|\.)author(?:\.id|Id)?$/i.test(option.label))?.expression ?? 'payload.author')
+const authorField = computed(() => authorVariable(props.variables))
 
 function problemsAt(path: string) {
   return props.problems.filter(problem => problem.path === path || problem.path.startsWith(`${path}/`)).map(problem => problem.message)
@@ -129,7 +130,7 @@ function setOperator(condition: Extract<RuleCondition, { type: 'compare' }>, ind
   update(index, {
     ...condition,
     operator,
-    right: binaryOperator(operator) ? typedComparisonRight(condition.right, comparisonExpects(condition.left, operator, props.variables)) : null,
+    right: binaryOperator(operator) ? typedComparisonRight(condition.right, comparisonExpects(condition.left, operator, props.variables), operator === 'in') : null,
   })
 }
 
@@ -175,7 +176,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
               expects="field"
               :variables="variables"
               :problems="problemsAt(`${conditionPath(index)}/left`)"
-              @update:model-value="left => update(index, { ...condition, left, right: binaryOperator(condition.operator) ? typedComparisonRight(condition.right, comparisonExpects(left, condition.operator, variables)) : null })"
+              @update:model-value="left => update(index, { ...condition, left, right: binaryOperator(condition.operator) ? typedComparisonRight(condition.right, comparisonExpects(left, condition.operator, variables), condition.operator === 'in') : null })"
             />
             <label class="grid gap-1.5 self-start">
               <span class="text-xs font-semibold">Test</span>

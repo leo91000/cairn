@@ -45,10 +45,16 @@ async function installRulesFixture(workspace: Workspace) {
           content: { type: 'string', title: 'Message text' },
           tags: { type: 'array', items: { type: 'string' } },
           count: { type: 'integer' },
+          counts: { type: 'array', items: { type: 'integer' } },
           approved: { type: 'boolean' },
         },
       },
       resourceFields: [{ path: '/channel', resourceType: 'channel' }, { path: '/author', resourceType: 'person' }],
+    }, {
+      name: 'nested-message',
+      description: 'Message with person details',
+      payloadSchema: { type: 'object', properties: { author: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } }, content: { type: 'string' } } },
+      resourceFields: [{ path: '/author/id', resourceType: 'person' }],
     }],
     tools: [{
       name: 'rules_studio_post_message',
@@ -59,6 +65,7 @@ async function installRulesFixture(workspace: Workspace) {
         properties: {
           channel: { type: 'string', title: 'Channel' },
           text: { type: 'string', title: 'Message', minLength: 1 },
+          body: { type: 'object', title: 'Body' },
           options: { type: 'object', title: 'Options', properties: { notify: { type: 'boolean', title: 'Notify the channel' }, style: { type: 'string', enum: ['plain', 'emphasis'], title: 'Style' } } },
           labels: { type: 'array', title: 'Labels', items: { type: 'string' } },
         },

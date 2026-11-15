@@ -397,7 +397,7 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
       v-bind="resourceSource"
       :model-value="model.type === 'literal' && typeof model.value === 'string' && model.value ? [{ resourceType: resourceSource.resourceType, id: model.value }] : []"
       label="Choose a resource…"
-      @update:model-value="values => { if (values[0]) model = { type: 'literal', value: values[0].id } }"
+      @update:model-value="values => model = { type: 'literal', value: values[0]?.id ?? '' }"
     />
   </div>
 </template>

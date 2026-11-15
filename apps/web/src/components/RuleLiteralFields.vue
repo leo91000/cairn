@@ -36,6 +36,26 @@ function inputNumber(raw: string) {
   model.value = emittedNumber
 }
 
+const objectDraft = ref('')
+let emittedObject: unknown = Symbol('initial')
+watch(() => model.value, (value) => {
+  if (!Object.is(value, emittedObject))
+    objectDraft.value = typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 2)
+}, { immediate: true })
+
+function inputObject(raw: string) {
+  objectDraft.value = raw
+  try {
+    const value = JSON.parse(raw)
+    emittedObject = value && typeof value === 'object' && !Array.isArray(value) ? value : raw
+  }
+  catch {
+    emittedObject = raw
+  }
+
+  model.value = emittedObject
+}
+
 function setField(name: string, value: unknown) {
   model.value = { ...object.value, [name]: value }
 }
@@ -69,7 +89,7 @@ function setItem(index: number, value: unknown) {
       {{ flag ? 'Yes' : 'No' }}
     </button>
   </div>
-  <div v-else-if="resolved.type === 'object' && (depth ?? 0) < 8" class="grid gap-3 rounded-xl border border-line p-3">
+  <div v-else-if="resolved.type === 'object' && fields.length && (depth ?? 0) < 8" class="grid gap-3 rounded-xl border border-line p-3">
     <div
       v-for="([name, field], index) in fields"
       :key="name"
@@ -113,6 +133,17 @@ function setItem(index: number, value: unknown) {
     <button type="button" class="inline-flex items-center gap-1.5 justify-self-start rounded-full border border-dashed border-line px-3 py-1.5 text-xs font-semibold text-muted hover:text-accent" @click="model = [...array, ruleLiteralDefault(resolveRuleSchema(resolved.items ?? {}, root ?? schema))]">
       <Icon :name="Plus" :size="13" />Add an item
     </button>
+  </div>
+  <div v-else-if="resolved.type === 'object'" class="grid gap-1.5">
+    <textarea
+      :value="objectDraft"
+      :aria-label="`${label} (JSON object)`"
+      rows="4"
+      spellcheck="false"
+      @input="inputObject(($event.target as HTMLTextAreaElement).value)"
+    />
+    <small class="text-xs text-muted">Enter the object's key/value properties as JSON.</small>
+    <small v-if="!model || typeof model !== 'object' || Array.isArray(model)" class="text-xs text-coral" role="alert">Enter a valid JSON object.</small>
   </div>
   <textarea
     v-else-if="resolved.type === 'string' && (resolved.maxLength ?? 0) > 200"

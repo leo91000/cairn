@@ -479,6 +479,9 @@ export interface VariableOption {
   type: string
   description: string
   example?: string
+  path?: string
+  itemType?: string
+  personId?: boolean
 }
 
 function typeOf(schema: any): string {
@@ -487,22 +490,26 @@ function typeOf(schema: any): string {
 }
 
 /** The fields of a JSON Schema, as CEL paths, depth-first and at most four levels deep. */
-export function schemaFields(schema: any, prefix: string, depth = 0, root = schema): VariableOption[] {
+export function schemaFields(schema: any, prefix: string, depth = 0, root = schema, pointer = ''): VariableOption[] {
   const properties = resolveRuleSchema(schema, root)?.properties
   if (!properties || typeof properties !== 'object' || depth > 3)
     return []
   return Object.entries(properties).flatMap(([name, field]: [string, any]) => {
+    const resolvedField = resolveRuleSchema(field, root)
     const identifier = /^[a-z_]\w*$/i.test(name)
     const expression = identifier ? `${prefix}.${name}` : `${prefix}[${JSON.stringify(name)}]`
+    const path = `${pointer}/${name.replace(/~/g, '~0').replace(/\//g, '~1')}`
     return [
       {
+        path,
+        itemType: typeOf(resolveRuleSchema(resolvedField?.items, root)),
         group: 'Event' as const,
         expression,
         label: expression.replace(/^payload\./, ''),
-        type: typeOf(resolveRuleSchema(field, root)),
+        type: typeOf(resolvedField),
         description: field?.description ?? '',
       },
-      ...schemaFields(field, expression, depth + 1, root),
+      ...schemaFields(field, expression, depth + 1, root, path),
     ]
   })
 }
@@ -563,7 +570,7 @@ function rememberedNames(nodes: RuleNode[]): string[] {
 /** What a value at this place of the tree can read. */
 export function variablesAt(definition: HookRuleDefinition, path: string, catalog: HookRuleCatalog | null): VariableOption[] {
   const hook = catalogHook(catalog, definition.trigger)
-  const fields = schemaFields(hook?.payloadSchema, 'payload')
+  const fields = schemaFields(hook?.payloadSchema, 'payload').map(field => ({ ...field, personId: hook?.resourceFields.some(resource => resource.path === field.path && (/person|user/i.test(resource.resourceType) || /author|sender/i.test(resource.path))) ?? false }))
   const earlier = actionsBefore(definition.steps, '/steps', path, { done: false })
   return [
     ...fields,
@@ -613,10 +620,32 @@ export function variablesAt(definition: HookRuleDefinition, path: string, catalo
   ]
 }
 
+export function authorVariable(variables: VariableOption[]): string {
+  const strings = variables.filter(variable => variable.group === 'Event' && variable.type === 'string')
+  return strings.find(variable => variable.personId)?.expression
+    ?? strings.find(variable => /(?:^|\.)author(?:\.id|Id)$/i.test(variable.expression))?.expression
+    ?? strings.find(variable => /(?:^|\.)author$/i.test(variable.expression))?.expression
+    ?? (variables.some(variable => variable.type === 'object' && /(?:^|\.)author$/i.test(variable.expression)) ? '' : 'payload.author')
+}
+
 export function comparisonExpects(left: RuleValue, operator: RuleOperator, variables: VariableOption[]): 'text' | 'number' | 'boolean' | 'json' {
   if (operator === 'in')
     return 'json'
-  if (['matches', 'startsWith', 'endsWith', 'contains'].includes(operator))
+  if (operator === 'contains') {
+    const field = left.type === 'formula' ? variables.find(variable => variable.expression === left.expression || variable.expression === `payload.${left.expression}`) : undefined
+    const items = left.type === 'literal' && Array.isArray(left.value) ? left.value : null
+    if (items || field?.type === 'array') {
+      const itemTypes = items ? [...new Set(items.map(item => typeof item))] : []
+      const itemType = items ? itemTypes.length === 1 ? itemTypes[0] : 'value' : field?.itemType
+      return itemType === 'integer' || itemType === 'number' ? 'number' : itemType === 'boolean' ? 'boolean' : itemType === 'string' ? 'text' : 'json'
+    }
+
+    if (left.type === 'formula' && (!field || ['value', 'result'].includes(field.type)))
+      return 'json'
+    return 'text'
+  }
+
+  if (['matches', 'startsWith', 'endsWith'].includes(operator))
     return 'text'
   const type = left.type === 'literal'
     ? typeof left.value
@@ -678,7 +707,7 @@ export function sameRuleDefinition(left: HookRuleDefinition, right: HookRuleDefi
   return stable(left) === stable(right)
 }
 
-export function typedComparisonRight(value: RuleValue | null | undefined, expects: ReturnType<typeof comparisonExpects>): RuleValue {
+export function typedComparisonRight(value: RuleValue | null | undefined, expects: ReturnType<typeof comparisonExpects>, listOnly = true): RuleValue {
   if (value?.type === 'formula')
     return value
   if (value?.type === 'template') {
@@ -693,6 +722,17 @@ export function typedComparisonRight(value: RuleValue | null | undefined, expect
   if (expects === 'boolean')
     return { type: 'literal', value: raw === true || raw === 'true' }
   if (expects === 'json') {
+    if (!listOnly) {
+      if (value?.type === 'literal')
+        return value
+      try {
+        return { type: 'literal', value: JSON.parse(String(raw)) }
+      }
+      catch {
+        return { type: 'literal', value: raw }
+      }
+    }
+
     if (Array.isArray(raw))
       return { type: 'literal', value: raw }
     try {
