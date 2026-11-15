@@ -10,6 +10,7 @@ import {
   catalogTool,
   describeAction,
   emptyValue,
+  initialToolInput,
   ownProblems,
   stepChoice,
 } from '../hook-rules'
@@ -26,7 +27,12 @@ const props = defineProps<{
   executionAgentId: string
   variables: VariableOption[]
   problems: HookRuleProblem[]
-  peopleSource?: { pluginId: string, instanceId: string, resourceType: string }
+  peopleSource?: {
+    pluginId: string
+    instanceId: string
+    resourceType: string
+    agentId: string
+  }
 }>()
 const emit = defineEmits<{ close: [], remove: [] }>()
 const node = defineModel<RuleNode>({ required: true })
@@ -59,11 +65,7 @@ function chooseTool(key: string) {
   const chosen = tools.value.find(entry => `${entry.instanceId}:${entry.tool}` === key)
   if (action.value?.type !== 'callTool' || !chosen)
     return
-  const schema = resolveRuleSchema(chosen.inputSchema)
-  const input = Object.fromEntries((schema.required ?? []).map((name: string) => {
-    const field = resolveRuleSchema(schema.properties?.[name] ?? {}, schema)
-    return [name, { type: 'literal', value: ruleLiteralDefault(field) }]
-  }))
+  const input = initialToolInput(chosen.inputSchema)
   setAction({
     ...action.value,
     instanceId: chosen.instanceId,
@@ -75,7 +77,14 @@ function chooseTool(key: string) {
 function resourceSource(name: string) {
   const path = `/${name.replace(/~/g, '~0').replace(/\//g, '~1')}`
   const field = tool.value?.resourceFields.find(entry => entry.path === path)
-  return field && tool.value ? { pluginId: tool.value.pluginId, instanceId: tool.value.instanceId, resourceType: field.resourceType } : undefined
+  return field && tool.value
+    ? {
+        pluginId: tool.value.pluginId,
+        instanceId: tool.value.instanceId,
+        resourceType: field.resourceType,
+        agentId: props.executionAgentId,
+      }
+    : undefined
 }
 
 interface Field {
@@ -108,13 +117,13 @@ const optionalFields = computed(() => fields.value.filter(field => !shownFields.
 
 function defaultValue(field: Field): RuleValue {
   if ('default' in field.schema || field.schema.enum?.length)
-    return { type: 'literal', value: ruleLiteralDefault(field.schema) }
+    return { type: 'literal', value: ruleLiteralDefault(field.schema, tool.value?.inputSchema ?? field.schema) }
   if (field.expects === 'boolean')
     return { type: 'literal', value: true }
   if (field.expects === 'number')
     return { type: 'literal', value: 0 }
   if (field.expects === 'json')
-    return { type: 'literal', value: field.schema?.type === 'array' ? [] : {} }
+    return { type: 'literal', value: ruleLiteralDefault(field.schema, tool.value?.inputSchema ?? field.schema) }
   return emptyValue()
 }
 

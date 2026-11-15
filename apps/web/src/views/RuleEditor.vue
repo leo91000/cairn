@@ -139,7 +139,12 @@ const hook = computed(() => definition.value ? catalogHook(catalog.value, defini
 const peopleSource = computed(() => {
   const field = hook.value?.resourceFields.find(entry => /person|user/i.test(entry.resourceType) || /author|sender/i.test(entry.path))
   return field && hook.value?.pluginId && definition.value?.trigger.type === 'plugin'
-    ? { pluginId: hook.value.pluginId, instanceId: definition.value.trigger.instanceId, resourceType: field.resourceType }
+    ? {
+        pluginId: hook.value.pluginId,
+        instanceId: definition.value.trigger.instanceId,
+        resourceType: field.resourceType,
+        agentId: definition.value.executionAgentId,
+      }
     : undefined
 })
 const executionAgents = computed(() => (catalog.value?.agents ?? []).filter(agent => !hook.value || hook.value.agentIds.includes(agent.agentId)))

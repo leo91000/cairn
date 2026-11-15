@@ -25,6 +25,71 @@ import org.junit.Test
 abstract class RulesCreationCases {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun theFirstNumericFieldStartsWithANumericOperand() = addTypedComparison("integer")
+
+    @Test fun theFirstBooleanFieldStartsWithABooleanOperand() = addTypedComparison("boolean")
+
+    private fun addTypedComparison(type: String) {
+        var value by
+            mutableStateOf(
+                ruleObject("type" to JsonPrimitive("all"), "conditions" to JsonArray(emptyList()))
+            )
+        val vm =
+            CairnViewModel(
+                ApplicationProvider.getApplicationContext<Application>(),
+                object : SessionVault {
+                    override fun read(origin: String): String? = null
+
+                    override fun write(origin: String, cookie: String?) {}
+                },
+                beaconOrigin = "",
+            )
+        val models = ViewModelStore().apply { put("fixture", vm) }
+        try {
+            compose.setContent {
+                CairnTheme {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        RuleConditionEditor(
+                            value,
+                            listOf(
+                                RuleVariable(
+                                    "Événement",
+                                    "payload.first",
+                                    "Premier champ",
+                                    type,
+                                    "",
+                                )
+                            ),
+                            { value = it },
+                            vm,
+                            null,
+                        )
+                    }
+                }
+            }
+            compose.onNodeWithText("+ Ajouter une condition").performClick()
+            compose.onNodeWithText("Comparer un champ").performClick()
+            compose.runOnIdle {
+                assertEquals("literal", value.list("conditions")[0].obj("right").text("type"))
+            }
+            if (type == "boolean") compose.onNodeWithText("Oui").performClick()
+            else
+                compose
+                    .onNode(hasSetTextAction() and hasContentDescription("Comparer avec"))
+                    .performTextReplacement("5")
+            compose.runOnIdle {
+                assertEquals(
+                    literalRuleValue(
+                        if (type == "boolean") JsonPrimitive(true) else JsonPrimitive(5)
+                    ),
+                    value.list("conditions")[0].obj("right"),
+                )
+            }
+        } finally {
+            compose.runOnIdle { models.clear() }
+        }
+    }
+
     @Test fun aLostCreationResponseKeepsTheLaterDraft() = recoverCreation(false)
 
     @Test fun aRecoveredCreationKeepsItsIdentityAcrossRecreation() = recoverCreation(true)

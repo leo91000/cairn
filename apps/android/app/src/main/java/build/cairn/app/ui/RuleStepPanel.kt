@@ -157,6 +157,7 @@ internal fun RuleStepPanel(
                                                     tool.pluginId,
                                                     tool.instanceId,
                                                     it.resourceType,
+                                                    executionAgent,
                                                 )
                                             },
                                         vm = vm,

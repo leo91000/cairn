@@ -34,7 +34,12 @@ const props = withDefaults(defineProps<{
   required?: boolean
   schema?: any
   schemaRoot?: any
-  resourceSource?: { pluginId: string, instanceId: string, resourceType: string }
+  resourceSource?: {
+    pluginId: string
+    instanceId: string
+    resourceType: string
+    agentId: string
+  }
 }>(), { expects: 'text', placeholder: '' })
 const model = defineModel<RuleValue>({ required: true })
 
@@ -55,7 +60,7 @@ const modes = computed(() => {
   return all
 })
 
-const literalDraft = ref<{ value: RuleValue, text: string } | null>(null)
+const literalDraft = ref<{ value: RuleValue, text: string, expects: string } | null>(null)
 const text = computed({
   get: () => {
     const value = model.value
@@ -63,9 +68,9 @@ const text = computed({
       return value.text
     if (value.type === 'formula')
       return value.expression
-    if (literalDraft.value?.value === value)
+    if (literalDraft.value?.value === value && literalDraft.value.expects === props.expects)
       return literalDraft.value.text
-    return typeof value.value === 'string' ? value.value : JSON.stringify(value.value ?? null)
+    return typeof value.value === 'string' && props.expects !== 'json' ? value.value : JSON.stringify(value.value ?? null)
   },
   set: (next: string) => {
     if (model.value.type === 'template') {
@@ -76,7 +81,7 @@ const text = computed({
     }
     else {
       const value: RuleValue = { type: 'literal', value: parseLiteral(next) }
-      literalDraft.value = { value, text: next }
+      literalDraft.value = { value, text: next, expects: props.expects }
       model.value = value
     }
   },
@@ -100,6 +105,23 @@ function parseLiteral(raw: string): unknown {
   return raw
 }
 
+// Map the visible JSON string selection to its decoded text before inserting a variable.
+function jsonStringCaret(encoded: string, at: number): number {
+  try {
+    if (typeof JSON.parse(encoded) !== 'string')
+      return at
+    for (let end = Math.min(at, encoded.length - 1); end >= 1; end--) {
+      try {
+        return JSON.parse(`${encoded.slice(0, end)}"`).length
+      }
+      catch { /* A caret inside an escape belongs before that character. */ }
+    }
+  }
+  catch { return at }
+
+  return 0
+}
+
 // A template that only inserts one formula becomes that formula; other text is quoted.
 function unwrap(template: string) {
   const trimmed = template.trim()
@@ -112,12 +134,14 @@ function unwrap(template: string) {
 function switchMode(next: Mode) {
   if (next === mode.value)
     return
-  const current = text.value
+  const held = model.value
+  const literalText = held.type === 'literal' && typeof held.value === 'string' ? held.value : null
+  const current = next === 'template' && literalText !== null ? literalText : text.value
   if (next === 'template') {
     model.value = { type: 'template', text: mode.value === 'formula' && current ? `{{${current}}}` : current }
   }
   else if (next === 'formula') {
-    model.value = { type: 'formula', expression: mode.value === 'template' ? unwrap(current) : JSON.stringify(model.value.type === 'literal' ? model.value.value ?? '' : current) }
+    model.value = { type: 'formula', expression: mode.value === 'template' ? unwrap(current) : JSON.stringify(model.value.type === 'literal' ? model.value.value ?? null : current) }
   }
   else {
     let value = props.expects === 'boolean' ? true : parseLiteral(current)
@@ -191,9 +215,13 @@ function insert(option: VariableOption) {
   const replace = props.expects === 'field' || (typed && mode.value !== 'formula')
   const nextMode = ['field', 'formula'].includes(props.expects) || replace ? 'formula' : mode.value === 'literal' ? 'template' : mode.value
   const insertion = nextMode === 'template' ? `{{${option.expression}}}` : option.expression
-  const start = replace ? 0 : element?.selectionStart ?? current.length
-  const end = replace ? current.length : element?.selectionEnd ?? current.length
-  const value = `${current.slice(0, start)}${insertion}${current.slice(end)}`
+  const jsonString = model.value.type === 'literal' && props.expects === 'json' && typeof model.value.value === 'string'
+  const content = jsonString && model.value.type === 'literal' ? model.value.value as string : current
+  const selectionStart = element?.selectionStart ?? current.length
+  const selectionEnd = element?.selectionEnd ?? current.length
+  const start = replace ? 0 : jsonString ? jsonStringCaret(current, selectionStart) : selectionStart
+  const end = replace ? content.length : jsonString ? jsonStringCaret(current, selectionEnd) : selectionEnd
+  const value = `${content.slice(0, start)}${insertion}${content.slice(end)}`
   model.value = nextMode === 'formula' ? { type: 'formula', expression: value } : { type: 'template', text: value }
   picking.value = false
   query.value = ''

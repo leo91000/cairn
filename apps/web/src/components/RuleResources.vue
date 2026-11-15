@@ -12,6 +12,7 @@ const props = defineProps<{
   pluginId: string
   instanceId: string
   resourceType: string
+  agentId: string
   label: string
   multiple?: boolean
 }>()
@@ -24,6 +25,7 @@ const next = ref<number | null>(1)
 const loading = ref(false)
 const error = ref('')
 let generation = 0
+let sourceGeneration = 0
 let timer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
 const key = (item: PluginResourceRef) => `${item.resourceType}:${item.id}`
@@ -40,6 +42,7 @@ async function load(more = false) {
       pluginId: props.pluginId,
       instanceId: props.instanceId,
       resourceType: props.resourceType,
+      agentId: props.agentId,
       query: query.value,
       page,
     })
@@ -67,25 +70,38 @@ function choose(item: PluginResourceRef) {
     open.value = false
 }
 
-watch(() => [props.pluginId, props.instanceId, props.resourceType, query.value, open.value], () => {
+watch(() => [props.pluginId, props.instanceId, props.resourceType, props.agentId], () => {
+  sourceGeneration++
+  generation++
+  names.value = {}
+  items.value = []
+  next.value = 1
+  loading.value = false
+  error.value = ''
+}, { flush: 'sync' })
+watch(() => [props.pluginId, props.instanceId, props.resourceType, props.agentId, query.value, open.value], () => {
   generation++
   clearTimeout(timer)
   if (open.value)
     timer = setTimeout(() => void load(), 200)
 })
-watch(() => [props.pluginId, props.instanceId, model.value] as const, async () => {
-  const askedInstance = props.instanceId
+watch(() => [props.pluginId, props.instanceId, props.resourceType, props.agentId, model.value] as const, async () => {
+  const askedSource = sourceGeneration
+  const { pluginId, instanceId, agentId } = props
   for (const selected of model.value) {
+    if (disposed || askedSource !== sourceGeneration)
+      return
     if (names.value[key(selected)])
       continue
     try {
       const result = await resolvePluginResource(pluginRequest, {
-        pluginId: props.pluginId,
-        instanceId: props.instanceId,
+        pluginId,
+        instanceId,
+        agentId,
         resourceType: selected.resourceType,
         id: selected.id,
       })
-      if (!disposed && props.instanceId === askedInstance)
+      if (!disposed && askedSource === sourceGeneration)
         names.value[key(selected)] = result.resource.name
     }
     catch { /* Existing selections remain visible if their service is unavailable. */ }

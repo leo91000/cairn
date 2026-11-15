@@ -31,6 +31,15 @@ import { resolveRuleSchema, ruleLiteralDefault } from './rule-schema'
 export type ActionKind = RuleAction['type']
 export type StepKind = ActionKind | 'if' | 'forEach'
 
+export function initialToolInput(root: unknown): Record<string, RuleValue> {
+  const schema = resolveRuleSchema(root)
+  const required: string[] = Array.isArray(schema.required) ? schema.required : []
+  return Object.fromEntries(required.map(name => [name, {
+    type: 'literal',
+    value: ruleLiteralDefault(schema.properties?.[name] ?? {}, root),
+  }]))
+}
+
 export interface StepChoice {
   kind: StepKind
   title: string
@@ -352,7 +361,7 @@ export function newStep(definition: HookRuleDefinition, kind: StepKind, catalog:
           type: 'callTool',
           instanceId: tool?.instanceId ?? '',
           tool: tool?.tool ?? '',
-          input: Object.fromEntries(((tool?.inputSchema as any)?.required ?? []).map((name: string) => [name, { type: 'literal', value: ruleLiteralDefault(resolveRuleSchema((tool?.inputSchema as any)?.properties?.[name] ?? {}, tool?.inputSchema)) }])),
+          input: initialToolInput(tool?.inputSchema),
         },
       }
     }
@@ -741,7 +750,7 @@ export function sameRuleDefinition(left: HookRuleDefinition, right: HookRuleDefi
 }
 
 export function typedComparisonRight(value: RuleValue | null | undefined, expects: ReturnType<typeof comparisonExpects>, listOnly = true): RuleValue {
-  if (value?.type === 'formula')
+  if (value?.type === 'formula' || (value?.type === 'template' && expects === 'json' && !listOnly))
     return value
   if (value?.type === 'template') {
     const expression = /^\s*\{\{([^{}]+)\}\}\s*$/.exec(value.text)?.[1]

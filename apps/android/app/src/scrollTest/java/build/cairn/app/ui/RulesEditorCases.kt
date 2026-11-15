@@ -1,17 +1,126 @@
 package build.cairn.app.ui
 
+import android.net.Uri
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.text.TextRange
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleProblem
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import org.junit.*
 import org.junit.Assert.*
 
 abstract class RulesEditorCases {
     @get:Rule val compose = createComposeRule()
+
+    @Test
+    fun aLateResourcePageCannotReplaceANewSearch() {
+        val requests = CopyOnWriteArrayList<String>()
+        val late = CompletableDeferred<JsonObject>()
+        val returned = AtomicBoolean(false)
+        var selected: JsonObject? = null
+        fun page(id: String, next: JsonElement) =
+            ruleObject(
+                "items" to
+                    JsonArray(
+                        listOf(
+                            ruleObject(
+                                "resourceType" to JsonPrimitive("person"),
+                                "id" to JsonPrimitive(id),
+                                "name" to JsonPrimitive(id),
+                            )
+                        )
+                    ),
+                "nextPage" to next,
+            )
+        compose.setContent {
+            CairnTheme {
+                ScopedRuleResourceSheet(
+                    RuleResourceSource("team", "messages", "person", "agent"),
+                    { path ->
+                        requests += path
+                        val uri = Uri.parse(path)
+                        when {
+                            uri.getQueryParameter("query") == "new" -> page("New result", JsonNull)
+                            uri.getQueryParameter("page") == "2" ->
+                                withContext(NonCancellable) {
+                                    val result = late.await()
+                                    returned.set(true)
+                                    result
+                                }
+                            else -> page("First result", JsonPrimitive(2))
+                        }
+                    },
+                    { selected = it },
+                    {},
+                )
+            }
+        }
+        try {
+            compose.waitUntil(5000) { requests.isNotEmpty() }
+            compose.onNodeWithText("Voir la suite").performScrollTo().performClick()
+            compose.waitUntil(5000) {
+                requests.any { Uri.parse(it).getQueryParameter("page") == "2" }
+            }
+            compose.onNode(hasSetTextAction()).performTextReplacement("new")
+            compose.waitUntil(5000) {
+                compose.onAllNodesWithText("New result").fetchSemanticsNodes().isNotEmpty()
+            }
+            late.complete(page("Old result", JsonPrimitive(3)))
+            compose.waitUntil(5000) { returned.get() }
+            compose.waitForIdle()
+            compose.onNodeWithText("Old result").assertDoesNotExist()
+            compose.onNodeWithText("Voir la suite").assertDoesNotExist()
+            compose.onNodeWithText("New result").performClick()
+            compose.runOnIdle { assertEquals("New result", selected.text("id")) }
+        } finally {
+            late.complete(page("Old result", JsonPrimitive(3)))
+        }
+    }
+
+    @Test fun aListAtTheDepthLimitRemainsJson() = editDeepList(false)
+
+    @Test fun editingADeepNestedListPropagatesItsArrayValue() = editDeepList(true)
+
+    private fun editDeepList(nested: Boolean) {
+        var schema =
+            ruleObject(
+                "type" to JsonPrimitive("array"),
+                "items" to ruleObject("type" to JsonPrimitive("integer")),
+            )
+        var initial: JsonElement = JsonArray(listOf(JsonPrimitive(1), JsonPrimitive(2)))
+        var expected: JsonElement = JsonArray(listOf(JsonPrimitive(3), JsonPrimitive(4)))
+        if (nested)
+            repeat(6) {
+                schema = ruleObject("type" to JsonPrimitive("array"), "items" to schema)
+                initial = JsonArray(listOf(initial))
+                expected = JsonArray(listOf(expected))
+            }
+        var value by mutableStateOf(initial)
+        compose.setContent {
+            CairnTheme {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    RuleLiteralEditor(schema, value, { value = it }, depth = if (nested) 0 else 6)
+                }
+            }
+        }
+        val input = compose.onNode(hasSetTextAction())
+        input.performScrollTo().assertTextContains("[1,2]")
+        input.performTextReplacement("[")
+        input.assertTextContains("[")
+        input.performTextReplacement("[3,4]")
+        compose.runOnIdle { assertEquals(expected, value) }
+    }
 
     @Test
     fun nestedFlowInsertsIntoTheChosenBranch() {
@@ -222,6 +331,123 @@ abstract class RulesEditorCases {
             input.assertTextContains(expected)
         }
         compose.runOnIdle { assertEquals(wireJson.parseToJsonElement("""{"n":1.5}"""), value) }
+    }
+
+    @Test
+    fun editingAnEqualityFieldPreservesTheRightTemplate() {
+        val fields =
+            schemaFields(
+                wireJson.parseToJsonElement("""{"properties":{"channel":{"type":"string"}}}"""),
+                "payload",
+            )
+        for (text in listOf("support-{{payload.author}}", "{{payload.author}}", "3")) {
+            var right = templateValue(text)
+            for (expression in
+                listOf(
+                    "payload.channel",
+                    "payload.channe",
+                    "payload.channel",
+                    "steps.fetch.name",
+                )) {
+                for (operator in listOf("equals", "notEquals")) {
+                    right =
+                        typedComparisonRight(
+                            right,
+                            comparisonExpects(formulaRuleValue(expression), operator, fields),
+                            listOnly = false,
+                        )
+                    assertEquals(templateValue(text), right)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun loopItemComparisonsPreserveLiteralTypes() {
+        val definition =
+            ruleObject(
+                "steps" to
+                    JsonArray(
+                        listOf(
+                            ruleObject(
+                                "type" to JsonPrimitive("forEach"),
+                                "itemName" to JsonPrimitive("entry"),
+                                "items" to literalRuleValue(JsonArray(listOf(JsonPrimitive(5)))),
+                                "body" to
+                                    JsonArray(listOf(ruleObject("type" to JsonPrimitive("if")))),
+                            )
+                        )
+                    )
+            )
+        val variables = ruleVariablesAt(definition, "/steps/0/body/0", null)
+        for (literal in
+            listOf(
+                JsonPrimitive(5),
+                JsonPrimitive(true),
+                ruleObject("count" to JsonPrimitive(5)),
+            )) {
+            var right = literalRuleValue(literal)
+            for (operator in listOf("notEquals", "equals")) {
+                right =
+                    typedComparisonRight(
+                        right,
+                        comparisonExpects(formulaRuleValue("entry"), operator, variables),
+                        listOnly = false,
+                    )
+                assertEquals(literalRuleValue(literal), right)
+            }
+        }
+    }
+
+    @Test
+    fun jsonStringEditingKeepsItsTypeAndTextModeHasNoEncodingQuotes() {
+        var value by mutableStateOf(literalRuleValue(JsonPrimitive("5")))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor(
+                    "Valeur mémorisée",
+                    value,
+                    emptyList(),
+                    { value = it },
+                    expects = "json",
+                )
+            }
+        }
+        val input = compose.onNode(hasSetTextAction())
+        input.assertTextContains("\"5\"")
+        input.performTextInputSelection(TextRange(2))
+        input.performTextInput("6")
+        compose.runOnIdle { assertEquals(literalRuleValue(JsonPrimitive("56")), value) }
+        compose.onNodeWithText("Texte").performClick()
+        compose.runOnIdle { assertEquals(templateValue("56"), value) }
+        input.assertTextContains("56")
+    }
+
+    @Test
+    fun jsonValueEditorKeepsPartialInputBeforeAnObjectIsComplete() {
+        var value by mutableStateOf(literalRuleValue(JsonPrimitive("")))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor(
+                    "Valeur mémorisée",
+                    value,
+                    emptyList(),
+                    { value = it },
+                    expects = "json",
+                )
+            }
+        }
+        val input = compose.onNode(hasSetTextAction())
+        input.performTextClearance()
+        var expected = ""
+        for (character in "{\"n\":1.5}") {
+            expected += character
+            input.performTextInput(character.toString())
+            input.assertTextContains(expected)
+        }
+        compose.runOnIdle {
+            assertEquals(literalRuleValue(wireJson.parseToJsonElement("""{"n":1.5}""")), value)
+        }
     }
 
     @Test

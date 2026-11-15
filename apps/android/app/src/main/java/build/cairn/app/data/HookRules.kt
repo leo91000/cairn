@@ -948,7 +948,17 @@ fun comparisonExpects(left: JsonElement?, operator: String, variables: List<Rule
     if (
         operator in setOf("equals", "notEquals") &&
             (type == null ||
-                type in setOf("array", "object", "value", "valeur", "result", "résultat", "item"))
+                type in
+                    setOf(
+                        "array",
+                        "object",
+                        "value",
+                        "valeur",
+                        "result",
+                        "résultat",
+                        "item",
+                        "élément",
+                    ))
     )
         return "json"
     if (
@@ -1015,7 +1025,11 @@ fun typedComparisonRight(
     listOnly: Boolean = true,
 ): JsonObject {
     val held = value as? JsonObject ?: templateValue()
-    if (held.text("type") == "formula") return held
+    if (
+        held.text("type") == "formula" ||
+            (held.text("type") == "template" && expects == "json" && !listOnly)
+    )
+        return held
     if (held.text("type") == "template" && expects != "text") {
         Regex("""^\s*\{\{([^{}]+)\}\}\s*$""").matchEntire(held.text("text"))?.let {
             return buildJsonObject {

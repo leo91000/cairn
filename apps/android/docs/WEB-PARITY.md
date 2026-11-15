@@ -32,7 +32,11 @@ the rule CRUD/catalog/history contracts, preserving their distinct authority.
 Both editors build nested If/otherwise and For-each branches visually, move and
 remove steps, compose AND/OR conditions and native conversation predicates, pick
 people/resources by name, fill schema-driven tool fields and insert scoped
-variables into text or formulas. The installation validates drafts and reports
+variables into text or formulas.
+People and resource choices use the rule's execution agent on both apps,
+including rules created by members with access to that agent. Changing the
+agent discards choices and names loaded under the previous resource source.
+The installation validates drafts and reports
 errors at their step. Saving creates a version. A state-only revision change is
 refreshed while preserving the draft; a newer saved definition can be reviewed,
 adopted or explicitly replaced by the draft as the next version.
@@ -50,6 +54,12 @@ pickers expose the catalog's variables and formula functions, with signatures,
 descriptions and examples. Inserting a variable into a typed value produces a
 formula; insertion into an existing formula preserves its cursor and surrounding
 expression. Numeric and boolean membership lists retain their item types. Both
+editors preserve text templates while editing an untyped comparison and display
+fixed JSON strings with quotes, keeping their string type during edits. Switching
+to text or inserting a variable uses the decoded string on both platforms. Both
+initialize a comparison from its first event field with the corresponding value
+type. Deeply nested object and list fields fall back to editable JSON, preserving
+their structure (after eight expanded levels on web and six on Android). Both
 editors preserve the agent selected at their entry point, require nonempty
 condition groups and omit waits inside loops. Validation and catalog-load
 failures offer retry.

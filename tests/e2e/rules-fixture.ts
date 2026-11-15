@@ -13,7 +13,11 @@ export function rulesFixture(workspace: Workspace) {
   return setup
 }
 
-async function installRulesFixture(workspace: Workspace) {
+export function scalarRulesFixture(workspace: Workspace, type: 'integer' | 'boolean') {
+  return installRulesFixture(workspace, type)
+}
+
+async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' | 'boolean') {
   const prepare = async (path: string, body: unknown): Promise<any> => {
     const started = await workspace.api(path, 'POST', body)
     if (!started.operation)
@@ -87,16 +91,28 @@ async function installRulesFixture(workspace: Workspace) {
     end,
     tool = function(input) return {ok=true,messageId="local-message",text=input.input.text,channel=input.input.channel} end
   }`
+  const activeManifest = scalarType
+    ? {
+        ...manifest,
+        id: `rules-first-${scalarType}`,
+        tools: [],
+        hooks: [{
+          ...manifest.hooks[0],
+          payloadSchema: { type: 'object', properties: { first: { type: scalarType, title: 'First field' } } },
+          resourceFields: [],
+        }],
+      }
+    : manifest
   const installed = await prepare('/api/plugins/packages', {
-    manifest,
+    manifest: activeManifest,
     manifestFormat: 'json',
     source,
     modules: {},
   })
-  await prepare('/api/plugins/packages/rules-studio/approve', { pluginId: 'rules-studio', version: '1', digest: installed.digest })
+  await prepare(`/api/plugins/packages/${activeManifest.id}/approve`, { pluginId: activeManifest.id, version: '1', digest: installed.digest })
   const saved = await prepare('/api/plugins/manage', {
     kind: 'save',
-    pluginId: 'rules-studio',
+    pluginId: activeManifest.id,
     instanceId: null,
     data: {
       name: 'Support team',

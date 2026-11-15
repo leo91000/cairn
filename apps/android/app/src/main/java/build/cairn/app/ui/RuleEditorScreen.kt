@@ -581,6 +581,7 @@ fun RuleEditorScreen(
                                 hook.pluginId!!,
                                 definition.obj("trigger").text("instanceId"),
                                 peopleField.resourceType,
+                                definition.text("executionAgentId"),
                             )
                         else null
                     Column(

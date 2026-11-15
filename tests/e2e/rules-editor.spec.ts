@@ -5,7 +5,59 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
-import { rulesFixture } from './rules-fixture'
+import { rulesFixture, scalarRulesFixture } from './rules-fixture'
+
+for (const type of ['integer', 'boolean'] as const) {
+  test(`a newly added comparison types its first ${type} event field and executes`, async ({ page, workspace }) => {
+    const fixture = await scalarRulesFixture(workspace, type)
+    const expected = type === 'integer' ? 5 : true
+    const rule = await workspace.api('/api/hook-rules', 'POST', {
+      definition: {
+        ...fixture.definition,
+        name: `First ${type} field`,
+        steps: [{
+          type: 'if',
+          id: 'check',
+          condition: { type: 'formula', expression: 'true' },
+          then: [{
+            type: 'action',
+            id: 'matched',
+            action: {
+              type: 'storeValue',
+              scope: 'rule',
+              name: 'matched',
+              value: { type: 'literal', value: true },
+            },
+          }],
+          otherwise: [],
+        }],
+      },
+      enabled: true,
+    })
+    await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+    await signIn(page)
+    await page.getByRole('button', { name: 'Edit check', exact: true }).click()
+    await page.getByRole('button', { name: 'Add a condition', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Compare a field', exact: false }).click()
+    if (type === 'integer')
+      await page.getByRole('textbox', { name: 'Value', exact: true }).fill('5')
+    else
+      await page.getByRole('button', { name: 'Yes', exact: true }).click()
+    await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+    await page.getByRole('button', { name: 'Save version', exact: true }).click()
+    await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+    const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
+    expect(saved.definition.steps[0].condition.conditions[1].right).toEqual({ type: 'literal', value: expected })
+    workspace.service.emitHook(fixture.instanceId, 'message', { first: expected }, `first-${type}`)
+    let triggering: any
+    await expect.poll(async () => {
+      triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+      return triggering?.status
+    }).toBe('completed')
+    const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+    expect(history.steps.some((step: any) => step.nodeId === 'matched' && step.status === 'completed')).toBe(true)
+  })
+}
 
 test('variable insertion keeps numeric and boolean comparisons as formulas', async ({ page, workspace }) => {
   const fixture = await rulesFixture(workspace)
@@ -581,6 +633,93 @@ test('formula equality and editing nested membership keep JSON types through exe
     channel: 'support',
     content: 'Nested comparison',
   }, 'nested-comparison')
+  let triggering: any
+  await expect.poll(async () => {
+    triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+    return triggering?.status
+  }).toBe('completed')
+  const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+  expect(history.steps.some((step: any) => step.nodeId === 'post' && step.status === 'completed')).toBe(true)
+})
+
+test('editing a comparison field preserves templates and their evaluated branch', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const definition: any = structuredClone(fixture.definition)
+  const right = { type: 'template', text: 'support-{{payload.author}}' }
+  definition.steps[0].condition = {
+    type: 'all',
+    conditions: [
+      {
+        type: 'compare',
+        left: { type: 'formula', expression: 'payload.channel' },
+        operator: 'equals',
+        right,
+      },
+      {
+        type: 'compare',
+        left: { type: 'formula', expression: '"support-" + payload.author' },
+        operator: 'equals',
+        right,
+      },
+    ],
+  }
+  const rule = await workspace.api('/api/hook-rules', 'POST', { definition, enabled: true })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit trusted', exact: true }).click()
+  const field = page.getByRole('textbox', { name: 'Field', exact: true }).first()
+  await field.fill('payload.channe')
+  await field.pressSequentially('l')
+  const operator = page.getByRole('combobox', { name: 'Test', exact: true }).nth(1)
+  await operator.selectOption('notEquals')
+  await operator.selectOption('equals')
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
+  expect(saved.definition.steps[0].condition.conditions.map((condition: any) => condition.right)).toEqual([right, right])
+  workspace.service.emitHook(fixture.instanceId, 'message', {
+    channel: 'support-alice',
+    author: 'alice',
+    content: 'Template comparison',
+  }, 'template-comparison')
+  let triggering: any
+  await expect.poll(async () => {
+    triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+    return triggering?.status
+  }).toBe('completed')
+  const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+  expect(history.steps.some((step: any) => step.nodeId === 'post' && step.status === 'completed')).toBe(true)
+})
+
+test('reopening a JSON string comparison preserves its string type through execution', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const definition: any = structuredClone(fixture.definition)
+  definition.steps[0].condition = {
+    type: 'compare',
+    left: { type: 'formula', expression: '"5" + "6"' },
+    operator: 'equals',
+    right: { type: 'literal', value: '5' },
+  }
+  const rule = await workspace.api('/api/hook-rules', 'POST', { definition, enabled: true })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit trusted', exact: true }).click()
+  const value = page.getByRole('textbox', { name: 'Value', exact: true })
+  await expect(value).toHaveValue('"5"')
+  await value.press('End')
+  await value.press('ArrowLeft')
+  await value.pressSequentially('6')
+  await expect(value).toHaveValue('"56"')
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  expect((await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0].condition.right).toEqual({ type: 'literal', value: '56' })
+  workspace.service.emitHook(fixture.instanceId, 'message', {
+    channel: 'support',
+    author: 'alice',
+    content: 'JSON string comparison',
+  }, 'json-string-comparison')
   let triggering: any
   await expect.poll(async () => {
     triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]

@@ -12,12 +12,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
@@ -26,6 +29,7 @@ internal data class RuleResourceSource(
     val pluginId: String,
     val instanceId: String,
     val resourceType: String,
+    val agentId: String,
 )
 
 internal fun formulaRuleValue(value: String) =
@@ -51,12 +55,19 @@ internal fun RuleValueEditor(
         when (mode) {
             "formula" -> held.text("expression")
             "literal" ->
-                (held["value"] as? JsonPrimitive)?.contentOrNull ?: held["value"].toString()
+                if (expects == "json") held["value"].toString()
+                else (held["value"] as? JsonPrimitive)?.contentOrNull ?: held["value"].toString()
             else -> held.text("text")
         }
     var editorInput by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
-    LaunchedEffect(text) {
-        if (editorInput.text != text) editorInput = TextFieldValue(text, TextRange(text.length))
+    var emittedInput by remember { mutableStateOf<JsonObject?>(null) }
+    var emittedExpects by remember { mutableStateOf(expects) }
+    LaunchedEffect(held, expects) {
+        if (held != emittedInput || expects != emittedExpects) {
+            if (editorInput.text != text) editorInput = TextFieldValue(text, TextRange(text.length))
+            emittedInput = held
+            emittedExpects = expects
+        }
     }
     val declaredSchemaKind = schema?.takeIf { it["type"] != null }?.let { schemaKind(it, JsonNull) }
     val modes =
@@ -86,7 +97,16 @@ internal fun RuleValueEditor(
                                             else -> text
                                         }
                                     )
-                                else -> templateValue(if (mode == "formula") "{{$text}}" else text)
+                                else ->
+                                    templateValue(
+                                        if (mode == "formula") "{{$text}}"
+                                        else if (
+                                            mode == "literal" &&
+                                                (held["value"] as? JsonPrimitive)?.isString == true
+                                        )
+                                            held["value"]!!.jsonPrimitive.content
+                                        else text
+                                    )
                             }
                         )
                     },
@@ -119,7 +139,7 @@ internal fun RuleValueEditor(
                 editorInput,
                 { input ->
                     editorInput = input
-                    change(
+                    val next =
                         when (mode) {
                             "formula" -> formulaRuleValue(input.text)
                             "literal" ->
@@ -133,7 +153,9 @@ internal fun RuleValueEditor(
                                 )
                             else -> templateValue(input.text)
                         }
-                    )
+                    emittedInput = next
+                    emittedExpects = expects
+                    change(next)
                 },
                 Modifier.fillMaxWidth(),
                 placeholder = {
@@ -237,9 +259,23 @@ internal fun RuleValueEditor(
                                 val insertion =
                                     if (nextFormula) variable.expression
                                     else "{{${variable.expression}}}"
-                                val start = if (replace) 0 else editorInput.selection.min
-                                val end = if (replace) text.length else editorInput.selection.max
-                                val nextText = text.take(start) + insertion + text.drop(end)
+                                val jsonString =
+                                    mode == "literal" &&
+                                        expects == "json" &&
+                                        (fixedValue as? JsonPrimitive)?.isString == true
+                                val content =
+                                    if (jsonString) fixedValue!!.jsonPrimitive.content else text
+                                val start =
+                                    if (replace) 0
+                                    else if (jsonString)
+                                        jsonStringCaret(editorInput.text, editorInput.selection.min)
+                                    else editorInput.selection.min
+                                val end =
+                                    if (replace) content.length
+                                    else if (jsonString)
+                                        jsonStringCaret(editorInput.text, editorInput.selection.max)
+                                    else editorInput.selection.max
+                                val nextText = content.take(start) + insertion + content.drop(end)
                                 editorInput =
                                     TextFieldValue(nextText, TextRange(start + insertion.length))
                                 change(
@@ -266,6 +302,19 @@ internal fun RuleValueEditor(
             },
             { browsing = false },
         )
+}
+
+private fun jsonStringCaret(encoded: String, at: Int): Int {
+    val parsed = runCatching { wireJson.parseToJsonElement(encoded) }.getOrNull()
+    if (parsed !is JsonPrimitive || !parsed.isString) return at
+    for (end in minOf(at, encoded.length - 1) downTo 1) {
+        val prefix = runCatching {
+            wireJson.parseToJsonElement(encoded.take(end) + "\"").jsonPrimitive.content
+        }
+            .getOrNull()
+        if (prefix != null) return prefix.length
+    }
+    return 0
 }
 
 private fun matchesRuleType(value: JsonElement?, type: String): Boolean =
@@ -402,7 +451,12 @@ internal fun RuleLiteralEditor(
                 }
             }
         }
-        kind == "object" || kind == "json" -> {
+        kind in setOf("object", "array", "json") -> {
+            fun matchesJson(candidate: JsonElement?): Boolean =
+                candidate != null &&
+                    (kind == "json" ||
+                        kind == "array" && candidate is JsonArray ||
+                        kind == "object" && candidate is JsonObject)
             fun display(value: JsonElement): String =
                 (value as? JsonPrimitive)?.takeIf { it.isString && kind != "json" }?.content
                     ?: value.toString()
@@ -419,21 +473,31 @@ internal fun RuleLiteralEditor(
                 { raw ->
                     draft = raw
                     val parsed = runCatching { wireJson.parseToJsonElement(raw) }.getOrNull()
-                    emitted =
-                        if (kind == "json") parsed ?: JsonPrimitive(raw)
-                        else if (parsed is JsonObject) parsed else JsonPrimitive(raw)
+                    emitted = parsed?.takeIf { matchesJson(it) } ?: JsonPrimitive(raw)
                     change(emitted)
                 },
                 Modifier.fillMaxWidth(),
-                label = { Text(if (kind == "json") "Valeur JSON" else "Objet JSON") },
+                label = {
+                    Text(
+                        when (kind) {
+                            "array" -> "Liste JSON"
+                            "object" -> "Objet JSON"
+                            else -> "Valeur JSON"
+                        }
+                    )
+                },
                 minLines = 3,
-                isError = kind == "object" && value !is JsonObject,
+                isError = !matchesJson(value),
                 supportingText = {
                     Text(
-                        if (kind == "json")
-                            "Texte entre guillemets, nombre, booléen, objet ou liste JSON."
-                        else if (value is JsonObject) "Propriétés et valeurs de l’objet en JSON."
-                        else "Saisissez un objet JSON valide."
+                        when {
+                            kind == "json" ->
+                                "Texte entre guillemets, nombre, booléen, objet ou liste JSON."
+                            kind == "array" && value is JsonArray -> "Valeurs de la liste en JSON."
+                            kind == "array" -> "Saisissez une liste JSON valide."
+                            value is JsonObject -> "Propriétés et valeurs de l’objet en JSON."
+                            else -> "Saisissez un objet JSON valide."
+                        }
                     )
                 },
                 shape = RoundedCornerShape(12.dp),
@@ -498,7 +562,7 @@ private fun RuleNumericField(
             emitted = ruleNumber(raw, integer)
             change(emitted)
         },
-        Modifier.fillMaxWidth(),
+        Modifier.fillMaxWidth().semantics { contentDescription = label },
         singleLine = true,
         keyboardOptions =
             androidx.compose.foundation.text.KeyboardOptions(
@@ -518,27 +582,49 @@ internal fun RuleResourceSheet(
     choose: (JsonObject) -> Unit,
     close: () -> Unit,
 ) {
+    key(vm.api.cacheScope, source) {
+        ScopedRuleResourceSheet(
+            source,
+            { vm.api.pluginOperation(it, method = "GET") },
+            choose,
+            close,
+        )
+    }
+}
+
+@Composable
+internal fun ScopedRuleResourceSheet(
+    source: RuleResourceSource,
+    request: suspend (String) -> JsonElement,
+    choose: (JsonObject) -> Unit,
+    close: () -> Unit,
+) {
     var query by remember { mutableStateOf("") }
     var page by remember { mutableStateOf<Long?>(1) }
     var items by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
+    var generation by remember { mutableIntStateOf(0) }
+    var paging by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
     suspend fun load(next: Long = 1) {
+        val asked = generation
+        val askedQuery = query
         loading = true
         error = ""
         try {
             val path =
-                "/plugins/${segment(source.pluginId)}/connections/${segment(source.instanceId)}/resources?resourceType=${segment(source.resourceType)}&query=${segment(query)}&page=$next"
-            val result = vm.api.pluginOperation(path, method = "GET")
+                "/plugins/${segment(source.pluginId)}/connections/${segment(source.instanceId)}/resources?resourceType=${segment(source.resourceType)}&agentId=${segment(source.agentId)}&query=${segment(askedQuery)}&page=$next"
+            val result = request(path)
+            if (asked != generation) return
             val found = result.list("items").map { it.jsonObject }
             items = if (next == 1L) found else (items + found).distinctBy { it.text("id") }
             page = result.jsonObject["nextPage"]?.jsonPrimitive?.longOrNull
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            error = e.message.orEmpty()
+            if (asked == generation) error = e.message.orEmpty()
         } finally {
-            loading = false
+            if (asked == generation) loading = false
         }
     }
     LaunchedEffect(query, source) {
@@ -550,7 +636,18 @@ internal fun RuleResourceSheet(
             Text("Choisir ${source.resourceType}", style = MaterialTheme.typography.titleLarge)
             OutlinedTextField(
                 query,
-                { query = it },
+                {
+                    if (query != it) {
+                        generation++
+                        paging?.cancel()
+                        paging = null
+                        query = it
+                        items = emptyList()
+                        page = null
+                        loading = true
+                        error = ""
+                    }
+                },
                 Modifier.fillMaxWidth().padding(vertical = 12.dp),
                 label = { Text("Rechercher par nom") },
                 singleLine = true,
@@ -573,7 +670,10 @@ internal fun RuleResourceSheet(
                 if (page != null)
                     item {
                         TextButton(
-                            onClick = { scope.launch { load(page!!) } },
+                            onClick = {
+                                val next = page ?: return@TextButton
+                                paging = scope.launch { load(next) }
+                            },
                             enabled = !loading,
                         ) {
                             Text("Voir la suite")

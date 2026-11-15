@@ -37,6 +37,10 @@ internal fun RuleConditionEditor(
     fun add(kind: String) {
         if (!canAddCondition) return
         val author = formulaRuleValue(authorVariable(variables))
+        val left =
+            formulaRuleValue(
+                variables.firstOrNull { it.group == "Événement" }?.expression ?: "payload"
+            )
         val condition =
             when (kind) {
                 "all",
@@ -71,13 +75,14 @@ internal fun RuleConditionEditor(
                 else ->
                     ruleObject(
                         "type" to JsonPrimitive("compare"),
-                        "left" to
-                            formulaRuleValue(
-                                variables.firstOrNull { it.group == "Événement" }?.expression
-                                    ?: "payload"
-                            ),
+                        "left" to left,
                         "operator" to JsonPrimitive("equals"),
-                        "right" to templateValue(),
+                        "right" to
+                            typedComparisonRight(
+                                templateValue(),
+                                comparisonExpects(left, "equals", variables),
+                                listOnly = false,
+                            ),
                     )
             }
         change(
@@ -405,7 +410,7 @@ private fun RulePeopleChoices(
                         val resource =
                             vm.api
                                 .pluginOperation(
-                                    "/plugins/${segment(source.pluginId)}/connections/${segment(source.instanceId)}/resources/ancestors?resourceType=${segment(person.text("resourceType"))}&id=${segment(id)}",
+                                    "/plugins/${segment(source.pluginId)}/connections/${segment(source.instanceId)}/resources/ancestors?resourceType=${segment(person.text("resourceType"))}&agentId=${segment(source.agentId)}&id=${segment(id)}",
                                     method = "GET",
                                 )
                                 .obj("resource")

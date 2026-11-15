@@ -204,3 +204,16 @@ it('keeps unknown formula equality operands typed and retains nested membership 
   expect(comparisonListSchema({ type: 'formula', expression: 'payload.counts' }, fields)).toEqual({ type: 'array', items: counts })
   expect(comparisonListSchema({ type: 'literal', value: [1, 2] }, [])).toEqual({ type: 'array', items: { type: 'array', items: { type: 'number' } } })
 })
+
+it('preserves right templates while editing an equality field or its operator', () => {
+  const fields = schemaFields({ properties: { channel: { type: 'string' } } }, 'payload')
+  for (const text of ['support-{{payload.author}}', '{{payload.author}}', '3']) {
+    let right: any = { type: 'template', text }
+    for (const expression of ['payload.channel', 'payload.channe', 'payload.channel', '"support-" + payload.author']) {
+      for (const operator of ['equals', 'notEquals'] as const) {
+        right = typedComparisonRight(right, comparisonExpects({ type: 'formula', expression }, operator, fields), false)
+        expect(right).toEqual({ type: 'template', text })
+      }
+    }
+  }
+})

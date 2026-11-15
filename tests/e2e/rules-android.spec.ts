@@ -97,8 +97,11 @@ async function scrollTo(text: string) {
 
 async function fill(label: string, value: string | (() => string)) {
   await tap(label)
+  const text = typeof value === 'function' ? value() : value
   adb('shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A')
-  adb('shell', 'input', 'text', (typeof value === 'function' ? value() : value).replaceAll(' ', '%s'))
+  adb('shell', 'input', 'text', text.replaceAll(' ', '%s'))
+  if (label === 'Adresse e-mail')
+    await expect.poll(() => screen().includes(text), { timeout: 7000 }).toBe(true)
   adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
 }
 
@@ -207,4 +210,87 @@ test('native rules persist edits, integer waits and every creator control agains
   await tap('Enregistrer')
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(2)
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).definition.steps[0].action.seconds).toEqual({ type: 'literal', value: 900 })
+})
+
+test('a native member selects people and a channel through the execution agent', async ({ page, browser, workspace }, info) => {
+  test.setTimeout(300000)
+  expect(adb('shell', 'getprop', 'ro.kernel.qemu').trim()).toBe('1')
+  expect(adb('shell', 'wm', 'size')).toContain('720x1280')
+  const fixture = await rulesFixture(workspace)
+  await page.goto(workspacePath('/rules'))
+  await signIn(page)
+  const owner = await (await page.request.get(`${workspace.url}/api/account/session`)).json()
+  const email = `native-rule-member-${crypto.randomUUID()}@example.test`
+  const invitation = await page.request.post(`${workspace.url}/api/installations/${workspace.installationId}/sharing/invitations`, {
+    headers: { 'origin': workspace.url, 'x-csrf-token': owner.csrf },
+    data: { email },
+  })
+  expect(invitation.ok()).toBe(true)
+  const memberContext = await browser.newContext({ serviceWorkers: 'block' })
+  try {
+    const member = await memberContext.newPage()
+    await member.goto(workspace.url)
+    await member.getByLabel('Email address', { exact: true }).fill(email)
+    const previousCode = workspace.emailProof().code
+    await member.getByRole('button', { name: 'Send code', exact: true }).click()
+    await expect.poll(() => workspace.emailProof().code).not.toBe(previousCode)
+    const firstCode = workspace.emailProof().code
+    const emailSentAt = Date.now()
+    await member.getByLabel('Email code', { exact: true }).fill(firstCode)
+    await member.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await member.getByRole('button', { name: 'Accept invitation', exact: true }).click()
+    await expect(member).toHaveURL(`${workspace.url}/installations/${workspace.installationSlug}/`)
+    const session = await (await member.request.get(`${workspace.url}/api/account/session`)).json()
+    const accountId = session.account.id
+    await workspace.api(`/api/agents/${fixture.agent.id}/accounts/${accountId}`, 'PUT', { agentId: fixture.agent.id, accountId })
+    const definition = structuredClone(fixture.definition)
+    definition.name = 'Member choices'
+    definition.steps[0].then[0].label = 'Member channel'
+    const created = await member.request.post(`${workspace.url}/api/installations/${workspace.installationId}/api/hook-rules`, {
+      headers: { 'origin': workspace.url, 'x-csrf-token': session.csrf },
+      data: { definition, enabled: false },
+    })
+    const rule = await created.json()
+    expect(created.ok(), rule.error).toBe(true)
+    expect(rule.creatorAccountId).toBe(accountId)
+    const port = new URL(workspace.url).port
+    adb('reverse', `tcp:${port}`, `tcp:${port}`)
+    adb('shell', 'am', 'force-stop', 'build.cairn.app')
+    if (process.env.CAIRN_RULES_ANDROID_RESET !== '1')
+      throw new Error('The member journey requires CAIRN_RULES_ANDROID_RESET=1 on its disposable emulator.')
+    adb('shell', 'pm', 'clear', 'build.cairn.app')
+    adb('shell', 'am', 'start', '-n', 'build.cairn.app/.MainActivity')
+    await fill('Adresse e-mail', email)
+    await expect.poll(() => Date.now() - emailSentAt, { timeout: 70000, intervals: [2000] }).toBeGreaterThan(62000)
+    await tap('Recevoir un code')
+    await expect.poll(() => workspace.emailProof().code).not.toBe(firstCode)
+    await fill('Code reçu par e-mail', () => workspace.emailProof().code)
+    await tap('Se connecter')
+    await tap('Atelier')
+    await tap('Règles')
+    await tap('Member choices')
+    await tap('Modifier')
+    await scrollTo('Si / sinon')
+    await scrollTo('Choisir une personne…')
+    await expect.poll(() => screen().includes('Bob'), { timeout: 15000 }).toBe(true)
+    await capture(info.outputPath('android-member-people.png'))
+    await tap('Bob')
+    await scrollTo('Terminer cette étape')
+    await scrollTo('Member channel')
+    await scrollTo('Choisir une ressource')
+    await expect.poll(() => screen().includes('#general'), { timeout: 15000 }).toBe(true)
+    await capture(info.outputPath('android-member-channels.png'))
+    await tap('#general')
+    await scrollTo('Terminer cette étape')
+    await tap('Enregistrer')
+    await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+    const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
+    expect(saved.creatorAccountId).toBe(accountId)
+    expect(saved.definition.steps[0].condition.people).toContainEqual({ resourceType: 'person', id: 'bob' })
+    expect(saved.definition.steps[0].then[0].action.input.channel).toEqual({ type: 'literal', value: 'general' })
+    await capture(info.outputPath('android-member-saved.png'))
+  }
+  finally {
+    await memberContext.close()
+  }
 })

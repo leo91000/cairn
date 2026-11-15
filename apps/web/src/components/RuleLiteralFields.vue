@@ -2,6 +2,7 @@
 import {
   computed,
   ref,
+  toRaw,
   useId,
   watch,
 } from 'vue'
@@ -37,24 +38,29 @@ function inputNumber(raw: string) {
 }
 
 const untyped = computed(() => !resolved.value.type && !resolved.value.properties && !resolved.value.items)
-const objectDraft = ref('')
-let emittedObject: unknown = Symbol('initial')
+const jsonNoun = computed(() => resolved.value.type === 'array' ? 'list' : 'object')
+const jsonDraft = ref('')
+let emittedJson: unknown = Symbol('initial')
 watch(() => model.value, (value) => {
-  if (!Object.is(value, emittedObject))
-    objectDraft.value = typeof value === 'string' && !untyped.value ? value : JSON.stringify(value ?? null, null, 2)
+  if (!Object.is(toRaw(value), emittedJson))
+    jsonDraft.value = typeof value === 'string' && !untyped.value ? value : JSON.stringify(value ?? null, null, 2)
 }, { immediate: true })
 
-function inputObject(raw: string) {
-  objectDraft.value = raw
+function matchesJson(value: unknown) {
+  return untyped.value || (resolved.value.type === 'array' ? Array.isArray(value) : !!value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function inputJson(raw: string) {
+  jsonDraft.value = raw
   try {
     const value = JSON.parse(raw)
-    emittedObject = untyped.value || (value && typeof value === 'object' && !Array.isArray(value)) ? value : raw
+    emittedJson = matchesJson(value) ? value : raw
   }
   catch {
-    emittedObject = raw
+    emittedJson = raw
   }
 
-  model.value = emittedObject
+  model.value = emittedJson
 }
 
 function setField(name: string, value: unknown) {
@@ -100,7 +106,7 @@ function setItem(index: number, value: unknown) {
     >
       <span :id="`${fieldId}-${index}`" class="text-xs font-semibold">{{ field.title ?? name }}</span>
       <RuleLiteralFields
-        :model-value="object[name] ?? ruleLiteralDefault(resolveRuleSchema(field, root ?? schema))"
+        :model-value="object[name] ?? ruleLiteralDefault(field, root ?? schema)"
         :schema="field"
         :root="root ?? schema"
         :depth="(depth ?? 0) + 1"
@@ -131,20 +137,20 @@ function setItem(index: number, value: unknown) {
         <Icon :name="Trash2" :size="14" />
       </button>
     </div>
-    <button type="button" class="inline-flex items-center gap-1.5 justify-self-start rounded-full border border-dashed border-line px-3 py-1.5 text-xs font-semibold text-muted hover:text-accent" @click="model = [...array, ruleLiteralDefault(resolveRuleSchema(resolved.items ?? {}, root ?? schema))]">
+    <button type="button" class="inline-flex items-center gap-1.5 justify-self-start rounded-full border border-dashed border-line px-3 py-1.5 text-xs font-semibold text-muted hover:text-accent" @click="model = [...array, ruleLiteralDefault(resolved.items ?? {}, root ?? schema)]">
       <Icon :name="Plus" :size="13" />Add an item
     </button>
   </div>
-  <div v-else-if="resolved.type === 'object' || untyped" class="grid gap-1.5">
+  <div v-else-if="resolved.type === 'object' || resolved.type === 'array' || untyped" class="grid gap-1.5">
     <textarea
-      :value="objectDraft"
-      :aria-label="`${label} (${untyped ? 'JSON' : 'JSON object'})`"
+      :value="jsonDraft"
+      :aria-label="`${label} (${untyped ? 'JSON' : `JSON ${jsonNoun}`})`"
       rows="4"
       spellcheck="false"
-      @input="inputObject(($event.target as HTMLTextAreaElement).value)"
+      @input="inputJson(($event.target as HTMLTextAreaElement).value)"
     />
-    <small class="text-xs text-muted">{{ untyped ? 'Enter a JSON value: text in quotes, number, boolean, object or list.' : "Enter the object's key/value properties as JSON." }}</small>
-    <small v-if="!untyped && (!model || typeof model !== 'object' || Array.isArray(model))" class="text-xs text-coral" role="alert">Enter a valid JSON object.</small>
+    <small class="text-xs text-muted">{{ untyped ? 'Enter a JSON value: text in quotes, number, boolean, object or list.' : resolved.type === 'array' ? "Enter the list's values as JSON." : "Enter the object's key/value properties as JSON." }}</small>
+    <small v-if="!matchesJson(model)" class="text-xs text-coral" role="alert">Enter a valid JSON {{ jsonNoun }}.</small>
   </div>
   <textarea
     v-else-if="resolved.type === 'string' && (resolved.maxLength ?? 0) > 200"

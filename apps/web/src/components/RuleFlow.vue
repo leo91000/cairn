@@ -3,7 +3,7 @@ import type { HookRuleCatalog } from '../../../../packages/contracts/generated/t
 import type { HookRuleProblem } from '../../../../packages/contracts/generated/typescript/HookRuleProblem'
 import type { RuleNode } from '../../../../packages/contracts/generated/typescript/RuleNode'
 import type { StepKind } from '../hook-rules'
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import {
   describeAction,
   describeCondition,
@@ -22,6 +22,7 @@ import {
   Trash2,
 } from '../icons'
 import Icon from './Icon.vue'
+import MenuButton from './MenuButton.vue'
 
 defineOptions({ name: 'RuleFlow' })
 // The tree as a vertical flow: each block is a card, a choice opens two lanes and a loop
@@ -47,7 +48,6 @@ const emit = defineEmits<{
   move: [path: string, offset: -1 | 1]
 }>()
 
-const menu = ref<number | null>(null)
 const choices = computed(() => stepChoices.filter((choice) => {
   if (choice.kind === 'wait' && props.inLoop)
     return false
@@ -55,11 +55,6 @@ const choices = computed(() => stepChoices.filter((choice) => {
     return false
   return choice.kind !== 'callTool' || props.catalog?.tools.some(tool => !props.executionAgentId || tool.agentIds.includes(props.executionAgentId))
 }))
-
-function pick(index: number, kind: StepKind) {
-  menu.value = null
-  emit('insert', props.container, index, kind)
-}
 
 function hasProblems(path: string) {
   return problemsUnder(props.problems ?? [], path).length > 0
@@ -88,28 +83,29 @@ const ranTone: Record<string, string> = {
 <template>
   <ol class="rule-flow m-0! grid list-none gap-0 p-0!" :aria-label="container === '/steps' ? 'Steps' : undefined">
     <li v-if="editable" class="flow-gap relative flex justify-center py-1.5">
-      <button
-        type="button"
-        class="add-step relative z-10 grid size-7 place-items-center rounded-full border border-dashed border-line bg-canvas text-muted hover:border-accent hover:text-accent"
-        :aria-label="nodes.length ? 'Add a step here' : 'Add the first step'"
-        :aria-expanded="menu === 0"
-        @click="menu = menu === 0 ? null : 0"
+      <MenuButton
+        :label="nodes.length ? 'Add a step here' : 'Add the first step'"
+        menu-label="Add a step"
+        :width="320"
+        trigger-class="add-step relative z-10 grid size-7 place-items-center rounded-full border border-dashed border-line bg-canvas text-muted hover:border-accent hover:text-accent"
       >
-        <Icon :name="Plus" :size="14" />
-      </button>
-      <div v-if="menu === 0" class="step-menu absolute top-9 z-30 grid w-80 overflow-hidden rounded-2xl border border-line bg-raised py-1 shadow-xl" role="menu">
-        <button
-          v-for="choice in choices"
-          :key="choice.kind"
-          type="button"
-          role="menuitem"
-          class="flex items-start gap-3 px-3.5 py-2.5 text-left hover:bg-hover"
-          @click="pick(0, choice.kind)"
-        >
-          <span class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg" :class="tone[choice.kind]"><Icon :name="choice.icon" :size="15" /></span>
-          <span class="min-w-0"><span class="block text-sm font-semibold">{{ choice.title }}</span><span class="block text-xs text-muted">{{ choice.description }}</span></span>
-        </button>
-      </div>
+        <template #trigger>
+          <Icon :name="Plus" :size="14" />
+        </template>
+        <template #default="{ select }">
+          <button
+            v-for="choice in choices"
+            :key="choice.kind"
+            type="button"
+            role="menuitem"
+            class="flex w-full items-start gap-3 rounded-lg px-2 py-2.5 text-left hover:bg-hover"
+            @click="select(() => emit('insert', container, 0, choice.kind))"
+          >
+            <span class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg" :class="tone[choice.kind]"><Icon :name="choice.icon" :size="15" /></span>
+            <span class="min-w-0"><span class="block text-sm font-semibold">{{ choice.title }}</span><span class="block text-xs text-muted">{{ choice.description }}</span></span>
+          </button>
+        </template>
+      </MenuButton>
     </li>
     <template v-for="(node, index) in nodes" :key="node.id">
       <li class="flow-node relative">
@@ -267,28 +263,29 @@ const ranTone: Record<string, string> = {
         </article>
       </li>
       <li v-if="editable" class="flow-gap relative flex justify-center py-1.5">
-        <button
-          type="button"
-          class="add-step relative z-10 grid size-7 place-items-center rounded-full border border-dashed border-line bg-canvas text-muted hover:border-accent hover:text-accent"
-          aria-label="Add a step here"
-          :aria-expanded="menu === index + 1"
-          @click="menu = menu === index + 1 ? null : index + 1"
+        <MenuButton
+          label="Add a step here"
+          menu-label="Add a step"
+          :width="320"
+          trigger-class="add-step relative z-10 grid size-7 place-items-center rounded-full border border-dashed border-line bg-canvas text-muted hover:border-accent hover:text-accent"
         >
-          <Icon :name="Plus" :size="14" />
-        </button>
-        <div v-if="menu === index + 1" class="step-menu absolute top-9 z-30 grid w-80 overflow-hidden rounded-2xl border border-line bg-raised py-1 shadow-xl" role="menu">
-          <button
-            v-for="choice in choices"
-            :key="choice.kind"
-            type="button"
-            role="menuitem"
-            class="flex items-start gap-3 px-3.5 py-2.5 text-left hover:bg-hover"
-            @click="pick(index + 1, choice.kind)"
-          >
-            <span class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg" :class="tone[choice.kind]"><Icon :name="choice.icon" :size="15" /></span>
-            <span class="min-w-0"><span class="block text-sm font-semibold">{{ choice.title }}</span><span class="block text-xs text-muted">{{ choice.description }}</span></span>
-          </button>
-        </div>
+          <template #trigger>
+            <Icon :name="Plus" :size="14" />
+          </template>
+          <template #default="{ select }">
+            <button
+              v-for="choice in choices"
+              :key="choice.kind"
+              type="button"
+              role="menuitem"
+              class="flex w-full items-start gap-3 rounded-lg px-2 py-2.5 text-left hover:bg-hover"
+              @click="select(() => emit('insert', container, index + 1, choice.kind))"
+            >
+              <span class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg" :class="tone[choice.kind]"><Icon :name="choice.icon" :size="15" /></span>
+              <span class="min-w-0"><span class="block text-sm font-semibold">{{ choice.title }}</span><span class="block text-xs text-muted">{{ choice.description }}</span></span>
+            </button>
+          </template>
+        </MenuButton>
       </li>
       <li v-else-if="index < nodes.length - 1" class="flow-gap h-4" aria-hidden="true" />
     </template>

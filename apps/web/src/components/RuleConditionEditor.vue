@@ -31,7 +31,12 @@ const props = defineProps<{
   variables: VariableOption[]
   problems: HookRuleProblem[]
   depth?: number
-  peopleSource?: { pluginId: string, instanceId: string, resourceType: string }
+  peopleSource?: {
+    pluginId: string
+    instanceId: string
+    resourceType: string
+    agentId: string
+  }
 }>()
 const model = defineModel<RuleCondition>({ required: true })
 // The server counts the root at level 1; a new group must still fit its leaf.
@@ -70,13 +75,14 @@ function add(kind: 'compare' | 'authorIn' | 'formula' | 'group' | 'conversationE
   if (!canAddCondition.value)
     return
   const field = props.variables.find(option => option.group === 'Event')?.expression ?? 'payload'
+  const left = { type: 'formula', expression: field } as const
   let condition: RuleCondition
   switch (kind) {
     case 'compare': condition = {
       type: 'compare',
-      left: { type: 'formula', expression: field },
+      left,
       operator: 'equals',
-      right: { type: 'template', text: '' },
+      right: typedComparisonRight({ type: 'template', text: '' }, comparisonExpects(left, 'equals', props.variables), false),
     }
       break
     case 'authorIn': condition = { type: 'authorIn', author: { type: 'formula', expression: authorField.value }, people: [] }
