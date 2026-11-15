@@ -27,12 +27,12 @@ pub(crate) const PLUGIN_PACKAGE_OPERATIONS: &[PluginPackageOperation] = &[
     PluginPackageOperation {
         name: "list_plugin_resources",
         scope: "read",
-        description: "List a plugin instance\'s resources by declared type, page and query. Returns an operation id; poll get_plugin_resource_operation. Installation agents also need a grant on the instance.",
+        description: "List a plugin instance\'s resources by declared type, page and query. Returns an operation id; poll get_plugin_resource_operation. With agentId, reads through that execution agent\'s grant on the instance. Installation agents read only through their own grant.",
     },
     PluginPackageOperation {
         name: "resolve_plugin_resource",
         scope: "read",
-        description: "Resolve an instance resource and each ancestor through its plugin. Returns an operation id; poll get_plugin_resource_operation. Installation agents also need a grant on the instance.",
+        description: "Resolve an instance resource and each ancestor through its plugin. Returns an operation id; poll get_plugin_resource_operation. With agentId, reads through that execution agent\'s grant on the instance. Installation agents read only through their own grant.",
     },
     PluginPackageOperation {
         name: "get_plugin_resource_operation",
@@ -98,6 +98,14 @@ pub(crate) struct Authority {
     additional_public_scope: Option<&'static str>,
     guard: Option<Arc<LocalGuard>>,
     recheck_guard: Option<Arc<RecheckGuard>>,
+    member: Option<Arc<MemberAgent>>,
+}
+
+/// A member reading through an agent they may use (ADR-0075): the membership holding
+/// that access, rechecked with the Beacon, and the access itself, rechecked locally.
+struct MemberAgent {
+    membership: cairn_protocol::TaskAuthorGrant,
+    agent: String,
 }
 
 type LocalGuard = dyn Fn(&Db<'_>) -> Result<()> + Send + Sync;
@@ -309,7 +317,32 @@ impl Authority {
             additional_public_scope: None,
             guard: None,
             recheck_guard: None,
+            member: None,
         })
+    }
+
+    /// Admitted like any use of the agent, then bound to the membership that holds
+    /// the access: removing the access, the member or a re-invitation ends it.
+    pub(crate) async fn member(s: &Service, account: &str, agent: &str) -> Result<Self> {
+        crate::agent_access::authorize_member_agent(s, account, agent).await?;
+        let (account_id, agent_id) = (account.to_owned(), agent.to_owned());
+        let access = s
+            .store
+            .read(move |db| db.member_agent_access(&account_id, &agent_id))
+            .await?
+            .ok_or_else(|| Error::forbidden(crate::agent_access::DENIED))?;
+        let authority = Self {
+            member: Some(Arc::new(MemberAgent {
+                membership: cairn_protocol::TaskAuthorGrant {
+                    account_id: account.to_owned(),
+                    access_id: access,
+                },
+                agent: agent.to_owned(),
+            })),
+            ..Default::default()
+        };
+        authority.recheck(s).await?;
+        Ok(authority)
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
@@ -337,6 +370,7 @@ impl Authority {
                 ));
             }
         }
+        self.recheck_member(s).await?;
         if let Some(guard) = &self.recheck_guard {
             let authority = self.clone();
             s.store.read(move |db| authority.authorize(db)).await?;
@@ -344,6 +378,28 @@ impl Authority {
         }
         let authority = self.clone();
         s.store.read(move |db| authority.authorize(db)).await
+    }
+
+    /// Remote membership only: safe under an OAuth mutex because it never
+    /// resolves plugin resources. Effect boundaries still take their complete
+    /// local authority snapshot after this asynchronous check.
+    pub(crate) async fn recheck_member(&self, s: &Service) -> Result<()> {
+        if let Some(member) = &self.member {
+            let current = crate::relay::task_author_policy(s)
+                .await?
+                .is_some_and(|policy| {
+                    policy.members.iter().any(|grant| {
+                        grant.account_id == member.membership.account_id
+                            && grant.access_id == member.membership.access_id
+                    })
+                });
+            if !current {
+                return Err(Error::forbidden(
+                    "Your membership changed during the resource read. Retry it.",
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
@@ -354,6 +410,15 @@ impl Authority {
             job.authorize(db)?;
         } else if let Some(bearer) = &self.bearer {
             crate::installation_mcp::authorize_in(db, bearer)?;
+        }
+        if let Some(member) = &self.member
+            && !db.membership_uses_agent(
+                &member.membership.account_id,
+                &member.membership.access_id,
+                &member.agent,
+            )?
+        {
+            return Err(Error::forbidden(crate::agent_access::DENIED));
         }
         Ok(())
     }
@@ -416,7 +481,29 @@ impl PluginPackageOperation {
     ) -> Result<Value> {
         // Resource handlers add sizeable futures to this shared dispatcher. Keep
         // that state off its HTTP/MCP callers' stacks, including nested preparation.
-        Box::pin(self.invoke_inner(s, input, context)).await
+        Box::pin(self.invoke_inner(s, input, context, false)).await
+    }
+
+    /// A member in the apps: only resource reads through an agent they may use, and
+    /// polling their own reads. Everything else of plugins stays the owner's.
+    pub(crate) async fn invoke_member(
+        &self,
+        s: &Arc<Service>,
+        input: Value,
+        account: String,
+    ) -> Result<Value> {
+        if !matches!(
+            self.name,
+            "list_plugin_resources"
+                | "resolve_plugin_resource"
+                | "get_plugin_operation"
+                | "get_plugin_resource_operation"
+        ) {
+            return Err(Error::forbidden(
+                "Only the installation owner can manage this resource.",
+            ));
+        }
+        Box::pin(self.invoke_inner(s, input, ResumeContext::Human(account), true)).await
     }
 
     async fn invoke_inner(
@@ -424,8 +511,9 @@ impl PluginPackageOperation {
         s: &Arc<Service>,
         input: Value,
         context: ResumeContext,
+        member: bool,
     ) -> Result<Value> {
-        let owner = matches!(context, ResumeContext::Human(_));
+        let owner = matches!(context, ResumeContext::Human(_)) && !member;
         let human_account = match &context {
             ResumeContext::Human(account) => Some(account.clone()),
             _ => None,
@@ -440,6 +528,19 @@ impl PluginPackageOperation {
             ResumeContext::Public(scopes, _) => Some(scopes.iter().any(|scope| scope == "read")),
             _ => None,
         };
+        // The execution agent a read goes through, chosen by the caller.
+        let through = match self.name {
+            "list_plugin_resources" => decode::<ListPluginResourcesInput>(input.clone())?.agent_id,
+            "resolve_plugin_resource" => {
+                decode::<ResolvePluginResourceInput>(input.clone())?.agent_id
+            }
+            _ => None,
+        }
+        .map(|agent| agent.to_string());
+        let member_audience = human_account
+            .clone()
+            .filter(|_| member)
+            .map(operations::Audience::Member);
         let mut authority = match context {
             ResumeContext::Installation(bearer) => {
                 let (_, live) =
@@ -472,6 +573,20 @@ impl PluginPackageOperation {
                     ..Default::default()
                 }
             }
+            // A member polls only their own reads, whose authority stays rechecked.
+            ResumeContext::Human(account) if member => match &through {
+                Some(agent) => Authority::member(s, &account, agent).await?,
+                None if matches!(
+                    self.name,
+                    "list_plugin_resources" | "resolve_plugin_resource"
+                ) =>
+                {
+                    return Err(Error::forbidden(
+                        "Choose an agent you may use to read this instance's resources.",
+                    ));
+                }
+                None => Authority::default(),
+            },
             ResumeContext::Human(account) => {
                 if reads_resources
                     || (self.scope == "manage"
@@ -501,11 +616,22 @@ impl PluginPackageOperation {
                     Some(bearer) => Some(crate::installation_mcp::authorize(s, bearer).await?),
                     None => None,
                 };
-                let agent = caller
-                    .as_ref()
-                    .map(|run| crate::validation::text(&run["snapshot"]["agent"], "id"));
-                let audience =
-                    operations::Audience::from_bearer(authority.bearer.as_deref(), owner);
+                // An installation agent never reads through another agent's grants.
+                let agent = match caller.as_ref() {
+                    Some(run) => {
+                        let own = crate::validation::text(&run["snapshot"]["agent"], "id");
+                        if through.as_deref().is_some_and(|agent| agent != own) {
+                            return Err(Error::forbidden(
+                                "An installation agent reads resources only through its own grants.",
+                            ));
+                        }
+                        Some(own)
+                    }
+                    None => through.as_deref(),
+                };
+                let audience = member_audience.clone().unwrap_or_else(|| {
+                    operations::Audience::from_bearer(authority.bearer.as_deref(), owner)
+                });
                 let service = s.clone();
                 if self.name == "list_plugin_resources" {
                     let input: ListPluginResourcesInput = decode(input)?;
@@ -640,18 +766,26 @@ impl PluginPackageOperation {
             | "get_plugin_resource_operation"
             | "cancel_plugin_operation" => {
                 let input: PluginOperationInput = decode(input)?;
-                s.plugins.operations.authorize(
-                    &input.operation_id,
-                    authority.bearer.as_deref(),
-                    owner,
-                )?;
+                let caller = member_audience.clone().unwrap_or_else(|| {
+                    operations::Audience::from_bearer(authority.bearer.as_deref(), false)
+                });
+                s.plugins
+                    .operations
+                    .authorize(&input.operation_id, &caller, owner)?;
                 result_authority = s.plugins.operations.result_authority(&input.operation_id)?;
                 resource_result = s.plugins.operations.resource_read(
                     &input.operation_id,
                     self.name == "get_plugin_resource_operation",
                 )?;
                 let protected_result = resource_result.is_some() || result_authority.is_some();
+                // A member's read rechecks their membership and access to its agent below.
+                if member && (resource_result.is_none() || result_authority.is_some()) {
+                    return Err(Error::forbidden(
+                        "This preparation belongs to another caller.",
+                    ));
+                }
                 if protected_result
+                    && !member
                     && authority.owner.is_none()
                     && let Some(account) = &human_account
                 {

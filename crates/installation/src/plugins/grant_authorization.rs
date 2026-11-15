@@ -618,6 +618,7 @@ impl ResourceAuthorization<'_> {
                     .map_err(|_| denied())?,
                 resource_type: reference.resource_type.clone(),
                 id: reference.id.clone(),
+                agent_id: None,
             };
             let read = super::resources::prepare_resolve(s, &input, Some(agent), None).await?;
             let read =
