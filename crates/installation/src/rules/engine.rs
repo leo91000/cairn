@@ -23,6 +23,9 @@ use cairn_contracts::{
 
 mod admissions;
 mod cairn_hooks;
+
+pub(crate) use cairn_hooks::record_question;
+
 pub(crate) mod conversations;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};

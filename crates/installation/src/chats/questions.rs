@@ -85,6 +85,7 @@ fn receive(db: &Db<'_>, mut question: Question) -> Result<()> {
         return save_question(db, &existing);
     }
     save_question(db, &question)?;
+    crate::rules::engine::record_question(db, &question)?;
     notifications::enqueue(db, &question)
 }
 

@@ -994,6 +994,7 @@ fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
          DROP TABLE hook_rule_task_depths;
          DROP TABLE hook_rule_run_depths;
          DROP TABLE hook_rule_reported_questions;
+         DROP TABLE hook_rule_question_order;
          DROP TABLE hook_rule_author_triggerings;
          DROP TABLE hook_rule_conversation_counts;
          PRAGMA user_version=34;",
@@ -1014,6 +1015,7 @@ fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
             "hook_rule_task_depths",
             "hook_rule_run_depths",
             "hook_rule_reported_questions",
+            "hook_rule_question_order",
             "hook_rule_author_triggerings",
             "hook_rule_conversation_counts",
         ] {
@@ -1221,7 +1223,7 @@ async fn installation_and_unattributed_input_stay_in_the_rules_chain() {
 }
 
 #[tokio::test]
-async fn only_the_rules_own_cancellation_lets_it_steer_a_paused_conversation() {
+async fn a_rule_cannot_resume_even_its_own_cancellation_without_a_person() {
     let f = granted().await;
     let steering = rule_on(
         &f,
@@ -1249,11 +1251,18 @@ async fn only_the_rules_own_cancellation_lets_it_steer_a_paused_conversation() {
     let run = launched(&f, &chat).await;
     fixture::running_conversation(&f.s, &chat).await;
 
-    // The rule cancels, then steers its own cancellation away.
+    // Even the rule's own cancellation requires a person's resumption.
     emit(&f, "stop", message("alice", "stop")).await;
     engine::tick(&f.s).await.unwrap();
     set_status(&f, &run, cairn_contracts::RunStatus::Cancelled).await;
     emit(&f, "resume", message("alice", "go on")).await;
+    engine::tick(&f.s).await.unwrap();
+    let latest = &triggerings(&f, &steering).await[0];
+    assert_eq!(latest["status"], "failed", "{latest}");
+    assert!(text(latest, "error").contains("paused"), "{latest}");
+    assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], true);
+    f.s.chat_pause(&chat, false).await.unwrap();
+    emit(&f, "person-resumed", message("alice", "go on")).await;
     engine::tick(&f.s).await.unwrap();
     let latest = &triggerings(&f, &steering).await[0];
     assert_eq!(latest["status"], "completed", "{latest}");
@@ -1823,7 +1832,7 @@ async fn a_rules_cancellation_never_takes_over_a_persons_pause_or_stop() {
     assert_eq!(refused["status"], "failed", "{refused}");
     assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], true);
 
-    // The rules' own pause stays theirs when a rule cancels it again while it stops.
+    // Repeated cancellation still needs a person to resume it.
     f.s.chat_pause(&chat, false).await.unwrap();
     set_status(&f, &run, cairn_contracts::RunStatus::Running).await;
     emit(&f, "own-stop", message("alice", "stop")).await;
@@ -1833,8 +1842,13 @@ async fn a_rules_cancellation_never_takes_over_a_persons_pause_or_stop() {
     set_status(&f, &run, cairn_contracts::RunStatus::Cancelled).await;
     emit(&f, "own-steer", message("alice", "go on")).await;
     engine::tick(&f.s).await.unwrap();
-    let steered = &triggerings(&f, &rule).await[0];
-    assert_eq!(steered["status"], "completed", "{steered}");
+    let refused = &triggerings(&f, &rule).await[0];
+    assert_eq!(refused["status"], "failed", "{refused}");
+    assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], true);
+    f.s.chat_pause(&chat, false).await.unwrap();
+    emit(&f, "person-resumed", message("alice", "go on")).await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(triggerings(&f, &rule).await[0]["status"], "completed");
     assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], false);
 }
 
@@ -2157,16 +2171,16 @@ async fn queued_agent_input_cannot_lower_an_unobserved_rules_chain() {
 }
 
 #[tokio::test]
-async fn a_public_members_message_resets_the_chain_and_takes_back_the_pause() {
+async fn a_public_members_message_resets_the_chain() {
     let f = granted().await;
     rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
     emit(&f, "first", message("alice", "hello")).await;
     engine::tick(&f.s).await.unwrap();
     let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
-    let run = launched(&f, &chat).await;
+    launched(&f, &chat).await;
     let checked = chat.clone();
     f.s.store.transaction(move |db| {
-        db.0.execute("UPDATE hook_rule_conversations SET watch=json_set(watch,'$.depth',8),cancelled_run=?2 WHERE chat_id=?1", rusqlite::params![checked,run])?;
+        db.0.execute("UPDATE hook_rule_conversations SET watch=json_set(watch,'$.depth',8) WHERE chat_id=?1", rusqlite::params![checked])?;
         Ok(())
     }).await.unwrap();
     common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
@@ -2206,12 +2220,6 @@ async fn a_public_members_message_resets_the_chain_and_takes_back_the_pause() {
             let origin: Value = serde_json::from_str(&origin)?;
             assert_eq!(origin["kind"], "person");
             assert_eq!(origin["accountId"], MEMBER);
-            let cancelled: Option<String> = db.0.query_row(
-                "SELECT cancelled_run FROM hook_rule_conversations WHERE chat_id=?",
-                [chat],
-                |row| row.get(0),
-            )?;
-            assert_eq!(cancelled, None);
             Ok(())
         })
         .await
@@ -2553,6 +2561,117 @@ async fn more_than_one_page_of_pending_questions_is_reported_once_across_restart
         .await
         .unwrap();
     assert_eq!(count, 101);
+}
+
+#[tokio::test]
+async fn answered_and_withdrawn_questions_still_emit_question_asked_once() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let asked = rule_on(
+        &f,
+        OWNER,
+        cairn("questionAsked"),
+        json!([remember("question", "question", "questionId")]),
+        limits(),
+    )
+    .await;
+    emit(&f, "start", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    event(
+        &f,
+        &run,
+        "chat.user",
+        "",
+        Some(json!({ "messageId": first_message(&f, &chat).await })),
+    )
+    .await;
+    let answered = "a".repeat(64);
+    let withdrawn = "b".repeat(64);
+    for id in [&answered, &withdrawn] {
+        f.s.question_receive(
+            &run,
+            json!({
+                "id": id, "blocking": false,
+                "fields": [{ "id": "color", "title": "Which color?", "options": [] }],
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    f.s.question_answer(
+        &chat,
+        &answered,
+        json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "answers": { "color": { "selected": [], "comment": "Blue" } },
+        }),
+    )
+    .await
+    .unwrap();
+    f.s.question_cancel(&chat, &withdrawn).await.unwrap();
+    for _ in 0..2 {
+        engine::tick(&f.s).await.unwrap();
+    }
+    assert_eq!(triggerings(&f, &asked).await.len(), 2);
+    assert_eq!(depth_of(&f, &asked).await, [1, 1]);
+}
+
+#[tokio::test]
+async fn question_origin_follows_event_order_even_with_identical_or_reversed_timestamps() {
+    for question_at in [1_000, 999] {
+        let f = granted().await;
+        rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+        let asked = rule_on(
+            &f,
+            OWNER,
+            cairn("questionAsked"),
+            json!([remember("origin", "origin", "origin.kind")]),
+            limits(),
+        )
+        .await;
+        emit(&f, "start", message("alice", "hello")).await;
+        engine::tick(&f.s).await.unwrap();
+        let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+        let run = launched(&f, &chat).await;
+        replied(&f, &run, &first_message(&f, &chat).await, "Old turn").await;
+        let next = person_sends(&f, &chat, "A new human turn").await;
+        event(
+            &f,
+            &run,
+            "chat.user",
+            "",
+            Some(json!({ "messageId": next })),
+        )
+        .await;
+        event(&f, &run, "turn.started", "", None).await;
+        f.s.question_receive(
+            &run,
+            json!({
+                "id": "e".repeat(64), "blocking": false,
+                "fields": [{ "id": "color", "title": "Which color?", "options": [] }],
+            }),
+        )
+        .await
+        .unwrap();
+        // Wall-clock values can tie or move backwards. Their values must not
+        // replace the transactional order of the actual creation and turns.
+        f.s.store
+            .transaction(move |db| {
+                db.0.execute("UPDATE events SET created_at=1000 WHERE run_id=?", [&run])?;
+                db.0.execute(
+                    "UPDATE chat_questions SET created_at=?2 WHERE chat_id=?1",
+                    rusqlite::params![chat, question_at],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        engine::tick(&f.s).await.unwrap();
+        assert_eq!(depth_of(&f, &asked).await, [0]);
+        assert_eq!(values(&f, &asked).await["origin"], "person");
+    }
 }
 
 #[tokio::test]

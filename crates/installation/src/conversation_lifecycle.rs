@@ -624,7 +624,6 @@ pub(crate) fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
     chat.paused = true;
     let saved = serde_json::to_value(db.save_conversation(&chat)?)?;
     // A person asked for a new session: rules wait until they resume it.
-    crate::rules::engine::conversations::release_pause(db, id)?;
     Ok(saved)
 }
 

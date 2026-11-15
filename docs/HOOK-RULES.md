@@ -228,10 +228,8 @@ conversation's agent. Steering queues a message that Cairn delivers after the cu
 turn, as for a person who writes again, also after a failed or stopped turn. A paused
 conversation cannot be steered or answered until a person resumes it.
 `cancelConversation` stops the current turn like Stop in Cairn, which pauses the
-conversation; the rules of the same creator may steer it again, which resumes it, until
-a person pauses, resumes, stops or writes in it. A conversation a person already paused
-or stopped stays theirs when a rule cancels its turn. Steering a conversation still
-stopping fails. With nothing working, `cancelConversation` only cancels a scheduled
+conversation. Only a person can resume it, including after a rule's cancellation.
+With nothing working, `cancelConversation` only cancels a scheduled
 wakeup.
 `answerQuestion` answers the oldest pending question of the conversation's current
 run: a text answers every question of it, an object answers each question by its id

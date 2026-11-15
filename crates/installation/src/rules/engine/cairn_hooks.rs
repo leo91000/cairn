@@ -19,9 +19,27 @@ const EVENTS: i64 = 200;
 const MAX_REPLY_BYTES: usize = 128 * 1024;
 /// Deliverables reported with one reply.
 const MAX_DELIVERABLES: i64 = 10;
-/// Pending questions loaded in one observation. Receipts, rather than this batch,
+/// Question creations loaded in one observation. Receipts, rather than this batch,
 /// remember every question already reported for the lifetime of its definition.
 const QUESTIONS_PER_PASS: usize = 100;
+
+/// Record creation in the questionnaire's transaction, independently of its later
+/// status. The run's event position orders it against turns without a wall clock
+/// or an additional run-log/UI event.
+pub(crate) fn record_question(db: &Db<'_>, question: &cairn_contracts::ChatQuestion) -> Result<()> {
+    db.0.execute(
+        "INSERT OR IGNORE INTO hook_rule_question_order(question_id,event_cursor) \
+         SELECT ?1,coalesce((SELECT max(id) FROM events WHERE run_id=?2),0) \
+         WHERE EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=?3 AND key IS NOT NULL)",
+        params![question.id, question.run_id, question.chat_id],
+    )?;
+    Ok(())
+}
+
+struct AskedQuestion {
+    definition: cairn_contracts::ChatQuestion,
+    after_event: i64,
+}
 
 /// Who wrote a delivered entry, and how deep in a chain it stands.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -318,25 +336,26 @@ impl Watch {
         }
     }
 
-    /// Reports the agent's pending questions not reported yet, asked up to `until`.
+    /// Reports creations before the next event boundary, even if the question
+    /// has since been answered or withdrawn.
     fn ask(
         &mut self,
         emissions: &mut Vec<Emission>,
-        questions: &[cairn_contracts::ChatQuestion],
+        questions: &[AskedQuestion],
         until: Option<i64>,
     ) {
         for question in questions {
-            if self.asked.contains(&question.id)
-                || until.is_some_and(|until| question.created_at.unwrap_or(0) > until)
+            if self.asked.contains(&question.definition.id)
+                || until.is_some_and(|until| question.after_event >= until)
             {
                 continue;
             }
             self.emit(
                 emissions,
                 CairnHookKind::QuestionAsked,
-                self::question(question),
+                self::question(&question.definition),
             );
-            self.asked.push(question.id.clone());
+            self.asked.push(question.definition.id.clone());
         }
     }
 
@@ -355,7 +374,7 @@ impl Watch {
     }
 }
 
-/// One chronological page of pending questions not yet durably reported.
+/// One transactionally ordered page of question creations not yet reported.
 fn pending_questions(
     db: &Db<'_>,
     chat: &str,
@@ -364,14 +383,15 @@ fn pending_questions(
     until: Option<i64>,
     offset: usize,
     limit: usize,
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, i64)>> {
     Ok(db.0.prepare_cached(
-        "SELECT q.id FROM chat_questions q WHERE q.chat_id=?1 AND q.run_id=?2 AND q.status='pending' \
+        "SELECT q.id,o.event_cursor FROM hook_rule_question_order o JOIN chat_questions q ON q.id=o.question_id \
+         WHERE q.chat_id=?1 AND q.run_id=?2 \
          AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?3) \
          AND NOT EXISTS(SELECT 1 FROM hook_rule_reported_questions r WHERE r.question_id=q.id) \
-         AND (?4 IS NULL OR coalesce(q.created_at,0)<=?4) \
-         ORDER BY coalesce(q.created_at,0),q.id LIMIT ?6 OFFSET ?5",
-    )?.query_map(params![chat,run,at,until,offset as i64,limit as i64], |row|row.get(0))?
+         AND (?4 IS NULL OR o.event_cursor<?4) \
+         ORDER BY o.event_cursor,q.id LIMIT ?6 OFFSET ?5",
+    )?.query_map(params![chat,run,at,until,offset as i64,limit as i64], |row|Ok((row.get(0)?,row.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -405,9 +425,12 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
     let mut cursor = if same_run { bound.cursor } else { 0 };
     let mut emissions = Vec::new();
     let mut questions = Vec::new();
-    for id in pending_questions(db, chat, &run, at, None, 0, QUESTIONS_PER_PASS)? {
+    for (id, after_event) in pending_questions(db, chat, &run, at, None, 0, QUESTIONS_PER_PASS)? {
         if let Some(question) = db.question(chat, &id)? {
-            questions.push(question);
+            questions.push(AskedQuestion {
+                definition: question,
+                after_event,
+            });
         }
     }
 
@@ -416,7 +439,7 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
     let events = db
         .0
         .prepare_cached(
-            "SELECT id,type,text,payload,created_at FROM events WHERE run_id=?1 AND id>?2 AND (type IN \
+            "SELECT id,type,text,payload FROM events WHERE run_id=?1 AND id>?2 AND (type IN \
              ('chat.user','chat.wakeup','turn.started','turn.completed','turn.failed','retry.scheduled') \
              OR (type='status' AND (text IN ('failed','cancelled','interrupted') \
              OR json_extract(payload,'$.chatOperation')='compact' \
@@ -428,16 +451,25 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
-                row.get::<_, i64>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut complete = (events.len() as i64) < EVENTS;
-    let mut observed_until = 0;
-    for (id, kind, text, payload, created_at) in events {
+    for (id, kind, text, payload) in events {
         let payload: Json = payload
             .and_then(|payload| serde_json::from_str(&payload).ok())
             .unwrap_or(Json::Null);
+        // Drain older pages before any boundary, including a new user input.
+        watch.ask(&mut emissions, &questions, Some(id));
+        let included = questions.iter().filter(|q| q.after_event < id).count();
+        // The page is ordered: a later page cannot precede this boundary
+        // unless every element of this full page precedes it already.
+        if included == QUESTIONS_PER_PASS
+            && !pending_questions(db, chat, &run, at, Some(id), included, 1)?.is_empty()
+        {
+            complete = false;
+            break;
+        }
         if kind == "status" && payload["chatOperation"] == crate::chats::COMPACT {
             watch.compacting = true;
             watch.open = false;
@@ -449,25 +481,7 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                 watch.compacting = false;
             } else {
                 cursor = id;
-                observed_until = created_at;
                 continue;
-            }
-        }
-        // The questions a turn asked are reported before it ends.
-        let ends_turn = matches!(kind.as_str(), "turn.completed" | "status")
-            || (watch.failed.is_some()
-                && matches!(kind.as_str(), "chat.user" | "chat.wakeup" | "turn.started"));
-        if ends_turn && watch.open {
-            watch.ask(&mut emissions, &questions, Some(created_at));
-            let included = questions
-                .iter()
-                .filter(|q| q.created_at.unwrap_or(0) <= created_at)
-                .count();
-            if !pending_questions(db, chat, &run, at, Some(created_at), included, 1)?.is_empty() {
-                // The next batch still belongs to this turn. Keep the boundary
-                // unread until its older questions have all been reported.
-                complete = false;
-                break;
             }
         }
         match kind.as_str() {
@@ -537,7 +551,6 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
             _ => {}
         }
         cursor = id;
-        observed_until = created_at;
     }
     if complete {
         // Later events are not boundaries: the next pass need not read them again.
@@ -572,12 +585,11 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
         }
     }
 
-    // A question stays answerable after its turn ended: it is reported whenever Cairn
-    // sees it, in the chain of the turn that asked it.
+    // Creation remains reportable after the question or its turn ended.
     watch.ask(
         &mut emissions,
         &questions,
-        (!complete).then_some(observed_until),
+        (!complete).then_some(cursor.saturating_add(1)),
     );
     if watch.open
         && working
@@ -758,8 +770,9 @@ pub(super) async fn observe(s: &Service) -> Result<bool> {
                      AND c.agent_id=k.agent_id AND (k.run_id IS NOT c.run_id \
                      OR json_extract(k.watch,'$.open')=1 OR json_extract(k.watch,'$.failed') IS NOT NULL \
                      OR EXISTS(SELECT 1 FROM events e WHERE e.run_id=c.run_id AND e.id>k.cursor) \
-                     OR EXISTS(SELECT 1 FROM chat_questions q WHERE q.chat_id=k.chat_id AND q.run_id=c.run_id \
-                       AND q.status='pending' AND NOT EXISTS(SELECT 1 FROM question_import_metadata m \
+                     OR EXISTS(SELECT 1 FROM hook_rule_question_order o JOIN chat_questions q ON q.id=o.question_id \
+                       WHERE q.chat_id=k.chat_id AND q.run_id=c.run_id \
+                       AND NOT EXISTS(SELECT 1 FROM question_import_metadata m \
                          WHERE m.question_id=q.id AND m.expires<=?1) \
                        AND NOT EXISTS(SELECT 1 FROM hook_rule_reported_questions r WHERE r.question_id=q.id))) \
                      ORDER BY k.chat_id",

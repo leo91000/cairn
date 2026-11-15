@@ -10,8 +10,7 @@
 //! never write rules there.
 use super::*;
 use crate::{
-    chats::Conversation, native::policy::Origin, rules::validation::Creator, run_status::RunStatus,
-    validation::text,
+    chats::Conversation, native::policy::Origin, rules::validation::Creator, validation::text,
 };
 use cairn_contracts::{AgentId, QuestionAnswer, QuestionAnswerInput, QuestionStatus};
 
@@ -27,7 +26,6 @@ CREATE TABLE IF NOT EXISTS hook_rule_conversations(
  run_id TEXT,
  cursor INTEGER NOT NULL DEFAULT 0 CHECK(cursor>=0),
  watch TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(watch) AND json_type(watch)='object' AND length(watch)<=65536),
- cancelled_run TEXT,
  created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
  UNIQUE(creator_account_id,key)
 ) WITHOUT ROWID;
@@ -59,6 +57,10 @@ CREATE TABLE IF NOT EXISTS hook_rule_run_depths(
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hook_rule_reported_questions(
  question_id TEXT PRIMARY KEY NOT NULL REFERENCES chat_questions(id) ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS hook_rule_question_order(
+ question_id TEXT PRIMARY KEY NOT NULL REFERENCES chat_questions(id) ON DELETE CASCADE,
+ event_cursor INTEGER NOT NULL CHECK(event_cursor>=0)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hook_rule_author_triggerings(
  rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
@@ -155,14 +157,13 @@ struct Bound {
     chat: String,
     agent: String,
     author: Option<String>,
-    cancelled_run: Option<String>,
 }
 
 fn bound(db: &Db<'_>, creator: &str, key: &str) -> Result<Option<Bound>> {
     Ok(db
         .0
         .prepare_cached(
-            "SELECT k.chat_id,k.agent_id,k.author,k.cancelled_run FROM hook_rule_conversations k \
+            "SELECT k.chat_id,k.agent_id,k.author FROM hook_rule_conversations k \
              JOIN conversations c ON c.id=k.chat_id WHERE k.creator_account_id=?1 AND k.key=?2 \
              AND c.lifecycle='active' AND c.agent_id=k.agent_id",
         )?
@@ -171,7 +172,6 @@ fn bound(db: &Db<'_>, creator: &str, key: &str) -> Result<Option<Bound>> {
                 chat: row.get(0)?,
                 agent: row.get(1)?,
                 author: row.get(2)?,
-                cancelled_run: row.get(3)?,
             })
         })
         .optional()?)
@@ -237,8 +237,7 @@ pub(super) fn origin_of(origin: &Origin) -> Json {
 /// of the turn it starts report it. Unkeyed rule conversations retain their depth
 /// too: their agent can write to another conversation through installation access.
 ///
-/// Only a person's entry starts a new chain, and takes back from rules a conversation
-/// a rule cancelled. Any other entry stays in the chain of the conversation, and of the
+/// Only a person's entry starts a new chain. Any other entry stays in the chain of the conversation, and of the
 /// run that caused it: an agent's delegated task, or `cairn_installation`.
 pub(crate) fn record_input(db: &Db<'_>, chat: &str, message: &str, origin: &Origin) -> Result<()> {
     let person = matches!(origin, Origin::Human(_) | Origin::PublicAccount(_));
@@ -274,9 +273,6 @@ pub(crate) fn record_input(db: &Db<'_>, chat: &str, message: &str, origin: &Orig
              ON CONFLICT(message_id) DO UPDATE SET origin=excluded.origin,depth=excluded.depth",
             params![message,chat,origin_of(origin).to_string(),depth],
         )?;
-    }
-    if person {
-        release_pause(db, chat)?;
     }
     Ok(())
 }
@@ -420,16 +416,6 @@ fn record_depth(db: &Db<'_>, chat: &str, depth: u32) -> Result<()> {
     Ok(())
 }
 
-/// A person paused, resumed, stopped or wrote: a rule's cancellation no longer accounts
-/// for the conversation's pause.
-pub(crate) fn release_pause(db: &Db<'_>, chat: &str) -> Result<()> {
-    db.0.prepare_cached(
-        "UPDATE hook_rule_conversations SET cancelled_run=NULL WHERE chat_id=? AND cancelled_run IS NOT NULL",
-    )?
-    .execute([chat])?;
-    Ok(())
-}
-
 /// A rule wrote this entry, one link further in its chain.
 fn record_rule_input(
     db: &Db<'_>,
@@ -458,7 +444,7 @@ fn record_rule_input(
 /// what rules remembered on them goes with the keys.
 pub(crate) fn detach(db: &Db<'_>, chat: &str) -> Result<()> {
     db.0.execute(
-        "UPDATE hook_rule_conversations SET key=NULL,cancelled_run=NULL,watch='{}' WHERE chat_id=?",
+        "UPDATE hook_rule_conversations SET key=NULL,watch='{}' WHERE chat_id=?",
         [chat],
     )?;
     db.0.execute(
@@ -573,7 +559,6 @@ fn conversation_environment(db: &Db<'_>, chat: &Conversation) -> Result<(Json, O
 
 /// Everything an action on a key-bound conversation needs, checked in its transaction.
 struct Reached {
-    bound: Bound,
     chat: Conversation,
     origin: Origin,
 }
@@ -599,11 +584,7 @@ fn reach(db: &Db<'_>, row: &RuleRow, version: &VersionRow, key: &str) -> Result<
     let origin = native_origin(db, row, version)?;
     let (agent, node) = conversation_environment(db, &chat)?;
     require_native(db, version, &agent, &origin, node.as_deref())?;
-    Ok(Reached {
-        bound,
-        chat,
-        origin,
-    })
+    Ok(Reached { chat, origin })
 }
 
 fn require_depth(depth: u32) -> Result<()> {
@@ -707,49 +688,20 @@ fn start(
 }
 
 /// Sends a message to the conversation of a key, which Cairn delivers after its current
-/// turn, as for a person who writes again. A paused conversation stays paused, unless
-/// the rule's own cancellation paused it.
+/// turn, as for a person who writes again. Only a person can resume a paused conversation.
 fn steer(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
     require_depth(acting.depth)?;
     let key = text_input(input, "key", "conversation key")?;
     let message = text_input(input, "message", "message")?;
-    let Reached {
-        bound,
-        chat,
-        origin,
-    } = reach(db, acting.row, acting.version, &key)?;
-    let run = chat
-        .run_id
-        .as_deref()
-        .map(|run| db.run(run))
-        .transpose()?
-        .flatten();
-    let status = run.as_ref().and_then(RunStatus::of);
-    let run_id = run.as_ref().map(|run| text(run, "id").to_owned());
-    // A rule's cancellation pauses the conversation like Stop. Any later pause,
-    // resumption or entry of a person releases that mark: only the rule's own pause
-    // lets it steer a paused conversation.
-    let cancelled_by_rule = bound.cancelled_run.is_some() && bound.cancelled_run == run_id;
-    if chat.paused && !cancelled_by_rule {
+    let Reached { chat, origin, .. } = reach(db, acting.row, acting.version, &key)?;
+    if chat.paused {
         return Err(Error::conflict(
             "This conversation is paused. Rules can steer it again once a person resumes it.",
         ));
     }
-    if cancelled_by_rule && status.is_some_and(RunStatus::is_active) {
-        return Err(Error::unavailable(
-            "This conversation is still stopping. The rule can steer it once it stopped.",
-        ));
-    }
-    if chat.paused {
-        crate::chats::pause_in(db, &chat.id, false)?;
-    }
     let id = id();
     crate::chats::send_as_in(db, &chat.id, json!({ "id": id, "text": message }), &origin)?;
     record_rule_input(db, &chat.id, &id, acting.row, acting.depth)?;
-    db.0.execute(
-        "UPDATE hook_rule_conversations SET cancelled_run=NULL WHERE chat_id=?",
-        [&chat.id],
-    )?;
     Ok(json!({ "conversationId": chat.id, "messageId": id }))
 }
 
@@ -758,7 +710,7 @@ fn steer(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
 fn cancel(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
     require_depth(acting.depth)?;
     let key = text_input(input, "key", "conversation key")?;
-    let Reached { bound, chat, .. } = reach(db, acting.row, acting.version, &key)?;
+    let Reached { chat, .. } = reach(db, acting.row, acting.version, &key)?;
     let active = chat
         .run_id
         .as_deref()
@@ -766,10 +718,6 @@ fn cancel(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
         .transpose()?
         .flatten()
         .is_some_and(|run| run.status.is_active());
-    // Only a pause the rules' own cancellation made lets them steer again: a person's
-    // pause or Stop, even one still stopping the turn, stays theirs.
-    let rule_owns_pause =
-        !chat.paused || (bound.cancelled_run.is_some() && bound.cancelled_run == chat.run_id);
     let Some(run) = chat.run_id.as_deref().filter(|_| active) else {
         // Nothing is working: only a scheduled continuation remains to cancel, and the
         // conversation stays open to later steering.
@@ -787,10 +735,6 @@ fn cancel(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
         &cairn_contracts::EventKind::Status,
         "Stop requested by a rule",
         Some(&json!({ "hookRuleDepth": acting.depth, "ruleId": acting.row.id })),
-    )?;
-    db.0.execute(
-        "UPDATE hook_rule_conversations SET cancelled_run=CASE WHEN ?3 THEN ?2 END WHERE chat_id=?1",
-        params![chat.id, run, rule_owns_pause],
     )?;
     Ok(json!({ "conversationId": chat.id, "runId": run, "cancelled": true }))
 }

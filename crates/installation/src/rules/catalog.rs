@@ -133,17 +133,17 @@ fn action(kind: &str) -> (&'static str, &'static str, bool) {
         ),
         "steerConversation" => (
             "Steer a conversation",
-            "Sends a message to the conversation bound to a key, after its current turn. Fails while a person keeps it paused.",
+            "Sends a message to the conversation bound to a key, after its current turn. Fails while it is paused, until a person resumes it.",
             true,
         ),
         "cancelConversation" => (
             "Cancel a conversation",
-            "Stops the current turn of the conversation bound to a key, like Stop in Cairn. A rule can steer it again.",
+            "Stops the current turn of the conversation bound to a key, like Stop in Cairn. A person must resume it before rules can steer it again.",
             false,
         ),
         "answerQuestion" => (
             "Answer a question",
-            "Answers the oldest pending question of the conversation bound to a key: a text for every question, or an object by question id. Fails while a person keeps it paused.",
+            "Answers the oldest pending question of the conversation bound to a key: a text for every question, or an object by question id. Fails while it is paused, until a person resumes it.",
             false,
         ),
         "storeValue" => (

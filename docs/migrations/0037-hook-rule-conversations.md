@@ -4,7 +4,7 @@ Version 34 upgrades to 35 automatically in `Store::open`, before the SQL actors 
 ([ADR-0075](../adr/0075-plugin-hooks-rules-and-scoped-grants.md), « Clé de conversation »,
 « Hooks de Cairn » and « Budget du moteur de règles »).
 
-One immediate transaction creates nine empty tables and advances `user_version`:
+One immediate transaction creates ten empty tables and advances `user_version`:
 
 - `hook_rule_conversations`: each conversation a rule started, with its creator, its
   key (unique per creator, released when the conversation is deleted or detached by a
@@ -28,9 +28,13 @@ One immediate transaction creates nine empty tables and advances `user_version`:
   on delivery or rule cancellation, independently of queued inputs and the
   asynchronous hook observer. A queued human input resets it when its own turn
   launches, including when a mission is continued as a conversation.
-- `hook_rule_reported_questions`: once-only question notifications, retained until
-  their question is deleted. Pending questionnaires are processed in bounded
-  batches without dropping deduplication at a cache limit or after restart.
+- `hook_rule_question_order`: a creation receipt with the run's last event position,
+  recorded atomically with each questionnaire on a keyed conversation. Question
+  hooks retain their turn's order even if timestamps tie or move backwards, and
+  remain reportable after an answer or withdrawal.
+- `hook_rule_reported_questions`: once-only notifications retained until their
+  question is deleted, processed in bounded batches without dropping
+  deduplication at a cache limit or after restart.
 - `hook_rule_author_triggerings`: the triggerings each author caused, for quota
   conditions, kept a week.
 - `hook_rule_conversation_counts`: the conversations each rule started or steered in
