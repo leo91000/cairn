@@ -24,6 +24,10 @@ on:
         description: Full paired reference SHA for a native diagnostic
         type: string
         default: ''
+      native-reference:
+        description: Optional full baseline SHA for validation-only native qualification
+        type: string
+        default: ''
       backend-only:
         description: Run backend tests and doctests without release resolution or image jobs
         type: boolean
@@ -578,7 +582,7 @@ jobs:
       - name: Identify the exact reference build
         id: native-reference-key
         env:
-          EVENT_REFERENCE_SHA: ${{ (inputs.ci-diagnostic == 'native' && inputs.diagnostic-reference) || github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
+          EVENT_REFERENCE_SHA: ${{ (inputs.validation-only == true && inputs.native-reference) || (inputs.ci-diagnostic == 'native' && inputs.diagnostic-reference) || github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
         run: |
           native_reference_sha="$(python3 scripts/native_reference.py)"
           echo "sha=$native_reference_sha" >> "$GITHUB_OUTPUT"

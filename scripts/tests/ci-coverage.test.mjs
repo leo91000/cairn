@@ -534,6 +534,25 @@ describe('parallel CI coverage', () => {
     expect(referenceCaches[0].with.key).toBe(referenceCaches[1].with.key)
   })
 
+  it('allows an explicit native baseline only for validation without publication', () => {
+    const selection = quality.jobs['native-runtime'].steps.find(step => step.id === 'native-reference-key')
+    expect(quality.on.workflow_dispatch.inputs['native-reference'].default).toBe('')
+    const expression = selection.env.EVENT_REFERENCE_SHA.slice(3, -2)
+      .replaceAll('inputs.validation-only', 'validationOnly')
+      .replaceAll('inputs.native-reference', 'baseline')
+      .replaceAll('inputs.ci-diagnostic', 'diagnostic')
+      .replaceAll('inputs.diagnostic-reference', 'diagnosticBaseline')
+    const github = { event: { pull_request: { base: { sha: 'pr-base' } } }, ref: 'refs/heads/feature' }
+    const context = {
+      github,
+      baseline: 'explicit-base',
+      diagnostic: 'none',
+      diagnosticBaseline: '',
+    }
+    expect(runInNewContext(expression, { ...context, validationOnly: true })).toBe('explicit-base')
+    expect(runInNewContext(expression, { ...context, validationOnly: false })).toBe('pr-base')
+  })
+
   it('observes capacity around actual cold builds without introducing a cache or writer mode', () => {
     const action = parse(readFileSync(new URL('../../.github/actions/observe-rust-build/action.yaml', import.meta.url), 'utf8'))
     expect(Object.keys(action.inputs)).toEqual(['phase'])
