@@ -40,7 +40,10 @@ under `/run`, create only a private placeholder before binding the slirp resolve
 this supports systemd-resolved symlinks without changing the host resolver.
 Slirp supplies egress and explicit IPv4 TCP/UDP host forwarding, whose lifecycle
 follows container start/stop/deletion. Mutation responses reconcile the current
-complete container inventory before reusing host ports; a one-second observer
+complete container and slirp forwarding inventories before reusing host ports.
+The slirp inventory recovers additions or removals whose reply was lost after
+the mutation committed; received rule IDs alone cannot prove current state.
+A one-second observer
 also retires publications after natural exits, with missed ticks skipped during
 CPU freezes. Default publications bind loopback;
 unsupported IPv6/SCTP and non-loopback-specific addresses are explicitly refused.

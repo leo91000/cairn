@@ -7,7 +7,7 @@ use crate::{
 use axum::{Json, extract::State as ExtractState};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs::File,
     net::Ipv4Addr,
     os::{
@@ -346,6 +346,11 @@ pub(super) fn validate_ports(ports: &Value) -> Result<()> {
 }
 
 async fn call_api(path: &Path, command: Value) -> Result<Value> {
+    let response_limit = if command["execute"] == "list_hostfwd" {
+        1_000_000
+    } else {
+        8192
+    };
     tokio::time::timeout(Duration::from_secs(2), async {
         let mut stream = tokio::net::UnixStream::connect(path).await?;
         stream.write_all(&serde_json::to_vec(&command)?).await?;
@@ -354,7 +359,7 @@ async fn call_api(path: &Path, command: Value) -> Result<Value> {
         let result = loop {
             let mut chunk = [0; 1024];
             let length = stream.read(&mut chunk).await?;
-            if length == 0 || bytes.len() + length > 8192 {
+            if length == 0 || bytes.len() + length > response_limit {
                 return Err(Error::unavailable("Managed Docker network response is missing or exceeds its limit."));
             }
             bytes.extend_from_slice(&chunk[..length]);
@@ -367,7 +372,13 @@ async fn call_api(path: &Path, command: Value) -> Result<Value> {
         if result.get("error").is_some() {
             return Err(Error::unavailable("Managed Docker could not reserve the published host port; check for a conflicting listener."));
         }
-        Ok(result["return"].clone())
+        // The pinned slirp 1.3.6 implementation returns the listing directly,
+        // unlike mutation replies (and the wrapped example in its manual).
+        if command["execute"] == "list_hostfwd" && result.get("return").is_none() {
+            Ok(result)
+        } else {
+            Ok(result["return"].clone())
+        }
     }).await.map_err(|_| Error::timeout("Managed Docker port publication timed out."))?
 }
 
@@ -376,6 +387,16 @@ struct Publication {
     protocol: String,
     address: String,
     port: u16,
+}
+
+impl Publication {
+    fn guest_address(&self) -> &str {
+        if self.address == "0.0.0.0" {
+            "127.0.0.1"
+        } else {
+            &self.address
+        }
+    }
 }
 
 fn publications(containers: &[Value]) -> Result<HashMap<String, Vec<Publication>>> {
@@ -423,15 +444,10 @@ fn publications(containers: &[Value]) -> Result<HashMap<String, Vec<Publication>
     Ok(desired)
 }
 
-struct Forwarding {
-    publications: Vec<Publication>,
-    rules: Vec<u64>,
-}
-
 struct Inner {
     client: reqwest::Client,
     api: std::path::PathBuf,
-    forwarded: Mutex<HashMap<String, Forwarding>>,
+    reconciling: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -451,7 +467,7 @@ impl State {
             inner: Arc::new(Inner {
                 client: crate::native::controller_client(socket)?,
                 api: api.to_owned(),
-                forwarded: Mutex::default(),
+                reconciling: Mutex::default(),
             }),
         })
     }
@@ -459,7 +475,7 @@ impl State {
     async fn reconcile(&self) -> Result<()> {
         // A complete current inventory avoids name/ID alias races and frees a
         // naturally exited container's ports before a new start reuses them.
-        let mut forwarded = self.inner.forwarded.lock().await;
+        let _reconciling = self.inner.reconciling.lock().await;
         let mut response = self
             .inner
             .client
@@ -480,62 +496,61 @@ impl State {
             bytes.extend_from_slice(&chunk);
         }
         let containers: Vec<Value> = serde_json::from_slice(&bytes)?;
-        let desired = publications(&containers)?;
-        // Retire every obsolete or incomplete mapping before claiming any new
-        // port. Preserve failed receipts so later passes can finish cleanup.
-        let mut removed = Vec::new();
-        for (id, entry) in forwarded.iter_mut() {
-            if desired.get(id) == Some(&entry.publications)
-                && entry.rules.len() == entry.publications.len()
-            {
-                continue;
-            }
-            while let Some(rule) = entry.rules.last().copied() {
+        let desired = publications(&containers)?
+            .into_values()
+            .flatten()
+            .collect::<BTreeSet<_>>();
+        // A mutation can commit before its reply is lost or cancelled. Query
+        // the actual rules every pass instead of relying on received IDs.
+        let inventory = call_api(&self.inner.api, json!({ "execute": "list_hostfwd" })).await?;
+        let rules = inventory["entries"]
+            .as_array()
+            .ok_or_else(|| Error::unavailable("Invalid Docker forwarding inventory."))?;
+        let mut retained = BTreeSet::new();
+        // Retire obsolete, misdirected or duplicate rules before claiming ports.
+        for rule in rules {
+            let id = rule["id"]
+                .as_u64()
+                .ok_or_else(|| Error::unavailable("Invalid Docker forwarding identity."))?;
+            let publication = Publication {
+                protocol: text(rule, "proto").into(),
+                address: text(rule, "host_addr").into(),
+                port: rule["host_port"]
+                    .as_u64()
+                    .and_then(|port| u16::try_from(port).ok())
+                    .filter(|port| *port > 0)
+                    .ok_or_else(|| Error::unavailable("Invalid Docker forwarding port."))?,
+            };
+            let destination_matches = text(rule, "guest_addr") == publication.guest_address()
+                && rule["guest_port"].as_u64() == Some(u64::from(publication.port));
+            let keep = desired.contains(&publication)
+                && destination_matches
+                && retained.insert(publication);
+            if !keep {
                 call_api(
                     &self.inner.api,
-                    json!({ "execute": "remove_hostfwd", "arguments": { "id": rule } }),
+                    json!({ "execute": "remove_hostfwd", "arguments": { "id": id } }),
                 )
                 .await?;
-                entry.rules.pop();
             }
-            removed.push(id.clone());
         }
-        for id in removed {
-            forwarded.remove(&id);
-        }
-        for (id, ports) in desired {
-            if forwarded.contains_key(&id) {
-                continue;
-            }
-            let entry = forwarded.entry(id).or_insert_with(|| Forwarding {
-                publications: ports.clone(),
-                rules: Vec::new(),
-            });
-            for port in ports {
-                let guest_address = if port.address == "0.0.0.0" {
-                    "127.0.0.1"
-                } else {
-                    port.address.as_str()
-                };
-                let rule = call_api(
-                    &self.inner.api,
-                    json!({
-                        "execute": "add_hostfwd",
-                        "arguments": {
-                            "proto": port.protocol,
-                            "host_addr": port.address,
-                            "host_port": port.port,
-                            "guest_addr": guest_address,
-                            "guest_port": port.port,
-                        },
-                    }),
-                )
-                .await?;
-                entry.rules.push(
-                    rule["id"]
-                        .as_u64()
-                        .ok_or_else(|| Error::unavailable("Invalid Docker forwarding receipt."))?,
-                );
+        for port in desired.difference(&retained) {
+            let rule = call_api(
+                &self.inner.api,
+                json!({
+                    "execute": "add_hostfwd",
+                    "arguments": {
+                        "proto": port.protocol,
+                        "host_addr": port.address,
+                        "host_port": port.port,
+                        "guest_addr": port.guest_address(),
+                        "guest_port": port.port,
+                    },
+                }),
+            )
+            .await?;
+            if rule["id"].as_u64().is_none() {
+                return Err(Error::unavailable("Invalid Docker forwarding receipt."));
             }
         }
         Ok(())
@@ -669,6 +684,109 @@ mod tests {
         server.abort();
     }
 
+    async fn recover_lost_mutation_reply(operation: &'static str) {
+        crate::tls::install_provider();
+        let root = tempfile::tempdir().unwrap();
+        let docker_path = root.path().join("docker.sock");
+        let api_path = root.path().join("slirp.sock");
+        let inventory = Arc::new(Mutex::new(vec![json!({
+            "Id": "a".repeat(64),
+            "State": "running",
+            "Ports": [{ "IP": "127.0.0.1", "PublicPort": 12345, "Type": "tcp" }],
+        })]));
+        let listener = tokio::net::UnixListener::bind(&docker_path).unwrap();
+        let router = axum::Router::new().route(
+            "/containers/json",
+            axum::routing::get({
+                let inventory = inventory.clone();
+                move || {
+                    let inventory = inventory.clone();
+                    async move { Json(inventory.lock().await.clone()) }
+                }
+            }),
+        );
+        let docker = tokio::spawn(async move { axum::serve(listener, router).await });
+        let listener = tokio::net::UnixListener::bind(&api_path).unwrap();
+        let rules = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let network = tokio::spawn({
+            let rules = rules.clone();
+            async move {
+                let mut next = 1u64;
+                let mut lost = false;
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    stream.read_to_end(&mut bytes).await.unwrap();
+                    let request: Value = serde_json::from_slice(&bytes).unwrap();
+                    let command = text(&request, "execute");
+                    let response = {
+                        let mut rules = rules.lock().await;
+                        match command {
+                            "list_hostfwd" => {
+                                let entries = rules.values().cloned().collect::<Vec<Value>>();
+                                json!({ "entries": entries })
+                            }
+                            "add_hostfwd" => {
+                                let mut rule = request["arguments"].clone();
+                                rule["id"] = next.into();
+                                rules.insert(next, rule);
+                                next += 1;
+                                json!({ "return": { "id": next - 1 } })
+                            }
+                            "remove_hostfwd" => {
+                                let id = request["arguments"]["id"].as_u64().unwrap();
+                                if rules.remove(&id).is_some() {
+                                    json!({ "return": {} })
+                                } else {
+                                    json!({ "error": { "desc": "unknown rule" } })
+                                }
+                            }
+                            _ => panic!("Unexpected slirp command"),
+                        }
+                    };
+                    // Apply the mutation, then lose its acknowledgment. This
+                    // models the same uncertainty as an expired reply deadline.
+                    if command == operation && !lost {
+                        lost = true;
+                        continue;
+                    }
+                    stream
+                        .write_all(&serde_json::to_vec(&response).unwrap())
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let state = State::connect("fixture".into(), &docker_path, &api_path).unwrap();
+        if operation == "add_hostfwd" {
+            assert!(state.reconcile().await.is_err());
+        } else {
+            state.reconcile().await.unwrap();
+        }
+        assert_eq!(rules.lock().await.len(), 1);
+        inventory.lock().await.clear();
+        if operation == "remove_hostfwd" {
+            assert!(state.reconcile().await.is_err());
+        }
+        state.reconcile().await.unwrap();
+        assert!(
+            rules.lock().await.is_empty(),
+            "Stopped container retained its host publication"
+        );
+        network.abort();
+        docker.abort();
+    }
+
+    #[tokio::test]
+    async fn lost_add_reply_does_not_strand_a_stopped_containers_publication() {
+        recover_lost_mutation_reply("add_hostfwd").await;
+    }
+
+    #[tokio::test]
+    async fn lost_remove_reply_does_not_block_later_reconciliation() {
+        recover_lost_mutation_reply("remove_hostfwd").await;
+    }
+
     #[tokio::test]
     async fn exited_container_ports_are_released_before_reuse_and_without_a_client_mutation() {
         crate::tls::install_provider();
@@ -701,7 +819,7 @@ mod tests {
             let history = history.clone();
             let retired = retired.clone();
             async move {
-                let mut current = None;
+                let mut current: Option<Value> = None;
                 let mut next = 1u64;
                 loop {
                     let (mut stream, _) = listener.accept().await.unwrap();
@@ -710,19 +828,30 @@ mod tests {
                     let request: Value = serde_json::from_slice(&bytes).unwrap();
                     let operation = text(&request, "execute");
                     history.lock().await.push(operation.to_owned());
-                    let response = if operation == "add_hostfwd" {
+                    let response = if operation == "list_hostfwd" {
+                        let entries = current.iter().cloned().collect::<Vec<_>>();
+                        json!({ "entries": entries })
+                    } else if operation == "add_hostfwd" {
                         assert!(
                             current.is_none(),
                             "New mapping claimed a port before retiring its previous owner"
                         );
                         assert_eq!(request["arguments"]["host_port"], 12345);
-                        assert_eq!(request["arguments"]["host_addr"], "127.0.0.2");
-                        assert_eq!(request["arguments"]["guest_addr"], "127.0.0.2");
-                        current = Some(next);
+                        let (host, guest) = if next == 1 {
+                            ("127.0.0.2", "127.0.0.2")
+                        } else {
+                            ("0.0.0.0", "127.0.0.1")
+                        };
+                        assert_eq!(request["arguments"]["host_addr"], host);
+                        assert_eq!(request["arguments"]["guest_addr"], guest);
+                        let mut rule = request["arguments"].clone();
+                        rule["id"] = next.into();
+                        current = Some(rule);
                         next += 1;
-                        json!({ "return": { "id": current.unwrap() } })
+                        json!({ "return": { "id": next - 1 } })
                     } else {
-                        assert_eq!(request["arguments"]["id"].as_u64(), current);
+                        assert_eq!(operation, "remove_hostfwd");
+                        assert_eq!(request["arguments"]["id"], current.as_ref().unwrap()["id"]);
                         current = None;
                         retired.notify_one();
                         json!({ "return": {} })
@@ -741,13 +870,19 @@ mod tests {
             json!({
                 "Id": second,
                 "State": "running",
-                "Ports": [{ "IP": "127.0.0.2", "PublicPort": 12345, "PrivatePort": 80, "Type": "tcp" }],
+                "Ports": [{ "IP": "0.0.0.0", "PublicPort": 12345, "PrivatePort": 80, "Type": "tcp" }],
             }),
         ];
         state.reconcile().await.unwrap();
         assert_eq!(
             *history.lock().await,
-            vec!["add_hostfwd", "remove_hostfwd", "add_hostfwd"]
+            vec![
+                "list_hostfwd",
+                "add_hostfwd",
+                "list_hostfwd",
+                "remove_hostfwd",
+                "add_hostfwd"
+            ]
         );
         // Consume the first retirement's notification, then stop the second
         // container without any API mutation: only the observer can release it.
@@ -764,7 +899,6 @@ mod tests {
             .unwrap();
         stop.cancel();
         observer.await.unwrap();
-        assert!(state.inner.forwarded.lock().await.is_empty());
         network.abort();
         docker.abort();
     }
