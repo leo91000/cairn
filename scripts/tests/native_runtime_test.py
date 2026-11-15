@@ -167,6 +167,10 @@ def retained_health(api, run):
 @contextmanager
 def escaped_docker_holder(root, docker_tools, disk):
     """An independent legacy engine on this disposable host, outside any run."""
+    # The controller shares the host mount namespace. Docker/runc must receive
+    # the real host path, not a procfs magic link into another process's root.
+    source = disk.resolve(strict=True)
+    assert source.is_dir() and source.samefile(disk), 'Legacy holder source changed.'
     directory = root / 'legacy-docker'
     directory.mkdir(mode=0o700)
     unit = 'cairn-fixture-legacy-' + uuid.uuid4().hex + '.service'
@@ -176,8 +180,14 @@ def escaped_docker_holder(root, docker_tools, disk):
     (directory / 'daemon.json').write_text('{}')
 
     def docker(*args):
-        return command(str(docker_tools / 'bin/docker'), '--host', endpoint, *args,
-                       env=environment).stdout.strip()
+        try:
+            return command(str(docker_tools / 'bin/docker'), '--host', endpoint, *args,
+                           env=environment).stdout.strip()
+        except subprocess.CalledProcessError as error:
+            # This isolated engine uses only synthetic fixture inputs. Preserve
+            # its bounded failure reason rather than only the command exit code.
+            detail = (error.stderr or '')[-4096:].replace(SECRET, '[fixture-secret]')
+            raise AssertionError('Legacy Docker fixture failed: ' + detail) from error
 
     def ready():
         try:
@@ -201,7 +211,7 @@ def escaped_docker_holder(root, docker_tools, disk):
         eventually(ready)
         docker('pull', 'alpine:3.22.2')
         container = docker('run', '-d', '--network=none', '--name=cairn-legacy-holder',
-                           '-v', str(disk) + ':/held', 'alpine:3.22.2', 'sh', '-c',
+                           '-v', str(source) + ':/held', 'alpine:3.22.2', 'sh', '-c',
                            'exec 3>/held/escaped-held; echo ready >&3; while :; do sleep 1; done')
         info = json.loads(docker('inspect', container))[0]
         pid = info['State']['Pid']
