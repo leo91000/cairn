@@ -547,6 +547,9 @@ async function navigateInstallation(value: { id: string, slug?: string }, destin
   if (navigationPending.value || state.redirecting)
     return
   navigationPending.value = true
+  // Session readiness can arrive while drafts are transferring. Keep the
+  // departing document from starting direct authorization during that wait.
+  state.redirecting = true
   try {
     const target = new URL(destination, beaconOrigin)
     if (value.slug) {
@@ -559,6 +562,7 @@ async function navigateInstallation(value: { id: string, slug?: string }, destin
   }
   catch (cause) {
     navigationPending.value = false
+    state.redirecting = false
     error.value = cause instanceof Error ? cause.message : 'Unable to open this installation.'
   }
 }
@@ -673,8 +677,8 @@ async function refreshAvailability() {
   }
 }
 
-watch(() => [session.value?.authenticated, state.signingOut], () => {
-  if (state.signingOut || !session.value?.authenticated)
+watch(() => [session.value?.authenticated, state.signingOut, state.redirecting], () => {
+  if (state.signingOut || state.redirecting || !session.value?.authenticated)
     availabilityRequest?.abort()
   void refreshAvailability()
 }, { flush: 'sync' })
