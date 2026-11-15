@@ -306,11 +306,12 @@ pub(super) async fn start(pid: u32) -> Result<Child> {
             .create(true)
             .append(true)
             .open("/tmp/cairn-slirp.log")?;
+        // Administrator host authority includes loopback. Disabling it in
+        // slirp also blocks UDP publication replies to local clients.
         let mut command = Command::new("/opt/cairn-docker/bin/slirp4netns");
         command
             .args([
                 "--configure",
-                "--disable-host-loopback",
                 "--enable-sandbox",
                 "--ready-fd=1",
                 &format!("--api-socket={API}"),

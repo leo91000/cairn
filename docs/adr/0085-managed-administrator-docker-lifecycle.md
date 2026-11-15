@@ -39,7 +39,12 @@ Record the host resolver's canonical target before hiding `/run`. For a target
 under `/run`, create only a private placeholder before binding the slirp resolver;
 this supports systemd-resolved symlinks without changing the host resolver.
 Slirp supplies egress and explicit IPv4 TCP/UDP host forwarding, whose lifecycle
-follows container start/stop/deletion. Before exec, its child clones a mount
+follows container start/stop/deletion. Administrator slirp permits host loopback
+access: disabling it also drops UDP replies to localhost publication clients.
+Administrator workloads already have host authority; the separate network owns
+firewall/interface lifecycle rather than restricting access to host services.
+Protected RootlessKit retains its host-loopback restriction.
+Before exec, its child clones a mount
 namespace and makes inherited mounts recursively slave. The pinned sandbox
 makes only its root private before detaching the old tree; shared submounts
 could otherwise propagate their removal into the supervisor's namespace.
