@@ -460,9 +460,7 @@ mod tests {
     async fn existing_epoch_applies_current_reserve_to_new_promises() {
         let (root, first, second, mut policy) = fixture();
         configure_disk(root.path(), 1_000_000);
-        let (total, free) = super::super::policy::physical_space(root.path()).unwrap();
-        policy.reserve_percent = 1;
-        policy.reserve_mi_b = free / MARGIN - 32;
+        let (total, _) = super::super::policy::physical_space(root.path()).unwrap();
         let save = |policy: &super::super::policy::Policy| {
             fs::write(
                 root.path().join("storage-policy.json"),
@@ -474,11 +472,17 @@ mod tests {
         let first_owner = reserve(root.path(), &first, 8 * MARGIN, &policy)
             .await
             .unwrap();
+        // Fix this epoch's envelope, rather than racing unrelated host writes
+        // between the test's free-space sample and the admission's sample.
+        let mut epoch: Epoch =
+            serde_json::from_slice(&fs::read(root.path().join(EPOCH)).unwrap()).unwrap();
+        epoch.capacity = 32 * MARGIN;
+        persist(&root.path().join(EPOCH), &epoch).unwrap();
         let original_capacity = epoch_capacity(root.path()).unwrap();
         let original_reserve = policy.reserve(total);
         // A stale caller must still use the newly persisted node policy.
         let old_policy = policy.clone();
-        policy.reserve_mi_b += 24;
+        policy.reserve_mi_b = original_reserve.div_ceil(MARGIN) + 24;
         save(&policy);
         assert_eq!(
             epoch_capacity(root.path()).unwrap(),
