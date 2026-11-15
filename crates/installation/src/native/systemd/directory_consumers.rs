@@ -293,37 +293,60 @@ fn inspect_namespace(namespace: File, device: String, root: PathBuf) -> io::Resu
     // The target may mount a procfs in a different PID namespace. Open its
     // mountinfo through pinned host procfs after setns, not through target /proc.
     std::thread::spawn(move || -> io::Result<bool> {
-        if unsafe { libc::unshare(libc::CLONE_FS) } != 0
-            || unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0
-        {
+        if unsafe { libc::unshare(libc::CLONE_FS) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        let fd = unsafe {
-            libc::openat(
-                host_proc.as_raw_fd(),
-                c"thread-self/mountinfo".as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut mounts = String::new();
-        unsafe { File::from_raw_fd(fd) }
-            .take(16 * 1024 * 1024 + 1)
-            .read_to_string(&mut mounts)?;
-        if mounts.len() > 16 * 1024 * 1024 {
-            return Err(io::Error::other(
-                "Namespace mount inventory exceeded its bound",
-            ));
-        }
-        for line in mounts.lines() {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.len() < 5 {
-                return Err(io::Error::other("Invalid mount inventory"));
+        let mut pending = vec![namespace];
+        let mut visited = std::collections::HashSet::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while let Some(namespace) = pending.pop() {
+            if std::time::Instant::now() >= deadline || visited.len() > 1024 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Namespace graph inspection exceeded its bound",
+                ));
             }
-            if fields[2] == device && unescape(fields[3])?.starts_with(&root) {
-                return Ok(true);
+            if !visited.insert((namespace.metadata()?.dev(), namespace.metadata()?.ino())) {
+                continue;
+            }
+            if unsafe { libc::ioctl(namespace.as_raw_fd(), 0xb703) } != libc::CLONE_NEWNS {
+                return Err(io::Error::other(
+                    "Retained namespace is not a mount namespace",
+                ));
+            }
+            if unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let fd = unsafe {
+                libc::openat(
+                    host_proc.as_raw_fd(),
+                    c"thread-self/mountinfo".as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut mounts = String::new();
+            unsafe { File::from_raw_fd(fd) }
+                .take(16 * 1024 * 1024 + 1)
+                .read_to_string(&mut mounts)?;
+            if mounts.len() > 16 * 1024 * 1024 {
+                return Err(io::Error::other(
+                    "Namespace mount inventory exceeded its bound",
+                ));
+            }
+            for line in mounts.lines() {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                if fields.len() < 5 {
+                    return Err(io::Error::other("Invalid mount inventory"));
+                }
+                if fields[2] == device && unescape(fields[3])?.starts_with(&root) {
+                    return Ok(true);
+                }
+            }
+            for reference in crate::native::block::holders::namespace_mounts(&mounts)? {
+                pending.push(reference.open()?);
             }
         }
         Ok(false)
@@ -351,6 +374,13 @@ fn remaining(source: &Source) -> io::Result<usize> {
     let mut namespaces = std::collections::BTreeMap::new();
     let mut remaining = 0;
     let current = std::process::id().to_string();
+    for reference in
+        crate::native::block::holders::namespace_mounts(&read(Path::new("/proc/self/mountinfo"))?)?
+    {
+        let namespace = reference.open()?;
+        let metadata = namespace.metadata()?;
+        namespaces.insert((metadata.dev(), metadata.ino()), namespace);
+    }
     for process in fs::read_dir("/proc")? {
         let process = process?;
         let name = process.file_name();
@@ -549,6 +579,87 @@ pub(in crate::native) async fn stop(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires CAP_SYS_ADMIN in a disposable mount namespace"]
+    fn persistent_mount_namespace_keeps_directory_ownership_without_tasks() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = tempfile::tempdir().unwrap();
+        let source_path = root.path().join("retained");
+        let bind_path = root.path().join("held");
+        let pin = root.path().join("namespace");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&bind_path).unwrap();
+        fs::write(source_path.join("work"), b"retained work").unwrap();
+        File::create(&pin).unwrap();
+        let source = Source::open_tree(&source_path, false).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let (release, finish) = std::sync::mpsc::channel();
+        let from = source_path.clone();
+        let target = bind_path.clone();
+        let task = std::thread::spawn(move || {
+            assert_eq!(
+                unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_FS) },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        std::ptr::null(),
+                        c"/".as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_REC | libc::MS_PRIVATE,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            let from = std::ffi::CString::new(from.as_os_str().as_bytes()).unwrap();
+            let target = std::ffi::CString::new(target.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        from.as_ptr(),
+                        target.as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_BIND,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            send.send(unsafe { libc::syscall(libc::SYS_gettid) })
+                .unwrap();
+            finish.recv().unwrap();
+        });
+        let tid = receive.recv().unwrap();
+        let namespace = std::ffi::CString::new(format!("/proc/{tid}/ns/mnt")).unwrap();
+        let pin_name = std::ffi::CString::new(pin.as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe {
+                libc::mount(
+                    namespace.as_ptr(),
+                    pin_name.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND,
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        release.send(()).unwrap();
+        task.join().unwrap();
+        assert!(!Path::new(&format!("/proc/self/task/{tid}")).exists());
+        // There is no surviving member task or namespace FD. Only the nsfs
+        // mount pins the private bind; the ownership fence must still find it.
+        let result = remaining(&source);
+        assert_eq!(unsafe { libc::umount2(pin_name.as_ptr(), 0) }, 0);
+        assert!(result.unwrap() > 0);
+        assert_eq!(
+            fs::read(source_path.join("work")).unwrap(),
+            b"retained work"
+        );
+    }
 
     #[test]
     fn independent_thread_descriptor_table_is_inventoried() {

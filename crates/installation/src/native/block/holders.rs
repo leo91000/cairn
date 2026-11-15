@@ -104,13 +104,13 @@ fn namespace_holds(path: &Path, device: u64) -> io::Result<bool> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct NamespaceMount {
+pub(in crate::native) struct NamespaceMount {
     path: std::path::PathBuf,
     inode: u64,
 }
 
 impl NamespaceMount {
-    fn open(&self) -> io::Result<fs::File> {
+    pub(in crate::native) fn open(&self) -> io::Result<fs::File> {
         let file = fs::File::open(&self.path).map_err(|error| {
             io::Error::other(format!(
                 "Cannot open retained mount namespace at {}: {error}",
@@ -128,7 +128,7 @@ impl NamespaceMount {
     }
 }
 
-fn namespace_mounts(mounts: &str) -> io::Result<Vec<NamespaceMount>> {
+pub(in crate::native) fn namespace_mounts(mounts: &str) -> io::Result<Vec<NamespaceMount>> {
     let mut paths = Vec::new();
     for line in mounts.lines() {
         let Some((fields, filesystem)) = line.split_once(" - ") else {

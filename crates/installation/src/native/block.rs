@@ -1,6 +1,6 @@
 //! Host-mounted ext4 over the same local journal and base blocks as VMs.
 mod closing;
-mod holders;
+pub(super) mod holders;
 
 use super::{atomic_write, workspace};
 use crate::{

@@ -168,3 +168,7 @@ L’export vérifie chaque fragment avant écriture ; les outils de système de 
 sont arrêtés et attendus en cas d’annulation ou de perte de réserve. Un refus
 retire la copie partielle non publiée après fermeture de son écrivain, tout en
 conservant la source retenue et les intentions nécessaires à la reprise.
+
+Les namespaces de montage épinglés par un montage nsfs sont parcourus même sans
+processus ni descripteur ouvert. Leur type et leur inode sont vérifiés avant
+chaque parcours ; une référence inconnue conserve les données et leur propriété.
