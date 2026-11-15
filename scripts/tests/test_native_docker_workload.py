@@ -74,6 +74,43 @@ class ComposeReadinessTests(unittest.TestCase):
 
 
 class AdministratorNetworkQualificationTests(unittest.TestCase):
+    def test_mount_inspection_observes_live_threads_after_the_leader_exits(self):
+        import select
+        import sys
+        import tempfile
+        import time
+        child = '''import ctypes, os, threading
+def worker():
+    print('ready', flush=True)
+    os.read(0, 1)
+    os._exit(0)
+threading.Thread(target=worker).start()
+ctypes.CDLL(None).pthread_exit(None)
+'''
+        with tempfile.TemporaryDirectory(prefix='native-thread-root-') as temporary:
+            marker = Path(temporary) / 'mounted'
+            marker.touch()
+            process = subprocess.Popen([sys.executable, '-c', child], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                self.assertTrue(select.select([process.stdout], [], [], 3)[0])
+                self.assertEqual(process.stdout.readline().strip(), 'ready')
+                leader = Path('/proc', str(process.pid), 'root') / marker.relative_to('/')
+                deadline = time.monotonic() + 3
+                while leader.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(leader.exists(), 'Leader did not exit in the owned fixture')
+                roots = network.live_thread_roots(process.pid)
+                self.assertTrue(any((root / marker.relative_to('/')).exists() for root in roots),
+                                'A live thread still sees the marker despite the missing leader root')
+            finally:
+                try:
+                    process.communicate('x', timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=3)
+                self.assertEqual(process.returncode, 0)
+
     def test_retained_bind_rejects_a_replaced_directory_after_mount_success(self):
         import os
         import tempfile

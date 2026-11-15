@@ -35,6 +35,22 @@ def bind_directory(descriptor, target):
         raise AssertionError("Retained directory was not restored at " + str(target))
 
 
+def live_thread_roots(pid):
+    # The leader's root may be unavailable, or its mount namespace different
+    # from another thread's. Inspect every observable live thread's view.
+    roots = []
+    for thread in Path("/proc", str(pid), "task").iterdir():
+        root = thread / "root"
+        try:
+            root.stat()
+        except FileNotFoundError:
+            continue
+        roots.append(root)
+    if not roots:
+        raise AssertionError("Managed Docker has no observable live thread roots: " + str(pid))
+    return roots
+
+
 def inside(arguments):
     attempt, binary, archive, go, tools = arguments
     assert Path("/proc/self/ns/mnt").stat().st_ino != Path("/proc/1/ns/mnt").stat().st_ino
@@ -115,10 +131,29 @@ def inside(arguments):
         parent = command(binary, "native-administrator-docker-ready")
         assert resolver.read_bytes() == resolver_before, "Docker changed the outer resolver"
         daemon_pid = int(Path("/run/cairn-docker/dockerd.pid").read_text())
-        inherited = Path("/proc", str(daemon_pid), "root/var/lib/foreign-run/mounted")
-        assert inherited.exists(), "Foreign mount was not inherited before the test"
+        relative_marker = foreign.relative_to("/") / "mounted"
+        roots = live_thread_roots(daemon_pid)
+        if not any((root / relative_marker).exists() for root in roots):
+            views = []
+            for root in roots[:16]:
+                try:
+                    with (root.parent / "mountinfo").open() as mounts:
+                        matches = [line.strip() for line in mounts if str(foreign) in line][:4]
+                    views.append(
+                        dict(thread=root.parent.name, root=os.readlink(root), mounts=matches)
+                    )
+                except FileNotFoundError:
+                    continue
+            raise AssertionError(
+                "Foreign mount was not inherited before the test: "
+                + json.dumps(
+                    dict(pid=daemon_pid, outerMarker=(foreign / "mounted").exists(), views=views)
+                )
+            )
         command("umount", str(foreign))
-        assert not inherited.exists(), "Docker retained another run's unmounted filesystem"
+        assert not any(
+            (root / relative_marker).exists() for root in live_thread_roots(daemon_pid)
+        ), "Docker retained another run's unmounted filesystem"
         client = "/opt/cairn-docker/bin/docker"
         env = dict(
             PATH="/usr/sbin:/usr/bin:/sbin:/bin",
