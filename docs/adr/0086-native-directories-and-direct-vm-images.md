@@ -29,7 +29,12 @@ locale facture toute cette capacité au budget partagé, même si le fichier res
 sparse ou si le guest effectue un discard. Le budget distingue ces promesses des
 octets physiquement alloués. Une époque d’admission fige l’enveloppe physique hors
 écritures des VM ; une surveillance séparée suspend ou arrête les écritures si la
-réserve physique devient indisponible. L’admission peut attendre malgré une faible
+réserve physique devient indisponible. Le démarrage surveille cette même réserve
+avant de lancer le VMM et toutes les 250 ms pendant l’attente du guest, puis
+jusqu’à la publication du lien vers l’exécution. Une observation invalide ou
+vieille de plus de cinq secondes échoue fermée ; le VMM est arrêté, récolté et
+son image synchronisée avant libération. La surveillance de l’exécution prend
+ensuite le relais. L’admission peut attendre malgré une faible
 occupation des images. Avant de refuser une promesse d’écriture demandée par une
 exécution, elle récupère les promesses des VM inactives éligibles, y compris la VM
 anonyme préparée et les conversations retenues. Chaque VMM est arrêté et son

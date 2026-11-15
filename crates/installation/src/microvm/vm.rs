@@ -361,6 +361,35 @@ fn auth_relay(
     })
 }
 
+/// The VMM can allocate its sparse image before an attempt has a socket or
+/// suspension record. Keep this phase under the same current capacity policy.
+async fn protect_startup<T>(
+    state: &Path,
+    operation: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    async fn check(state: &Path) -> Result<()> {
+        if crate::storage::image::capacity_blocked(state).await? {
+            return Err(Error::new(
+                507,
+                "VM startup stopped to preserve storage reserve.",
+            ));
+        }
+        Ok(())
+    }
+    check(state).await?;
+    let monitor = async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            check(state).await?;
+        }
+    };
+    tokio::select! {
+        biased;
+        result = monitor => result,
+        result = operation => result,
+    }
+}
+
 impl Vm {
     pub(super) fn bind_stop(&self, stop: &crate::storage::runtime::AttemptStop) -> Result<()> {
         if stop.execution.is_cancelled() {
@@ -421,10 +450,13 @@ impl Vm {
             memory_mib: resources.memory_mi_b,
         };
         let result = tokio::select! {
-            result = vm.launch(state, (&image, &current_kernel, &current_control), &id, &resources, slot, &mut timing) => result,
+            result = protect_startup(state, vm.launch(state, (&image, &current_kernel, &current_control), &id, &resources, slot, &mut timing)) => result,
             () = stop.cancelled() => Err(Error::unavailable("VM preparation stopped.")),
         };
         if let Err(error) = result {
+            // A failed boot has no running attempt to finish gracefully. Stop
+            // its exact child immediately, then reap/flush before releasing it.
+            vm.closing = true;
             vm.shutdown().await;
             return Err(Error::new(
                 error.status,
@@ -703,17 +735,25 @@ impl Vm {
         stop: CancellationToken,
     ) -> Result<i32> {
         let mut timing = Operation::new("guest_prepare", plan.run_id(), "clock_and_auth");
-        super::suspension::prepare_attempt(state, plan.id(), self.id()).await?;
-        self.synchronize_clock().await?;
-        let record = AttemptRecord {
-            vm_id: self.id().to_owned(),
-            run_id: plan.run_id().to_owned(),
-        };
-        atomic_write(
-            &state.join(format!("{}.vm.json", plan.id())),
-            &serde_json::to_vec(&record)?,
-        )
-        .await?;
+        let prepared = protect_startup(state, async {
+            super::suspension::prepare_attempt(state, plan.id(), self.id()).await?;
+            self.synchronize_clock().await?;
+            let record = AttemptRecord {
+                vm_id: self.id().to_owned(),
+                run_id: plan.run_id().to_owned(),
+            };
+            atomic_write(
+                &state.join(format!("{}.vm.json", plan.id())),
+                &serde_json::to_vec(&record)?,
+            )
+            .await?;
+            Ok(())
+        })
+        .await;
+        if let Err(error) = prepared {
+            self.closing = true;
+            return Err(error);
+        }
         let relay_path = self.jail.join("v.sock_5201");
         let listener = UnixListener::bind(&relay_path)?;
         std::os::unix::fs::chown(&relay_path, Some(self.uid), Some(self.uid))?;
@@ -1020,6 +1060,73 @@ mod tests {
     use super::*;
     use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
+
+    async fn set_startup_policy(state: &Path, blocked: bool) {
+        let (total, _) = crate::storage::policy::physical_space(state).unwrap();
+        let reserve = if blocked { total / 1_048_576 + 1 } else { 64 };
+        atomic_write(
+            &state.join("storage-policy.json"),
+            &serde_json::to_vec(&json!({ "reserveMiB": reserve, "reservePercent": 1 })).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_refuses_pressure_before_starting_the_vmm() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), true).await;
+        let started = AtomicBool::new(false);
+        let result = protect_startup(root.path(), async {
+            started.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert_eq!(result.unwrap_err().status, 507);
+        assert!(!started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn startup_observes_policy_changes_before_any_attempt_record_exists() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), false).await;
+        let (entered, running) = tokio::sync::oneshot::channel();
+        let startup = protect_startup(root.path(), async {
+            entered.send(()).unwrap();
+            std::future::pending::<Result<()>>().await
+        });
+        let change_policy = async {
+            running.await.unwrap();
+            set_startup_policy(root.path(), true).await;
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(startup, change_policy)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().status, 507);
+        assert!(!root.path().join("attempt.vm.json").exists());
+    }
+
+    #[tokio::test]
+    async fn startup_completes_under_current_capacity_and_refuses_invalid_observations() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), false).await;
+        assert_eq!(
+            protect_startup(root.path(), async { Ok(42) })
+                .await
+                .unwrap(),
+            42
+        );
+        atomic_write(&root.path().join("storage-policy.json"), b"invalid")
+            .await
+            .unwrap();
+        assert!(
+            protect_startup(root.path(), async { Ok(42) })
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn resumed_disks_use_the_current_guest_image_without_changing_workspace_bytes() {

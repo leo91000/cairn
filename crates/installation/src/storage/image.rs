@@ -792,6 +792,16 @@ pub(crate) async fn enforce_limits(
     if stop.is_cancelled() {
         return Err(Error::conflict("VM execution stopped."));
     }
+    let blocked = capacity_blocked(state).await?;
+    if stop.is_cancelled() {
+        return Err(Error::conflict("VM execution stopped."));
+    }
+    suspension::set_reason(state, attempt, &Reason::Storage, blocked).await?;
+    Ok(())
+}
+
+/// Shared by startup protection and the bound attempt's suspension controller.
+pub(crate) async fn capacity_blocked(state: &Path) -> Result<bool> {
     let observing = state.to_owned();
     let worker = tokio::task::spawn_blocking(move || -> Result<bool> {
         let policy = match std::fs::read(observing.join("storage-policy.json")) {
@@ -814,15 +824,10 @@ pub(crate) async fn enforce_limits(
         Ok(free <= policy.reserve(total)
             || crate::microvm::budget::disk_bytes(&observing)? >= limit)
     });
-    let blocked = tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+    tokio::time::timeout(std::time::Duration::from_secs(5), worker)
         .await
         .map_err(|_| Error::unavailable("VM disk observations are stale; execution must stop."))?
-        .map_err(Error::internal)??;
-    if stop.is_cancelled() {
-        return Err(Error::conflict("VM execution stopped."));
-    }
-    suspension::set_reason(state, attempt, &Reason::Storage, blocked).await?;
-    Ok(())
+        .map_err(Error::internal)?
 }
 
 #[cfg(test)]
