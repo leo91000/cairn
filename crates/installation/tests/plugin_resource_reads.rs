@@ -10,7 +10,10 @@ use cairn_installation::{
 };
 use common::{AgentFixture, relay_fixture};
 use serde_json::{Value, json};
-use std::sync::atomic::Ordering;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[path = "fixtures/plugin_grants.rs"]
 mod fixture;
@@ -306,6 +309,126 @@ async fn revoking_access_during_a_read_stops_its_plugin_calls_and_result() {
     let (status, refused) = poll(&f, Some(MEMBER), &operation).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
     assert_eq!(refused["error"], DENIED);
+}
+
+/// Forward the real fixture Beacon response, but hold its pre-send membership
+/// check. No worker deadline is changed: revocation happens before releasing it.
+async fn hold_pre_send_policy(
+    f: &Fixture,
+) -> (
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+    tokio::task::JoinHandle<()>,
+) {
+    let identity_path = f.s.config.data_dir.join("installation-relay/identity.json");
+    let mut identity: Value =
+        serde_json::from_slice(&tokio::fs::read(&identity_path).await.unwrap()).unwrap();
+    let previous = text(&identity, "origin").to_owned();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (arrived, resume) = (entered.clone(), release.clone());
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let (origin, server) = common::serve_locally(axum::Router::new().fallback(axum::routing::get(
+        move |request: axum::extract::Request| {
+            let (previous, lookups, arrived, resume) = (
+                previous.clone(),
+                lookups.clone(),
+                arrived.clone(),
+                resume.clone(),
+            );
+            async move {
+                let response = reqwest::Client::new()
+                    .get(format!("{previous}{}", request.uri()))
+                    .headers(request.headers().clone())
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = response.bytes().await.unwrap();
+                // Admission (2), pre-enqueue (1), worker/read/invoke (2),
+                // capability entry (1), then the HTTP pre-send check (1).
+                if request.uri().path().ends_with("/task-authors")
+                    && lookups.fetch_add(1, Ordering::SeqCst) + 1 == 7
+                {
+                    assert_eq!(status, StatusCode::OK);
+                    arrived.notify_one();
+                    resume.notified().await;
+                }
+                (status, body)
+            }
+        },
+    )))
+    .await;
+    identity["origin"] = origin.into();
+    tokio::fs::write(identity_path, serde_json::to_vec(&identity).unwrap())
+        .await
+        .unwrap();
+    (entered, release, server)
+}
+
+#[tokio::test]
+async fn revoking_the_named_agents_grant_during_pre_send_policy_prevents_the_http_effect() {
+    // List and resolve share the same grant authority at the effect boundary.
+    for resolve in [false, true] {
+        let f = Fixture::new().await;
+        f.marker("live-parent").await;
+        let agent = reviewer(&f).await;
+        let (entered, release, server) = hold_pre_send_policy(&f).await;
+        let path = if resolve {
+            resolve_path(&f, Some(&agent))
+        } else {
+            list_path(&f, Some(&agent))
+        };
+        let operation = start(&f, Some(MEMBER), &path).await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), entered.notified())
+            .await
+            .expect("the membership check immediately before HTTP is held");
+        assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+
+        // Revoke through the real owner GET/PUT routes while Beacon already has
+        // a valid member response to return. Local access/membership stay valid.
+        let grants_path = format!("/api/agents/{agent}/plugin-grants");
+        let (status, grants) = get(&f, None, &grants_path).await;
+        assert_eq!(status, StatusCode::OK, "{grants}");
+        let app = cairn_installation::http::router(f.s.clone()).await.unwrap();
+        let revoked_grants = json!({
+            "agentId": agent,
+            "revision": grants["revision"],
+            "grants": [],
+            "runCredentialInstances": [],
+        });
+        let request = common::request("PUT", &grants_path)
+            .extension(InstallationIdentity::trusted(
+                InstallationRole::Owner,
+                "fixture-owner",
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&revoked_grants).unwrap()))
+            .unwrap();
+        let response = common::send(&app, request).await;
+        let status = response.status();
+        let revoked = common::read_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{revoked}");
+        release.notify_one();
+
+        let read = finished(&f, &operation).await;
+        assert_eq!(read["state"], "failed", "{read}");
+        assert!(read["result"].is_null(), "{read}");
+        assert_eq!(
+            f.posts.load(Ordering::SeqCst),
+            0,
+            "revocation must prevent the external request, not only refuse its result (resolve={resolve})"
+        );
+        for path in [
+            format!("/api/plugins/packages/operations/{operation}"),
+            format!("/api/plugins/resources/operations/{operation}"),
+        ] {
+            let (status, refused) = get(&f, Some(MEMBER), &path).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+            assert!(refused.get("result").is_none(), "{refused}");
+        }
+        server.abort();
+    }
 }
 
 #[tokio::test]

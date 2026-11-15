@@ -125,6 +125,9 @@ async fn instance(
 
     // Refresh publication and HTTP pre-send checks also need the expected
     // instance: revoking a plugin grant does not change its settings revision.
+    // A named agent retains its grant/package authority even when the caller is
+    // a person or public MCP client, without an installation bearer. Management
+    // checks this snapshot locally after asynchronous policy checks and waits.
     let authority = match authority {
         Some(authority) => {
             let snapshot = match (agent, authority.bearer.as_deref()) {
@@ -134,7 +137,10 @@ async fn instance(
                     )
                     .await?,
                 ),
-                _ => None,
+                (Some(agent), None) => Some(
+                    super::grant_authorization::Snapshot::capture(s, agent, None, &package).await?,
+                ),
+                (None, _) => None,
             };
             let managed = management::Authority::resource_read(authority, connection.clone());
             Some(match snapshot {
@@ -346,5 +352,80 @@ impl Read {
             }
         }
         Err(invalid())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::MAIN_AGENT_ID,
+        plugin_grant_fixture::{Fixture, contribution, support},
+    };
+
+    #[tokio::test]
+    async fn named_agent_authority_survives_the_oauth_lock_wait() {
+        for revoke_package in [false, true] {
+            let f = Fixture::new().await;
+            f.set(json!([contribution("hook", "message", support())]))
+                .await;
+            let input: ListPluginResourcesInput = serde_json::from_value(json!({
+                "pluginId": "grant-probe",
+                "instanceId": f.instance,
+                "resourceType": "channel",
+                "agentId": MAIN_AGENT_ID,
+            }))
+            .unwrap();
+            let owner = Authority::human(&f.s, "fixture-owner").await.unwrap();
+            let read = prepare_list(&f.s, &input, Some(MAIN_AGENT_ID), Some(owner))
+                .await
+                .unwrap();
+            let Scope::Managed(_, authority) = &read.scope else {
+                panic!("the read retains the caller's authority");
+            };
+            let connection = connections::get(&f.s, "grant-probe", &f.instance)
+                .await
+                .unwrap();
+            f.s.vault
+                .set(
+                    &connections::credential_key(&f.instance),
+                    &json!({ "token": "synthetic-resource-credential" }),
+                )
+                .await
+                .unwrap();
+            let lock = f.s.plugins.oauth_flows.lock(&f.instance);
+            let held = lock.lock().await;
+            let access =
+                super::super::oauth::access_token_managed(&f.s, &connection, Some(authority));
+            tokio::pin!(access);
+            assert!(futures_util::poll!(&mut access).is_pending());
+
+            if revoke_package {
+                f.s.store
+                    .transaction(|db| {
+                        db.0.execute(
+                            "UPDATE plugin_approvals SET digest=?1 WHERE plugin_id='grant-probe'",
+                            ["0".repeat(64)],
+                        )?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            } else {
+                f.remove_for(MAIN_AGENT_ID).await;
+            }
+            drop(held);
+
+            let result = access.await;
+            assert!(
+                result.is_err(),
+                "OAuth must refuse the revoked named-agent authority after waiting (package={revoke_package})"
+            );
+            assert_eq!(
+                result.unwrap_err().status,
+                if revoke_package { 409 } else { 403 }
+            );
+            f.s.shutdown.cancel();
+        }
     }
 }
