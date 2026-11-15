@@ -59,6 +59,7 @@ async fn erase_native_attempts(
     }
     crate::storage::retirement::seed_attempts(&controller.state, &controller.data, run, known)
         .await?;
+    let mut identities = Vec::new();
     let mut entries = tokio::fs::read_dir(&controller.state).await?;
     while let Some(entry) = entries.next_entry().await? {
         if entry
@@ -90,7 +91,7 @@ async fn erase_native_attempts(
             return Err(Error::conflict("A native attempt is still active."));
         }
         atomic_write(&controller.file(&id, "stopped"), b"1").await?;
-        for extension in ["log", "lease", "terminal"] {
+        for extension in ["active", "vm.json", "log", "lease", "terminal"] {
             require_removed(tokio::fs::remove_file(controller.file(&id, extension)).await)?;
         }
         require_removed(
@@ -103,6 +104,7 @@ async fn erase_native_attempts(
             )
             .await,
         )?;
+        identities.push(entry.path());
         require_removed(tokio::fs::remove_dir_all(controller.state.join("roots").join(&id)).await)?;
         require_removed(
             tokio::fs::remove_file(
@@ -123,6 +125,15 @@ async fn erase_native_attempts(
             tokio::fs::File::open(directory).await?.sync_all().await?;
         }
     }
+    // Keep run ownership until private output and plan removals are durable.
+    // A failed erase must remain discoverable even without request hints.
+    for identity in identities {
+        require_removed(tokio::fs::remove_file(identity).await)?;
+    }
+    tokio::fs::File::open(&controller.state)
+        .await?
+        .sync_all()
+        .await?;
     Ok(())
 }
 
@@ -5313,6 +5324,14 @@ pub(crate) mod tests {
             tokio::fs::write(controller.file(&attempt, "run"), run.as_bytes())
                 .await
                 .unwrap();
+            for extension in ["active", "vm.json", "lease", "terminal"] {
+                tokio::fs::write(
+                    controller.file(&attempt, extension),
+                    b"private attempt metadata",
+                )
+                .await
+                .unwrap();
+            }
             let roots = controller.state.join("roots");
             private_dir(&roots).await.unwrap();
             let directory = roots.join(&attempt);
@@ -5345,6 +5364,13 @@ pub(crate) mod tests {
                 !receipt.exists(),
                 "failed cleanup was permanently acknowledged"
             );
+            assert_eq!(
+                tokio::fs::read_to_string(controller.file(&attempt, "run"))
+                    .await
+                    .unwrap(),
+                run,
+                "failed cleanup lost its retry ownership"
+            );
             if bad_log {
                 tokio::fs::remove_dir(controller.file(&attempt, "log"))
                     .await
@@ -5353,7 +5379,7 @@ pub(crate) mod tests {
                 tokio::fs::remove_file(&directory).await.unwrap();
             }
             assert_eq!(
-                route(controller, request(&path, &body))
+                route(controller.clone(), request(&path, &body))
                     .await
                     .unwrap()
                     .status(),
@@ -5361,6 +5387,13 @@ pub(crate) mod tests {
             );
             assert!(receipt.exists());
             assert!(!directory.exists());
+            for extension in ["active", "vm.json", "run", "log", "lease", "terminal"] {
+                assert!(
+                    !controller.file(&attempt, extension).exists(),
+                    "retired attempt retained {extension}"
+                );
+            }
+            assert!(controller.file(&attempt, "stopped").exists());
         }
     }
 

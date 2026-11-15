@@ -1120,7 +1120,7 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 assert not (state / 'native' / current / 'docker-runtime').exists()
                 for attempt in [created, resumed_cycle]:
                     for suffix in ['active', 'run', 'vm.json', 'log', 'terminal']:
-                        assert not (state / (attempt + '.' + suffix)).exists(), 'Retired technical attempt survived.'
+                        assert not (state / (attempt + '.' + suffix)).exists(), f'Retired technical attempt retained {suffix}.'
                 assert not (state / 'disks' / current / 'lazy').exists()
                 assert not (state / 'disks' / current / 'data.ext4').exists()
                 repeated = api('/disks/' + current + '/delete', deletion)
