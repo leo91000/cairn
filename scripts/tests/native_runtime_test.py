@@ -446,7 +446,23 @@ def main():
             command('systemd-run', '--quiet', '--collect', '--service-type=exec', '--unit=' + supervisor,
                 '--property=LimitNOFILE=1024:524288',
                 *['--setenv=' + key + '=' + value for key, value in environment.items()], str(binary), 'native-controller')
-            eventually(lambda: api('/health', method='GET').get('backend') == 'native')
+            try:
+                eventually(lambda: api('/health', method='GET').get('backend') == 'native')
+            except Exception:
+                diagnostics = []
+                for args in [('systemctl', 'show', supervisor,
+                              '--property=ActiveState,SubState,Result,ExecMainStatus'),
+                             ('journalctl', '--no-pager', '--output=cat', '--lines=80', '--unit=' + supervisor)]:
+                    result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+                    diagnostics.append(result.stdout + result.stderr)
+                diagnostic_text = '\n'.join(diagnostics)
+                for context in contexts.values():
+                    diagnostic_text = redact_fixture_diagnostics(diagnostic_text, token, context)
+                print(diagnostic_text, file=sys.stderr)
+                evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
+                evidence.mkdir(parents=True, exist_ok=True)
+                (evidence / 'controller-start-failure.txt').write_text(diagnostic_text)
+                raise
             assert (state / 'controller.sock').stat().st_mode & 0o777 == 0o600
             pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
             limits = Path('/proc/' + pid + '/limits').read_text().splitlines()

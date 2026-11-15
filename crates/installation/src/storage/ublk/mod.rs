@@ -410,15 +410,35 @@ pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<b
         }
         let attachment =
             fs::symlink_metadata(state.join("native-block").join(run).join("root/disk.blk"))?;
-        let address = fs::read_to_string(format!("/sys/class/block/ublkb{id}/dev"))?;
-        let (major, minor) = address
-            .trim()
-            .split_once(':')
-            .ok_or_else(|| stdio::Error::other("Invalid native block identity"))?;
-        let expected = libc::makedev(
-            major.parse().map_err(stdio::Error::other)?,
-            minor.parse().map_err(stdio::Error::other)?,
-        );
+        // STOP removes the gendisk before DEL removes the nonce-owned control
+        // device. GET_PARAMS then reports a zero disk address; older receipts
+        // retain that address only in the private block attachment.
+        let mut parameters = libublk::sys::ublk_params {
+            len: std::mem::size_of::<libublk::sys::ublk_params>() as u32,
+            types: libublk::sys::UBLK_PARAM_TYPE_DEVT,
+            ..Default::default()
+        };
+        control.get_params(&mut parameters).map_err(error)?;
+        let address = attachment.rdev();
+        let active_address = if parameters.devt.disk_major == 0 {
+            match fs::metadata(format!(
+                "/sys/dev/block/{}:{}",
+                libc::major(address),
+                libc::minor(address)
+            )) {
+                Ok(_) => true,
+                Err(error) if error.kind() == stdio::ErrorKind::NotFound => false,
+                Err(error) => return Err(error),
+            }
+        } else {
+            true
+        };
+        let expected = retained_device_address(
+            &parameters,
+            control.dev_info().state,
+            address,
+            active_address,
+        )?;
         if !attachment.file_type().is_block_device() || attachment.rdev() != expected {
             return Err(stdio::Error::other(
                 "Native block attachment differs from its owned device",
@@ -441,6 +461,32 @@ pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<b
         }
     }
     Ok(found)
+}
+
+fn retained_device_address(
+    parameters: &libublk::sys::ublk_params,
+    state: u16,
+    attachment: u64,
+    active_address: bool,
+) -> stdio::Result<u64> {
+    if parameters.types & libublk::sys::UBLK_PARAM_TYPE_DEVT == 0 {
+        return Err(stdio::Error::other("Native device address is unavailable"));
+    }
+    if parameters.devt.disk_major == 0 {
+        if u32::from(state) != libublk::sys::UBLK_S_DEV_DEAD
+            || active_address
+            || libc::major(attachment) == 0
+        {
+            return Err(stdio::Error::other(
+                "Stopped native device address cannot be verified",
+            ));
+        }
+        return Ok(attachment);
+    }
+    Ok(libc::makedev(
+        parameters.devt.disk_major,
+        parameters.devt.disk_minor,
+    ))
 }
 
 /// Native recovery owns both disk leases and has requested workload termination.
@@ -787,6 +833,37 @@ fn mount(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_device_identity_does_not_require_a_live_sysfs_block_entry() {
+        let mut parameters = libublk::sys::ublk_params::default();
+        let attachment = libc::makedev(259, 17);
+        let dead = libublk::sys::UBLK_S_DEV_DEAD as u16;
+        assert!(retained_device_address(&parameters, dead, attachment, false).is_err());
+        parameters.types = libublk::sys::UBLK_PARAM_TYPE_DEVT;
+        assert_eq!(
+            retained_device_address(&parameters, dead, attachment, false).unwrap(),
+            attachment
+        );
+        assert!(retained_device_address(&parameters, dead, attachment, true).is_err());
+        assert!(
+            retained_device_address(
+                &parameters,
+                libublk::sys::UBLK_S_DEV_LIVE as u16,
+                attachment,
+                false
+            )
+            .is_err()
+        );
+        parameters.devt.disk_major = 259;
+        parameters.devt.disk_minor = 17;
+        assert_eq!(
+            retained_device_address(&parameters, dead, attachment, true).unwrap(),
+            attachment
+        );
+        parameters.types = 0;
+        assert!(retained_device_address(&parameters, dead, attachment, false).is_err());
+    }
 
     #[test]
     fn stale_native_attachment_without_a_receipt_has_no_owned_device() {
