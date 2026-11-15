@@ -192,6 +192,12 @@ test('OpenCode Auto runs a model on the first connection, then the next one at i
     await region.screenshot({ path: testInfo.outputPath(`opencode-order-${width}.png`), animations: 'disabled' })
   }
 
+  // Establish usage before the synthetic limit. A first healthy reading after
+  // exhaustion would legitimately recover the same Go account instead of Zen.
+  await workspace.api('/api/accounts/refresh', 'POST')
+  const refreshedGo = (await workspace.api('/api/accounts')).accounts.find((account: { id: string }) => account.id === go.id)
+  expect(refreshedGo.remainingPercent).toBe(15)
+
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
     id: crypto.randomUUID(),
@@ -210,8 +216,10 @@ test('OpenCode Auto runs a model on the first connection, then the next one at i
   }, { timeout: 60000 }).toBe('succeeded')
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   const statuses = (await workspace.api(`/api/runs/${detail.run.id}/events`)).filter((e: { type: string }) => e.type === 'status').map((e: { text: string }) => e.text)
-  expect(statuses).toContain('Ling 3.1 Flash Free via OpenCode Go')
-  expect(statuses.indexOf('Ling 3.1 Flash Free via OpenCode Zen')).toBeGreaterThan(statuses.indexOf('Ling 3.1 Flash Free via OpenCode Go'))
+  expect(statuses.filter((status: string) => status.startsWith('Ling 3.1 Flash Free via '))).toEqual([
+    'Ling 3.1 Flash Free via OpenCode Go',
+    'Ling 3.1 Flash Free via OpenCode Zen',
+  ])
   expect(detail.run.accountId).toBe(zen.id)
 
   await page.goto(workspacePath(`/chats/${chat.id}`))

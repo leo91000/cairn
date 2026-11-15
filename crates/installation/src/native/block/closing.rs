@@ -224,6 +224,12 @@ mod tests {
             reserve_percent: 1,
             ..storage::policy::Policy::default()
         };
+        // Consolidation reads the node policy independently of the volume context.
+        std::fs::write(
+            state.join("storage-policy.json"),
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
         drop(
             storage::runtime::create(
                 &owner.directory.join("lazy"),
