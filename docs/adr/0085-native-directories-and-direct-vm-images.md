@@ -134,3 +134,10 @@ facturé pendant l’export du nouveau `image.partial`. Sa présence ne réduit 
 promesse de capacité de remplacement. Le reçu de réservation distingue cet inode
 historique de l’inode exporté : le crédit du nouveau fichier suit son renommage,
 sans double promesse ni crédit des octets qui doivent encore coexister.
+
+La préparation VM surveille la réserve physique courante et le budget partagé
+avant et pendant l’export de journal, le formatage, le fsck et la croissance.
+L’export vérifie chaque fragment avant écriture ; les outils de système de fichiers
+sont arrêtés et attendus en cas d’annulation ou de perte de réserve. Un refus
+retire la copie partielle non publiée après fermeture de son écrivain, tout en
+conservant la source retenue et les intentions nécessaires à la reprise.

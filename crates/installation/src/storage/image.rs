@@ -31,6 +31,172 @@ struct ConversionProof {
     digest: String,
 }
 
+const INVALID_FILESYSTEM: &str = "invalid_local_filesystem";
+
+#[derive(Clone)]
+struct Preparation {
+    directory: PathBuf,
+    context: Value,
+    stop: CancellationToken,
+}
+
+impl Preparation {
+    fn new(directory: &Path, context: &Value, stop: &CancellationToken) -> Self {
+        Self {
+            directory: directory.to_owned(),
+            context: context.clone(),
+            stop: stop.clone(),
+        }
+    }
+
+    fn state(&self) -> Option<&Path> {
+        if let Some(parent) = self.directory.parent()
+            && super::environment::ROOTS
+                .iter()
+                .any(|name| parent.file_name().is_some_and(|value| value == *name))
+        {
+            return parent.parent();
+        }
+        self.directory
+            .ancestors()
+            .find(|path| path.join(crate::microvm::budget::FILE).is_file())
+    }
+
+    fn check_sync(&self, incoming: u64) -> Result<()> {
+        if self.stop.is_cancelled() {
+            return Err(Error::unavailable(
+                "VM image preparation stopped; source retained.",
+            ));
+        }
+        let state = self.state();
+        let policy =
+            match std::fs::read(state.unwrap_or(&self.directory).join("storage-policy.json")) {
+                Ok(bytes) => super::policy::from_persisted(&bytes)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    super::policy::for_node(&self.context["policy"])?
+                }
+                Err(error) => return Err(error.into()),
+            };
+        let pending = super::cache::pending_write_bytes();
+        let margin = 1_048_576_u64.saturating_add(incoming);
+        let (total, free) = super::policy::physical_space(&self.directory)?;
+        if free.saturating_sub(pending) <= policy.reserve(total).saturating_add(margin) {
+            return Err(Error::new(
+                507,
+                "Physical reserve prevents VM image preparation; source retained.",
+            ));
+        }
+        if let Some(state) = state {
+            let configured = match std::fs::read(state.join(crate::microvm::budget::FILE)) {
+                Ok(bytes) => serde_json::from_slice::<crate::microvm::budget::Budget>(&bytes)?
+                    .limits
+                    .disk_mi_b
+                    .saturating_mul(1_048_576),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => u64::MAX,
+                Err(error) => return Err(error.into()),
+            };
+            // A live reservation already charges all future writable bytes;
+            // only unreserved callers need to debit the next export chunk.
+            let charged = if super::reservation::reserved(&self.directory)? {
+                crate::microvm::budget::committed_disk_bytes(state)?
+            } else {
+                crate::microvm::budget::disk_bytes(state)?.saturating_add(incoming)
+            };
+            let limit = configured.min(super::reservation::epoch_capacity(state)?);
+            if charged.saturating_add(pending).saturating_add(1_048_576) > limit {
+                return Err(Error::new(
+                    507,
+                    "Shared capacity prevents VM image preparation; source retained.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn check(&self, incoming: u64) -> Result<()> {
+        let sample = self.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || sample.check_sync(incoming)),
+        )
+        .await
+        .map_err(|_| {
+            Error::unavailable("VM preparation capacity observations are stale; source retained.")
+        })?
+        .map_err(Error::internal)?
+    }
+
+    async fn command(&self, binary: &str, args: &[&str]) -> Result<()> {
+        self.check(0).await?;
+        // These fixed filesystem utilities do not launch user commands. Keep
+        // their exact Child until reaped after cancellation or reserve loss.
+        let mut child = tokio::process::Command::new(binary)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(180));
+        tokio::pin!(deadline);
+        let outcome = loop {
+            tokio::select! {
+                () = self.stop.cancelled() => {
+                    break Err(Error::unavailable("VM image preparation stopped; source retained."));
+                },
+                () = &mut deadline => {
+                    break Err(Error::unavailable("VM filesystem preparation timed out; source retained."));
+                },
+                result = child.wait() => {
+                    break result.map_err(Into::into);
+                },
+                _ = interval.tick() => {
+                    if let Err(error) = self.check(0).await {
+                        break Err(error);
+                    }
+                }
+            }
+        };
+        let status = match outcome {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.start_kill();
+                loop {
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                        .await
+                    {
+                        Ok(result) => {
+                            result?;
+                            break;
+                        }
+                        Err(_) => tracing::warn!(
+                            binary,
+                            "VM preparation writer retirement pending; ownership and source retained"
+                        ),
+                    }
+                }
+                return Err(error);
+            }
+        };
+        self.check(0).await?;
+        if status.success() || binary == "e2fsck" && status.code() == Some(1) {
+            return Ok(());
+        }
+        tracing::warn!(binary, %status, "VM filesystem preparation failed; source retained");
+        if binary == "e2fsck" {
+            return Err(Error::coded(
+                409,
+                INVALID_FILESYSTEM,
+                "Local image filesystem check failed; source retained.",
+            ));
+        }
+        Err(Error::unavailable(format!(
+            "VM filesystem preparation failed: {binary}; source retained."
+        )))
+    }
+}
+
 pub fn exists(directory: &Path) -> bool {
     directory.join(RECORD).is_file()
 }
@@ -179,6 +345,7 @@ pub(crate) async fn prepare_locked(
         super::bootstrap::recover_resize_source(directory, context, "vm").await?;
     }
     let image = directory.join("data.ext4");
+    let preparation = Preparation::new(directory, context, stop);
     let mut record = if exists(directory) {
         read_record(directory).await?
     } else if super::runtime::exists(directory) {
@@ -233,7 +400,17 @@ pub(crate) async fn prepare_locked(
         let temporary = directory.join("image.partial");
         let image_present = regular_image_present(&image).await?;
         let temporary_present = regular_image_present(&temporary).await?;
-        if !image_present || check(&image).await.is_err() {
+        let rebuild = if image_present {
+            match check(&image, &preparation).await {
+                Ok(()) => false,
+                Err(error) if error.code.as_deref() == Some(INVALID_FILESYSTEM) => true,
+                Err(error) => return Err(error),
+            }
+        } else {
+            true
+        };
+        if rebuild {
+            preparation.check(0).await?;
             let policy = super::policy::for_node(&context["policy"])?;
             let (total, free) = if super::reservation::reserved(directory)? {
                 super::policy::physical_space(directory)?
@@ -265,7 +442,13 @@ pub(crate) async fn prepare_locked(
                 .await?;
             file.set_len(record.size).await?;
             drop(file);
-            crate::microvm::host::command("mkfs.ext4", &["-q", "-F", path(&temporary)?]).await?;
+            if let Err(error) = preparation
+                .command("mkfs.ext4", &["-q", "-F", path(&temporary)?])
+                .await
+            {
+                remove_partial(directory, &temporary).await?;
+                return Err(error);
+            }
             tokio::fs::File::open(&temporary).await?.sync_all().await?;
             tokio::fs::rename(&temporary, &image).await?;
         }
@@ -295,7 +478,7 @@ pub(crate) async fn prepare_locked(
             "VM conversion proof is missing; recover the retained legacy source before continuing.",
         ));
     }
-    check(&image).await?;
+    check(&image, &preparation).await?;
     if size > actual.len() {
         tokio::fs::OpenOptions::new()
             .write(true)
@@ -305,9 +488,10 @@ pub(crate) async fn prepare_locked(
             .await?;
     }
     if size > record.size || actual.len() != record.size {
-        crate::microvm::host::command("resize2fs", &[path(&image)?]).await?;
+        preparation.command("resize2fs", &[path(&image)?]).await?;
         record.size = size;
     }
+    preparation.check(0).await?;
     persist(directory, &record).await?;
     match tokio::fs::remove_file(directory.join("image.pending.json")).await {
         Ok(()) => tokio::fs::File::open(directory).await?.sync_all().await?,
@@ -422,11 +606,17 @@ async fn migrate_journal(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    let preparation = Preparation::new(directory, requested, stop);
+    preparation.check(0).await?;
     let output = temporary.clone();
-    let copy_stop = stop.clone();
-    let size = tokio::task::spawn_blocking(move || -> Result<u64> {
+    let copy_stop = stop.child_token();
+    let _cancel_export_on_drop = copy_stop.clone().drop_guard();
+    let copy_preparation = Preparation::new(directory, requested, &copy_stop);
+    let exported = tokio::task::spawn_blocking(move || -> Result<u64> {
         let source = super::LazyDisk::open(&root)?;
-        super::export(&source, &output)?;
+        super::device::export_checked::<Error>(&source, &output, |incoming| {
+            copy_preparation.check_sync(incoming)
+        })?;
         let target = LocalDisk::open(&output, false)?;
         // Verify every logical byte, including zero ranges and the final tail.
         // This also forces legacy block checksums before changing the format.
@@ -434,6 +624,7 @@ async fn migrate_journal(
         let mut copied = vec![0; original.len()];
         let mut offset = 0;
         while offset < source.size() {
+            copy_preparation.check_sync(0)?;
             if copy_stop.is_cancelled() {
                 return Err(Error::unavailable(
                     "Local image conversion stopped; journal retained.",
@@ -452,29 +643,56 @@ async fn migrate_journal(
         Ok(source.size())
     })
     .await
-    .map_err(Error::internal)??;
-    check(&temporary).await?;
-    if requested_size > size {
-        tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&temporary)
-            .await?
-            .set_len(requested_size)
-            .await?;
-        crate::microvm::host::command("resize2fs", &[path(&temporary)?]).await?;
-        check(&temporary).await?;
-    }
-    sync(&temporary).await?;
-    let conversion = Some(conversion_proof(&temporary, stop).await?);
-    tokio::fs::rename(&temporary, directory.join("data.ext4")).await?;
-    let record = Record {
-        format: FORMAT.into(),
-        size: requested_size,
-        context,
-        conversion,
+    .map_err(Error::internal)
+    .and_then(|result| result);
+    let size = match exported {
+        Ok(size) => size,
+        Err(error) => {
+            remove_partial(directory, &temporary).await?;
+            return Err(error);
+        }
     };
-    persist(directory, &record).await?;
-    Ok(record)
+    let completed = async {
+        check(&temporary, &preparation).await?;
+        if requested_size > size {
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&temporary)
+                .await?
+                .set_len(requested_size)
+                .await?;
+            preparation
+                .command("resize2fs", &[path(&temporary)?])
+                .await?;
+            check(&temporary, &preparation).await?;
+        }
+        sync(&temporary).await?;
+        let conversion = Some(conversion_proof(&temporary, stop).await?);
+        preparation.check(0).await?;
+        tokio::fs::rename(&temporary, directory.join("data.ext4")).await?;
+        let record = Record {
+            format: FORMAT.into(),
+            size: requested_size,
+            context,
+            conversion,
+        };
+        persist(directory, &record).await?;
+        Ok(record)
+    }
+    .await;
+    if completed.is_err() {
+        remove_partial(directory, &temporary).await?;
+    }
+    completed
+}
+
+async fn remove_partial(directory: &Path, temporary: &Path) -> Result<()> {
+    match tokio::fs::remove_file(temporary).await {
+        Ok(()) => tokio::fs::File::open(directory).await?.sync_all().await?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 fn legacy_present(directory: &Path) -> Result<bool> {
@@ -559,19 +777,10 @@ fn path(value: &Path) -> Result<&str> {
         .ok_or_else(|| Error::bad("Invalid local image path."))
 }
 
-async fn check(image: &Path) -> Result<()> {
-    let result = tokio::process::Command::new("e2fsck")
-        .args(["-p", "-f"])
-        .arg(image)
-        .kill_on_drop(true)
-        .output()
-        .await?;
-    if !matches!(result.status.code(), Some(0 | 1)) {
-        return Err(Error::conflict(
-            "Local image filesystem check failed; source retained.",
-        ));
-    }
-    Ok(())
+async fn check(image: &Path, preparation: &Preparation) -> Result<()> {
+    preparation
+        .command("e2fsck", &["-p", "-f", path(image)?])
+        .await
 }
 
 pub(crate) async fn enforce_limits(
@@ -625,6 +834,59 @@ mod tests {
 
     fn context() -> Value {
         json!({ "owner": "local-image-test", "policy": { "reserveMiB": 64, "reservePercent": 1 } })
+    }
+
+    #[tokio::test]
+    async fn preparation_rechecks_reserve_and_reaps_its_exact_writer_before_returning() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks").join(crate::config::id());
+        std::fs::create_dir_all(&directory).unwrap();
+        let retained = directory.join("retained-source");
+        std::fs::write(&retained, b"retained user work").unwrap();
+        let marker = root.path().join("writer-started");
+        let preparation = Preparation::new(&directory, &context(), &CancellationToken::new());
+        let command_marker = marker.clone();
+        let operation = tokio::spawn(async move {
+            preparation.command("/usr/bin/python3", &["-c", "import os,sys,time; p=sys.argv[1]; f=open(p+'.partial','w'); f.write(str(os.getpid())); f.close(); os.replace(p+'.partial',p); time.sleep(30)", path(&command_marker).unwrap()]).await
+        });
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(value) = tokio::fs::read_to_string(&marker).await {
+                    break value.parse::<u32>().unwrap();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+        assert!(raw >= 0);
+        let process = unsafe { std::fs::File::from_raw_fd(raw) };
+        let (total, _) = super::super::policy::physical_space(&directory).unwrap();
+        atomic_write(
+            &root.path().join("storage-policy.json"),
+            &serde_json::to_vec(&json!({
+                "reserveMiB": total / 1_048_576 + 1,
+                "reservePercent": 1
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), operation)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.status, 507);
+        let mut poll = libc::pollfd {
+            fd: process.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 2000) }, 1);
+        assert_eq!(std::fs::read(retained).unwrap(), b"retained user work");
     }
 
     #[tokio::test]
