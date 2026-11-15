@@ -240,7 +240,7 @@ impl Cursor {
 }
 
 /// A value, where a missing field, or a field of a missing value, reads as null.
-fn lenient(
+pub(super) fn lenient(
     value: &RuleValue,
     evaluator: &Evaluator,
     items: &Map<String, Json>,

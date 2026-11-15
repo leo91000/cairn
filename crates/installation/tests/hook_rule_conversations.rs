@@ -2675,6 +2675,168 @@ async fn question_origin_follows_event_order_even_with_identical_or_reversed_tim
 }
 
 #[tokio::test]
+async fn explicit_resume_reports_each_startup_failure_and_stop_without_delivery() {
+    use common::run_fixture::RunFixture;
+
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let ended = rule_on(
+        &f,
+        OWNER,
+        cairn("ended"),
+        json!([
+            remember("outcome", "outcome", "outcome"),
+            remember("origin", "origin", "origin.kind"),
+        ]),
+        limits(),
+    )
+    .await;
+    emit(&f, "start", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    f.s.store.change_run_fixture(&run, json!({
+        "status": "failed", "error": "Initial authentication failed.", "recoveryPending": false,
+    })).await.unwrap();
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(triggerings(&f, &ended).await.len(), 1);
+    let token = common::relay_fixture::grant(&f.s, &["read", "write", "run", "manage"]).await;
+    let resumed = f
+        .mcp("/mcp", &token, "resume_chat", json!({ "chatId": chat }))
+        .await;
+    assert_ne!(resumed["result"]["isError"], true, "{resumed}");
+    assert_eq!(f.s.store.run(&run).await.unwrap()["status"], "queued");
+    engine::tick(&f.s).await.unwrap();
+    f.s.store.change_run_fixture(&run, json!({
+        "status": "failed", "error": "Authentication failed again.", "recoveryPending": false,
+    })).await.unwrap();
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(triggerings(&f, &ended).await.len(), 2);
+    assert_eq!(values(&f, &ended).await["origin"], "resume");
+
+    let resumed = f
+        .mcp("/mcp", &token, "resume_chat", json!({ "chatId": chat }))
+        .await;
+    assert_ne!(resumed["result"]["isError"], true, "{resumed}");
+    // The recovery owner released its slot before provider startup. Stopping
+    // this queued execution takes the ordinary synchronous cancellation path.
+    f.s.store
+        .change_run_fixture(&run, json!({ "recoveryPending": false }))
+        .await
+        .unwrap();
+    let (status, stopped) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/chats/{chat}/stop"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    for _ in 0..2 {
+        engine::tick(&f.s).await.unwrap();
+    }
+    assert_eq!(triggerings(&f, &ended).await.len(), 3);
+    assert_eq!(values(&f, &ended).await["outcome"], "cancelled");
+    assert_eq!(values(&f, &ended).await["origin"], "resume");
+    assert_eq!(depth_of(&f, &ended).await, [1, 1, 1]);
+}
+
+#[tokio::test]
+async fn explicit_start_author_tolerates_absence_but_not_evaluation_errors() {
+    for (expression, status) in [("payload.missing", "completed"), ("1 / 0", "failed")] {
+        let f = granted().await;
+        let mut node = start("start");
+        node["action"]["author"] = json!({ "type": "formula", "expression": expression });
+        let rule = rule_on(&f, OWNER, plugin(&f), json!([node]), limits()).await;
+        emit(&f, "start", message("alice", "hello")).await;
+        engine::tick(&f.s).await.unwrap();
+        let history = triggerings(&f, &rule).await;
+        if status == "completed" {
+            assert_eq!(history[0]["status"], status, "{:?}", history[0]);
+        } else {
+            assert!(history.is_empty(), "{history:?}");
+            let (_, listed) = call(
+                &f,
+                OWNER,
+                "GET",
+                &format!("/api/hook-rules/{rule}/triggerings"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(listed["withoutEffect"], 1, "{listed}");
+        }
+        assert_eq!(
+            bound(&f, OWNER, "chat:alice").await.is_some(),
+            status == "completed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicitly_resuming_compaction_does_not_emit_conversation_hooks() {
+    use common::run_fixture::RunFixture;
+
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let ended = rule_on(
+        &f,
+        OWNER,
+        cairn("ended"),
+        json!([remember("outcome", "outcome", "outcome")]),
+        limits(),
+    )
+    .await;
+    let reply = rule_on(
+        &f,
+        OWNER,
+        cairn("replyReady"),
+        json!([remember("reply", "reply", "text")]),
+        limits(),
+    )
+    .await;
+    emit(&f, "start", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    replied(
+        &f,
+        &run,
+        &first_message(&f, &chat).await,
+        "Before maintenance",
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    event(
+        &f,
+        &run,
+        "status",
+        "Compacting the conversation context",
+        Some(json!({ "chatOperation": "compact" })),
+    )
+    .await;
+    let mut execution = f.s.store.run(&run).await.unwrap()["chatExecution"].clone();
+    execution["operation"] = "compact".into();
+    f.s.store.change_run_fixture(&run, json!({
+        "chatExecution": execution, "status": "failed", "error": "Compaction startup failed.", "recoveryPending": false,
+    })).await.unwrap();
+    let token = common::relay_fixture::grant(&f.s, &["read", "write", "run", "manage"]).await;
+    let resumed = f
+        .mcp("/mcp", &token, "resume_chat", json!({ "chatId": chat }))
+        .await;
+    assert_ne!(resumed["result"]["isError"], true, "{resumed}");
+    f.s.store.change_run_fixture(&run, json!({
+        "status": "failed", "error": "Compaction startup failed again.", "recoveryPending": false,
+    })).await.unwrap();
+    for _ in 0..2 {
+        engine::tick(&f.s).await.unwrap();
+    }
+    assert_eq!(triggerings(&f, &ended).await.len(), 1);
+    assert_eq!(triggerings(&f, &reply).await.len(), 1);
+    assert_eq!(values(&f, &reply).await["reply"], "Before maintenance");
+}
+
+#[tokio::test]
 async fn an_admitted_turn_reports_progress_only_after_its_worker_starts() {
     let f = granted().await;
     rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;

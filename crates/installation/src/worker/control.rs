@@ -497,7 +497,12 @@ pub(crate) fn requeue(
     }
     db.change_run(id, patch)?;
     let result = required(db.run(id)?, "Run not found")?;
-    db.event(id, &EventKind::Status, "Resume requested", None)?;
+    let previous_turn = json!({
+        "status": state.status.as_str(),
+        "error": run["error"],
+    });
+    let context = crate::rules::engine::conversations::resume_context(db, id, &previous_turn)?;
+    db.event(id, &EventKind::Status, "Resume requested", context.as_ref())?;
     Ok(result)
 }
 

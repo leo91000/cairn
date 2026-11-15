@@ -408,6 +408,38 @@ pub(crate) fn begin_chat_turn(
     Ok(())
 }
 
+/// Explicit recovery reuses the run and its chain without a new user input.
+/// It still needs an ordered admission before provider startup can fail again.
+pub(crate) fn resume_context(db: &Db<'_>, run: &str, previous_turn: &Json) -> Result<Option<Json>> {
+    let Some(chat) = db.conversation_for_run(run)? else {
+        return Ok(None);
+    };
+    let keyed: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=? AND key IS NOT NULL)",
+        [&chat.id],
+        |row| row.get(0),
+    )?;
+    if !keyed {
+        return Ok(None);
+    }
+    if db
+        .run(run)?
+        .as_ref()
+        .is_some_and(crate::chats::is_compaction)
+    {
+        // Retrying context maintenance is still not a conversation turn.
+        return Ok(None);
+    }
+    let depth = source_depth(db, &Origin::Run(run.to_owned()))?;
+    Ok(Some(json!({
+        "hookRuleTurn": {
+            "origin": { "kind": "resume" },
+            "depth": depth,
+        },
+        "hookRulePreviousTurn": previous_turn,
+    })))
+}
+
 /// Steering or answering can join an already working turn. Such delivery
 /// extends its active cause; a queued human message resets it only in
 /// begin_chat_turn, rather than retroactively changing the preceding turn.

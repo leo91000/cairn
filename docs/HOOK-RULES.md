@@ -272,8 +272,12 @@ a wakeup resumes the conversation regardless of provider notifications. `origin`
 says who started the turn: `{kind: "person", accountId}`,
 `{kind: "rule", ruleId, accountId}`, `agent` (a delegated task), `installation`
 (`cairn_installation`), `resume` (a turn without new input, such as a wakeup or the
-end of a wait) or `unknown`. A turn that fails and is retried reports only how its last
-attempt ended. Only one `progress` waits at a time per conversation: while a rule has
+end of a wait) or `unknown`. A turn retried automatically reports only how its last
+attempt ended. An explicit resume after a reported failure continues the same chain
+and reports its own end, even if it fails before delivery. Compaction and its retries
+remain context maintenance and emit none of these conversation hooks. Progress starts
+with actual work, never while an admitted turn is still in the queue.
+Only one `progress` waits at a time per conversation: while a rule has
 not finished handling the previous one, Cairn emits none, nor once the run no longer
 works. A hook whose recorded event would exceed the recorded-data budget (a reply near
 128 KiB of characters JSON escapes, with large remembered values) is refused whole:

@@ -1641,7 +1641,7 @@ fn conversation_input(
                 input["key"] = key(bound)?.into();
             }
             if let Some(author) = author {
-                let value = evaluator.value(author, items).unwrap_or(Json::Null);
+                let value = super::interpreter::lenient(author, evaluator, items)?;
                 input["author"] = conversations::author(&value)?.into();
             }
             input
