@@ -325,7 +325,14 @@ pub async fn recover_host_mounts(state: &Path) -> Result<()> {
             })
             .await
             .map_err(Error::internal)??;
-            if !current_device {
+            if current_device == storage::ublk::HostDiskIdentity::PreviousBoot {
+                if target_has_mount(&mounted.path, &std::fs::read_to_string("/proc/self/mountinfo")?)? {
+                    return Err(Error::conflict("Previous-boot native attachment has a new host mount; ownership retained."));
+                }
+                retire_attachment(&attachment).await?;
+                return Ok(());
+            }
+            if current_device == storage::ublk::HostDiskIdentity::Absent {
                 // No current nonce-owned device survives. Never act on a reused
                 // numeric ID or inspect it as if it belonged to this run.
                 // No nonce authorizes a process signal. Refuse residual views
@@ -335,6 +342,7 @@ pub async fn recover_host_mounts(state: &Path) -> Result<()> {
                 if !holders.is_empty() {
                     return Err(Error::unavailable("Unowned native attachment still has filesystem holders; ownership retained."));
                 }
+                require_unmounted_registration(&attachment).await?;
                 retire_attachment(&attachment).await?;
                 return Ok(());
             }
@@ -412,6 +420,24 @@ fn unmount_sync(path: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn target_has_mount(path: &Path, inventory: &str) -> std::io::Result<bool> {
+    for line in inventory.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 6 {
+            return Err(std::io::Error::other("Invalid mount inventory"));
+        }
+        let mounted = fields[4]
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\");
+        if Path::new(&mounted) == path {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn owned_mount_present(path: &Path, device: u64, inventory: &str) -> std::io::Result<bool> {
@@ -493,7 +519,31 @@ async fn unmount(
             Error::unavailable(format!(
                 "Native disk could not unmount: {error}; ownership retained."
             ))
-        })
+        })?;
+    require_unmounted_registration(attachment).await
+}
+
+async fn require_unmounted_registration(attachment: &Path) -> Result<()> {
+    let run_directory = attachment
+        .parent()
+        .ok_or_else(|| Error::bad("Invalid native attachment."))?;
+    let run = run_directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::bad("Invalid native attachment identity."))?
+        .to_owned();
+    crate::validation::uuid(&run)?;
+    let state = run_directory
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Error::bad("Invalid native attachment state."))?
+        .to_owned();
+    tokio::task::spawn_blocking(move || {
+        storage::ublk::require_host_filesystems_unmounted(&state, &run)
+    })
+    .await
+    .map_err(Error::internal)?
+    .map_err(|error| Error::unavailable(error.to_string()))
 }
 
 async fn quiesce_holders(device: u64, attempt: &str, private_copies: bool) -> Result<()> {
@@ -1236,6 +1286,15 @@ mod tests {
     fn absent_mount_is_not_confused_with_the_parent_filesystem() {
         let dev = libc::makedev(259, 10);
         let path = Path::new("/state/native/run/data");
+        assert!(!target_has_mount(path, "1 0 8:1 / / rw - ext4 /dev/root rw").unwrap());
+        assert!(
+            target_has_mount(
+                path,
+                "1 0 8:1 / /state/native/run/data rw - ext4 /dev/new rw"
+            )
+            .unwrap()
+        );
+        assert!(target_has_mount(path, "malformed").is_err());
         assert!(!owned_mount_present(path, dev, "1 0 8:1 / / rw - ext4 /dev/root rw").unwrap());
         let mounted = "1 0 259:10 / /state/native/run/data rw - ext4 /dev/ublkb1 rw";
         assert!(owned_mount_present(path, dev, mounted).unwrap());

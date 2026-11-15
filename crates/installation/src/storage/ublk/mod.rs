@@ -379,10 +379,28 @@ fn records(state: &Path) -> stdio::Result<Vec<Record>> {
 
 /// Verify a native stale attachment before holder cleanup changes a process.
 /// The durable nonce, boot and dead-owner checks also apply without a host mount.
-pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<bool> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostDiskIdentity {
+    Current,
+    PreviousBoot,
+    Absent,
+}
+
+pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<HostDiskIdentity> {
     let current_boot = boot_id()?;
+    let records = records(state)?;
+    let previous_boot = records.iter().any(|record| record.vm_id == run)
+        && records
+            .iter()
+            .filter(|record| record.vm_id == run)
+            .all(|record| record.boot_id != current_boot);
+    if previous_boot {
+        // A retained mount cannot survive a reboot. Its old dev_t may now name
+        // an unrelated live disk; never inspect, stop or delete that new owner.
+        return Ok(HostDiskIdentity::PreviousBoot);
+    }
     let mut found = false;
-    for record in records(state)? {
+    for record in records {
         if record.vm_id != run || record.boot_id != current_boot {
             continue;
         }
@@ -460,7 +478,56 @@ pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<b
             ));
         }
     }
-    Ok(found)
+    Ok(if found {
+        HostDiskIdentity::Current
+    } else {
+        HostDiskIdentity::Absent
+    })
+}
+
+/// A root-overmounted namespace can hide a retained filesystem from mountinfo.
+/// ext4 keeps this registration until put_super starts, independently of task roots.
+/// Absence is not proof that journal destruction or kernel retirement has completed.
+pub(crate) fn require_host_filesystems_unmounted(state: &Path, run: &str) -> stdio::Result<()> {
+    let boot = boot_id()?;
+    let ids = records(state)?
+        .into_iter()
+        .filter(|record| record.vm_id == run && record.boot_id == boot)
+        .filter_map(|record| record.device_id)
+        .collect::<Vec<_>>();
+    let root = Path::new("/sys/fs/ext4");
+    let path = CString::new(root.as_os_str().as_bytes()).map_err(stdio::Error::other)?;
+    let mut status = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(path.as_ptr(), status.as_mut_ptr()) } != 0 {
+        return Err(stdio::Error::last_os_error());
+    }
+    if unsafe { status.assume_init() }.f_type != 0x6265_6572 {
+        return Err(stdio::Error::other("Native ext4 inventory is not on sysfs"));
+    }
+    require_ext4_registrations_absent(root, &ids)
+}
+
+fn require_ext4_registrations_absent(root: &Path, ids: &[i32]) -> stdio::Result<()> {
+    // Reading the authoritative directory must succeed even when no entry matches.
+    // Without a current receipt, conservatively refuse any retained ublk filesystem;
+    // a numeric ID inferred from an attachment alone would not prove ownership.
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("ublkb"))
+            .and_then(|id| id.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if ids.is_empty() || ids.contains(&id) {
+            return Err(stdio::Error::other(format!(
+                "Native ext4 filesystem ublkb{id} remains registered after unmount; a hidden namespace may retain it; ownership retained"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn retained_device_address(
@@ -835,6 +902,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_ext4_registration_refuses_retirement_even_without_visible_holders() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("features")).unwrap();
+        require_ext4_registrations_absent(root.path(), &[7]).unwrap();
+        fs::create_dir(root.path().join("ublkb7")).unwrap();
+        assert!(require_ext4_registrations_absent(root.path(), &[7]).is_err());
+        require_ext4_registrations_absent(root.path(), &[8]).unwrap();
+        assert!(require_ext4_registrations_absent(root.path(), &[]).is_err());
+        fs::remove_dir(root.path().join("ublkb7")).unwrap();
+        require_ext4_registrations_absent(root.path(), &[7]).unwrap();
+        assert!(require_ext4_registrations_absent(&root.path().join("missing"), &[7]).is_err());
+    }
+
+    #[test]
     fn stopped_device_identity_does_not_require_a_live_sysfs_block_entry() {
         let mut parameters = libublk::sys::ublk_params::default();
         let attachment = libc::makedev(259, 17);
@@ -872,7 +953,10 @@ mod tests {
         let attachment = root.path().join("native-block").join(&run).join("root");
         fs::create_dir_all(&attachment).unwrap();
         fs::write(attachment.join("disk.blk"), b"obsolete attachment metadata").unwrap();
-        assert!(!verify_stale_host_disk(root.path(), &run).unwrap());
+        assert_eq!(
+            verify_stale_host_disk(root.path(), &run).unwrap(),
+            HostDiskIdentity::Absent
+        );
     }
 
     #[test]
@@ -991,6 +1075,11 @@ mod tests {
             owner: Owner::current().unwrap(),
         };
         persist(root.path(), &record).unwrap();
+        // No attachment or device lookup is needed for a positively older boot.
+        assert_eq!(
+            verify_stale_host_disk(root.path(), &record.vm_id).unwrap(),
+            HostDiskIdentity::PreviousBoot
+        );
         cleanup_stale(root.path()).unwrap();
         assert!(!record.path(root.path()).exists());
     }

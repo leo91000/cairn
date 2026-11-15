@@ -574,6 +574,71 @@ mod tests {
 
     #[test]
     #[ignore = "requires CAP_SYS_ADMIN; disposable mount namespace only"]
+    fn covered_namespace_root_requires_independent_superblock_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().to_owned();
+        let (namespace, device) = std::thread::spawn(move || {
+            use std::os::unix::ffi::OsStrExt;
+            assert_eq!(
+                unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_FS) },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        std::ptr::null(),
+                        c"/".as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_REC | libc::MS_PRIVATE,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            let path = std::ffi::CString::new(target.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        c"tmpfs".as_ptr(),
+                        path.as_ptr(),
+                        c"tmpfs".as_ptr(),
+                        0,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            let device = fs::metadata(&target).unwrap().dev();
+            let namespace = fs::File::open("/proc/thread-self/ns/mnt").unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        c"tmpfs".as_ptr(),
+                        c"/".as_ptr(),
+                        c"tmpfs".as_ptr(),
+                        0,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            (namespace, device)
+        })
+        .join()
+        .unwrap();
+        // setns follows the covering root. mountinfo cannot prove absence of
+        // the lower filesystem: close must also check ext4's kernel registration.
+        assert!(
+            !namespace_holds(
+                Path::new(&format!("/proc/self/fd/{}", namespace.as_raw_fd())),
+                device
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_SYS_ADMIN; disposable mount namespace only"]
     fn retained_namespace_without_procfs_still_reports_the_device() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().to_owned();

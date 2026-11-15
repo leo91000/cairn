@@ -22,3 +22,16 @@ This adds holder recovery to ADR-0085 without adopting legacy Docker stores.
 Physical deletion remains separate from logical completion; this change does not
 make an uninterruptible kernel operation cancellable. Isolating retirement and
 startup cleanup is a subsequent change. No journal or runtime marker changes.
+
+A namespace can cover its root and hide older mounts from a process-relative
+mountinfo inventory. After unmount and holder recovery, close also requires the
+owned ublk device's ext4 registration to disappear from trusted host sysfs. The
+current-boot receipt supplies the device name; missing inventory or any matching
+registration refuses retirement. This is evidence against a retained active
+superblock, not proof that journal destruction or kernel retirement completed.
+
+After a host reboot, an attachment with exclusively previous-boot receipts cannot
+still refer to an old mounted filesystem. If its expected host path has no mount,
+recovery removes only that private stale block-node entry, without inspecting or
+signalling any process and without controlling a possibly reused device number.
+Unknown attachments and current-boot conflicts continue to fail closed.

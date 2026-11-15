@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest'
 
 const launcher = fileURLToPath(new URL('../test-native-namespace.mjs', import.meta.url))
 const testName = 'storage::ublk::namespace::tests::isolated_namespace_qualification'
-const namespaceTests = [testName, 'native::block::holders::tests::retained_namespace_without_procfs_still_reports_the_device', 'native::block::holders::tests::private_mount_outside_a_chroot_is_not_lost']
+const namespaceTests = [testName, 'native::block::holders::tests::retained_namespace_without_procfs_still_reports_the_device', 'native::block::holders::tests::private_mount_outside_a_chroot_is_not_lost', 'native::block::holders::tests::covered_namespace_root_requires_independent_superblock_inventory']
 const privilegedTest = 'native::block::holders::tests::raw_block_device_descriptor_is_a_holder'
 
 function invoke(args, overrides = {}) {
