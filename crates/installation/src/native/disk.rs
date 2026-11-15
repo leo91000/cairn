@@ -63,12 +63,23 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
             Err(error) => Err(error.into()),
         }
     }
+    use std::os::unix::fs::MetadataExt;
     let mut seen = std::collections::HashSet::new();
     let mut used = size(data, false, &mut seen)?;
     for entry in std::fs::read_dir(state)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name == "roots" {
+        if name == "native-data" && entry.metadata()?.dev() != std::fs::metadata(state)?.dev() {
+            // The dedicated data filesystem accounts directories, deleted-open
+            // inodes and all project payloads without rescanning every file.
+            let filesystem = super::workspace::filesystem(&entry.path())?;
+            used = used.saturating_add(
+                filesystem
+                    .f_blocks
+                    .saturating_sub(filesystem.f_bfree)
+                    .saturating_mul(filesystem.f_frsize),
+            );
+        } else if name == "roots" {
             for plan in std::fs::read_dir(entry.path())? {
                 let plan = plan?;
                 if plan.file_type()?.is_file() {
@@ -82,8 +93,9 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
                     continue;
                 }
                 let root = conversation.path();
-                let block =
-                    root.join("block-initialized").exists() || root.join("block-seeding").exists();
+                let block = !root.join("directory.json").exists()
+                    && (root.join("block-initialized").exists()
+                        || root.join("block-seeding").exists());
                 if block {
                     for file in std::fs::read_dir(&root)? {
                         let file = file?;
@@ -92,7 +104,11 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
                         }
                     }
                 } else {
-                    used = used.saturating_add(size(&root, false, &mut seen)?);
+                    used = used.saturating_add(size(
+                        &root,
+                        root.join("directory.json").exists(),
+                        &mut seen,
+                    )?);
                 }
             }
         } else if name == "native-preparations" {
@@ -126,6 +142,7 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
             }
         } else {
             let physical = name == "native-bases"
+                || name == "native-data"
                 || super::super::storage::environment::ROOTS
                     .iter()
                     .any(|root| name == *root);
@@ -138,6 +155,7 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
 /// Incoming bytes remain charged while the copy's physical worker is alive.
 pub(super) struct Preparation {
     path: std::path::PathBuf,
+    pub bytes: u64,
 }
 
 impl Preparation {
@@ -151,7 +169,7 @@ impl Preparation {
             return Err(Error::conflict("Native preparation is already reserved."));
         }
         super::atomic_write(&path, bytes.to_string().as_bytes()).await?;
-        Ok(Self { path })
+        Ok(Self { path, bytes })
     }
 }
 

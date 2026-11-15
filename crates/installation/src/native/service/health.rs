@@ -42,14 +42,12 @@ impl Controller {
         let usage = self.usage().await?;
         let budget = self.budget.lock().await.clone();
         let capacity = self.capacity.lock().await.clone();
-        let disk_growth = if storage::ublk::supports_growth() {
+        let disk_growth = {
             serde_json::to_value(
                 capacity
                     .report(&self.state, usage["diskBytes"].as_u64().unwrap_or(0))
                     .await?,
             )?
-        } else {
-            Value::Null
         };
         Ok(json!({
             "capabilities": capabilities,

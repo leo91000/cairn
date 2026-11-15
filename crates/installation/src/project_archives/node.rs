@@ -9,6 +9,32 @@ async fn download(
     response: reqwest::Response,
     budget: u64,
 ) -> Result<std::fs::File> {
+    let mut admission = None;
+    download_admitted(root, descriptor, response, budget, &mut |target, bytes| {
+        if !crate::native::enabled() {
+            return Ok(());
+        }
+        // Capture accounting only after cleanup/pruning, against this download's
+        // inode. Old cache removals cannot hide newly allocated payload bytes.
+        if admission.is_none() {
+            admission = Some(crate::native::ingress::Admission::staging(
+                root,
+                &crate::native::state_dir(),
+                target,
+            )?);
+        }
+        admission.as_mut().unwrap().admit(bytes)
+    })
+    .await
+}
+
+async fn download_admitted(
+    root: &Path,
+    descriptor: &Archive,
+    response: reqwest::Response,
+    budget: u64,
+    admit: &mut (impl FnMut(&Path, u64) -> Result<()> + Send),
+) -> Result<std::fs::File> {
     descriptor.validate()?;
     if !response.status().is_success() {
         return Err(Error::unavailable("Project archive download rejected."));
@@ -25,26 +51,39 @@ async fn download(
     prune(root, descriptor.bytes).await?;
     let directory = root.join("project-archives");
     let temporary = tempfile::NamedTempFile::new_in(&directory)?;
+    admit(temporary.path(), 2 * 5120)?;
     let mut output = tokio::fs::File::from_std(temporary.reopen()?);
-    let mut stream = response.bytes_stream();
-    let mut bytes = 0u64;
-    let mut hash = blake3::Hasher::new();
-    while let Some(chunk) = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
-        .await
-        .map_err(|_| Error::timeout("Project archive download stalled."))?
-    {
-        let chunk =
-            chunk.map_err(|_| Error::unavailable("Project archive download interrupted."))?;
-        bytes = bytes.saturating_add(chunk.len() as u64);
-        if bytes > descriptor.bytes {
-            return Err(Error::too_large("Project archive length changed."));
+    let received = async {
+        let mut stream = response.bytes_stream();
+        let mut bytes = 0u64;
+        let mut hash = blake3::Hasher::new();
+        while let Some(chunk) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+                .await
+                .map_err(|_| Error::timeout("Project archive download stalled."))?
+        {
+            let chunk =
+                chunk.map_err(|_| Error::unavailable("Project archive download interrupted."))?;
+            bytes = bytes.saturating_add(chunk.len() as u64);
+            if bytes > descriptor.bytes {
+                return Err(Error::too_large("Project archive length changed."));
+            }
+            for bytes in chunk.chunks(65536) {
+                admit(temporary.path(), bytes.len() as u64)?;
+                hash.update(bytes);
+                output.write_all(bytes).await?;
+            }
         }
-        hash.update(&chunk);
-        output.write_all(&chunk).await?;
+        if bytes != descriptor.bytes || hash.finalize().to_hex().as_str() != descriptor.hash {
+            return Err(Error::bad("Project archive checksum mismatch."));
+        }
+        Ok::<_, Error>(())
     }
-    if bytes != descriptor.bytes || hash.finalize().to_hex().as_str() != descriptor.hash {
-        return Err(Error::bad("Project archive checksum mismatch."));
-    }
+    .await;
+    // Drain accepted filesystem writes before releasing the partial and its owner.
+    let drained = output.flush().await;
+    received?;
+    drained?;
     output.sync_all().await?;
     drop(output);
     tokio::fs::rename(temporary.path(), descriptor.path(root)).await?;
@@ -427,6 +466,110 @@ mod tests {
         .unwrap();
         background.await.unwrap();
         drop(foreground);
+    }
+
+    #[tokio::test]
+    async fn archive_admission_starts_after_reclaim_on_its_private_file() {
+        use axum::{Router, body::Body, routing::post};
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let state = root.path().join("state");
+        std::fs::create_dir_all(data.join("project-archives")).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        let old = data.join("project-archives/old.zip");
+        std::fs::write(&old, vec![0; 4 * 1024 * 1024]).unwrap();
+        let bytes = vec![42; 1536 * 1024];
+        let archive = Archive {
+            project_id: crate::config::id(),
+            key: "b".repeat(64),
+            revision: "a".repeat(40),
+            origin_hash: None,
+            hash: blake3::hash(&bytes).to_hex().to_string(),
+            bytes: bytes.len() as u64,
+            logical_bytes: bytes.len() as u64,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/", post(move || async move { Body::from(bytes) }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::new().post(&url).send().await.unwrap();
+        let policy = crate::storage::policy::for_node(
+            &serde_json::json!({"reserveMiB":64,"reservePercent":1}),
+        )
+        .unwrap();
+        let mut admission = None;
+        let mut target_path = None;
+        let result = download_admitted(&data, &archive, response, 0, &mut |target, bytes| {
+            if admission.is_none() {
+                assert!(!old.exists(), "accounting sampled before reclaim");
+                assert!(
+                    target.is_file(),
+                    "accounting must target the private download inode"
+                );
+                target_path = Some(target.to_owned());
+                admission = Some(crate::native::ingress::Admission::new(
+                    &data,
+                    &state,
+                    target,
+                    &data,
+                    3 * 1024 * 1024,
+                    &policy,
+                )?);
+            }
+            assert_eq!(target_path.as_deref(), Some(target));
+            admission.as_mut().unwrap().admit(bytes)
+        })
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert!(archive.path(&data).is_file());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn archive_admission_refusal_never_publishes_the_partial_download() {
+        use axum::{Router, body::Body, routing::post};
+        let root = tempfile::tempdir().unwrap();
+        let bytes = vec![42; 128 * 1024];
+        let archive = Archive {
+            project_id: crate::config::id(),
+            key: "b".repeat(64),
+            revision: "a".repeat(40),
+            origin_hash: None,
+            hash: blake3::hash(&bytes).to_hex().to_string(),
+            bytes: bytes.len() as u64,
+            logical_bytes: bytes.len() as u64,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/", post(move || async move { Body::from(bytes) }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::new().post(&url).send().await.unwrap();
+        let mut payload = 0;
+        let result = download_admitted(
+            root.path(),
+            &archive,
+            response,
+            CACHE_BYTES,
+            &mut |_, bytes| {
+                if bytes != 2 * 5120 {
+                    payload += bytes;
+                    if payload > 65536 {
+                        return Err(Error::new(507, "fixture reserve increased"));
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().status, 507);
+        assert!(!archive.path(root.path()).exists());
+        assert_eq!(
+            std::fs::read_dir(root.path().join("project-archives"))
+                .unwrap()
+                .count(),
+            0
+        );
+        server.abort();
     }
 
     #[tokio::test]

@@ -128,7 +128,7 @@ def node_supervisor():
 def configure_ublk(runner):
     # Detect and validate the running host before stopping any workload. Reuse
     # the standalone node's exact kernel/device checks and capability contract.
-    arguments = node_supervisor().block_device_arguments()
+    arguments = node_supervisor().block_device_arguments(ROOT / 'runner-state')
     rules = [value.split('=', 1)[1] for value in arguments if value.startswith('--device-cgroup-rule=')]
     capabilities = runner.setdefault('cap_add', [])
     devices = runner.setdefault('devices', [])
@@ -139,8 +139,12 @@ def configure_ublk(runner):
         if capability not in capabilities:
             capabilities.append(capability)
     control = '/dev/ublk-control:/dev/ublk-control'
-    if control not in devices:
+    if arguments and control not in devices:
         devices.append(control)
+    if not arguments and control in devices:
+        devices.remove(control)
+    if not arguments and 'SYS_RESOURCE' in capabilities:
+        capabilities.remove('SYS_RESOURCE')
     runner['device_cgroup_rules'] = rules
 
 

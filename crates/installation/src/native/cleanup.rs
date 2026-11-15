@@ -344,10 +344,10 @@ impl Registry {
 pub(super) fn prepare(
     owner: Option<Arc<crate::file_lock::Guard>>,
     run: impl FnOnce() -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<super::block::Mounted>> + Send>,
+        Box<dyn std::future::Future<Output = Result<super::directory::Mounted>> + Send>,
     > + Send
     + 'static,
-) -> Result<tokio::sync::oneshot::Receiver<Result<super::block::Mounted>>> {
+) -> Result<tokio::sync::oneshot::Receiver<Result<super::directory::Mounted>>> {
     let (send, receive) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("native-disk-prepare".into())
@@ -361,13 +361,6 @@ pub(super) fn prepare(
             };
             runtime.block_on(async move {
                 let result = run().await;
-                // The opener also owns journal maintenance tasks. Keep driving
-                // its runtime until every disk user, including consolidation,
-                // has finished after the mounted value leaves this thread.
-                let disk = result
-                    .as_ref()
-                    .ok()
-                    .map(|mounted| Arc::downgrade(&mounted.volume.disk));
                 if let Err(Ok(mut mounted)) = send.send(result) {
                     loop {
                         match mounted.close().await {
@@ -379,15 +372,9 @@ pub(super) fn prepare(
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }
-                // Handoff succeeded or the late mount has fully closed. The
-                // surviving journal maintenance must not keep workspace
-                // admission locked: reopening asks consolidation to yield.
+                // The directory has no journal-maintenance task to keep alive.
+                // The mount retains physical ownership after a successful handoff.
                 drop(owner);
-                if let Some(disk) = disk {
-                    while disk.strong_count() > 0 {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                }
             });
         })
         .map_err(Error::internal)?;

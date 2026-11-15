@@ -19,7 +19,6 @@ import { attemptOutput, inboxContains } from './runner-probe.mjs'
 import { retirementSmoke } from './runner-retirement-smoke.mjs'
 import { prepareLocalStorage, storageSmoke } from './runner-storage-smoke.mjs'
 import { udpSmoke } from './runner-udp-smoke.mjs'
-import { ublkDeviceArguments } from './ublk-devices.mjs'
 
 async function main() {
   const image = process.argv[2] || 'cairn-firecracker:dev'
@@ -225,7 +224,7 @@ console.log('probe.done');
       })
     })
     await new Promise(resolve => mcp.listen(path.join(source, 'home/cairn-mcp.sock'), resolve))
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', ...ublkDeviceArguments(), '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv4.conf.all.rp_filter=0', '--sysctl', 'net.ipv4.conf.default.rp_filter=0', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv4.conf.all.rp_filter=0', '--sysctl', 'net.ipv4.conf.default.rp_filter=0', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     docker('network', 'connect', '--ip', '93.184.216.2', networkName, name)
     docker('network', 'create', installationNetwork)
     docker('network', 'connect', '--alias', 'manager', installationNetwork, name)
@@ -275,7 +274,7 @@ console.log('probe.done');
         id,
         runId,
         storage: { ...storage, owner: runId },
-        resources: { cpu: 2, memoryMiB: 4096, diskMiB: mode === 'first' ? 1024 : 65536 },
+        resources: { cpu: 2, memoryMiB: 4096, diskMiB: mode === 'first' ? 1024 : 33792 },
         expires: Date.now() + 300000,
         sandbox: 'yolo',
         cwd: `${runRoot}/workspace`,
@@ -349,12 +348,12 @@ console.log('probe.done');
                 await until(() => {
                   const records = docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).map(line => JSON.parse(line))
                   return attemptOutput(records).includes('probe.updated')
-                }, 180000, 'Live local journal guest update')
+                }, 180000, 'Live direct image guest update')
                 assert.equal(JSON.parse(docker('exec', name, 'cat', `/runner-state/${id}.vm.json`)).vmId, vm, 'Local writes keep the same VMM')
                 const after = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
                 assert.equal(after.waitingFor, null)
                 assert.ok(after.localBytes > 0)
-                process.stdout.write(`${JSON.stringify({ mode: 'active-local-journal', status: 'passed' })}\n`)
+                process.stdout.write(`${JSON.stringify({ mode: 'active-local-image', status: 'passed' })}\n`)
                 await api(`/runs/${id}`, 'DELETE')
               }
 
@@ -592,7 +591,7 @@ console.log('probe.done');
           });req.on('error',reject);
         });
         const drive=config.drives.find(d=>d.drive_id==='data');
-        require('node:assert/strict').equal(drive.path_on_host,'disk.blk');
+        require('node:assert/strict').equal(drive.path_on_host,'data.ext4');
         require('node:assert/strict').equal(drive.socket,undefined);
         return {machine:config['machine-config'],config:config.balloon,stats};
       })).then(result=>console.log(JSON.stringify(result)));

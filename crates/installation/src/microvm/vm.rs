@@ -12,13 +12,12 @@ use crate::{
     nodes::Resources,
     performance::Operation,
     skills::{atomic_write, private_dir},
-    storage::Disk,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -150,26 +149,121 @@ pub struct Vm {
     jail: PathBuf,
     lock: Option<std::fs::File>,
     child: Option<tokio::process::Child>,
+    storage_watchdog: Option<StorageWatchdog>,
+    storage_stop: CancellationToken,
+    reservation: Option<crate::storage::reservation::Reservation>,
+    closing: bool,
+    image_sync: Option<JoinHandle<std::io::Result<()>>>,
+    image_synced: bool,
+    image_flush_failed: bool,
     consoles: Vec<JoinHandle<()>>,
     network: Network,
-    mounted: Option<crate::storage::transport::MountedDisk>,
-    volume: Option<Arc<crate::storage::runtime::Volume>>,
+    image: PathBuf,
+    disk_bytes: u64,
+    anonymous: bool,
     uid: u32,
     warmed: bool,
     idle: bool,
     memory_mib: u64,
 }
 
+/// Invalid/stale observations must stop even an unassigned ready VM. Pin the
+/// unreaped child rather than looking up a PID again when a later sample fails.
+struct StorageWatchdog {
+    unassigned: Arc<AtomicBool>,
+    failed: CancellationToken,
+    stop: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl StorageWatchdog {
+    fn start(
+        state: &Path,
+        child: &tokio::process::Child,
+        execution: CancellationToken,
+        unassigned: bool,
+    ) -> Result<Self> {
+        let pid = child
+            .id()
+            .ok_or_else(|| Error::unavailable("VMM already exited."))?;
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let process = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+        let state = state.to_owned();
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let failed = CancellationToken::new();
+        let failure = failed.clone();
+        let unassigned = Arc::new(AtomicBool::new(unassigned));
+        let background = unassigned.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let observation = tokio::select! {
+                    () = cancelled.cancelled() => return,
+                    result = crate::storage::image::capacity_blocked(&state) => result,
+                };
+                let error = match observation {
+                    Err(error) => Some(error),
+                    Ok(true) if background.load(Ordering::Acquire) => Some(Error::new(
+                        507,
+                        "Unassigned VM exhausted its physical reserve.",
+                    )),
+                    _ => None,
+                };
+                if let Some(error) = error {
+                    failure.cancel();
+                    execution.cancel();
+                    tracing::error!(pid, message = %error.message, "VMM storage observation failed; stopping its pinned process");
+                    let result = unsafe {
+                        libc::syscall(
+                            libc::SYS_pidfd_send_signal,
+                            process.as_raw_fd(),
+                            libc::SIGKILL,
+                            std::ptr::null::<libc::siginfo_t>(),
+                            0,
+                        )
+                    };
+                    if result != 0 {
+                        tracing::error!(pid, error = %std::io::Error::last_os_error(), "Could not stop pinned VMM; retaining its ownership for cleanup");
+                    }
+                    return;
+                }
+                // Valid pressure is handled by startup cancellation, the pool
+                // or attempt suspension. This guard only fences lost evidence.
+                tokio::select! {
+                    () = cancelled.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_millis(250)) => {}
+                }
+            }
+        });
+        Ok(Self {
+            unassigned,
+            failed,
+            stop,
+            task,
+        })
+    }
+}
+
+impl Drop for StorageWatchdog {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        self.task.abort();
+    }
+}
+
 impl Drop for Vm {
     fn drop(&mut self) {
-        // Mounted transports also own the Volume. Cancelling before dropping
-        // them releases remote reads even when boot/run was cancelled before
-        // shutdown could await the VMM and close the backend normally.
-        if let Some(volume) = &self.volume {
-            volume.stop.cancel();
-        }
         if let Some(child) = &mut self.child {
             let _ = child.start_kill();
+            // A kill request is not a reap. The enclosing pool quarantines a
+            // lost boot/shutdown future; retain physical ownership until its
+            // controller fence/recovery can establish that the VMM is gone.
+            if let Some(lock) = self.lock.take() {
+                std::mem::forget(lock);
+            }
         }
     }
 }
@@ -356,10 +450,39 @@ fn auth_relay(
     })
 }
 
+/// The VMM can allocate its sparse image before an attempt has a socket or
+/// suspension record. Keep this phase under the same current capacity policy.
+async fn protect_startup<T>(
+    state: &Path,
+    operation: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    async fn check(state: &Path) -> Result<()> {
+        if crate::storage::image::capacity_blocked(state).await? {
+            return Err(Error::new(
+                507,
+                "VM startup stopped to preserve storage reserve.",
+            ));
+        }
+        Ok(())
+    }
+    check(state).await?;
+    let monitor = async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            check(state).await?;
+        }
+    };
+    tokio::select! {
+        biased;
+        result = monitor => result,
+        result = operation => result,
+    }
+}
+
 impl Vm {
     pub(super) fn bind_stop(&self, stop: &crate::storage::runtime::AttemptStop) -> Result<()> {
-        if let Some(volume) = &self.volume {
-            stop.bind(volume)?;
+        if stop.execution.is_cancelled() {
+            return Err(Error::unavailable("VM preparation stopped."));
         }
         Ok(())
     }
@@ -371,6 +494,7 @@ impl Vm {
         slot: usize,
         stop: &CancellationToken,
         resources: Option<&Value>,
+        reservation: &mut Option<crate::storage::reservation::Reservation>,
     ) -> Result<Self> {
         // GC cannot unlink a runtime between selecting it, publishing the disk
         // pin and linking the immutable files into the new jail.
@@ -389,34 +513,41 @@ impl Vm {
             return Err(Error::conflict("VM restore is incomplete."));
         }
 
-        timing.next("open_journal");
-        let volume = crate::storage::runtime::load(&disk_dir).await?;
-        if volume.disk.size() != resources.disk_mi_b * 1024 * 1024 {
-            return Err(Error::conflict(
-                "VM disk size does not match its local journal.",
-            ));
-        }
-        volume.limit_backing(resources.disk_mi_b * 1024 * 1024)?;
+        timing.next("open_image");
+        let disk_bytes = resources.disk_mi_b * 1024 * 1024;
+        let image_path = crate::storage::image::path_for_boot(&disk_dir, disk_bytes).await?;
+        let anonymous = crate::storage::image::unassigned(&disk_dir).await?;
         let jail = state.join("jails/firecracker").join(&id).join("root");
         let mut vm = Self {
             socket: jail.join("v.sock"),
             jail,
             lock: Some(lock),
             child: None,
+            storage_watchdog: None,
+            storage_stop: stop.clone(),
+            reservation: reservation.take(),
+            closing: false,
+            image_sync: None,
+            image_synced: false,
+            image_flush_failed: false,
             consoles: Vec::new(),
             network,
-            mounted: None,
-            volume: Some(volume),
+            image: image_path,
+            disk_bytes,
+            anonymous,
             uid: 40000 + slot as u32,
             warmed: false,
             idle: false,
             memory_mib: resources.memory_mi_b,
         };
         let result = tokio::select! {
-            result = vm.launch(state, (&image, &current_kernel, &current_control), &id, &resources, slot, &mut timing) => result,
+            result = protect_startup(state, vm.launch(state, (&image, &current_kernel, &current_control), &id, &resources, slot, &mut timing)) => result,
             () = stop.cancelled() => Err(Error::unavailable("VM preparation stopped.")),
         };
         if let Err(error) = result {
+            // A failed boot has no running attempt to finish gracefully. Stop
+            // its exact child immediately, then reap/flush before releasing it.
+            vm.closing = true;
             vm.shutdown().await;
             return Err(Error::new(
                 error.status,
@@ -439,32 +570,39 @@ impl Vm {
         timing.next("mount_and_network");
         let jail = &self.jail;
         private_dir(jail).await?;
-        self.mounted = Some(
-            crate::storage::transport::mount(
-                self.volume.as_ref().unwrap().clone(),
-                state,
-                jail,
-                self.uid,
-            )
-            .await?,
-        );
+        tokio::fs::hard_link(&self.image, jail.join("data.ext4")).await?;
+        std::os::unix::fs::chown(jail.join("data.ext4"), Some(self.uid), Some(self.uid))?;
         tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
         tokio::fs::copy(kernel, jail.join("vmlinux")).await?;
         tokio::fs::hard_link(control, jail.join("control.squashfs")).await?;
         self.network.create(self.uid).await?;
 
         timing.next("spawn_and_guest_ready");
-        let mounted = self.mounted.as_ref().unwrap();
-        let config = firecracker_config(&self.network, resources, slot, &mounted.drives());
+        let drive = json!({
+            "drive_id": "data",
+            "path_on_host": "data.ext4",
+            "is_root_device": false,
+            "is_read_only": false,
+            "cache_type": "Writeback",
+            "io_engine": "Async",
+            "discard": true
+        });
+        let config = firecracker_config(&self.network, resources, slot, &[drive]);
         atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
         std::os::unix::fs::chown(jail.join("config.json"), Some(self.uid), Some(self.uid))?;
-        let disk_bytes = self.volume.as_ref().unwrap().disk.size();
+        let disk_bytes = self.disk_bytes;
         tracing::info!(target: "cairn_performance", operation = "vm_configuration", id,
             cpu = resources.cpu, memory_mib = resources.memory_mi_b, disk_bytes,
-            file_limit_bytes = disk_bytes, transport = "ublk");
+            file_limit_bytes = disk_bytes, transport = "local-image");
         let child = self
             .child
             .insert(jailer(id, self.uid, state, disk_bytes).spawn()?);
+        self.storage_watchdog = Some(StorageWatchdog::start(
+            state,
+            child,
+            self.storage_stop.clone(),
+            self.anonymous,
+        )?);
         self.consoles.push(console(
             child.stdout.take().unwrap(),
             state.join(format!("{id}.boot.log")),
@@ -480,13 +618,6 @@ impl Vm {
     async fn wait_for_guest(&mut self) -> Result<GuestStatus> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
-            if self
-                .mounted
-                .as_ref()
-                .is_some_and(crate::storage::transport::MountedDisk::failed)
-            {
-                return Err(Error::unavailable("VM block backend stopped."));
-            }
             if self.child.as_mut().unwrap().try_wait()?.is_some() {
                 return Err(Error::unavailable(
                     "Firecracker exited before the guest was ready. Check the VM boot log.",
@@ -521,93 +652,101 @@ impl Vm {
         Ok(())
     }
 
-    pub async fn shutdown(&mut self) {
+    pub async fn shutdown(&mut self) -> bool {
+        loop {
+            match self.shutdown_once().await {
+                Ok(flushed) => return flushed,
+                Err(error) => {
+                    tracing::error!(vm_id = self.id(), message = %error.message, "VM close is unconfirmed; retaining disk ownership and capacity for retry");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+
+    async fn shutdown_once(&mut self) -> Result<bool> {
         let id = self.id().to_owned();
         let mut timing = Operation::new("vm_shutdown", &id, "guest_shutdown");
-        let blocked = self.volume.as_ref().is_some_and(|volume| volume.paused())
-            || super::suspension::inspect_jail(&self.jail)
+        let mut acknowledged = false;
+        if !self.closing {
+            self.closing = true;
+            let blocked = super::suspension::inspect_jail(&self.jail)
                 .await
                 .map_or(true, |status| {
                     status.is_some_and(|status| status.paused || !status.acknowledged)
                 });
-        let mut acknowledged = false;
-        if !blocked && !self.idle {
-            // Healthy guests get a bounded graceful stop.
-            let request = call::<Reply>(&self.socket, &GuestRequest::Shutdown);
-            if let Ok(Ok(reply)) = tokio::time::timeout(Duration::from_secs(10), request).await {
+            if !blocked
+                && !self.idle
+                && let Ok(Ok(reply)) = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    call::<Reply>(&self.socket, &GuestRequest::Shutdown),
+                )
+                .await
+            {
                 acknowledged = reply.succeeded();
             }
         }
-        // A VMM blocked on disk I/O may not exit even after SIGKILL until its read
-        // returns. Release remote reads and reserve waits before awaiting it.
-        // All previously acknowledged disk writes remain in the durable journal.
-        let volume = self.volume.take();
-        if let Some(volume) = &volume {
-            tracing::info!(target: "cairn_performance", operation = "disk_io", id = id.as_str(),
-                metrics = %volume.disk.performance(), blocked, acknowledged);
-        }
-
         timing.next("wait_vmm");
-        let cancel_reads = || {
-            if let Some(volume) = &volume {
-                volume.stop.cancel();
-            }
-        };
-        if let Some(mut child) = self.child.take() {
+        if let Some(child) = self.child.as_mut() {
             if !acknowledged {
-                cancel_reads();
                 let _ = child.start_kill();
             }
-            if tokio::time::timeout(Duration::from_secs(8), child.wait())
+            tokio::time::timeout(Duration::from_secs(8), child.wait())
                 .await
-                .is_err()
-            {
-                cancel_reads();
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-            }
+                .map_err(|_| Error::unavailable("VMM exit is not confirmed."))??;
+            self.child.take();
         }
+        self.storage_watchdog.take();
         if let Err(error) = super::suspension::finish_jail(&self.jail).await {
             tracing::warn!(vm_id = id, message = %error.message, "Could not finalize VM suspension accounting");
         }
-        cancel_reads();
-        for console in self.consoles.drain(..) {
-            let _ = console.await;
-        }
-
-        timing.next("unmount");
-        let drained = if let Some(mounted) = self.mounted.take() {
-            match tokio::task::spawn_blocking(move || mounted.close()).await {
-                Ok(Ok(())) => true,
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "Could not close VM block backend");
-                    false
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "Could not join VM block backend cleanup");
-                    false
-                }
+        while let Some(console) = self.consoles.last_mut() {
+            let result = tokio::time::timeout(Duration::from_secs(2), console)
+                .await
+                .map_err(|_| Error::unavailable("VM console closure is not confirmed."))?;
+            if let Err(error) = result {
+                tracing::warn!(%error, "VM console task failed");
             }
-        } else {
-            true
-        };
-        if drained
-            && let Some(volume) = &volume
-            && let Err(error) = volume.seal_stopped().await
-        {
-            tracing::warn!(%error, "Could not seal stopped VM journal; its durable tail is retained");
+            self.consoles.pop();
         }
-        drop(volume);
-
+        timing.next("sync_image");
+        if !self.image_synced {
+            if self.image_sync.is_none() {
+                let image = self.image.clone();
+                let lease = self.lock.as_ref().unwrap().try_clone()?;
+                self.image_sync = Some(tokio::spawn(async move {
+                    let _lease = lease;
+                    crate::storage::image::sync_io(&image).await
+                }));
+            }
+            let sync =
+                tokio::time::timeout(Duration::from_secs(30), self.image_sync.as_mut().unwrap())
+                    .await
+                    .map_err(|_| Error::unavailable("Stopped VM image flush is still pending."))?;
+            self.image_flush_failed = !matches!(sync, Ok(Ok(())));
+            if self.image_flush_failed {
+                tracing::error!(
+                    vm_id = id,
+                    "Stopped VM image flush failed; retained work is a crash prefix"
+                );
+            }
+            self.image_synced = true;
+            self.image_sync.take();
+        }
         timing.next("network_cleanup");
         self.network.remove().await;
-        if let Err(error) = tokio::fs::remove_dir_all(self.jail.parent().unwrap()).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(%error, "Could not remove VM jail");
+        match tokio::fs::remove_dir_all(self.jail.parent().unwrap()).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
+        if let Some(reservation) = self.reservation.as_ref() {
+            reservation.release().await?;
+        }
+        self.reservation.take();
         self.lock.take();
         timing.finish();
+        Ok(!self.image_flush_failed)
     }
 
     pub(super) fn id(&self) -> &str {
@@ -629,6 +768,12 @@ impl Vm {
 
     /// Only a confirmed process exit permits retiring an unpublished idle VM.
     /// Uncertain process state keeps its physical ownership and journal pinned.
+    pub(super) fn storage_failed(&self) -> bool {
+        self.storage_watchdog
+            .as_ref()
+            .is_some_and(|watchdog| watchdog.failed.is_cancelled())
+    }
+
     pub(super) fn exited(&mut self) -> bool {
         self.child
             .as_mut()
@@ -693,18 +838,31 @@ impl Vm {
         state: &Path,
         stop: CancellationToken,
     ) -> Result<i32> {
+        if let Some(watchdog) = &self.storage_watchdog {
+            // The startup guard below covers binding until the broker can pause
+            // this execution. Never keep anonymous eviction after assignment.
+            watchdog.unassigned.store(false, Ordering::Release);
+        }
         let mut timing = Operation::new("guest_prepare", plan.run_id(), "clock_and_auth");
-        super::suspension::prepare_attempt(state, plan.id(), self.id()).await?;
-        self.synchronize_clock().await?;
-        let record = AttemptRecord {
-            vm_id: self.id().to_owned(),
-            run_id: plan.run_id().to_owned(),
-        };
-        atomic_write(
-            &state.join(format!("{}.vm.json", plan.id())),
-            &serde_json::to_vec(&record)?,
-        )
-        .await?;
+        let prepared = protect_startup(state, async {
+            super::suspension::prepare_attempt(state, plan.id(), self.id()).await?;
+            self.synchronize_clock().await?;
+            let record = AttemptRecord {
+                vm_id: self.id().to_owned(),
+                run_id: plan.run_id().to_owned(),
+            };
+            atomic_write(
+                &state.join(format!("{}.vm.json", plan.id())),
+                &serde_json::to_vec(&record)?,
+            )
+            .await?;
+            Ok(())
+        })
+        .await;
+        if let Err(error) = prepared {
+            self.closing = true;
+            return Err(error);
+        }
         let relay_path = self.jail.join("v.sock_5201");
         let listener = UnixListener::bind(&relay_path)?;
         std::os::unix::fs::chown(&relay_path, Some(self.uid), Some(self.uid))?;
@@ -748,7 +906,6 @@ impl Vm {
         let result = tokio::select! {
             result = operation => result,
             () = stop.cancelled() => Ok(STOPPED),
-            result = watch_backend(self.mounted.as_ref()) => result,
         };
         let result = if finalization_failed.load(Ordering::SeqCst) {
             Ok(crate::runner::FINALIZATION_FAILED_SENTINEL)
@@ -767,14 +924,7 @@ impl Vm {
     /// Warm only an anonymous local disk. A live native process must never be
     /// initialized over a previous conversation or a borrowed storage grant.
     pub async fn warm_codex(&mut self, stop: &CancellationToken) -> Result<bool> {
-        if self
-            .volume
-            .as_ref()
-            .unwrap()
-            .assignment
-            .assigned()?
-            .is_some()
-        {
+        if !self.anonymous {
             return Err(Error::conflict("Only an anonymous VM can prewarm Codex."));
         }
         let status = host::status(&self.socket).await?;
@@ -808,18 +958,6 @@ impl Vm {
         matches!(tokio::time::timeout(Duration::from_secs(1), host::status(&self.socket)).await,
             Ok(Ok(status)) if status.codex_ready && !status.initialized)
     }
-}
-
-async fn watch_backend(backend: Option<&crate::storage::transport::MountedDisk>) -> Result<i32> {
-    let Some(backend) = backend else {
-        return std::future::pending().await;
-    };
-    while !backend.failed() {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    Err(Error::unavailable(
-        "VM block backend stopped. Its workspace disk has been preserved.",
-    ))
 }
 
 /// First boot of a disk: copy every import into the guest.
@@ -1031,6 +1169,182 @@ mod tests {
     use super::*;
     use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    async fn unassigned_vmm_is_stopped_when_capacity_observations_fail() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), false).await;
+        let retained = root.path().join("data.ext4");
+        std::fs::write(&retained, b"retained-work").unwrap();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut other = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let watchdog =
+            StorageWatchdog::start(root.path(), &child, CancellationToken::new(), true).unwrap();
+        atomic_write(&root.path().join("storage-policy.json"), b"invalid")
+            .await
+            .unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(6), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!exit.success());
+        assert!(other.try_wait().unwrap().is_none());
+        assert_eq!(std::fs::read(&retained).unwrap(), b"retained-work");
+        assert!(!root.path().join("attempt.vm.json").exists());
+        drop(watchdog);
+        other.kill().await.unwrap();
+        other.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unassigned_vmm_is_stopped_when_capacity_observations_stall() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = tempfile::tempdir().unwrap();
+        let policy = root.path().join("storage-policy.json");
+        let name = std::ffi::CString::new(policy.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let watchdog =
+            StorageWatchdog::start(root.path(), &child, CancellationToken::new(), true).unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
+        // Release the read-only observation worker even if an assertion fails.
+        let mut writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(policy)
+            .unwrap();
+        std::io::Write::write_all(&mut writer, b"{}").unwrap();
+        drop(writer);
+        assert!(!exit.unwrap().unwrap().success());
+        assert!(watchdog.failed.is_cancelled());
+        drop(watchdog);
+    }
+
+    #[tokio::test]
+    async fn unassigned_vmm_enforces_pressure_without_waiting_for_pool_maintenance() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), false).await;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let watchdog =
+            StorageWatchdog::start(root.path(), &child, CancellationToken::new(), true).unwrap();
+        // No pool exists or can perform retirement while this standalone owner
+        // changes policy. The per-VMM watchdog must enforce valid pressure.
+        set_startup_policy(root.path(), true).await;
+        let exit = tokio::time::timeout(Duration::from_secs(6), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!exit.success());
+        assert!(watchdog.failed.is_cancelled());
+        drop(watchdog);
+    }
+
+    #[tokio::test]
+    async fn assigned_vmm_leaves_valid_pressure_to_attempt_suspension() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), false).await;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let watchdog =
+            StorageWatchdog::start(root.path(), &child, CancellationToken::new(), true).unwrap();
+        watchdog.unassigned.store(false, Ordering::Release);
+        set_startup_policy(root.path(), true).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(600), child.wait())
+                .await
+                .is_err()
+        );
+        assert!(!watchdog.failed.is_cancelled());
+        drop(watchdog);
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+
+    async fn set_startup_policy(state: &Path, blocked: bool) {
+        let (total, _) = crate::storage::policy::physical_space(state).unwrap();
+        let reserve = if blocked { total / 1_048_576 + 1 } else { 64 };
+        atomic_write(
+            &state.join("storage-policy.json"),
+            &serde_json::to_vec(&json!({ "reserveMiB": reserve, "reservePercent": 1 })).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_refuses_pressure_before_starting_the_vmm() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), true).await;
+        let started = AtomicBool::new(false);
+        let result = protect_startup(root.path(), async {
+            started.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert_eq!(result.unwrap_err().status, 507);
+        assert!(!started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn startup_observes_policy_changes_before_any_attempt_record_exists() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), false).await;
+        let (entered, running) = tokio::sync::oneshot::channel();
+        let startup = protect_startup(root.path(), async {
+            entered.send(()).unwrap();
+            std::future::pending::<Result<()>>().await
+        });
+        let change_policy = async {
+            running.await.unwrap();
+            set_startup_policy(root.path(), true).await;
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(startup, change_policy)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().status, 507);
+        assert!(!root.path().join("attempt.vm.json").exists());
+    }
+
+    #[tokio::test]
+    async fn startup_completes_under_current_capacity_and_refuses_invalid_observations() {
+        let root = tempfile::tempdir().unwrap();
+        set_startup_policy(root.path(), false).await;
+        assert_eq!(
+            protect_startup(root.path(), async { Ok(42) })
+                .await
+                .unwrap(),
+            42
+        );
+        atomic_write(&root.path().join("storage-policy.json"), b"invalid")
+            .await
+            .unwrap();
+        assert!(
+            protect_startup(root.path(), async { Ok(42) })
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn resumed_disks_use_the_current_guest_image_without_changing_workspace_bytes() {

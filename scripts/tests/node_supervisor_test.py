@@ -81,6 +81,14 @@ class Supervisor(unittest.TestCase):
                         host.launch(NEW)
                 remove.assert_not_called()
 
+    def test_fresh_direct_image_node_does_not_probe_or_require_ublk(self):
+        spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
+        host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(host)
+        with tempfile.TemporaryDirectory() as temporary, patch.object(host, 'command') as command, patch.object(Path, 'read_text', return_value='0'):
+            self.assertEqual(host.block_device_arguments(Path(temporary)), [])
+            command.assert_not_called()
+
     def test_ublk_permissions_use_detected_majors_without_privileged_mode(self):
         spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
         host = importlib.util.module_from_spec(spec)

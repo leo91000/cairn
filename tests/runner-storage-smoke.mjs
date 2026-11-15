@@ -1,4 +1,4 @@
-// Real controller/guest local journal durability, pressure and cold reopen path.
+// Real controller/guest direct image durability, pressure and cold reopen path.
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
@@ -26,8 +26,8 @@ export async function inspectLocalDisk(api, runId) {
   assert.equal(status.mode, 'on-demand')
   assert.ok(status.localBytes > 0, 'The environment retains its local backing')
   assert.equal(status.grantId, undefined, 'Local disks expose no remote read grant')
-  if (status.published)
-    assert.equal(status.published.local, true, 'Base retirement uses a local consolidation receipt')
+  assert.equal(status.storage, 'local-ext4-v1')
+  assert.equal(status.availability, 'available')
   return status
 }
 
@@ -108,8 +108,7 @@ export async function storageSmoke({
     try {
       await until(async () => {
         sample = await status()
-        return sample.dirtyBytes === 0 && sample.published?.local === true
-          && sample.completedGeneration > 0 && sample.published.generation >= sample.completedGeneration
+        return sample.storage === 'local-ext4-v1' && sample.availability === 'available' && !sample.paused
       })
     }
     catch (error) {
@@ -126,8 +125,38 @@ export async function storageSmoke({
   const first = await start(true)
   await ready(first)
   await status()
-  docker('exec', name, 'test', '!', '-e', `/runner-state/disks/${runId}/data.ext4`)
+  docker('exec', name, 'test', '-f', `/runner-state/disks/${runId}/data.ext4`)
+  docker('exec', name, 'test', '!', '-e', `/runner-state/disks/${runId}/lazy`)
+  docker('exec', name, 'test', '!', '-e', '/dev/ublk-control')
   await finish(first)
+
+  const exhausted = await start(false)
+  await ready(exhausted)
+  await writeFile(path.join(inbox, 'messages.json'), '[{"text":"exhaust"}]')
+  const full = await until(async () => {
+    const match = (await logs(exhausted)).match(/storage.enospc (\{[^\n]+\})/)
+    return match && JSON.parse(match[1])
+  })
+  assert.equal(full.code, 'ENOSPC')
+  const peakBytes = (await status()).localBytes
+  assert.ok(peakBytes > 256 * 1048576, 'Pressure must reach actual allocated image blocks')
+  await writeFile(path.join(inbox, 'messages.json'), '[{"text":"reclaim"}]')
+  await until(async () => (await logs(exhausted)).includes('storage.reclaimed'))
+  await finish(exhausted)
+  docker('restart', name)
+  await reconnect()
+  const trimmed = await start(false)
+  await ready(trimmed)
+  // The new guest's immutable control helper trims its data filesystem after
+  // boot. This exercises the actual virtio discard -> host hole-punch path.
+  await until(async () => (await status()).localBytes < peakBytes - 128 * 1048576)
+  process.stdout.write(`${JSON.stringify({
+    kind: 'vm-image-enospc-and-discard',
+    ...full,
+    peakAllocatedBytes: peakBytes,
+    reclaimedAllocatedBytes: (await status()).localBytes,
+  })}\n`)
+  await finish(trimmed)
 
   const soakSeconds = Number(process.env.CAIRN_STORAGE_SOAK_SECONDS || 0)
   if (soakSeconds > 0) {
@@ -143,7 +172,7 @@ export async function storageSmoke({
       const sample = await status()
       assert.equal(vmIdentity(), initialVm, 'Local maintenance must not replace the VM')
       assert.equal(sample.waitingFor, null)
-      resources.push(sample.performance)
+      resources.push({ localBytes: sample.localBytes, size: sample.size })
     }
 
     const metrics = [...(await logs(attempt)).matchAll(/storage.soak (\{[^\n]+\})/g)].map(match => JSON.parse(match[1]))
@@ -152,7 +181,8 @@ export async function storageSmoke({
       assert.ok(metrics[index].writes > metrics[index - 1].writes, 'Durable guest writes stalled')
     assert.ok(metrics.at(-1).writes >= soakSeconds * 20)
     assert.ok(Math.max(...metrics.map(sample => sample.maximumMs)) < 1000)
-    assert.ok(resources.every(sample => sample.write.errors === 0 && sample.read.errors === 0))
+    assert.ok(resources.every(sample => sample.localBytes > 0 && sample.size === 512 * 1048576))
+    assert.ok(Math.max(...resources.map(sample => sample.localBytes)) - Math.min(...resources.map(sample => sample.localBytes)) < 8 * 1048576, 'Overwrites must not accumulate journal history')
     const evidence = {
       kind: 'storage-vm-soak',
       seconds: (performance.now() - started) / 1000,
@@ -161,7 +191,7 @@ export async function storageSmoke({
       metrics,
       resources,
       unintendedRestarts: 0,
-      source: 'Real Firecracker/ublk local journal; no remote disk source or WAN',
+      source: 'Real Firecracker/direct raw image; no remote disk source or WAN',
     }
     if (process.env.CAIRN_STORAGE_SOAK_EVIDENCE)
       await writeFile(process.env.CAIRN_STORAGE_SOAK_EVIDENCE, JSON.stringify(evidence, null, 2))
@@ -191,18 +221,16 @@ export async function storageSmoke({
   await ready(recovered)
   await finish(recovered)
 
-  // Inspect the actual local base, including prepared-environment indirection.
+  // A committed image marker must never permit a missing retained image to
+  // become a fresh disk. Withhold only this stopped environment's own file.
   const withheld = JSON.parse(docker('exec', name, '/usr/local/bin/node', '-e', `
-    const fs=require('node:fs'),{DatabaseSync}=require('node:sqlite');
+    const fs=require('node:fs');
     let directory='/runner-state/disks/${runId}';
     if(fs.existsSync(directory+'/environment'))
       directory='/runner-state/environments/'+fs.readFileSync(directory+'/environment','utf8').trim();
-    const db=new DatabaseSync(directory+'/lazy/journal-v2.sqlite',{readOnly:true});
-    const manifest=JSON.parse(db.prepare('SELECT manifest FROM state WHERE id=1').get().manifest);
-    db.close();
-    const hash=manifest.blocks.find(block=>block.hash)?.hash;
-    if(!/^(?:b3-)?[a-f0-9]{64}$/.test(hash))throw Error('Missing local base for integrity qualification');
-    const file=directory+'/lazy/cache/'+hash,backup=file+'.integrity-test';
+    const record=JSON.parse(fs.readFileSync(directory+'/image.json','utf8'));
+    if(record.format!=='local-ext4-v1')throw Error('Missing committed image');
+    const file=directory+'/data.ext4',backup=file+'.integrity-test';
     fs.renameSync(file,backup);console.log(JSON.stringify({file,backup}));
   `))
   let integrityRefused = false
@@ -211,7 +239,7 @@ export async function storageSmoke({
     await reconnect()
     const broken = await start(false)
     const exit = await (await api(`/runs/${broken}/wait`, 'POST')).json()
-    assert.notEqual(exit.StatusCode, 0, 'A missing local base must refuse guest startup')
+    assert.notEqual(exit.StatusCode, 0, 'A missing retained image must refuse guest startup')
     assert.ok(!(await logs(broken)).includes('storage.ready'))
     integrityRefused = true
   }
@@ -244,14 +272,93 @@ export async function storageSmoke({
       bootMs,
       remoteEncodedBytes: 0,
       ...metrics,
-      source: 'Same-node controller/VM restart, local journal, warm host page cache; no WAN',
+      source: 'Same-node controller/VM restart, direct raw image, warm host page cache; no WAN',
     })}\n`)
     await finish(id)
   }
 
   await api(`/disks/${runId}/delete`, 'POST', { permanentlyDeleted: true })
+  const cycles = []
+  for (let cycle = 0; cycle < 5; cycle++) {
+    const created = await start(true)
+    await ready(created)
+    await finish(created)
+    const resumed = await start(false)
+    await ready(resumed)
+    if (cycle % 2 === 0) {
+      // Kill only this Docker-owned controller namespace. Its VMMs die with
+      // that namespace; restart must reconcile the retained image and promises.
+      docker('kill', '--signal', 'KILL', name)
+      docker('start', name)
+      await reconnect()
+      const recovered = await start(false)
+      await ready(recovered)
+      await finish(recovered)
+    }
+    else {
+      await stop(resumed)
+    }
+
+    const before = JSON.parse(docker('exec', name, 'node', '-e', `
+      const fs=require('node:fs');
+      let directory='/runner-state/disks/${runId}';
+      if(fs.existsSync(directory+'/environment'))
+        directory='/runner-state/environments/'+fs.readFileSync(directory+'/environment','utf8').trim();
+      const record=JSON.parse(fs.readFileSync(directory+'/image.json','utf8'));
+      if(record.format!=='local-ext4-v1')throw Error('Expected retained image');
+      const vms=new Set();
+      for(const file of fs.readdirSync('/runner-state').filter(file=>file.endsWith('.run'))){
+        if(fs.readFileSync('/runner-state/'+file,'utf8')!==${JSON.stringify(runId)})continue;
+        const record='/runner-state/'+file.slice(0,-4)+'.vm.json';
+        if(fs.existsSync(record))vms.add(JSON.parse(fs.readFileSync(record,'utf8')).vmId);
+      }
+      console.log(JSON.stringify({directory,vms:[...vms],bytes:fs.statSync(directory+'/data.ext4').blocks*512}));
+    `))
+    assert.ok(before.vms.length > 0, 'Lifecycle resource inspection needs positive VMM ownership records')
+    const retirementId = randomUUID()
+    const retired = await (await api(`/disks/${runId}/delete`, 'POST', { retirementId })).json()
+    assert.equal(retired.deleted, true)
+    assert.equal(retired.retirementId, retirementId)
+    const physical = JSON.parse(docker('exec', name, 'node', '-e', `
+      const fs=require('node:fs'),directory=${JSON.stringify(before.directory)};
+      const image=fs.existsSync(directory+'/data.ext4'),journal=fs.existsSync(directory+'/lazy');
+      const promises=fs.existsSync(directory+'/image-reservation.json');
+      const ids=${JSON.stringify(before.vms)};
+      const jails=ids.filter(id=>fs.existsSync('/runner-state/jails/firecracker/'+id+'/root')).length;
+      let processes=0;
+      for(const pid of fs.readdirSync('/proc').filter(value=>/^\\d+$/.test(value))){
+        try{if(fs.readFileSync('/proc/'+pid+'/comm','utf8').trim()==='firecracker'
+          &&ids.some(id=>fs.readFileSync('/proc/'+pid+'/cmdline','utf8').includes(id)))processes++;}
+        catch(error){if(error.code!=='ENOENT'&&error.code!=='ESRCH')throw error;}
+      }
+      console.log(JSON.stringify({image,journal,promises,jails,processes}));
+    `))
+    assert.deepEqual(physical, {
+      image: false,
+      journal: false,
+      promises: false,
+      jails: 0,
+      processes: 0,
+    })
+    assert.equal((await (await api('/health')).json()).activeRuns, 0)
+    const repeated = await (await api(`/disks/${runId}/delete`, 'POST', { retirementId })).json()
+    assert.equal(repeated.retirementId, retirementId)
+    cycles.push({
+      cycle,
+      allocatedBeforeDeletion: before.bytes,
+      ...physical,
+      controllerCrash: cycle % 2 === 0,
+    })
+  }
+
   process.stdout.write(`${JSON.stringify({
-    mode: 'local-journal-controller',
+    kind: 'vm-storage-lifecycle-cycles',
+    cycles,
+    retained: 'Manager-owned history/artifacts, immutable retirement receipts, lock namespaces and shared runtime/prepared-image caches.',
+  })}\n`)
+
+  process.stdout.write(`${JSON.stringify({
+    mode: 'local-image-controller',
     pressureResume: true,
     pressureCancellation: true,
     integrityRefused,

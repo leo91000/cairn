@@ -2,10 +2,10 @@ use super::{bases::*, disk};
 use crate::{
     project_archives::Archive,
     skills::private_dir,
-    storage::{self, Disk},
+    storage::{self},
 };
 use serde_json::json;
-use std::{io::Write, os::unix::fs::MetadataExt};
+use std::{io::Write, os::unix::fs::MetadataExt, path::Path};
 use tokio_util::sync::CancellationToken;
 
 async fn fixture() -> (tempfile::TempDir, Bases, Archive, storage::policy::Policy) {
@@ -14,6 +14,7 @@ async fn fixture() -> (tempfile::TempDir, Bases, Archive, storage::policy::Polic
         data: root.path().join("data"),
         state: root.path().join("state"),
         identity: (unsafe { libc::geteuid() }, unsafe { libc::getegid() }),
+        build_entered: None,
     };
     private_dir(&bases.data.join("project-archives"))
         .await
@@ -93,7 +94,7 @@ async fn preparation_pins_are_attempt_scoped_and_recovered_after_fencing() {
 }
 
 #[tokio::test]
-async fn prepared_ext4_base_adopts_private_authority_and_preserves_existing_conversations() {
+async fn prepared_directory_base_is_verified_and_private_copies_survive_cache_reclamation() {
     let (_root, bases, archive, policy) = fixture().await;
     let archives = vec![archive.clone()];
     let stop = CancellationToken::new();
@@ -103,121 +104,41 @@ async fn prepared_ext4_base_adopts_private_authority_and_preserves_existing_conv
         .unwrap();
     let ready = bases.lookup(&archives, 128).await.unwrap().unwrap();
     assert!(bases.lookup(&archives, 256).await.unwrap().is_none());
-    let other_identity = Bases {
+    let other = Bases {
         identity: (bases.identity.0 + 1, bases.identity.1),
         ..bases.clone()
     };
-    assert!(
-        other_identity
-            .lookup(&archives, 128)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(other.lookup(&archives, 128).await.unwrap().is_none());
     let source = bases.state.join("native-bases").join(&ready.key);
-    assert_eq!(
-        storage::LazyDisk::context(&source.join("lazy")).unwrap()["unassigned"],
-        true
-    );
-    let run = crate::config::id();
-    let attempt = crate::config::id();
-    let plan = json!({
-        "id": attempt,
-        "runId": run,
-        "runtimeId": "a".repeat(40),
-        "resources": { "diskMiB": 128 },
-        "nativeProjectArchives": archives,
-        "nativeProjectBase": ready.key,
-        "storage": {
-            "master": "http://127.0.0.1:1/",
-            "grant": "first-owner",
-            "policy": policy
-        }
-    });
-    private_dir(&bases.data.join("runs").join(&run))
-        .await
-        .unwrap();
-    tokio::fs::hard_link(
-        source.join("pin"),
-        pin_path(&bases.data.join("runs").join(&run), &attempt).unwrap(),
+    assert!(!source.join("lazy").exists());
+    let private = bases.state.join("private-copy");
+    private_dir(&private).await.unwrap();
+    super::directory::copy_unbudgeted(
+        &source.join("contents"),
+        &private,
+        &CancellationToken::new(),
     )
     .await
     .unwrap();
-    assert_eq!(bases.trim(0, u64::MAX, None).await.unwrap(), 0);
-    assert!(bases.initialize(&plan, &stop).await.unwrap());
-    let directory = storage::environment::directory(&bases.state, &run).unwrap();
-    assert_eq!(directory, bases.state.join("disks").join(&run));
-    assert!(!directory.join("environment").exists());
-    assert!(!directory.join("owner").exists());
-    assert!(!directory.join("restore.pending").exists());
-    assert!(
-        !bases
-            .data
-            .join("runs")
-            .join(&run)
-            .join(format!("native-base-{attempt}.pin"))
-            .exists()
-    );
-    let volume = storage::runtime::load(&directory).await.unwrap();
+    let relative = Path::new("workspaces")
+        .join(&archive.project_id)
+        .join("file");
     assert_eq!(
-        volume.assignment.assigned().unwrap().unwrap(),
-        crate::auth::digest("first-owner")
+        std::fs::read(private.join(&relative)).unwrap(),
+        b"initial project"
     );
-    // Read the real ext4 image through the production journal, without a mount.
-    let raw = directory.join("verify.ext4");
-    storage::export(volume.disk.as_ref(), &raw).unwrap();
-    let result = tokio::process::Command::new("debugfs")
-        .arg("-R")
-        .arg(format!("cat /workspaces/{}/file", archive.project_id))
-        .arg(&raw)
-        .output()
-        .await
-        .unwrap();
-    assert!(result.status.success());
-    assert_eq!(result.stdout, b"initial project");
-    tokio::fs::remove_file(raw).await.unwrap();
-    let segment = std::fs::read_dir(source.join("lazy"))
-        .unwrap()
-        .map(Result::unwrap)
-        .find(|entry| entry.file_name().to_string_lossy().starts_with("payload-"))
-        .unwrap()
-        .file_name();
-    assert_eq!(
-        std::fs::metadata(source.join("lazy").join(&segment))
+    assert_ne!(
+        std::fs::metadata(source.join("contents").join(&relative))
             .unwrap()
             .ino(),
-        std::fs::metadata(directory.join("lazy").join(&segment))
-            .unwrap()
-            .ino()
+        std::fs::metadata(private.join(&relative)).unwrap().ino()
     );
-    assert!(!bases.initialize(&plan, &stop).await.unwrap());
-    // A conventional committed disk is readable without running environment
-    // claim recovery, including when interrupted before the ownership hint.
-    tokio::fs::remove_file(
-        bases
-            .state
-            .join("native")
-            .join(&run)
-            .join("file-owner.json"),
-    )
-    .await
-    .unwrap();
     bases.trim(0, u64::MAX, None).await.unwrap();
-    let mut legacy_plan = plan.clone();
-    legacy_plan
-        .as_object_mut()
-        .unwrap()
-        .remove("nativeProjectArchives");
-    legacy_plan
-        .as_object_mut()
-        .unwrap()
-        .remove("nativeProjectBase");
-    assert!(!bases.initialize(&legacy_plan, &stop).await.unwrap());
-    assert!(!directory.join("restore.pending").exists());
     assert!(!source.exists());
-    let mut magic = [0; 2];
-    volume.disk.read_at(1080, &mut magic).unwrap();
-    assert_eq!(magic, [0x53, 0xef]);
+    assert_eq!(
+        std::fs::read(private.join(relative)).unwrap(),
+        b"initial project"
+    );
 }
 
 #[tokio::test]
@@ -254,12 +175,12 @@ async fn tiny_file_archives_reserve_allocated_blocks_before_extraction() {
     .await
     .unwrap();
     let limit = 4 * 1024 * disk::MIB;
-    // Logical bytes alone would admit a 520 MiB temporary reservation. Rounded
-    // entry allocation requires more than the remaining 600 MiB, before mkfs.
+    // Logical text bytes fit, but 8192 separately allocated files need at
+    // least 32 MiB. Admission must use that allocation before extracting.
     let occupied = tokio::fs::File::create(bases.data.join("other-retained-work"))
         .await
         .unwrap();
-    occupied.set_len(limit - 600 * disk::MIB).await.unwrap();
+    occupied.set_len(limit - 16 * disk::MIB).await.unwrap();
     let stop = CancellationToken::new();
     bases
         .warm(&[archive.clone()], 128, limit, &policy, &stop)
@@ -286,12 +207,10 @@ async fn changed_cache_payload_is_rejected_before_a_conversation_can_claim_it() 
         .unwrap();
     let ready = bases.lookup(&archives, 128).await.unwrap().unwrap();
     let source = bases.state.join("native-bases").join(ready.key);
-    let payload = std::fs::read_dir(source.join("lazy"))
-        .unwrap()
-        .map(Result::unwrap)
-        .find(|entry| entry.file_name().to_string_lossy().starts_with("payload-"))
-        .unwrap()
-        .path();
+    let payload = source
+        .join("contents/workspaces")
+        .join(&archives[0].project_id)
+        .join("file");
     let mut bytes = std::fs::read(&payload).unwrap();
     let last = bytes.len() - 1;
     bytes[last] ^= 0xff;
@@ -374,7 +293,9 @@ async fn background_preparation_yields_to_foreground_intent_and_then_finishes_ch
 #[tokio::test]
 async fn active_background_build_releases_its_temporary_files_before_foreground_admission() {
     use std::{sync::Arc, time::Duration};
-    let (_root, bases, archive, policy) = fixture().await;
+    let (_root, mut bases, archive, policy) = fixture().await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    bases.build_entered = Some(entered.clone());
     super::atomic_write(
         &bases.state.join("storage-policy.json"),
         &serde_json::to_vec(&policy).unwrap(),
@@ -395,18 +316,9 @@ async fn active_background_build_releases_its_temporary_files_before_foreground_
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if std::fs::read_dir(bases.state.join("environments"))
-                .is_ok_and(|mut entries| entries.next().is_some())
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
     let foreground = tokio::time::timeout(Duration::from_secs(5), super::disk::lock(&bases.state))
         .await
         .unwrap()
@@ -430,22 +342,72 @@ async fn active_background_build_releases_its_temporary_files_before_foreground_
 }
 
 #[tokio::test]
-#[ignore = "reproducible local ZIP extraction versus prepared native base benchmark"]
+#[ignore = "requires the disposable project-quota pool; scripts/qualify-native-quota.mjs"]
 async fn measure_prepared_native_bases() {
     use rand::{RngCore, SeedableRng};
-    use std::{os::fd::AsRawFd, time::Instant};
+    use std::{io::Read, os::fd::AsRawFd, time::Instant};
+
     fn cpu_ms() -> f64 {
-        let mut time = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
+        let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
         assert_eq!(
-            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) },
+            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, time.as_mut_ptr()) },
             0
         );
-        time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
+        let time = unsafe { time.assume_init() };
+        let mut children = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, children.as_mut_ptr()) },
+            0
+        );
+        let children = unsafe { children.assume_init() };
+        time.tv_sec as f64 * 1000.0
+            + time.tv_nsec as f64 / 1_000_000.0
+            + (children.ru_utime.tv_sec + children.ru_stime.tv_sec) as f64 * 1000.0
+            + (children.ru_utime.tv_usec + children.ru_stime.tv_usec) as f64 / 1000.0
     }
-    let (root, bases, mut archive, policy) = fixture().await;
+
+    fn file_io(root: &Path, expected: &[u8]) -> serde_json::Value {
+        let mut reads = Vec::new();
+        for cold in [true, false] {
+            let mut file = std::fs::File::open(root.join("asset")).unwrap();
+            if cold {
+                assert_eq!(
+                    unsafe {
+                        libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+                    },
+                    0
+                );
+            }
+            let mut buffer = vec![0; 4 * 1024 * 1024];
+            let begin = Instant::now();
+            let cpu = cpu_ms();
+            file.read_exact(&mut buffer).unwrap();
+            let sample = json!({ "wallMs": begin.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu });
+            assert_eq!(buffer, expected[..buffer.len()]);
+            reads.push(sample);
+        }
+        let begin = Instant::now();
+        let cpu = cpu_ms();
+        {
+            let mut file = std::fs::File::create(root.join("measurement-delta")).unwrap();
+            file.write_all(&[0x5a; 4096]).unwrap();
+            file.sync_all().unwrap();
+        }
+        json!({ "read4MiBColdHintThenWarm": reads, "write4KiB": {
+            "wallMs": begin.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu
+        } })
+    }
+
+    assert_eq!(
+        std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),
+        Ok("1")
+    );
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    let state =
+        std::path::PathBuf::from(std::env::var_os("CAIRN_NATIVE_QUOTA_TEST_STATE").unwrap());
+    super::quota::require(&state).unwrap();
+    let (_root, mut bases, mut archive, policy) = fixture().await;
+    bases.state = state.clone();
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -487,8 +449,16 @@ async fn measure_prepared_native_bases() {
     let ready = bases.lookup(&archives, 256).await.unwrap().unwrap();
     let cache = bases.state.join("native-bases").join(&ready.key);
     let mut samples = Vec::new();
-    for index in 0..3 {
-        let extracted = root.path().join(format!("zip-{index}"));
+    for _ in 0..3 {
+        let baseline_run = crate::config::id();
+        let baseline_control = super::workspace::directory(&state, &baseline_run).unwrap();
+        let baseline_workload = super::workspace::workload(&state, &baseline_run).unwrap();
+        private_dir(&baseline_control).await.unwrap();
+        private_dir(&baseline_workload).await.unwrap();
+        super::quota::prepare(&state, &baseline_workload, 256 * disk::MIB)
+            .await
+            .unwrap();
+        let extracted = baseline_workload.join("data");
         let begin = Instant::now();
         let cpu = cpu_ms();
         crate::project_archives::extract_cached(&bases.data, &archive, &extracted, &stop)
@@ -498,81 +468,44 @@ async fn measure_prepared_native_bases() {
             .await
             .unwrap();
         super::block::sync(&extracted).await.unwrap();
-        let zip_sample = json!({
-            "wallMs": begin.elapsed().as_secs_f64() * 1000.0,
-            "cpuMs": cpu_ms() - cpu
-        });
+        let zip_sample =
+            json!({ "wallMs": begin.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu });
+        let baseline_io = file_io(&extracted, &random);
         let run = crate::config::id();
+        let attempt = crate::config::id();
         let plan = json!({
-            "id": crate::config::id(),
-            "runId": run,
-            "runtimeId": "a".repeat(40),
+            "id": attempt, "runId": run, "runtimeId": "a".repeat(40),
             "resources": { "diskMiB": 256 },
-            "nativeProjectArchives": archives,
-            "nativeProjectBase": ready.key,
-            "storage": {
-                "master": "http://127.0.0.1:1/",
-                "grant": format!("probe-{index}"),
-                "policy": policy
-            }
+            "nativeProjectArchives": archives, "nativeProjectBase": ready.key,
+            "storage": { "owner": run, "policy": policy }
         });
         let begin = Instant::now();
         let cpu = cpu_ms();
         assert!(bases.initialize(&plan, &stop).await.unwrap());
-        let physical = storage::environment::directory(&bases.state, &run).unwrap();
-        storage::bootstrap::prepare_native(&physical, 256 * 1024 * 1024, &plan["storage"], &stop)
+        let mut mounted = super::directory::mount(&state, &run, &plan, &stop)
             .await
             .unwrap();
-        let volume = storage::runtime::load(&physical).await.unwrap();
-        let clone_sample = json!({
-            "wallMs": begin.elapsed().as_secs_f64() * 1000.0,
-            "cpuMs": cpu_ms() - cpu
-        });
-        let private_bytes = super::bases::reclaimable_bytes(&physical).unwrap()
-            + super::workspace::measure(&bases.state.join("native").join(&run), true).unwrap();
-        for entry in std::fs::read_dir(physical.join("lazy")).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_name().to_string_lossy().starts_with("payload-") {
-                let file = std::fs::File::open(entry.path()).unwrap();
-                assert_eq!(
-                    unsafe {
-                        libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
-                    },
-                    0
-                );
-            }
-        }
-        let mut reads = Vec::new();
-        let mut buffer = vec![0; 4 * 1024 * 1024];
-        for _ in 0..2 {
-            let begin = Instant::now();
-            let cpu = cpu_ms();
-            volume.disk.read_at(0, &mut buffer).unwrap();
-            reads.push(json!({
-                "wallMs": begin.elapsed().as_secs_f64() * 1000.0,
-                "cpuMs": cpu_ms() - cpu
-            }));
-        }
-        let begin = Instant::now();
-        let cpu = cpu_ms();
-        volume
-            .disk
-            .write_at(64 * 1024 * 1024, &[0x5a; 4096])
+        super::directory::initialize(&state, &run, &plan, 256 * disk::MIB)
+            .await
             .unwrap();
-        volume.disk.sync().unwrap();
-        let write = json!({
-            "wallMs": begin.elapsed().as_secs_f64() * 1000.0,
-            "cpuMs": cpu_ms() - cpu
-        });
-        samples.push(json!({
-            "zip": zip_sample,
-            "clone": clone_sample,
-            "privateBytesBeforeDelta": private_bytes,
-            "read4MiBColdHintThenWarm": reads,
-            "write4KiBDelta": write
-        }));
-        drop(volume);
-        tokio::fs::remove_dir_all(extracted).await.unwrap();
+        let clone_sample =
+            json!({ "wallMs": begin.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu });
+        let workload = super::workspace::workload(&state, &run).unwrap();
+        let private_bytes = super::quota::usage(&workload).unwrap();
+        let prepared_io = file_io(
+            &workload.join("data/workspaces").join(&archive.project_id),
+            &random,
+        );
+        samples.push(json!({ "cachedZipExtraction": zip_sample, "preparedDirectoryAdmission": clone_sample,
+            "privateAllocatedBytesBeforeDelta": private_bytes, "baselineIo": baseline_io, "preparedIo": prepared_io }));
+        let control = super::workspace::directory(&state, &run).unwrap();
+        tokio::fs::write(control.join("attempt"), attempt.as_bytes())
+            .await
+            .unwrap();
+        mounted.close().await.unwrap();
+        drop(mounted);
+        super::directory::action(&state, &run, true).await.unwrap();
+        super::quota::retire(&baseline_control).await.unwrap();
     }
     println!(
         "{}",
@@ -581,7 +514,366 @@ async fn measure_prepared_native_bases() {
             "baseAllocatedBytes": super::workspace::measure(&cache, true).unwrap(),
             "basePreparation": warm, "samples": samples,
             "hostLoad": std::fs::read_to_string("/proc/loadavg").unwrap(),
-            "conditions": "4096x4KiB text + seeded random42 8MiB; local host filesystem; cached ZIP/base; no ublk mount or WAN. ZIP final syncfs can include unrelated host writes. Clone includes durable metadata, atomic journal publication, geometry and full journal open. Reads use advisory DONTNEED; writes probe a disposable raw journal block.",
+            "kernel": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap().trim(),
+            "cpuScope": "test process plus reaped child CPU, including rsync/checksum children",
+            "conditions": "4096x4KiB text + seeded random42 8MiB; cached ZIP reference and prepared-directory admission on same dedicated ext4 project-quota pool; 256MiB per project; no ublk or WAN. Native admission includes verified private copy, durable format and initialization. Syncfs can include other pool writeback. File reads use advisory DONTNEED, not guaranteed hardware-cold storage; writes fsync a new 4KiB file. Development profile with debug=0/incremental=0 in CI."
         })
+    );
+    bases.trim(0, u64::MAX, None).await.unwrap();
+}
+
+/// Uses the real quota pool supplied by the disposable qualification launcher.
+#[tokio::test]
+#[ignore = "requires scripts/qualify-native-quota.mjs on its dedicated disposable filesystem"]
+async fn kernel_prepared_base_admission_and_recovery() {
+    assert_eq!(
+        std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),
+        Ok("1")
+    );
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    let state =
+        std::path::PathBuf::from(std::env::var_os("CAIRN_NATIVE_QUOTA_TEST_STATE").unwrap());
+    super::quota::require(&state).unwrap();
+    let enrollment = state.join("different-enrollment/data/node");
+    private_dir(&enrollment).await.unwrap();
+    assert!(super::enabled());
+    let capabilities = crate::nodes::connector::capabilities(&enrollment).unwrap();
+    let total = capabilities["diskTotalMiB"].as_u64().unwrap();
+    assert!(
+        (768..=1024).contains(&total),
+        "native enrollment must sample its 1GiB data pool, not controller storage: {total}"
+    );
+    let (_root, mut bases, archive, policy) = fixture().await;
+    bases.state = state.clone();
+    let stop = CancellationToken::new();
+    bases
+        .warm(
+            std::slice::from_ref(&archive),
+            128,
+            16 * 1024 * 1024 * 1024,
+            &policy,
+            &stop,
+        )
+        .await
+        .unwrap();
+    let ready = bases
+        .lookup(std::slice::from_ref(&archive), 128)
+        .await
+        .unwrap()
+        .unwrap();
+    let source = state.join("native-bases").join(&ready.key);
+    for phase in ["fresh", "copying", "renamed", "committed"] {
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        let control = super::workspace::directory(&state, &run).unwrap();
+        let workload = super::workspace::workload(&state, &run).unwrap();
+        let directory = storage::environment::directory(&state, &run).unwrap();
+        private_dir(&control).await.unwrap();
+        private_dir(&directory).await.unwrap();
+        let stage = bases.data.join("runs").join(&run);
+        private_dir(&stage).await.unwrap();
+        let plan = json!({
+            "id": attempt, "runId": run, "runtimeId": "synthetic",
+            "resources": { "diskMiB": 128 },
+            "storage": { "owner": run, "policy": policy },
+            "nativeProjectArchives": [archive], "nativeProjectBase": ready.key
+        });
+        let intent = directory.join(format!(
+            "native-base-initializing-v1.{}.{}.pin",
+            ready.key, attempt
+        ));
+        if phase != "fresh" {
+            tokio::fs::hard_link(source.join("pin"), &intent)
+                .await
+                .unwrap();
+            private_dir(&workload).await.unwrap();
+            super::quota::prepare(&state, &workload, 128 * disk::MIB)
+                .await
+                .unwrap();
+            if phase == "copying" {
+                private_dir(&workload.join("base.partial")).await.unwrap();
+                tokio::fs::write(workload.join("base.partial/interrupted"), b"partial copy")
+                    .await
+                    .unwrap();
+            } else {
+                private_dir(&workload.join("data")).await.unwrap();
+                super::directory::copy_unbudgeted(
+                    &source.join("contents"),
+                    &workload.join("data"),
+                    &stop,
+                )
+                .await
+                .unwrap();
+            }
+            if phase == "committed" {
+                super::directory::publish_format(&directory, &control, &plan, 128 * disk::MIB)
+                    .await
+                    .unwrap();
+                tokio::fs::write(
+                    workload.join("data/workspaces/new-work"),
+                    b"must survive recovery",
+                )
+                .await
+                .unwrap();
+            }
+            // Startup attempt-pin cleanup must preserve this environment's
+            // durable initialization pin and therefore its cache source.
+            recover_pins(&bases.data).await.unwrap();
+            assert!(intent.exists());
+        }
+        if phase == "copying" {
+            let path = state.join("storage-policy.json");
+            let previous = std::fs::read(&path).ok();
+            let (total, _) =
+                crate::storage::policy::physical_space(&super::workspace::data_root(&state))
+                    .unwrap();
+            let reserved = json!({ "reserveMiB": total / disk::MIB + 1, "reservePercent": 1 });
+            super::atomic_write(&path, &serde_json::to_vec(&reserved).unwrap())
+                .await
+                .unwrap();
+            assert!(bases.initialize(&plan, &stop).await.is_err());
+            assert!(
+                intent.exists(),
+                "Capacity refusal must preserve the initialization intent and source pin"
+            );
+            assert!(!directory.join("directory.json").exists());
+            if let Some(bytes) = previous {
+                super::atomic_write(&path, &bytes).await.unwrap();
+            } else {
+                tokio::fs::remove_file(&path).await.unwrap();
+            }
+        }
+        let expected_clone = phase != "committed";
+        assert_eq!(
+            bases.initialize(&plan, &stop).await.unwrap(),
+            expected_clone
+        );
+        assert!(!std::fs::read_dir(&directory).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("native-base-initializing-v1.")
+        }));
+        let mut mounted = super::directory::mount(&state, &run, &plan, &stop)
+            .await
+            .unwrap();
+        super::directory::initialize(&state, &run, &plan, 128 * disk::MIB)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(
+                workload
+                    .join("data/workspaces")
+                    .join(&archive.project_id)
+                    .join("file")
+            )
+            .unwrap(),
+            b"initial project"
+        );
+        if phase == "committed" {
+            assert_eq!(
+                std::fs::read(workload.join("data/workspaces/new-work")).unwrap(),
+                b"must survive recovery"
+            );
+        }
+        tokio::fs::write(control.join("attempt"), attempt.as_bytes())
+            .await
+            .unwrap();
+        mounted.close().await.unwrap();
+        drop(mounted);
+        // Model leftover temporary resources after controller death. Recovery
+        // must clean them even if no conversation ever resumes afterward.
+        private_dir(&workload.join("tmp")).await.unwrap();
+        private_dir(&control.join("docker-runtime")).await.unwrap();
+        private_dir(&control.join("tmp")).await.unwrap();
+        tokio::fs::write(
+            control.join("tmp/legacy-interrupted-output"),
+            b"old temporary",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(workload.join("tmp/interrupted-output"), b"temporary")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            control.join("docker-runtime/interrupted-runtime"),
+            b"temporary",
+        )
+        .await
+        .unwrap();
+        let peer_temporary = state.join("foreign-legacy-tmp");
+        private_dir(&peer_temporary).await.unwrap();
+        tokio::fs::write(peer_temporary.join("peer-work"), b"foreign temporary")
+            .await
+            .unwrap();
+        let mut peer_consumer = tokio::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&peer_temporary)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut consumer = tokio::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(control.join("tmp"))
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        assert!(
+            super::directory::recover_completed(&state, &run, &attempt)
+                .await
+                .is_err()
+        );
+        assert!(control.join("tmp/legacy-interrupted-output").is_file());
+        consumer.kill().await.unwrap();
+        consumer.wait().await.unwrap();
+        super::directory::recover_completed(&state, &run, &attempt)
+            .await
+            .unwrap();
+        super::directory::recover_completed(&state, &run, &attempt)
+            .await
+            .unwrap();
+        assert!(!workload.join("tmp").exists());
+        assert!(!control.join("docker-runtime").exists());
+        assert!(!control.join("tmp").exists());
+        assert_eq!(
+            tokio::fs::read(peer_temporary.join("peer-work"))
+                .await
+                .unwrap(),
+            b"foreign temporary"
+        );
+        assert!(peer_consumer.try_wait().unwrap().is_none());
+        peer_consumer.kill().await.unwrap();
+        peer_consumer.wait().await.unwrap();
+        tokio::fs::remove_dir_all(&peer_temporary).await.unwrap();
+        assert_eq!(
+            std::fs::read(
+                workload
+                    .join("data/workspaces")
+                    .join(&archive.project_id)
+                    .join("file")
+            )
+            .unwrap(),
+            b"initial project"
+        );
+        super::directory::action(&state, &run, true).await.unwrap();
+        assert!(!workload.exists());
+    }
+    assert_eq!(std::fs::metadata(source.join("pin")).unwrap().nlink(), 1);
+    bases.trim(0, u64::MAX, None).await.unwrap();
+    println!(
+        "Prepared native initialization: fresh, interrupted copy, durable rename and committed work all admitted and retired."
+    );
+}
+
+#[tokio::test]
+async fn committed_prepared_intent_cleanup_preserves_later_user_work_without_cache_access() {
+    let (_root, bases, _archive, _policy) = fixture().await;
+    let run = crate::config::id();
+    let old = crate::config::id();
+    let next = crate::config::id();
+    let directory = storage::environment::directory(&bases.state, &run).unwrap();
+    let workload = super::workspace::workload(&bases.state, &run).unwrap();
+    private_dir(&directory).await.unwrap();
+    for name in ["home", "workspaces", "output"] {
+        private_dir(&workload.join("data").join(name))
+            .await
+            .unwrap();
+    }
+    let retained = workload.join("data/workspaces/saved");
+    tokio::fs::write(&retained, b"user work after format publication")
+        .await
+        .unwrap();
+    let plan = json!({ "id": next, "runId": run, "runtimeId": "current" });
+    super::atomic_write(
+        &directory.join("directory.json"),
+        &serde_json::to_vec(&super::directory::format(&plan)).unwrap(),
+    )
+    .await
+    .unwrap();
+    let intent = directory.join(format!(
+        "native-base-initializing-v1.{}.{}.pin",
+        "a".repeat(64),
+        old
+    ));
+    tokio::fs::write(&intent, b"").await.unwrap();
+    let stage = bases.data.join("runs").join(&run);
+    let blocked_pin = pin_path(&stage, &old).unwrap();
+    private_dir(&blocked_pin).await.unwrap();
+    assert!(
+        bases
+            .initialize(&plan, &CancellationToken::new())
+            .await
+            .is_err()
+    );
+    assert!(
+        intent.exists(),
+        "failed staging cleanup must preserve its retry intent"
+    );
+    assert_eq!(
+        std::fs::read(&retained).unwrap(),
+        b"user work after format publication"
+    );
+    tokio::fs::remove_dir(blocked_pin).await.unwrap();
+    assert!(
+        !bases
+            .initialize(&plan, &CancellationToken::new())
+            .await
+            .unwrap()
+    );
+    assert!(!intent.exists());
+    assert_eq!(
+        std::fs::read(retained).unwrap(),
+        b"user work after format publication"
+    );
+}
+
+#[tokio::test]
+async fn prepared_initialization_intent_does_not_authorize_unrecognized_old_payloads() {
+    let (_root, bases, archive, policy) = fixture().await;
+    let stop = CancellationToken::new();
+    bases
+        .warm(
+            std::slice::from_ref(&archive),
+            128,
+            16 * 1024 * 1024 * 1024,
+            &policy,
+            &stop,
+        )
+        .await
+        .unwrap();
+    let ready = bases
+        .lookup(std::slice::from_ref(&archive), 128)
+        .await
+        .unwrap()
+        .unwrap();
+    let run = crate::config::id();
+    let attempt = crate::config::id();
+    let directory = storage::environment::directory(&bases.state, &run).unwrap();
+    private_dir(&directory.join("lazy")).await.unwrap();
+    let payload = directory.join("lazy/retained-payload");
+    tokio::fs::write(&payload, b"old work").await.unwrap();
+    tokio::fs::hard_link(
+        bases
+            .state
+            .join("native-bases")
+            .join(&ready.key)
+            .join("pin"),
+        directory.join(format!(
+            "native-base-initializing-v1.{}.{}.pin",
+            ready.key, attempt
+        )),
+    )
+    .await
+    .unwrap();
+    let plan = json!({ "id": attempt, "runId": run, "resources": { "diskMiB": 128 },
+        "nativeProjectArchives": [archive], "nativeProjectBase": ready.key });
+    assert!(bases.initialize(&plan, &stop).await.is_err());
+    assert_eq!(std::fs::read(payload).unwrap(), b"old work");
+    assert!(!directory.join("directory.json").exists());
+    assert!(
+        !super::workspace::workload(&bases.state, &run)
+            .unwrap()
+            .exists()
     );
 }

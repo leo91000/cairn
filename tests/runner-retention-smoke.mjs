@@ -17,7 +17,6 @@ import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { stripVTControlCharacters } from 'node:util'
 import { inspectLocalDisk, prepareLocalStorage } from './runner-storage-smoke.mjs'
-import { ublkDeviceArguments } from './ublk-devices.mjs'
 
 async function main() {
   const image = process.argv[2]
@@ -33,7 +32,7 @@ async function main() {
   const runId = randomUUID()
   const runRoot = `/data/runs/${runId}`
   const samples = []
-  let localConsolidations = 0
+  let localImageInspections = 0
   const benchmarkStarted = Date.now()
   let broker
   let credentials = 0
@@ -114,7 +113,7 @@ async function main() {
     docker('run', '-d', '--name', peer, '-v', `${root}/peer.cjs:/peer.cjs:ro`, '--entrypoint', 'node', image, '/peer.cjs')
     docker('network', 'connect', '--ip', '93.184.216.3', network, peer)
     const capabilities = ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', ...ublkDeviceArguments(), '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${process.env.CAIRN_RETENTION_MEMORY_GIB ?? 10}g`, '--cpus', cpuQuota, '-e', 'CONCURRENCY=3', '-e', `CAIRN_VM_RETENTION_SECONDS=${retention}`, '-e', 'CAIRN_READY_VM_POOL=false', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${process.env.CAIRN_RETENTION_MEMORY_GIB ?? 10}g`, '--cpus', cpuQuota, '-e', 'CONCURRENCY=3', '-e', `CAIRN_VM_RETENTION_SECONDS=${retention}`, '-e', 'CAIRN_READY_VM_POOL=false', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     docker('network', 'connect', '--ip', '93.184.216.2', network, name)
     url = `http://${await until(() => {
       try {
@@ -131,7 +130,7 @@ async function main() {
       name,
       api,
     })
-    assert.notEqual(process.env.CAIRN_RETENTION_ASYNC_PUBLISH, 'true', 'Use CAIRN_RETENTION_LOCAL_CONSOLIDATION for local disks')
+    assert.notEqual(process.env.CAIRN_RETENTION_ASYNC_PUBLISH, 'true', 'Use CAIRN_RETENTION_LOCAL_IMAGE_INSPECTION for local disks')
     assert.notEqual(process.env.CAIRN_RETENTION_PUBLISH, 'true', 'Remote publication is no longer a retention qualification')
     let sessionId
     let lastPlan
@@ -185,7 +184,7 @@ async function main() {
         expires: Date.now() + 120000,
         sandbox: 'yolo',
         cwd: chat.cwd,
-        resources: { cpu: 3, memoryMiB: 1024, diskMiB: 32768 },
+        resources: { cpu: 3, memoryMiB: 1024, diskMiB: 1024 },
         chat,
         imports: [{ source: `${runRoot}/home`, target: '/home/node' }, { source: `${runRoot}/workspace`, target: chat.cwd }, { source: `${runRoot}/output`, target: `${runRoot}/output` }, { source: `${runRoot}/chat-input`, target: '/run/cairn-chat' }],
       }
@@ -248,16 +247,15 @@ async function main() {
         }
 
         await inspectLocalDisk(api, runId)
-        if (process.env.CAIRN_RETENTION_LOCAL_CONSOLIDATION === 'true') {
+        if (process.env.CAIRN_RETENTION_LOCAL_IMAGE_INSPECTION === 'true') {
           await until(async () => {
             const status = await inspectLocalDisk(api, runId)
-            return status.dirtyBytes === 0 && status.published?.local === true
-              && status.completedGeneration > 0 && status.published.generation >= status.completedGeneration
+            return status.storage === 'local-ext4-v1' && status.availability === 'available'
           })
-          localConsolidations++
+          localImageInspections++
         }
 
-        assert.equal(state(vmId), 'Paused', 'Local consolidation never wakes retained CPUs')
+        assert.equal(state(vmId), 'Paused', 'Inspecting the direct image never wakes retained CPUs')
       }
       else {
         assert.equal(health.pool.retained, 0)
@@ -431,7 +429,7 @@ async function main() {
       retentionSeconds: retention,
       scope: 'Local real Firecracker/native Codex, synthetic account/model/MCP and local working disks. Model response deliberately delayed 1.5 s; preModel excludes that delay. No manager, production or WAN.',
       durationMs: Date.now() - benchmarkStarted,
-      localConsolidations,
+      localImageInspections,
       samples,
       reclamation,
       crashRecoveryPassed,

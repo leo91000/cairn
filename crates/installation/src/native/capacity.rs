@@ -192,14 +192,20 @@ impl Capacity {
             let mut requests = Vec::new();
             for (id, attempt) in attempts {
                 let directory = crate::storage::environment::directory(&state, &attempt.run)?;
-                let local = crate::storage::LazyDisk::cached_backing_bytes(&directory.join("lazy"))
-                    .unwrap_or(0);
-                let temporary = super::workspace::directory(&state, &attempt.run)?.join("tmp");
-                // Withhold journal credit: obsolete append frames are not
-                // current backing, even below the logical consumption cap.
-                let owned = local
-                    .min(attempt.workspace_bytes)
-                    .saturating_add(super::workspace::credit_bytes(&temporary).unwrap_or(0));
+                let root = super::workspace::directory(&state, &attempt.run)?;
+                let direct = directory.join("directory.json").exists();
+                let owned = if direct {
+                    super::quota::usage(&super::workspace::workload(&state, &attempt.run)?)
+                        .unwrap_or(0)
+                        .min(attempt.bytes)
+                } else {
+                    let local =
+                        crate::storage::LazyDisk::cached_backing_bytes(&directory.join("lazy"))
+                            .unwrap_or(0);
+                    local.min(attempt.workspace_bytes).saturating_add(
+                        super::workspace::credit_bytes(&root.join("tmp")).unwrap_or(0),
+                    )
+                };
                 owned_bytes.insert(id.clone(), owned);
                 if attempt.requested {
                     requests.push(GrowthRequest {
@@ -208,7 +214,12 @@ impl Capacity {
                     });
                 }
             }
-            let (_, free_bytes) = crate::storage::policy::space(&state)?;
+            let data_root = super::workspace::data_root(&state);
+            let (_, free_bytes) = crate::storage::policy::space(if data_root.exists() {
+                &data_root
+            } else {
+                &state
+            })?;
             Ok(Observation {
                 protocol: 1,
                 captured_at: crate::config::now(),
@@ -234,6 +245,7 @@ pub(super) async fn record_retained(directory: &Path, attempt: &str, workspace: 
         &serde_json::to_vec(&json!({
             "attempt": attempt, "workspaceBytes": workspace,
             "journalDevice": metadata.dev(), "journalInode": metadata.ino(),
+            "filesystemId": crate::storage::policy::filesystem_id(&std::fs::File::open(directory)?)?,
         }))?,
     )
     .await
@@ -276,7 +288,13 @@ fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<St
         else {
             continue;
         };
-        let directory = crate::storage::environment::directory(state, &run)?.join("lazy");
+        let environment = crate::storage::environment::directory(state, &run)?;
+        let direct = environment.join("directory.json").exists();
+        let directory = if direct {
+            environment
+        } else {
+            environment.join("lazy")
+        };
         let marker = directory.join("capacity.json");
         let Ok(metadata) = std::fs::symlink_metadata(&marker) else {
             continue;
@@ -299,16 +317,30 @@ fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<St
         else {
             continue;
         };
+        let filesystem_matches = if usage.get("filesystemId").is_some() {
+            usage["filesystemId"]
+                == serde_json::to_value(crate::storage::policy::filesystem_id(
+                    &std::fs::File::open(&directory)?,
+                )?)?
+        } else {
+            usage["journalDevice"] == metadata.dev()
+        };
         if usage["attempt"] != attempt
-            || usage["journalDevice"] != metadata.dev()
+            || !filesystem_matches
             || usage["journalInode"] != metadata.ino()
         {
             continue;
         }
-        let owned = crate::storage::LazyDisk::cached_backing_bytes(&directory)
-            .unwrap_or(0)
-            .min(workspace)
-            .saturating_add(super::workspace::credit_bytes(&root.join("tmp")).unwrap_or(0));
+        let owned = if direct {
+            super::quota::usage(&super::workspace::workload(state, &run)?)
+                .unwrap_or(0)
+                .min(workspace)
+        } else {
+            crate::storage::LazyDisk::cached_backing_bytes(&directory)
+                .unwrap_or(0)
+                .min(workspace)
+                .saturating_add(super::workspace::credit_bytes(&root.join("tmp")).unwrap_or(0))
+        };
         credits.insert(run, owned);
     }
     Ok(credits)

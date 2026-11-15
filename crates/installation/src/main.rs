@@ -98,16 +98,16 @@ where
         return ExitCode::FAILURE;
     }
 
-    if args.first().is_some_and(|a| a == "runner-broker")
-        && let Err(error) = cairn_installation::storage::ublk::prepare_io_threads()
-    {
-        eprintln!("{error}");
-        return ExitCode::FAILURE;
-    }
-    if args.first().is_some_and(|arg| arg == "native-controller")
+    // VM disks use direct files. Legacy journal export is ordinary file IO;
+    // only native legacy block serving needs IO_FLUSHER/CAP_SYS_RESOURCE.
+    let native_storage_process = args.first().is_some_and(|arg| {
+        arg == "native-controller"
+            || (arg == "node-daemon" && cairn_installation::native::enabled())
+    });
+    if native_storage_process
         && let Err(error) = cairn_installation::native::prepare_storage_process()
     {
-        eprintln!("Could not initialize native ublk storage: {error}");
+        eprintln!("Could not initialize native storage: {error}");
         return ExitCode::FAILURE;
     }
     tracing_subscriber::fmt()

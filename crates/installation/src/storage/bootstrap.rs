@@ -56,26 +56,105 @@ pub async fn prepare_unassigned(
     prepare_source(directory, size, &context, stop, true, false, None).await
 }
 
-/// Populate and seal an anonymous native base before it can be cloned.
-pub(crate) async fn prepare_native_base(
+/// Recognize the previous format's authoritative source after interrupted
+/// materialization. This is discovery only; unknown/mixed sources are preserved.
+pub(crate) fn resize_source(directory: &Path) -> Result<Option<std::path::PathBuf>> {
+    if super::runtime::exists(directory) {
+        return Ok(None);
+    }
+    let source = directory.join("resize-source");
+    match std::fs::symlink_metadata(&source) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(Error::conflict(
+                "Legacy resize source is not an owned directory.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let intent_path = directory.join("bootstrap.pending");
+    let inspect = |path: &Path| -> Result<std::fs::Metadata> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                Ok(metadata)
+            }
+            Ok(_) => Err(Error::conflict(
+                "Legacy resize metadata is not a regular owned file.",
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(Error::conflict(
+                "Unrecognized legacy resize source; its metadata is missing.",
+            )),
+            Err(error) => Err(error.into()),
+        }
+    };
+    inspect(&intent_path)?;
+    let intent = std::fs::read(intent_path)?;
+    let database = inspect(&source.join("journal-v2.sqlite"))?;
+    if intent != b"resizing"
+        || !database.is_file()
+        || database.file_type().is_symlink()
+        || super::LazyDisk::geometry(&source)? == 0
+    {
+        return Err(Error::conflict(
+            "Unrecognized legacy resize source; retained work was preserved.",
+        ));
+    }
+    Ok(Some(source))
+}
+
+/// Caller holds logical/physical ownership. Restore only the recognized old
+/// crash state before choosing a new storage format, never a damaged raw copy.
+pub(crate) async fn recover_resize_source(
     directory: &Path,
-    size: u64,
-    contents: &Path,
-    identity: (u32, u32),
-    policy: &super::policy::Policy,
-    stop: &tokio_util::sync::CancellationToken,
-) -> Result<()> {
-    let context = serde_json::json!({ "unassigned": true, "policy": policy });
-    prepare_source(
-        directory,
-        size,
-        &context,
-        stop,
-        true,
-        true,
-        Some((contents, identity)),
-    )
-    .await
+    requested: &Value,
+    backend: &str,
+) -> Result<bool> {
+    let Some(source) = resize_source(directory)? else {
+        return Ok(false);
+    };
+    let context = super::LazyDisk::context(&source)?;
+    if context["owner"].as_str().is_some() && context["owner"] != requested["owner"] {
+        return Err(Error::conflict(
+            "Legacy resize source belongs to another environment.",
+        ));
+    }
+    if directory.join("runtime.json").exists() {
+        let runtime: Value =
+            serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        if let Some(actual) = runtime["backend"].as_str()
+            && actual != backend
+            && !(backend == "vm" && actual == "firecracker")
+        {
+            return Err(Error::conflict(
+                "Legacy resize source belongs to another backend.",
+            ));
+        }
+    }
+    let target = directory.join("lazy");
+    match tokio::fs::symlink_metadata(&target).await {
+        Ok(metadata)
+            if metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && tokio::fs::read_dir(&target)
+                    .await?
+                    .next_entry()
+                    .await?
+                    .is_none() =>
+        {
+            tokio::fs::remove_dir(&target).await?;
+        }
+        Ok(_) => {
+            return Err(Error::conflict(
+                "Ambiguous legacy resize target; both sources were preserved.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    tokio::fs::rename(source, target).await?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
+    Ok(true)
 }
 
 async fn prepare_source(

@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -134,6 +134,7 @@ pub struct Reservation {
     released: bool,
     slot: usize,
     vm: Option<Vm>,
+    disk_reservation: Option<crate::storage::reservation::Reservation>,
     owner: Option<crate::storage::environment::OwnerLease>,
     anonymous: Option<PathBuf>,
     prepared: Option<ready::Prepared>,
@@ -196,6 +197,8 @@ impl Pool {
         if prepared.exists() {
             tokio::fs::remove_dir_all(&prepared).await?;
         }
+        crate::skills::private_dir(&state).await?;
+        crate::storage::reservation::recover(&state).await?;
         crate::storage::environment::recover(&state).await?;
         if let Err(error) = super::images::collect(&state, &image).await {
             tracing::warn!(message = %error.message, "Runtime image collection skipped");
@@ -313,6 +316,14 @@ impl Pool {
         // Health and stop never take the admission lock or await VM teardown.
         self.retire_idle().await;
         self.ensure_not_quarantined()?;
+        budget::invalidate_disk_usage(&self.state)?;
+        if budget::committed_disk_bytes(&self.state)?
+            > next.limits.disk_mi_b.saturating_mul(1_048_576)
+        {
+            return Err(Error::conflict(
+                "Stop writable VMs before reducing the shared budget below their reserved image allowances.",
+            ));
+        }
         let _slots = self.slots.lock().await;
         let mut current = self.budget.lock().await;
         let cgroup = self.cgroup.get().unwrap();
@@ -346,22 +357,55 @@ impl Pool {
             .unwrap()
             .parent()
             .ok_or_else(|| Error::unavailable("Controller memory envelope is unavailable."))?;
-        let memory = budget::memory_usage(envelope)? / 1_048_576;
-        let disk = budget::disk_bytes(&self.state)?;
-        let (total, free) = crate::storage::policy::space(&self.state)?;
-        let policy = match std::fs::read(self.state.join("storage-policy.json")) {
-            Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                crate::storage::policy::Policy::default()
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let reserve = policy.reserve(total);
-        let pressure = budget::pressure(memory, budget.limits.memory_mi_b, free, reserve);
-        Ok((
-            serde_json::json!({ "memoryMiB": memory, "diskMiB": disk / 1_048_576 }),
-            pressure,
-        ))
+        let envelope = envelope.to_owned();
+        let state = self.state.clone();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || -> Result<_> {
+                let memory = budget::memory_usage(&envelope)? / 1_048_576;
+                let disk = budget::disk_bytes(&state)?;
+                let (total, free) = crate::storage::policy::space(&state)?;
+                let policy = match std::fs::read(state.join("storage-policy.json")) {
+                    Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        crate::storage::policy::Policy::default()
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let reserve = policy.reserve(total);
+                let pressure = budget::pressure(memory, budget.limits.memory_mi_b, free, reserve);
+                Ok((
+                    serde_json::json!({ "memoryMiB": memory, "diskMiB": disk / 1_048_576 }),
+                    pressure,
+                ))
+            }),
+        )
+        .await
+        .map_err(|_| Error::unavailable("VM pool resource observations are stale."))?
+        .map_err(Error::internal)?
+    }
+
+    async fn retire_failed_storage(&self) {
+        loop {
+            let failed = {
+                let mut slots = self.slots.lock().await;
+                let ready = slots.ready.iter().position(|reservation| {
+                    reservation.vm.as_ref().is_some_and(Vm::storage_failed)
+                });
+                if let Some(index) = ready {
+                    slots.ready.remove(index)
+                } else {
+                    let retained = slots.retained.iter().position(|idle| {
+                        idle.reservation.vm.as_ref().is_some_and(Vm::storage_failed)
+                    });
+                    retained
+                        .and_then(|index| slots.retained.remove(index))
+                        .map(|idle| idle.reservation)
+                }
+            };
+            let Some(mut failed) = failed else { return };
+            failed.finish().await;
+        }
     }
 
     pub async fn monitor(self: Arc<Self>) {
@@ -375,6 +419,7 @@ impl Pool {
                 () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             }
 
+            self.retire_failed_storage().await;
             if Instant::now() >= next_image_gc {
                 next_image_gc = Instant::now() + Duration::from_secs(600);
                 if let Err(error) = super::images::collect(&self.state, &self.image).await {
@@ -501,6 +546,7 @@ impl Pool {
             released: false,
             slot,
             vm: None,
+            disk_reservation: None,
             owner: None,
             anonymous: None,
             prepared: None,
@@ -576,6 +622,49 @@ impl Pool {
                 return Ok(());
             };
             reservation.finish().await;
+        }
+    }
+
+    /// Foreground capacity preempts idle promises only after atomic admission
+    /// proves the requested image cannot fit. Active VMMs are never selected.
+    async fn reserve_image(
+        &self,
+        directory: &Path,
+        size: u64,
+        policy: &crate::storage::policy::Policy,
+        stop: &CancellationToken,
+    ) -> Result<crate::storage::reservation::Reservation> {
+        let _admission = self.admission.lock().await;
+        self.cancel_preparing().await?;
+        loop {
+            self.ensure_not_quarantined()?;
+            match crate::storage::reservation::reserve_cancellable(
+                &self.state,
+                directory,
+                size,
+                policy,
+                stop,
+            )
+            .await
+            {
+                Ok(reservation) => return Ok(reservation),
+                Err(error) if error.status == 507 => {
+                    let idle = {
+                        let mut slots = self.slots.lock().await;
+                        slots
+                            .retained
+                            .pop_front()
+                            .map(|idle| idle.reservation)
+                            .or_else(|| slots.ready.pop_front())
+                    };
+                    let Some(mut idle) = idle else {
+                        return Err(error);
+                    };
+                    idle.finish().await;
+                    tracing::info!(target: "cairn_performance", operation = "vm_retention", event = "evicted", reason = "foreground_disk_capacity");
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -753,6 +842,7 @@ impl Pool {
             released: false,
             slot,
             vm: None,
+            disk_reservation: None,
             owner: None,
             anonymous: Some(self.state.join("environments").join(crate::config::id())),
             prepared: None,
@@ -793,10 +883,20 @@ impl Reservation {
             "diskMiB": DEFAULT_DISK_MIB,
         });
         let operation = async {
-            crate::storage::bootstrap::prepare_unassigned(
+            self.disk_reservation = Some(
+                crate::storage::reservation::reserve_cancellable(
+                    &self.pool.state,
+                    &directory,
+                    DEFAULT_DISK_MIB * 1_048_576,
+                    &policy,
+                    &stop,
+                )
+                .await?,
+            );
+            crate::storage::image::prepare(
                 &directory,
                 DEFAULT_DISK_MIB * 1_048_576,
-                &policy,
+                &serde_json::json!({ "unassigned": true, "policy": policy }),
                 &stop,
             )
             .await?;
@@ -808,6 +908,7 @@ impl Reservation {
                 self.slot,
                 &stop,
                 Some(&resources),
+                &mut self.disk_reservation,
             )
             .await;
             self.vm_in_flight = false;
@@ -955,17 +1056,12 @@ impl Reservation {
             }
             let disk = self.owner.as_ref().unwrap().directory.clone();
             if !compatible {
-                crate::storage::bootstrap::prepare(&disk, size, plan.storage(), &stop).await?;
+                let policy = crate::storage::policy::for_node(&plan.storage()["policy"])?;
+                self.disk_reservation =
+                    Some(self.pool.reserve_image(&disk, size, &policy, &stop).await?);
+                crate::storage::image::prepare(&disk, size, plan.storage(), &stop).await?;
             }
-            let volume = crate::storage::runtime::load(&disk).await?;
-            attempt_stop.bind(&volume)?;
-            if volume.assignment.assigned()?.is_none() {
-                // A controller crash may leave ownership durable before its
-                // authorization was attached. Bind before any user import.
-                volume
-                    .authorize(self.owner.as_ref().unwrap(), plan.storage())
-                    .await?;
-            }
+            crate::storage::image::authorize(self.owner.as_ref().unwrap(), plan.storage()).await?;
             if !compatible {
                 timing.next("boot_vm");
                 self.vm_in_flight = true;
@@ -976,6 +1072,7 @@ impl Reservation {
                     self.slot,
                     &stop,
                     plan.resources(),
+                    &mut self.disk_reservation,
                 )
                 .await;
                 self.vm_in_flight = false;
@@ -990,14 +1087,6 @@ impl Reservation {
         };
         // Do not drop boot or cleanup futures on cancellation: their resource ownership must drain.
         let result = operation.await;
-        if matches!(result, Ok(0)) {
-            let volume =
-                crate::storage::runtime::load(&self.owner.as_ref().unwrap().directory).await?;
-            // Seal the synced response before releasing its execution lease.
-            // The publisher can reconstruct this prefix without pausing a
-            // following turn, including when optional VM retention is skipped.
-            volume.seal_completed().await?;
-        }
         // Retention is optional. A capture can wait for attempt cancellation
         // to settle an uncertain pause/thaw, so finalization must not wait for
         // its control lock indefinitely before signalling that cancellation.
@@ -1035,8 +1124,6 @@ impl Reservation {
         };
         if retain {
             let pool = self.pool.clone();
-            let directory = &self.owner.as_ref().unwrap().directory;
-            let volume = crate::storage::runtime::load(directory).await?;
             let _admission = pool.admission.lock().await;
             if let Some(budget) = pool.retention_budget(execution_budget.as_ref()).await
                 && let Some(bytes) = self.vm.as_ref().and_then(Vm::resident_bytes)
@@ -1074,7 +1161,9 @@ impl Reservation {
                 };
                 if !fits {
                     stop.cancel();
-                    self.finish().await;
+                    if !self.finish().await {
+                        return Ok(crate::runner::FINALIZATION_FAILED_SENTINEL);
+                    }
                     return result;
                 }
                 // Anonymous eligibility ends permanently on assignment.
@@ -1087,7 +1176,7 @@ impl Reservation {
                     key: retained::key(&plan),
                     expires: Instant::now() + pool.retention,
                     reservation: self,
-                    _volume: Some(volume),
+                    _volume: None,
                 };
                 pool.slots.lock().await.retained.push_back(idle);
                 stop.cancel();
@@ -1097,30 +1186,48 @@ impl Reservation {
         // Captures share this attempt's lifetime. Release pending thaw retries
         // before shutdown removes the guest socket, including normal completion.
         stop.cancel();
-        self.finish().await;
+        let flushed = self.finish().await;
+        if !flushed {
+            return Ok(crate::runner::FINALIZATION_FAILED_SENTINEL);
+        }
         result
     }
 
-    async fn finish(&mut self) {
+    async fn finish(&mut self) -> bool {
         self.idle_stop.cancel();
         let control = self.idle_control.clone();
         let _capture = control.lock().await;
-        self.retire_anonymous().await;
+        let flushed = self.retire_anonymous().await;
+        if let Some(reservation) = self.disk_reservation.as_ref() {
+            loop {
+                match reservation.release().await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::warn!(message = %error.message, "VM capacity release will retry; ownership retained");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        }
+        self.disk_reservation.take();
         self.owner.take();
         release_slot(&self.pool, self.slot, self.completion.take()).await;
         self.released = true;
         if let Some(teardown) = self.physical_teardown.take() {
             let _ = teardown.send(true);
         }
+        flushed
     }
 
-    async fn retire_anonymous(&mut self) {
+    async fn retire_anonymous(&mut self) -> bool {
+        let mut flushed = true;
         if let Some(mut vm) = self.vm.take() {
             self.vm_in_flight = true;
-            vm.shutdown().await;
+            flushed = vm.shutdown().await;
             self.vm_in_flight = false;
         }
         discard_anonymous(self.anonymous.take()).await;
+        flushed
     }
 }
 
@@ -1129,7 +1236,7 @@ impl Drop for Reservation {
         if self.released {
             return;
         }
-        if self.vm_in_flight {
+        if self.vm_in_flight || self.disk_reservation.is_some() {
             // The local boot/shutdown future owned a VMM when it disappeared.
             // Keep its physical slot, disk files and logical ownership fenced;
             // neither completion channel may announce that cleanup succeeded.
@@ -1256,6 +1363,11 @@ mod tests {
         std::fs::write(
             state.join(budget::FILE),
             serde_json::to_vec(&budget).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            state.join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
         )
         .unwrap();
         let pool = Pool::new(state, root.path().into(), CancellationToken::new(), 1)
@@ -1581,6 +1693,114 @@ mod tests {
         slots.occupied[1] = false;
         assert_eq!(slots.reserve(2), Some(1));
         assert_eq!(slots.reserve(2), None);
+    }
+
+    #[tokio::test]
+    async fn foreground_disk_promises_reclaim_idle_vms_and_preserve_active_work() {
+        const MIB: u64 = 1_048_576;
+        for anonymous in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let state = root.path();
+            let pool = Pool::new(state.into(), state.into(), CancellationToken::new(), 4)
+                .await
+                .unwrap();
+            let budget = Budget {
+                slots: 4,
+                limits: crate::nodes::Resources {
+                    cpu: 1,
+                    memory_mi_b: 2048,
+                    disk_mi_b: 50,
+                },
+            };
+            std::fs::write(
+                state.join(budget::FILE),
+                serde_json::to_vec(&budget).unwrap(),
+            )
+            .unwrap();
+            let policy = crate::storage::policy::Policy {
+                reserve_mi_b: 64,
+                reserve_percent: 1,
+                ..Default::default()
+            };
+            let mut active = pool.reserve(&cold_plan("active")).await.unwrap();
+            let active_directory = state.join("disks").join(crate::config::id());
+            active.disk_reservation = Some(
+                crate::storage::reservation::reserve(state, &active_directory, 8 * MIB, &policy)
+                    .await
+                    .unwrap(),
+            );
+            let mut idle = pool.reserve(&cold_plan("idle")).await.unwrap();
+            let idle_directory = state.join("environments").join(crate::config::id());
+            idle.disk_reservation = Some(
+                crate::storage::reservation::reserve(state, &idle_directory, 32 * MIB, &policy)
+                    .await
+                    .unwrap(),
+            );
+            std::fs::write(
+                idle_directory.join("data.ext4"),
+                b"retained conversation work",
+            )
+            .unwrap();
+            if anonymous {
+                idle.anonymous = Some(idle_directory.clone());
+                pool.slots.lock().await.ready.push_back(idle);
+            } else {
+                pool.slots
+                    .lock()
+                    .await
+                    .retained
+                    .push_back(retained::Retained {
+                        run: "idle".into(),
+                        budget: budget.clone(),
+                        key: serde_json::json!({}),
+                        expires: Instant::now() + Duration::from_secs(60),
+                        reservation: idle,
+                        _volume: None,
+                    });
+            }
+            let requested = state.join("disks").join(crate::config::id());
+            assert_eq!(
+                crate::storage::reservation::reserve(state, &requested, 33 * MIB, &policy)
+                    .await
+                    .err()
+                    .unwrap()
+                    .status,
+                507
+            );
+            let promise = pool
+                .reserve_image(&requested, 33 * MIB, &policy, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert_eq!(
+                pool.health().await.occupied,
+                1,
+                "Only the active slot remains"
+            );
+            assert!(active_directory.join("image-reservation.json").is_file());
+            if anonymous {
+                assert!(!idle_directory.exists());
+            } else {
+                assert_eq!(
+                    std::fs::read(idle_directory.join("data.ext4")).unwrap(),
+                    b"retained conversation work"
+                );
+                assert!(!idle_directory.join("image-reservation.json").exists());
+            }
+            let impossible = state.join("disks").join(crate::config::id());
+            assert_eq!(
+                pool.reserve_image(&impossible, 64 * MIB, &policy, &CancellationToken::new())
+                    .await
+                    .err()
+                    .unwrap()
+                    .status,
+                507
+            );
+            assert!(active_directory.join("image-reservation.json").is_file());
+            promise.release().await.unwrap();
+            active.finish().await;
+            pool.drain().await;
+            assert_eq!(pool.health().await.occupied, 0);
+        }
     }
 
     #[tokio::test]

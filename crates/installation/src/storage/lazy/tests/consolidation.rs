@@ -114,6 +114,11 @@ fn consolidation_keeps_writes_after_its_seal_in_the_journal() {
 #[test]
 fn consolidation_retires_only_blocks_no_base_references() {
     let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("storage-policy.json"),
+        br#"{"reserveMiB":64,"reservePercent":1}"#,
+    )
+    .unwrap();
     let first = root.path().join("environments/first/lazy");
     let second = root.path().join("environments/second/lazy");
     let original = vec![1; BLOCK as usize];
