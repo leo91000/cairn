@@ -21,17 +21,26 @@ if (built.status !== 0)
 const binary = records.find(record => record.reason === 'compiler-artifact' && record.target?.name === 'cairn_installation' && record.executable)?.executable
 if (!binary)
   throw new Error('Cargo did not produce the isolated namespace test executable')
-const testName = 'storage::ublk::namespace::tests::isolated_namespace_qualification'
+const privileged = process.argv.includes('--sudo')
+const testNames = [
+  'storage::ublk::namespace::tests::isolated_namespace_qualification',
+  'native::block::holders::tests::retained_namespace_without_procfs_still_reports_the_device',
+  'native::block::holders::tests::private_mount_outside_a_chroot_is_not_lost',
+]
+// A user namespace cannot create a block node on the host-backed temp directory.
+if (privileged)
+  testNames.push('native::block::holders::tests::raw_block_device_descriptor_is_a_holder')
 const listed = spawnSync(binary, ['--list', '--ignored'], { encoding: 'utf8' })
 if (listed.error)
   throw listed.error
-if (listed.status !== 0 || !listed.stdout.split('\n').includes(`${testName}: test`))
+if (listed.status !== 0 || testNames.some(testName => !listed.stdout.split('\n').includes(`${testName}: test`)))
   throw new Error('Namespace qualification test is absent from the executable')
-const privileged = process.argv.includes('--sudo')
 const command = privileged ? 'sudo' : 'unshare'
 const args = privileged ? ['-n', 'unshare', '--mount', '--propagation', 'private'] : ['--user', '--map-root-user', '--mount', '--propagation', 'private']
-args.push(binary, '--exact', testName, '--ignored', '--nocapture')
-const tested = spawnSync(command, args, { stdio: 'inherit' })
-if (tested.error)
-  throw tested.error
-process.exit(tested.status ?? 1)
+for (const testName of testNames) {
+  const tested = spawnSync(command, [...args, binary, '--exact', testName, '--ignored', '--nocapture'], { stdio: 'inherit' })
+  if (tested.error)
+    throw tested.error
+  if (tested.status !== 0)
+    process.exit(tested.status ?? 1)
+}

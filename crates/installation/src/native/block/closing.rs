@@ -25,6 +25,7 @@ pub(super) struct State {
     pub flush_failed: bool,
     pub retired: bool,
     retained_usage: Option<u64>,
+    flushed: bool,
     owner: Option<environment::OwnerLease>,
     physical: Option<file_lock::Guard>,
 }
@@ -38,6 +39,7 @@ impl State {
             flush_failed: false,
             retired: false,
             retained_usage: None,
+            flushed: false,
             owner: Some(owner),
             physical: Some(physical),
         }
@@ -45,9 +47,12 @@ impl State {
 
     pub async fn close(&mut self, operations: &impl Operations) -> Result<super::Completion> {
         if self.mounted {
-            if !self.aborted {
+            if !self.aborted && !self.flushed {
                 match operations.flush().await {
-                    Ok(used) => self.retained_usage = used,
+                    Ok(used) => {
+                        self.retained_usage = used;
+                        self.flushed = true;
+                    }
                     Err(error) if matches!(error.raw_os_error(), Some(libc::EROFS | libc::EIO)) => {
                         tracing::error!(%error, "Native filesystem flush failed; retaining a crash prefix after fencing");
                         self.flush_failed = true;
@@ -135,6 +140,7 @@ mod tests {
         flush_error: AtomicI32,
         flush_write: AtomicBool,
         retire_error: AtomicBool,
+        unmount_error: AtomicBool,
         presealed: bool,
     }
 
@@ -178,6 +184,11 @@ mod tests {
 
         async fn unmount(&self) -> Result<()> {
             self.phase(Phase::Unmount).await;
+            if self.unmount_error.swap(false, Ordering::SeqCst) {
+                return Err(crate::error::Error::unavailable(
+                    "Synthetic private mount remains.",
+                ));
+            }
             Ok(())
         }
 
@@ -251,6 +262,7 @@ mod tests {
             flush_error: AtomicI32::new(0),
             flush_write: AtomicBool::new(false),
             retire_error: AtomicBool::new(false),
+            unmount_error: AtomicBool::new(false),
             presealed: false,
         };
         (
@@ -259,6 +271,22 @@ mod tests {
             filesystem,
             workspace_owner,
         )
+    }
+
+    #[tokio::test]
+    async fn successful_flush_is_not_repeated_after_a_partial_unmount() {
+        let root = tempfile::tempdir().unwrap();
+        let (_run, mut state, operations, _workspace) = fixture(root.path(), None).await;
+        operations.unmount_error.store(true, Ordering::SeqCst);
+        assert!(state.close(&operations).await.is_err());
+        assert!(state.flushed);
+        assert!(state.mounted);
+        // A second flush would now address the parent filesystem, because the
+        // owned host mount disappeared while its private copy remained.
+        operations.flush_error.store(libc::EIO, Ordering::SeqCst);
+        assert_eq!(state.close(&operations).await.unwrap(), Completion::Flushed);
+        assert!(!state.flush_failed);
+        assert_eq!(operations.flush_error.load(Ordering::SeqCst), libc::EIO);
     }
 
     #[tokio::test]
