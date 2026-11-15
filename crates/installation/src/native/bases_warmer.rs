@@ -208,7 +208,15 @@ impl Warmer {
                     10u64 << (failure.attempts - 1)
                 };
                 failure.retry_at = Instant::now() + Duration::from_secs(seconds);
-                tracing::debug!(key = %job.key, retry_seconds = seconds, "Native base warming deferred");
+                match &result {
+                    Ok(Err(error)) => {
+                        tracing::warn!(key = %job.key, retry_seconds = seconds, status = error.status, message = %error.message, "Native base warming failed; publication was not completed");
+                    }
+                    Err(error) => {
+                        tracing::warn!(key = %job.key, retry_seconds = seconds, %error, "Native base warming worker did not finish");
+                    }
+                    Ok(Ok(())) => {}
+                }
             } else {
                 self.queue.lock().await.failures.remove(&job.key);
             }

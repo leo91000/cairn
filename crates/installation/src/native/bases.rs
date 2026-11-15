@@ -291,22 +291,26 @@ impl Bases {
             metadata_bytes,
             inputs,
         };
+        self.publish(&temporary, &ready).await
+    }
+
+    /// Seal every lookup input while still private. A lookup may run without
+    /// storage.lock and must never invalidate a half-published candidate.
+    async fn publish(&self, temporary: &Path, ready: &Ready) -> Result<()> {
         atomic_write(&temporary.join("pin"), b"").await?;
-        atomic_write(&temporary.join("ready.json"), &serde_json::to_vec(&ready)?).await?;
+        atomic_write(
+            &temporary.join("contents.digest"),
+            base_signature(&temporary.join("contents"))?.as_bytes(),
+        )
+        .await?;
+        atomic_write(&temporary.join("ready.json"), &serde_json::to_vec(ready)?).await?;
         private_dir(&self.root()).await?;
-        let target = self.root().join(&key);
+        let target = self.root().join(&ready.key);
         if target.exists() {
             tokio::fs::remove_dir_all(&target).await?;
         }
-        tokio::fs::rename(&temporary, &target).await?;
+        tokio::fs::rename(temporary, &target).await?;
         tokio::fs::File::open(self.root()).await?.sync_all().await?;
-        // The builder has just written and synchronized every sealed frame.
-        // Later lookups invalidate this receipt on any payload/metadata change.
-        atomic_write(
-            &target.join("contents.digest"),
-            base_signature(&target.join("contents"))?.as_bytes(),
-        )
-        .await?;
         Ok(())
     }
 
@@ -798,6 +802,76 @@ pub(crate) async fn request(operation: &str, value: &Value) -> Result<Value> {
 #[cfg(test)]
 mod payload_size_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cache_publication_exposes_only_fully_sealed_contents() {
+        let fixture = tempfile::tempdir().unwrap();
+        let bases = Bases {
+            data: fixture.path().join("data"),
+            state: fixture.path().join("state"),
+            identity: (unsafe { libc::geteuid() }, unsafe { libc::getegid() }),
+        };
+        let archive = Archive {
+            project_id: crate::config::id(),
+            revision: "a".repeat(40),
+            origin_hash: None,
+            key: "b".repeat(64),
+            hash: "c".repeat(64),
+            bytes: 1,
+            logical_bytes: 5,
+        };
+        let inputs = Inputs::new(std::slice::from_ref(&archive), 128, bases.identity).unwrap();
+        let ready = Ready {
+            key: inputs.key().unwrap(),
+            metadata_bytes: CLONE_RESERVE + 16384,
+            inputs,
+        };
+        let temporary = bases.state.join("environments").join(crate::config::id());
+        private_dir(&temporary.join("contents")).await.unwrap();
+        let fifo = std::ffi::CString::new(
+            temporary
+                .join("contents/unsupported")
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+        .unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(bases.publish(&temporary, &ready).await.is_err());
+        assert!(
+            !bases.root().join(&ready.key).exists(),
+            "An unsealed candidate must never become visible"
+        );
+        assert!(
+            bases
+                .lookup(std::slice::from_ref(&archive), 128)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_file(temporary.join("contents/unsupported")).unwrap();
+        for name in ["home", "workspaces", "output"] {
+            private_dir(&temporary.join("contents").join(name))
+                .await
+                .unwrap();
+        }
+        std::fs::write(temporary.join("contents/workspaces/file"), b"hello").unwrap();
+        bases.publish(&temporary, &ready).await.unwrap();
+        let source = bases.root().join(&ready.key);
+        for _ in 0..3 {
+            assert!(source.join("contents.digest").is_file());
+            assert!(
+                bases
+                    .lookup(std::slice::from_ref(&archive), 128)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                source.join("ready.json").is_file(),
+                "Lookup must not invalidate a complete publication"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn large_verified_directory_payloads_remain_discoverable_and_do_not_rebuild() {

@@ -429,7 +429,26 @@ def main():
             archive.rename(cached)
             request = dict(archives=[descriptor], diskMiB=256)
             api('/native-bases/warm', request)
-            ready = eventually(lambda: api('/native-bases/lookup', request)['base'])
+            try:
+                ready = eventually(lambda: api('/native-bases/lookup', request)['base'])
+            except AssertionError:
+                # Keep the original failure while preserving this owned cache's
+                # publication state and redacted supervisor errors for diagnosis.
+                facts = []
+                bases = state / 'native-bases'
+                if bases.is_dir():
+                    for entry in list(bases.iterdir())[:20]:
+                        facts.append(dict(key=entry.name, ready=(entry / 'ready.json').is_file(),
+                                          digest=(entry / 'contents.digest').is_file(), pin=(entry / 'pin').is_file()))
+                print(json.dumps(dict(nativeBasePublication=facts)), file=sys.stderr)
+                try:
+                    diagnostic = subprocess.run(['journalctl', '--no-pager', '--output=cat', '--lines=60',
+                                                 '--unit=' + supervisor], capture_output=True, text=True, timeout=10)
+                    text = (diagnostic.stdout + diagnostic.stderr)[-16384:]
+                    print(redact_fixture_diagnostics(text, token, contexts[run]), file=sys.stderr)
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    print('Native base diagnostics unavailable: ' + type(error).__name__, file=sys.stderr)
+                raise
             base_projects[run], base_archives[run], base_keys[run] = project, [descriptor], ready['key']
             stage = seed(run)
             for name in ('seed', 'asset'):
