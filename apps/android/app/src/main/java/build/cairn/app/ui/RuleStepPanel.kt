@@ -89,7 +89,9 @@ internal fun RuleStepPanel(
                                 tools.firstOrNull { "${it.instanceId}:${it.tool}" == key }
                                     ?: return@Choice
                             val schema =
-                                selected.inputSchema as? JsonObject ?: JsonObject(emptyMap())
+                                resolveRuleSchema(
+                                    selected.inputSchema as? JsonObject ?: JsonObject(emptyMap())
+                                )
                             val required =
                                 schema.list("required").map { it.jsonPrimitive.content }.toSet()
                             val inputs =
@@ -119,7 +121,10 @@ internal fun RuleStepPanel(
                         if (tool != null) {
                             if (tool.description.isNotBlank())
                                 Text(tool.description, style = MaterialTheme.typography.bodySmall)
-                            val schema = tool.inputSchema as? JsonObject ?: JsonObject(emptyMap())
+                            val schema =
+                                resolveRuleSchema(
+                                    tool.inputSchema as? JsonObject ?: JsonObject(emptyMap())
+                                )
                             val fields = schema.obj("properties").orEmpty()
                             val required =
                                 schema.list("required").map { it.jsonPrimitive.content }.toSet()

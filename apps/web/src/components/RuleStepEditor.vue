@@ -97,10 +97,11 @@ interface Field {
 }
 
 const fields = computed<Field[]>(() => {
-  const schema: any = tool.value?.inputSchema ?? {}
+  const root = tool.value?.inputSchema ?? {}
+  const schema = resolveRuleSchema(root)
   const required = new Set<string>(Array.isArray(schema.required) ? schema.required : [])
   return Object.entries<any>(schema.properties ?? {}).map(([name, raw]) => {
-    const property = resolveRuleSchema(raw, schema)
+    const property = resolveRuleSchema(raw, root)
     const type = Array.isArray(property?.type) ? property.type.find((entry: string) => entry !== 'null') : property?.type
     return {
       name,

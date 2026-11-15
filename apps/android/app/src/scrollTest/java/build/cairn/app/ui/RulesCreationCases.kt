@@ -12,6 +12,10 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import build.cairn.contracts.HookRuleCatalog
+import build.cairn.contracts.HookRuleLimits
+import build.cairn.contracts.RuleCatalogLimits
+import build.cairn.contracts.RuleCatalogTool
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -24,6 +28,119 @@ import org.junit.Test
 
 abstract class RulesCreationCases {
     @get:Rule val compose = createComposeRule()
+
+    private fun rootSchemaCatalog(): HookRuleCatalog {
+        val schema =
+            wireJson.parseToJsonElement(
+                """{"type":"object","${'$'}ref":"#/${'$'}defs/Input","${'$'}defs":{"Input":{"type":"object","required":["text"],"properties":{"text":{"type":"string","title":"Message","minLength":1}}}}}"""
+            )
+        return HookRuleCatalog(
+            actions = emptyList(),
+            agents = emptyList(),
+            conditions = emptyList(),
+            functions = emptyList(),
+            hooks = emptyList(),
+            limits =
+                RuleCatalogLimits(
+                    defaultLimits =
+                        HookRuleLimits(conversationsPerHour = 5, triggeringsPerHour = 60),
+                    maxConversationsPerHour = 10,
+                    maxNodes = 100,
+                    maxSteps = 500,
+                    maxToolCalls = 100,
+                    maxTriggeringsPerHour = 100,
+                    maxWaitSeconds = 604800,
+                ),
+            operators = emptyList(),
+            tools =
+                listOf(
+                    RuleCatalogTool(
+                        agentIds = listOf(MAIN_AGENT_ID),
+                        description = "",
+                        inputSchema = schema,
+                        instanceId = "00000000-0000-4000-8000-000000000015",
+                        instanceName = "Root schema",
+                        pluginId = "root",
+                        resourceFields = emptyList(),
+                        tool = "root_post",
+                    )
+                ),
+            variables = emptyList(),
+        )
+    }
+
+    @Test
+    fun aRootToolReferenceInitializesRequiredInputs() {
+        val catalog = rootSchemaCatalog()
+        val definition =
+            ruleObject(
+                "executionAgentId" to JsonPrimitive(MAIN_AGENT_ID),
+                "steps" to JsonArray(emptyList()),
+            )
+        val step = newRuleStep(definition, "callTool", catalog)
+        assertTrue(step.obj("action").obj("input")!!.containsKey("text"))
+    }
+
+    @Test
+    fun aRootToolReferenceShowsItsEditableFields() {
+        val catalog = rootSchemaCatalog()
+        var node by
+            mutableStateOf(
+                ruleObject(
+                    "type" to JsonPrimitive("action"),
+                    "id" to JsonPrimitive("post"),
+                    "action" to
+                        ruleObject(
+                            "type" to JsonPrimitive("callTool"),
+                            "instanceId" to JsonPrimitive(catalog.tools[0].instanceId),
+                            "tool" to JsonPrimitive("root_post"),
+                            "input" to ruleObject("text" to templateValue()),
+                        ),
+                )
+            )
+        val vm =
+            CairnViewModel(
+                ApplicationProvider.getApplicationContext<Application>(),
+                object : SessionVault {
+                    override fun read(origin: String): String? = null
+
+                    override fun write(origin: String, cookie: String?) {}
+                },
+                beaconOrigin = "",
+            )
+        val models = ViewModelStore().apply { put("fixture", vm) }
+        try {
+            compose.setContent {
+                CairnTheme {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        RuleStepPanel(
+                            vm,
+                            Workspace(),
+                            node,
+                            catalog,
+                            MAIN_AGENT_ID,
+                            emptyList(),
+                            null,
+                        ) {
+                            node = it
+                        }
+                    }
+                }
+            }
+            compose.onNodeWithText("Message").assertIsDisplayed()
+            compose.onAllNodes(hasSetTextAction()).assertCountEquals(2)
+            compose
+                .onAllNodes(hasSetTextAction())
+                .onLast()
+                .performScrollTo()
+                .performTextReplacement("Hello")
+            compose.runOnIdle {
+                assertEquals(templateValue("Hello"), node.obj("action").obj("input").obj("text"))
+            }
+        } finally {
+            compose.runOnIdle { models.clear() }
+        }
+    }
 
     @Test fun theFirstNumericFieldStartsWithANumericOperand() = addTypedComparison("integer")
 

@@ -410,7 +410,10 @@ fun newRuleStep(definition: JsonElement, kind: String, catalog: HookRuleCatalog?
                     put("type", "callTool")
                     put("instanceId", tool?.instanceId.orEmpty())
                     put("tool", tool?.tool.orEmpty())
-                    val schema = tool?.inputSchema as? JsonObject ?: JsonObject(emptyMap())
+                    val schema =
+                        resolveRuleSchema(
+                            tool?.inputSchema as? JsonObject ?: JsonObject(emptyMap())
+                        )
                     val required = schema.list("required").map { it.jsonPrimitive.content }.toSet()
                     put(
                         "input",

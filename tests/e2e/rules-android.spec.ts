@@ -253,6 +253,7 @@ test('a native member selects people and a channel through the execution agent',
     const rule = await created.json()
     expect(created.ok(), rule.error).toBe(true)
     expect(rule.creatorAccountId).toBe(accountId)
+    expect(rule.definition.name).toBe('Member choices')
     const port = new URL(workspace.url).port
     adb('reverse', `tcp:${port}`, `tcp:${port}`)
     adb('shell', 'am', 'force-stop', 'build.cairn.app')
@@ -268,7 +269,7 @@ test('a native member selects people and a channel through the execution agent',
     await tap('Se connecter')
     await tap('Atelier')
     await tap('Règles')
-    await tap('Member choices')
+    await scrollTo('Member choices')
     await tap('Modifier')
     await scrollTo('Si / sinon')
     await scrollTo('Choisir une personne…')

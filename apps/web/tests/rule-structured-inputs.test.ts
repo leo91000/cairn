@@ -205,3 +205,45 @@ it('adds list items with defaults resolved from the root schema', async () => {
     editor.app.unmount()
   }
 })
+
+it('shows required fields declared by a reference at the tool schema root', () => {
+  const schema = {
+    type: 'object',
+    $ref: '#/$defs/Input',
+    $defs: { Input: { type: 'object', required: ['text'], properties: { text: { type: 'string', title: 'Message', minLength: 1 } } } },
+  }
+  const model = vue.ref<any>({
+    type: 'action',
+    id: 'post',
+    action: {
+      type: 'callTool',
+      instanceId: 'messages',
+      tool: 'post',
+      input: {},
+    },
+  })
+  const scope = vue.effectScope()
+  try {
+    const editor = component('RuleStepEditor', false, { useModel: () => model })
+    const catalog = {
+      tools: [{
+        instanceId: 'messages',
+        tool: 'post',
+        agentIds: ['agent'],
+        inputSchema: schema,
+      }],
+    }
+    const input = scope.run(() => editor.setup({
+      catalog,
+      executionAgentId: 'agent',
+      path: '/steps/0',
+      variables: [],
+      problems: [],
+    }, { expose() {} }))
+    input.chooseTool('messages:post')
+    expect(input.shownFields.value.map((field: any) => [field.name, field.title, field.required])).toEqual([['text', 'Message', true]])
+  }
+  finally {
+    scope.stop()
+  }
+})

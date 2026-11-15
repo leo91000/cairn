@@ -5,7 +5,48 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
-import { rulesFixture, scalarRulesFixture } from './rules-fixture'
+import { referencedToolRulesFixture, rulesFixture, scalarRulesFixture } from './rules-fixture'
+
+test('a tool with a referenced root schema exposes its fields and executes the saved values', async ({ page, workspace }) => {
+  const fixture = await referencedToolRulesFixture(workspace)
+  const rule = await workspace.api('/api/hook-rules', 'POST', {
+    definition: {
+      ...fixture.definition,
+      name: 'Referenced tool input',
+      steps: [{
+        type: 'action',
+        id: 'remember',
+        action: {
+          type: 'storeValue',
+          scope: 'rule',
+          name: 'last',
+          value: { type: 'literal', value: true },
+        },
+      }],
+    },
+    enabled: true,
+  })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Add a step here', exact: true }).last().click()
+  await page.getByRole('menuitem', { name: /Call a plugin tool/ }).click()
+  await page.getByRole('textbox', { name: 'Channel', exact: true }).fill('support')
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('From the referenced schema')
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
+  const call = saved.definition.steps.find((node: any) => node.type === 'action' && node.action.type === 'callTool')
+  expect(call.action.input.text).toEqual({ type: 'literal', value: 'From the referenced schema' })
+  workspace.service.emitHook(fixture.instanceId, 'message', { author: 'alice', channel: 'support', content: 'Root schema event' }, 'root-schema-event')
+  let triggering: any
+  await expect.poll(async () => {
+    triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+    return triggering?.status
+  }).toBe('completed')
+  const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+  expect(history.steps.some((step: any) => step.nodeId === call.id && step.status === 'completed' && JSON.stringify(step.result ?? null).includes('From the referenced schema'))).toBe(true)
+})
 
 for (const type of ['integer', 'boolean'] as const) {
   test(`a newly added comparison types its first ${type} event field and executes`, async ({ page, workspace }) => {

@@ -17,7 +17,11 @@ export function scalarRulesFixture(workspace: Workspace, type: 'integer' | 'bool
   return installRulesFixture(workspace, type)
 }
 
-async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' | 'boolean') {
+export function referencedToolRulesFixture(workspace: Workspace) {
+  return installRulesFixture(workspace, undefined, true)
+}
+
+async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' | 'boolean', referencedTool = false) {
   const prepare = async (path: string, body: unknown): Promise<any> => {
     const started = await workspace.api(path, 'POST', body)
     if (!started.operation)
@@ -102,7 +106,18 @@ async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' 
           resourceFields: [],
         }],
       }
-    : manifest
+    : referencedTool
+      ? {
+          ...manifest,
+          id: 'rules-referenced',
+          tools: [{
+            ...manifest.tools[0],
+            name: 'rules_referenced_post_message',
+            resourceFields: [],
+            inputSchema: { type: 'object', $ref: '#/$defs/Input', $defs: { Input: manifest.tools[0].inputSchema } },
+          }],
+        }
+      : manifest
   const installed = await prepare('/api/plugins/packages', {
     manifest: activeManifest,
     manifestFormat: 'json',
@@ -153,7 +168,7 @@ async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' 
         action: {
           type: 'callTool',
           instanceId,
-          tool: 'rules_studio_post_message',
+          tool: activeManifest.tools[0]?.name ?? 'rules_studio_post_message',
           input: { channel: { type: 'literal', value: 'support' }, text: { type: 'template', text: 'Received: {{content}}' } },
         },
       }],
