@@ -326,13 +326,7 @@ impl ChatOperation {
                         self.scope
                     )));
                 }
-                (
-                    None,
-                    crate::native::policy::caller().map_or(
-                        crate::native::policy::Origin::Unknown,
-                        crate::native::policy::Origin::Human,
-                    ),
-                )
+                (None, crate::native::policy::public_origin())
             }
             ResumeContext::Installation(bearer) => {
                 let run = crate::installation_mcp::authorize(s, &bearer).await?;

@@ -229,7 +229,7 @@ impl Authority {
         super::bundle::Authorization {
             store: s.store.clone(),
             recheck: Box::pin(async move { external.recheck(s).await }),
-            authorize: Box::new(move |db, _| authority.authorize(db)),
+            authorize: Box::new(move |db, _, _| authority.authorize(db)),
         }
     }
 }

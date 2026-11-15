@@ -338,6 +338,12 @@ impl Db<'_> {
                 grant.installation,
                 expires
             ])?;
+        crate::conversation_writers::bind_launch(
+            self,
+            digest,
+            &grant.run_id,
+            grant.message_id.as_deref(),
+        )?;
         for (id, scope) in &grant.servers {
             self.0
                 .prepare_cached("INSERT INTO mcp_grant_servers VALUES(?,?,?,?)")?
