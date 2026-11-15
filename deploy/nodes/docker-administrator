@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+classify() {
+  client_config=${DOCKER_CONFIG:-/home/node/.docker}
+  while test "$#" -gt 0; do
+    case "$1" in
+      --config) client_config=$2; shift 2 ;;
+      --config=*) client_config=${1#--config=}; shift ;;
+      --context|-c|--host|-H|--log-level|-l|--tlscacert|--tlscert|--tlskey) shift 2 ;;
+      --*=*|--debug|-D|--tls|--tlsverify) shift ;;
+      *) docker_command=$1; docker_subcommand=${2:-}; return ;;
+    esac
+  done
+  docker_command=; docker_subcommand=
+}
+classify "$@"
+mkdir -p "$client_config/cli-plugins"
+for plugin in buildx compose; do
+  if ! test -e "$client_config/cli-plugins/docker-$plugin"; then
+    ln -s "/opt/cairn-docker/plugins/docker-$plugin" "$client_config/cli-plugins/docker-$plugin"
+  fi
+done
+case "$docker_command" in
+  --version|--help|help|context)
+    exec /opt/cairn-docker/bin/docker --config "$client_config" "$@"
+    ;;
+  compose|buildx)
+    plugin=$docker_command
+    case "$docker_subcommand" in
+      version|--help|help)
+        exec /opt/cairn-docker/bin/docker --config "$client_config" "$@"
+        ;;
+    esac
+    ;;
+esac
+sudo -n /run/cairn-entrypoint/cairn native-administrator-docker >>/tmp/cairn-docker-supervisor.log 2>&1 &
+cgroup_parent=$(/run/cairn-entrypoint/cairn native-administrator-docker-ready)
+export DOCKER_HOST=unix:///run/cairn-docker/docker.sock
+case "$docker_command" in
+  build|builder|image|buildx|compose)
+    case "$docker_command:$docker_subcommand" in
+      image:build|builder:build|build:*|buildx:*|compose:*) ;;
+      *) exec /opt/cairn-docker/bin/docker "$@" ;;
+    esac
+    # The embedded BuildKit gRPC API allows arbitrary cgroup overrides. Keep
+    # build execution inside an ordinary managed, private-cgroup container.
+    /opt/cairn-docker/bin/docker --config "$client_config" buildx create --name=cairn-managed --node=cairn-managed0 --driver=docker-container --driver-opt="restart-policy=no,cgroup-parent=$cgroup_parent,default-load=true,image=moby/buildkit@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe" >/dev/null
+    export BUILDX_BUILDER=cairn-managed
+    ;;
+esac
+exec /opt/cairn-docker/bin/docker "$@"
