@@ -16,6 +16,28 @@ declare global {
   interface Window { cairnOAuthProbe: (probe: OAuthDepartureProbe) => Promise<void> }
 }
 
+test('canonical installation navigation starts direct authorization only in its destination', async ({ page, workspace }) => {
+  await page.goto(workspacePath('/mcps'))
+  const initialAuthorization = page.waitForResponse(response => response.url().endsWith('/direct/authorize'))
+  await authenticateWorkspace(page)
+  await initialAuthorization
+  await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+
+  const authorizations: string[] = []
+  const errors: string[] = []
+  page.on('request', (request) => {
+    if (request.url().endsWith('/direct/authorize'))
+      authorizations.push(new URL(request.frame().url()).pathname)
+  })
+  page.on('pageerror', error => errors.push(error.message))
+  await page.goto(`/installations/${workspace.installationId}/mcps`)
+  await expect(page).toHaveURL(`${workspace.url}/installations/${workspace.installationSlug}/mcps`)
+  await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+  await expect.poll(() => authorizations.length).toBeGreaterThan(0)
+  expect(authorizations).toEqual([`/installations/${workspace.installationSlug}/mcps`])
+  expect(errors).toEqual([])
+})
+
 test('failed saves keep feedback visible above a scrolled MCP form', async ({ page }) => {
   await useRelayForHttpMocks(page)
   await page.setViewportSize({ width: 390, height: 440 })
