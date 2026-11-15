@@ -1,7 +1,9 @@
 """Unprivileged checks of native exit records and retained health observations."""
+import ast
 import importlib.util
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import types
 import unittest
@@ -42,6 +44,41 @@ class FixtureDiskReservationsTest(unittest.TestCase):
         self.assertEqual(reservations.reserve('run', 2048), 2048)
         reservations.grow(Mock(), 'run', 'attempt', 384)
         self.assertEqual(reservations.reserve('run', 256), 2048)
+
+
+class LegacyDockerHolderTest(unittest.TestCase):
+    def test_probe_executable_binding_is_not_shadowed_before_holder_launch(self):
+        module = ast.parse(path.read_text())
+        main = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        assignments = [node for node in ast.walk(main) if isinstance(node, ast.Name)
+                       and isinstance(node.ctx, ast.Store) and node.id == 'probe']
+        self.assertEqual(len(assignments), 1, 'The executable path must retain its single binding.')
+
+    def test_holder_uses_canonical_source_and_reports_daemon_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'workspace'
+            source.mkdir()
+            alias = root / 'controller-root'
+            alias.symlink_to(source, target_is_directory=True)
+            observed = []
+
+            def command(*args, **options):
+                observed.append(args)
+                if 'run' in args:
+                    raise subprocess.CalledProcessError(
+                        125, args, stderr='mount rejected ' + runtime.SECRET)
+                return types.SimpleNamespace(stdout='')
+
+            with patch.object(runtime, 'command', side_effect=command), \
+                    patch.object(runtime, 'eventually'):
+                with self.assertRaisesRegex(AssertionError, r'mount rejected \[fixture-secret\]'):
+                    with runtime.escaped_docker_holder(root, root / 'tools', alias):
+                        self.fail('A failed container must not be reported ready.')
+
+            launch = next(args for args in observed if 'run' in args)
+            self.assertEqual(launch[launch.index('-v') + 1], str(source) + ':/held')
+            self.assertEqual(observed[-1][:2], ('systemctl', 'stop'))
 
 
 class ControllerResultTest(unittest.TestCase):
