@@ -466,11 +466,13 @@ pub(crate) async fn import(
     let auth = origin.authority.clone();
     let mut publication_record = record.clone();
     let mut publication = origin.authority.publication(s);
-    publication.authorize = Box::new(move |db, saved| {
+    publication.authorize = Box::new(move |db, saved, _| {
         auth.authorize(db)?;
         publication_record.revision = saved.revision.clone();
         db.save_skill_source(&source_scope, &source_name, &publication_record)
     });
+    let publication =
+        crate::conversation_writers::record_skill_publication(publication, scope, writer);
     let saved = s
         .skills
         .apply_authorized(&skill, None, &changes, project, Some(publication))
@@ -663,6 +665,7 @@ pub(crate) async fn update(
     input: &cairn_contracts::UpdateSkillSourceInput,
     project: Option<&Path>,
     authority: Authority,
+    writer: &crate::conversation_writers::EntryWriter,
 ) -> Result<Value> {
     super::name(skill)?;
     let mut record = record(s, scope, skill).await?;
@@ -698,7 +701,7 @@ pub(crate) async fn update(
     auth.recheck(s).await?;
     let root = s.skills.root(project).await?;
     let mut publication = origin.authority.publication(s);
-    publication.authorize = Box::new(move |db, saved| {
+    publication.authorize = Box::new(move |db, saved, _| {
         auth.authorize(db)?;
         if db.skill_source(&source_scope, &source_name)?.as_ref() != Some(&expected) {
             return Err(Error::conflict(
@@ -708,6 +711,8 @@ pub(crate) async fn update(
         publication_record.revision = saved.revision.clone();
         db.save_skill_source(&source_scope, &source_name, &publication_record)
     });
+    let publication =
+        crate::conversation_writers::record_skill_publication(publication, scope, writer);
     let saved = super::bundle::save_authorized(
         &root,
         skill,

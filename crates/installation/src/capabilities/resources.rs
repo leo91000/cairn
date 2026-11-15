@@ -310,7 +310,11 @@ impl ResourceOperation {
                                         .await
                                     }
                                 },
-                                authority.publication(s),
+                                crate::conversation_writers::record_skill_publication(
+                                    authority.publication(s),
+                                    &scope,
+                                    &writer,
+                                ),
                             )
                             .await?
                     }
@@ -323,14 +327,6 @@ impl ResourceOperation {
                     s.store
                         .audit("skill.saved", json!({"scope": scope, "name": name}))
                         .await?;
-                    crate::conversation_writers::record_skill_write(
-                        s,
-                        &scope,
-                        name,
-                        project.as_deref(),
-                        &writer,
-                    )
-                    .await?;
                 }
                 return output::<SkillImport>(result);
             }
@@ -393,7 +389,11 @@ impl ResourceOperation {
                         &input.name,
                         &input.content,
                         project.as_deref(),
-                        Some(authority.publication(s)),
+                        Some(crate::conversation_writers::record_skill_publication(
+                            authority.publication(s),
+                            &input.scope,
+                            &writer,
+                        )),
                     )
                     .await?;
                 s.store
@@ -402,14 +402,7 @@ impl ResourceOperation {
                         json!({"scope": input.scope, "name": input.name}),
                     )
                     .await?;
-                crate::conversation_writers::record_skill_write(
-                    s,
-                    &input.scope,
-                    &input.name,
-                    project.as_deref(),
-                    &writer,
-                )
-                .await?;
+
                 return output::<SkillMetadata>(saved);
             }
             "edit_skill_files" => {
@@ -432,7 +425,11 @@ impl ResourceOperation {
                         input.base.as_deref(),
                         &changes,
                         project.as_deref(),
-                        Some(authority.publication(s)),
+                        Some(crate::conversation_writers::record_skill_publication(
+                            authority.publication(s),
+                            &input.scope,
+                            &writer,
+                        )),
                     )
                     .await?;
                 s.skills.discard(&uploads).await;
@@ -441,16 +438,6 @@ impl ResourceOperation {
                         "skill.saved",
                         json!({"scope": input.scope, "name": input.name}),
                     )
-                    .await?;
-                let (scope, name) = (input.scope.clone(), input.name.clone());
-                let revision = saved.revision.clone();
-                let written = writer.clone();
-                s.store
-                    .transaction(move |db| {
-                        crate::conversation_writers::record_skill(
-                            db, &scope, &name, &revision, &written,
-                        )
-                    })
                     .await?;
                 let mut bundle = skills::bundle_response(&input.scope, &input.name, &saved);
                 sources::source(s, &input.scope, &input.name, &mut bundle).await?;
@@ -503,16 +490,10 @@ impl ResourceOperation {
                     &input,
                     project.as_deref(),
                     authority,
-                )
-                .await?;
-                crate::conversation_writers::record_skill_write(
-                    s,
-                    &input.scope,
-                    &input.name,
-                    project.as_deref(),
                     &writer,
                 )
                 .await?;
+
                 return output::<SkillBundle>(bundle);
             }
             _ => {

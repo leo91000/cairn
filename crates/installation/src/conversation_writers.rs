@@ -604,7 +604,8 @@ pub(crate) fn record_native_instructions(
 
 /// Records who wrote a skill revision through Cairn's skill tools. A skill imported
 /// from a source counts as written by whoever imported it.
-pub(crate) fn record_skill(
+#[cfg(test)]
+fn record_skill(
     db: &Db<'_>,
     scope: &str,
     name: &str,
@@ -677,21 +678,34 @@ pub(crate) async fn record_skill_intent(
         .await
 }
 
-/// Records the revision a skill tool left on disk.
-pub(crate) async fn record_skill_write(
-    s: &Service,
+/// Attests the exact staged revision and canonical directory in the transaction
+/// that publishes it. Never reread a bundle after releasing its publication lock.
+pub(crate) fn record_skill_publication<'a>(
+    mut publication: crate::skills::bundle::Authorization<'a>,
     scope: &str,
-    name: &str,
-    project: Option<&Path>,
     writer: &EntryWriter,
-) -> Result<()> {
-    let bundle = s.skills.bundle(scope, name, project).await?;
-    let revision = text(&bundle, "revision").to_owned();
-    let root = s.skills.root(project).await?.to_string_lossy().into_owned();
-    let (scope, name, writer) = (scope.to_owned(), name.to_owned(), writer.clone());
-    s.store
-        .transaction(move |db| record_skill_at(db, &scope, &name, &revision, Some(&root), &writer))
-        .await
+) -> crate::skills::bundle::Authorization<'a> {
+    let (scope, writer) = (scope.to_owned(), writer.clone());
+    let authorize = publication.authorize;
+    publication.authorize = Box::new(move |db, saved, directory| {
+        authorize(db, saved, directory)?;
+        let root = directory
+            .parent()
+            .ok_or_else(|| Error::bad("Missing skill root."))?;
+        let name = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::bad("Missing skill name."))?;
+        record_skill_at(
+            db,
+            &scope,
+            name,
+            &saved.revision,
+            Some(&root.to_string_lossy()),
+            &writer,
+        )
+    });
+    publication
 }
 
 /// The person an agent writes rules for, in an eligible conversation.

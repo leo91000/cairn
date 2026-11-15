@@ -523,7 +523,8 @@ pub async fn save(
     save_authorized(root, skill, base, changes, None).await
 }
 
-type PublicationCheck = Box<dyn FnOnce(&crate::store::Db<'_>, &Described) -> Result<()> + Send>;
+type PublicationCheck =
+    Box<dyn FnOnce(&crate::store::Db<'_>, &Described, &Path) -> Result<()> + Send>;
 
 pub(crate) struct Authorization<'a> {
     pub store: crate::store::Store,
@@ -592,7 +593,7 @@ pub(crate) async fn save_authorized(
             recheck.await?;
             store
                 .transaction(move |db| {
-                    authorize(db, &publication)?;
+                    authorize(db, &publication, &directory)?;
                     swap(&prepared, &directory, exists)
                 })
                 .await?;
@@ -697,7 +698,7 @@ mod publication_tests {
                         }
                         Ok(())
                     }),
-                    authorize: Box::new(|db, _| db.set("published", &json!(true), None)),
+                    authorize: Box::new(|db, _, _| db.set("published", &json!(true), None)),
                 };
                 started.send(()).unwrap();
                 save_authorized(

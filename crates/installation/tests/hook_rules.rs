@@ -1368,6 +1368,76 @@ fn skill_content(name: &str, body: &str) -> String {
 }
 
 #[tokio::test]
+async fn unrecorded_skill_replacements_during_save_are_never_attested() {
+    for replace in [false, true] {
+        let f = granted().await;
+        let root = f.s.skills.root(None).await.unwrap();
+        let file = root.join("raced/SKILL.md");
+        let replacement = skill_content("raced", "Unrecorded replacement instructions");
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if replace {
+            let observed = observed.clone();
+            let replacement = replacement.clone();
+            f.s.store
+                .transaction(move |db| {
+                    db.0.create_scalar_function(
+                        "replace_published_skill",
+                        0,
+                        rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                        move |_| -> rusqlite::Result<i64> {
+                            // The audit occurs after publication and before the
+                            // old provenance handler rereads the released bundle.
+                            std::fs::write(&file, &replacement).unwrap();
+                            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                            Ok(1)
+                        },
+                    )?;
+                    db.0.execute_batch(
+                        "CREATE TRIGGER replace_published_skill AFTER INSERT ON audit
+                         WHEN NEW.action='skill.saved' BEGIN SELECT replace_published_skill(); END;",
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let (status, saved) = call(
+            &f,
+            OWNER,
+            "PUT",
+            "/api/skills/global/raced",
+            json!({ "content": skill_content("raced", "Human instructions") }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst), replace);
+        let (chat, bearer) = person_conversation(&f, OWNER).await;
+        let run = f.s.chat_detail(&chat).await.unwrap()["run"].clone();
+        assert_eq!(run["snapshot"]["skills"][0]["name"], "raced");
+        if replace {
+            assert_eq!(
+                tokio::fs::read_to_string(root.join("raced/SKILL.md"))
+                    .await
+                    .unwrap(),
+                replacement
+            );
+        }
+        let created = agent(
+            &f,
+            &bearer,
+            "create_hook_rule",
+            json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false }),
+        )
+        .await;
+        if replace {
+            refused_because(&created, "did not record who wrote the skill raced");
+        } else {
+            assert!(!refused(&created), "{created}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn deleting_a_changed_skill_never_restores_conversation_eligibility() {
     let f = granted().await;
     let (status, saved) = call(

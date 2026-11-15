@@ -314,7 +314,9 @@ ADR-0075:
 Cairn records who writes each conversation entry, each change to an agent's
 instructions (including inherited native defaults) and each skill change through its skill tools (`save_skill`,
 `edit_skill_files`, `import_skill`, `update_skill_source`, `delete_skill`; imports count
-as written by the importer). Every message must carry an attestation of the person
+as written by the importer). Skill attestations bind the exact revision and canonical
+directory inside the bundle publication transaction; a later file replacement never
+inherits the requester's authorship. Every message must carry an attestation of the person
 matching its current content: a write that skipped the record makes the conversation
 ineligible. Conversations, instructions and skills written before this record never
 qualify. Native instruction documents have their own writer history, and each turn
