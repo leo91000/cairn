@@ -2675,6 +2675,69 @@ async fn question_origin_follows_event_order_even_with_identical_or_reversed_tim
 }
 
 #[tokio::test]
+async fn a_first_turn_ending_before_delivery_reports_its_admitted_cause_once() {
+    use common::run_fixture::RunFixture;
+
+    for outcome in ["failed", "cancelled"] {
+        let f = granted().await;
+        rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+        let ended = rule_on(
+            &f,
+            OWNER,
+            cairn("ended"),
+            json!([
+                remember("outcome", "outcome", "outcome"),
+                remember("origin", "origin", "origin.kind"),
+            ]),
+            limits(),
+        )
+        .await;
+        emit(&f, "start", message("alice", "hello")).await;
+        engine::tick(&f.s).await.unwrap();
+        let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+        let run = launched(&f, &chat).await;
+        let checked = run.clone();
+        let delivered: u32 = f.s.store.read(move |db| Ok(db.0.query_row(
+            "SELECT count(*) FROM events WHERE run_id=? AND type IN ('chat.user','turn.started','chat.wakeup')",
+            [checked], |row| row.get(0),
+        )?)).await.unwrap();
+        assert_eq!(delivered, 0);
+        if outcome == "failed" {
+            // Startup can fail before a session or any provider event exists.
+            f.s.store.change_run_fixture(&run, json!({
+                "status": "failed", "error": "Account authentication service is unavailable.",
+                "recoveryPending": false,
+            })).await.unwrap();
+        } else {
+            let (status, stopped) = call(
+                &f,
+                OWNER,
+                "POST",
+                &format!("/api/chats/{chat}/stop"),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{stopped}");
+            assert_eq!(f.s.store.run(&run).await.unwrap()["status"], "cancelled");
+        }
+        for _ in 0..2 {
+            engine::tick(&f.s).await.unwrap();
+        }
+        let history = triggerings(&f, &ended).await;
+        assert_eq!(history.len(), 1, "{history:?}");
+        assert_eq!(values(&f, &ended).await["outcome"], outcome);
+        assert_eq!(values(&f, &ended).await["origin"], "rule");
+        assert_eq!(depth_of(&f, &ended).await, [1]);
+        if outcome == "failed" {
+            assert_eq!(
+                history[0]["event"]["payload"]["error"],
+                "Account authentication service is unavailable."
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn reply_ready_includes_the_proposed_plan_of_a_human_plan_turn() {
     use common::run_fixture::RunFixture;
 

@@ -349,12 +349,13 @@ pub(crate) fn begin_chat_turn(
     chat: &str,
     run: &str,
     message: Option<&str>,
+    previous_turn: Option<&Json>,
 ) -> Result<()> {
-    let input: Option<u32> = if let Some(message) = message {
+    let input: Option<(String, u32)> = if let Some(message) = message {
         db.0.query_row(
-            "SELECT depth FROM hook_rule_turn_origins WHERE chat_id=?1 AND message_id=?2",
+            "SELECT origin,depth FROM hook_rule_turn_origins WHERE chat_id=?1 AND message_id=?2",
             params![chat, message],
-            |row| row.get::<_, u32>(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?
     } else {
@@ -368,7 +369,7 @@ pub(crate) fn begin_chat_turn(
          AND (r.run_id IS NOT NULL OR d.chat_id IS NOT NULL OR k.chat_id IS NOT NULL)",
         [chat], |row|row.get::<_,u32>(0),
     ).optional()?;
-    let Some(depth) = input.or(previous) else {
+    let Some(depth) = input.as_ref().map(|(_, depth)| *depth).or(previous) else {
         return Ok(());
     };
     db.0.execute(
@@ -376,6 +377,34 @@ pub(crate) fn begin_chat_turn(
          ON CONFLICT(run_id) DO UPDATE SET depth=excluded.depth",
         params![run, depth],
     )?;
+    if let Some(message) = message
+        && db.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=? AND key IS NOT NULL)",
+            [chat],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        let origin = input
+            .as_ref()
+            .map(|(origin, _)| serde_json::from_str::<Json>(origin))
+            .transpose()?
+            .unwrap_or_else(|| json!({ "kind": "unknown" }));
+        // Admission can fail before the worker delivers any input. Record its
+        // immutable cause in the same ordered stream as delivery and completion.
+        db.event(
+            run,
+            &cairn_contracts::EventKind::Status,
+            "Starting a turn",
+            Some(&json!({
+                "hookRuleTurn": {
+                    "messageId": message,
+                    "origin": origin,
+                    "depth": depth,
+                },
+                "hookRulePreviousTurn": previous_turn,
+            })),
+        )?;
+    }
     Ok(())
 }
 

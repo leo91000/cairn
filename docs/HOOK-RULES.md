@@ -262,13 +262,14 @@ access to the conversation's agent:
 
 | Hook | When | Payload, besides `key`, `conversationId`, `agentId`, `origin` and `values` |
 | --- | --- | --- |
-| `replyReady` | a turn completed | `text` (the agent's last message, at most 128 KiB, `truncated` when cut) and `deliverables` (at most 10: `id`, `name`, `title`, `mediaType`, `size`) |
-| `questionAsked` | the agent asks, once per question still pending, also when its turn already ended; before that turn's `replyReady` and `ended` | `questionId`, `title`, `text` (every question with its options) and `fields` |
+| `replyReady` | a turn completed | `text` (the final proposed approach in a Plan turn, otherwise the last nonempty agent message; at most 128 KiB, `truncated` when cut) and `deliverables` (at most 10: `id`, `name`, `title`, `mediaType`, `size`) |
+| `questionAsked` | the agent asks, once per creation even if it is answered or withdrawn before observation; ordered before that turn's `replyReady` and `ended` | `questionId`, `title`, `text` (every question with its options) and `fields` |
 | `progress` | about every 8 seconds of a working turn | `step`, a short step without detail |
-| `ended` | a turn completed, failed or was cancelled, also when its run stops without the turn reporting it (a queued wakeup cancelled before it started) | `outcome` and, for a failure, `error` (the turn's or the run's, such as an exceeded time limit) |
+| `ended` | an admitted turn completed, failed or was cancelled, including startup failure before input delivery or a queued wakeup cancelled before it started | `outcome` and, for a failure, `error` (the turn's or the run's, such as an exceeded time limit) |
 
-A turn starts when Cairn delivers its input or wakes the conversation, whatever its
-provider notifies. `origin` says who started the turn: `{kind: "person", accountId}`,
+Cairn records a turn's admission and cause before its worker starts or delivers input;
+a wakeup resumes the conversation regardless of provider notifications. `origin`
+says who started the turn: `{kind: "person", accountId}`,
 `{kind: "rule", ruleId, accountId}`, `agent` (a delegated task), `installation`
 (`cairn_installation`), `resume` (a turn without new input, such as a wakeup or the
 end of a wait) or `unknown`. A turn that fails and is retried reports only how its last

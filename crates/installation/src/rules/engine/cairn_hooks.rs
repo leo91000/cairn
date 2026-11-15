@@ -445,6 +445,7 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
              ('chat.user','chat.wakeup','turn.started','turn.completed','turn.failed','retry.scheduled') \
              OR (type='status' AND (text IN ('failed','cancelled','interrupted') \
              OR json_extract(payload,'$.chatOperation')='compact' \
+             OR json_type(payload,'$.hookRuleTurn')='object' \
              OR json_type(payload,'$.hookRuleDepth')='integer'))) ORDER BY id LIMIT ?3",
         )?
         .query_map(params![run, cursor, EVENTS], |row| {
@@ -479,7 +480,9 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
             watch.failed = None;
         }
         if watch.compacting {
-            if matches!(kind.as_str(), "chat.user" | "chat.wakeup") {
+            if matches!(kind.as_str(), "chat.user" | "chat.wakeup")
+                || kind == "status" && payload["hookRuleTurn"].is_object()
+            {
                 watch.compacting = false;
             } else {
                 cursor = id;
@@ -487,6 +490,34 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
             }
         }
         match kind.as_str() {
+            "status" if payload["hookRuleTurn"].is_object() => {
+                if watch.open {
+                    let previous = &payload["hookRulePreviousTurn"];
+                    let outcome = match previous["status"].as_str() {
+                        Some("failed" | "interrupted") => Some("failed"),
+                        Some("cancelled") => Some("cancelled"),
+                        Some("succeeded") => Some("completed"),
+                        _ => None,
+                    };
+                    if let Some(outcome) = outcome {
+                        if outcome == "completed" {
+                            watch.emit(
+                                &mut emissions,
+                                CairnHookKind::ReplyReady,
+                                reply(db, &run, watch.started, id)?,
+                            );
+                        } else if outcome == "failed" {
+                            watch.error = failure(&previous["error"]);
+                        }
+                        watch.end(&mut emissions, outcome);
+                    }
+                }
+                let input: Input = serde_json::from_value(payload["hookRuleTurn"].clone())?;
+                if input.depth > MAX_CHAIN_DEPTH {
+                    return Err(Error::bad("Invalid admitted turn depth."));
+                }
+                watch.open(id, at, Some(input));
+            }
             "status" if payload["hookRuleDepth"].is_number() => {
                 if let Some(depth) = payload["hookRuleDepth"]
                     .as_u64()

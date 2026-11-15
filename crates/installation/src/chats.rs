@@ -1423,6 +1423,12 @@ fn launch_turn(
     };
     // A wakeup resumes a turn; only a message launches one. Both record what they freeze.
     let launched_by = (!waking).then(|| execution.message_id.clone());
+    let previous_turn = run.as_ref().map(|run| {
+        json!({
+            "status": run["status"],
+            "error": run["error"],
+        })
+    });
     let run_id = if let Some(run) = run {
         continue_run(db, &chat, &run, &snapshot, execution)?;
         text(&run, "id").to_owned()
@@ -1442,6 +1448,7 @@ fn launch_turn(
         &chat.id,
         &run_id,
         launched_by.as_deref(),
+        previous_turn.as_ref(),
     )?;
     chat.cancelled_by_deletion = false;
     chat.session_restart_requested = false;
