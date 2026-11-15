@@ -11,6 +11,11 @@ fn local_block(directory: &std::path::Path, hash: &str, bytes: &[u8]) {
 fn consolidating_a_foreground_block_keeps_its_verified_new_identity_local() {
     const BLOCK: u64 = 4 * 1024 * 1024;
     let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("storage-policy.json"),
+        br#"{"reserveMiB":64,"reservePercent":1}"#,
+    )
+    .unwrap();
     let directory = root.path().join("disks/conversation/lazy");
     let manifest = json!({
         "version": 1, "size": BLOCK, "blockSize": BLOCK,
