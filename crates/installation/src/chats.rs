@@ -984,6 +984,7 @@ pub(crate) fn edit_as(
     if current.status != MessageStatus::Queued {
         return Err(Error::conflict("This message is already being sent."));
     }
+    crate::conversation_writers::record_message_before_change(db, &current)?;
     let Some(mut values) = values else {
         // Withdrawing a queued message is an entry of whoever withdraws it.
         crate::conversation_writers::record_entry(

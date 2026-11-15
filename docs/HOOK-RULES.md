@@ -318,7 +318,9 @@ as written by the importer). Skill attestations bind the exact revision and cano
 directory inside the bundle publication transaction; a later file replacement never
 inherits the requester's authorship. Every message must carry an attestation of the person
 matching its current content: a write that skipped the record makes the conversation
-ineligible. Conversations, instructions and skills written before this record never
+ineligible. An edit or withdrawal first checks the previous message revision and
+permanently records an unknown writer if its attestation is absent or mismatched.
+Conversations, instructions and skills written before this record never
 qualify. Native instruction documents have their own writer history, and each turn
 records the source it follows. A human edit cannot erase an agent, rule or unknown
 writer from a source's history.

@@ -338,6 +338,21 @@ pub(crate) fn record_entry(db: &Db<'_>, conversation: &str, writer: &EntryWriter
     Ok(())
 }
 
+/// Preserve any unattested prior revision before a person edits or removes it.
+/// Replacing the current attestation must never erase an unrecorded entry.
+pub(crate) fn record_message_before_change(db: &Db<'_>, message: &Message) -> Result<()> {
+    let attested: Option<String> =
+        db.0.prepare_cached(
+            "SELECT digest FROM conversation_entry_writers WHERE message_id=? AND chat_id=?",
+        )?
+        .query_row(params![message.id, message.chat_id], |row| row.get(0))
+        .optional()?;
+    if attested.as_deref() != Some(entry_digest(message)?.as_str()) {
+        record_entry(db, &message.chat_id, &EntryWriter::Unknown)?;
+    }
+    Ok(())
+}
+
 /// Attests who wrote a message as it is now stored: sent, edited or answered.
 pub(crate) fn record_message(
     db: &Db<'_>,

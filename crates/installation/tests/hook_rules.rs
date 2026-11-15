@@ -1028,6 +1028,90 @@ async fn a_member_loses_agent_rule_writes_with_their_access() {
     refused_because(&created, "no longer has access to this agent");
 }
 
+async fn replacing_a_queued_message_preserves_its_unknown_writer(withdraw: bool) {
+    for prior in ["attested", "changed", "missing"] {
+        let f = granted().await;
+        let (chat, bearer) = person_conversation(&f, OWNER).await;
+        let queued = cairn_installation::config::id();
+        let path = format!("/api/chats/{chat}/messages");
+        let (status, sent) = call(
+            &f,
+            OWNER,
+            "POST",
+            &path,
+            json!({ "id": queued, "text": "Original human request" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        let message = queued.clone();
+        f.s.store
+            .transaction(move |db| {
+                match prior {
+                    "changed" => {
+                        db.0.execute(
+                            "UPDATE chat_messages SET text='Unrecorded rewrite' WHERE id=?",
+                            [&message],
+                        )?;
+                    }
+                    "missing" => {
+                        db.0.execute(
+                            "DELETE FROM conversation_entry_writers WHERE message_id=?",
+                            [&message],
+                        )?;
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let path = format!("{path}/{queued}");
+        let (status, edited) = call(
+            &f,
+            OWNER,
+            if withdraw { "DELETE" } else { "PUT" },
+            &path,
+            if withdraw {
+                Value::Null
+            } else {
+                json!({ "text": "Person's correction" })
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{edited}");
+        if !withdraw {
+            assert_eq!(edited["text"], "Person's correction");
+        }
+        let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+        let created = agent(&f, &bearer, "create_hook_rule", write.clone()).await;
+        if prior == "attested" {
+            assert!(!refused(&created), "{created}");
+            continue;
+        }
+        refused_because(&created, "Another writer reached this conversation");
+        if !withdraw {
+            let (status, removed) = call(&f, OWNER, "DELETE", &path, Value::Null).await;
+            assert_eq!(status, StatusCode::OK, "{removed}");
+        }
+        finish_turn(&f, &chat).await;
+        let later = next_person_turn(&f, &chat).await;
+        refused_because(
+            &agent(&f, &later, "create_hook_rule", write).await,
+            "Another writer reached this conversation",
+        );
+    }
+}
+
+#[tokio::test]
+async fn editing_a_message_never_attests_its_unknown_previous_revision() {
+    replacing_a_queued_message_preserves_its_unknown_writer(false).await;
+}
+
+#[tokio::test]
+async fn withdrawing_a_message_never_erases_its_unknown_previous_revision() {
+    replacing_a_queued_message_preserves_its_unknown_writer(true).await;
+}
+
 #[tokio::test]
 async fn any_other_writer_or_unrecorded_write_closes_the_conversation_for_good() {
     let f = granted().await;
