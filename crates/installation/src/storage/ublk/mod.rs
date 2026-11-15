@@ -377,6 +377,185 @@ fn records(state: &Path) -> stdio::Result<Vec<Record>> {
     Ok(records)
 }
 
+/// Verify a native stale attachment before holder cleanup changes a process.
+/// The durable nonce, boot and dead-owner checks also apply without a host mount.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostDiskIdentity {
+    Current,
+    PreviousBoot,
+    Absent,
+}
+
+pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<HostDiskIdentity> {
+    let current_boot = boot_id()?;
+    let records = records(state)?;
+    let previous_boot = records.iter().any(|record| record.vm_id == run)
+        && records
+            .iter()
+            .filter(|record| record.vm_id == run)
+            .all(|record| record.boot_id != current_boot);
+    if previous_boot {
+        // A retained mount cannot survive a reboot. Its old dev_t may now name
+        // an unrelated live disk; never inspect, stop or delete that new owner.
+        return Ok(HostDiskIdentity::PreviousBoot);
+    }
+    let mut found = false;
+    for record in records {
+        if record.vm_id != run || record.boot_id != current_boot {
+            continue;
+        }
+        let Some(id) = record.device_id else {
+            continue;
+        };
+        if record.owner.alive()? || vm_alive(state, &record)? {
+            return Err(stdio::Error::new(
+                stdio::ErrorKind::WouldBlock,
+                "Native backend remains active",
+            ));
+        }
+        let control = match UblkCtrlBuilder::default().id(id).build() {
+            Ok(control) => control,
+            Err(failure) => {
+                let failure = error(failure);
+                if matches!(failure.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) {
+                    continue;
+                }
+                return Err(failure);
+            }
+        };
+        if control.dev_info().ublksrv_flags != record.token {
+            continue;
+        }
+        let attachment =
+            fs::symlink_metadata(state.join("native-block").join(run).join("root/disk.blk"))?;
+        // STOP removes the gendisk before DEL removes the nonce-owned control
+        // device. GET_PARAMS then reports a zero disk address; older receipts
+        // retain that address only in the private block attachment.
+        let mut parameters = libublk::sys::ublk_params {
+            len: std::mem::size_of::<libublk::sys::ublk_params>() as u32,
+            types: libublk::sys::UBLK_PARAM_TYPE_DEVT,
+            ..Default::default()
+        };
+        control.get_params(&mut parameters).map_err(error)?;
+        let address = attachment.rdev();
+        let active_address = if parameters.devt.disk_major == 0 {
+            match fs::metadata(format!(
+                "/sys/dev/block/{}:{}",
+                libc::major(address),
+                libc::minor(address)
+            )) {
+                Ok(_) => true,
+                Err(error) if error.kind() == stdio::ErrorKind::NotFound => false,
+                Err(error) => return Err(error),
+            }
+        } else {
+            true
+        };
+        let expected = retained_device_address(
+            &parameters,
+            control.dev_info().state,
+            address,
+            active_address,
+        )?;
+        if !attachment.file_type().is_block_device() || attachment.rdev() != expected {
+            return Err(stdio::Error::other(
+                "Native block attachment differs from its owned device",
+            ));
+        }
+        found = true;
+    }
+    if !found {
+        let path = state.join("native-block").join(run).join("root/disk.blk");
+        let address = fs::symlink_metadata(path)?.rdev();
+        let sysfs = format!(
+            "/sys/dev/block/{}:{}",
+            libc::major(address),
+            libc::minor(address)
+        );
+        if Path::new(&sysfs).exists() {
+            return Err(stdio::Error::other(
+                "Native attachment device exists without a matching ownership receipt",
+            ));
+        }
+    }
+    Ok(if found {
+        HostDiskIdentity::Current
+    } else {
+        HostDiskIdentity::Absent
+    })
+}
+
+/// A root-overmounted namespace can hide a retained filesystem from mountinfo.
+/// ext4 keeps this registration until put_super starts, independently of task roots.
+/// Absence is not proof that journal destruction or kernel retirement has completed.
+pub(crate) fn require_host_filesystems_unmounted(state: &Path, run: &str) -> stdio::Result<()> {
+    let boot = boot_id()?;
+    let ids = records(state)?
+        .into_iter()
+        .filter(|record| record.vm_id == run && record.boot_id == boot)
+        .filter_map(|record| record.device_id)
+        .collect::<Vec<_>>();
+    let root = Path::new("/sys/fs/ext4");
+    let path = CString::new(root.as_os_str().as_bytes()).map_err(stdio::Error::other)?;
+    let mut status = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(path.as_ptr(), status.as_mut_ptr()) } != 0 {
+        return Err(stdio::Error::last_os_error());
+    }
+    if unsafe { status.assume_init() }.f_type != 0x6265_6572 {
+        return Err(stdio::Error::other("Native ext4 inventory is not on sysfs"));
+    }
+    require_ext4_registrations_absent(root, &ids)
+}
+
+fn require_ext4_registrations_absent(root: &Path, ids: &[i32]) -> stdio::Result<()> {
+    // Reading the authoritative directory must succeed even when no entry matches.
+    // Without a current receipt, conservatively refuse any retained ublk filesystem;
+    // a numeric ID inferred from an attachment alone would not prove ownership.
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("ublkb"))
+            .and_then(|id| id.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if ids.is_empty() || ids.contains(&id) {
+            return Err(stdio::Error::other(format!(
+                "Native ext4 filesystem ublkb{id} remains registered after unmount; a hidden namespace may retain it; ownership retained"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn retained_device_address(
+    parameters: &libublk::sys::ublk_params,
+    state: u16,
+    attachment: u64,
+    active_address: bool,
+) -> stdio::Result<u64> {
+    if parameters.types & libublk::sys::UBLK_PARAM_TYPE_DEVT == 0 {
+        return Err(stdio::Error::other("Native device address is unavailable"));
+    }
+    if parameters.devt.disk_major == 0 {
+        if u32::from(state) != libublk::sys::UBLK_S_DEV_DEAD
+            || active_address
+            || libc::major(attachment) == 0
+        {
+            return Err(stdio::Error::other(
+                "Stopped native device address cannot be verified",
+            ));
+        }
+        return Ok(attachment);
+    }
+    Ok(libc::makedev(
+        parameters.devt.disk_major,
+        parameters.devt.disk_minor,
+    ))
+}
+
 /// Native recovery owns both disk leases and has requested workload termination.
 /// Abort only dead, nonce-verified backends so blocked consumers can finish exiting;
 /// keep kernel devices and receipts until fencing and unmount are confirmed.
@@ -700,6 +879,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_ext4_registration_refuses_retirement_even_without_visible_holders() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("features")).unwrap();
+        require_ext4_registrations_absent(root.path(), &[7]).unwrap();
+        fs::create_dir(root.path().join("ublkb7")).unwrap();
+        assert!(require_ext4_registrations_absent(root.path(), &[7]).is_err());
+        require_ext4_registrations_absent(root.path(), &[8]).unwrap();
+        assert!(require_ext4_registrations_absent(root.path(), &[]).is_err());
+        fs::remove_dir(root.path().join("ublkb7")).unwrap();
+        require_ext4_registrations_absent(root.path(), &[7]).unwrap();
+        assert!(require_ext4_registrations_absent(&root.path().join("missing"), &[7]).is_err());
+    }
+
+    #[test]
+    fn stopped_device_identity_does_not_require_a_live_sysfs_block_entry() {
+        let mut parameters = libublk::sys::ublk_params::default();
+        let attachment = libc::makedev(259, 17);
+        let dead = libublk::sys::UBLK_S_DEV_DEAD as u16;
+        assert!(retained_device_address(&parameters, dead, attachment, false).is_err());
+        parameters.types = libublk::sys::UBLK_PARAM_TYPE_DEVT;
+        assert_eq!(
+            retained_device_address(&parameters, dead, attachment, false).unwrap(),
+            attachment
+        );
+        assert!(retained_device_address(&parameters, dead, attachment, true).is_err());
+        assert!(
+            retained_device_address(
+                &parameters,
+                libublk::sys::UBLK_S_DEV_LIVE as u16,
+                attachment,
+                false
+            )
+            .is_err()
+        );
+        parameters.devt.disk_major = 259;
+        parameters.devt.disk_minor = 17;
+        assert_eq!(
+            retained_device_address(&parameters, dead, attachment, true).unwrap(),
+            attachment
+        );
+        parameters.types = 0;
+        assert!(retained_device_address(&parameters, dead, attachment, false).is_err());
+    }
+
+    #[test]
+    fn stale_native_attachment_without_a_receipt_has_no_owned_device() {
+        let root = tempfile::tempdir().unwrap();
+        let run = uuid::Uuid::new_v4().to_string();
+        let attachment = root.path().join("native-block").join(&run).join("root");
+        fs::create_dir_all(&attachment).unwrap();
+        fs::write(attachment.join("disk.blk"), b"obsolete attachment metadata").unwrap();
+        assert_eq!(
+            verify_stale_host_disk(root.path(), &run).unwrap(),
+            HostDiskIdentity::Absent
+        );
+    }
+
+    #[test]
     #[ignore = "requires CAP_SYS_ADMIN; uses disposable private mount namespaces"]
     fn private_backend_namespace_releases_only_selected_inherited_mounts() {
         std::thread::spawn(|| {
@@ -815,6 +1052,11 @@ mod tests {
             owner: Owner::current().unwrap(),
         };
         persist(root.path(), &record).unwrap();
+        // No attachment or device lookup is needed for a positively older boot.
+        assert_eq!(
+            verify_stale_host_disk(root.path(), &record.vm_id).unwrap(),
+            HostDiskIdentity::PreviousBoot
+        );
         cleanup_stale(root.path()).unwrap();
         assert!(!record.path(root.path()).exists());
     }

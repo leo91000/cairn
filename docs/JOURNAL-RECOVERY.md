@@ -3,7 +3,7 @@
 Decision: [ADR-0072](adr/0072-fast-journal-recovery-and-receipt-reconciliation.md).
 The local disk model is defined in
 [ADR-0083](adr/0083-local-conversation-disks-without-s3.md).
-New environments use [ADR-0086](adr/0086-native-directories-and-direct-vm-images.md).
+New environments use [ADR-0087](adr/0087-native-directories-and-direct-vm-images.md).
 Journal recovery remains a legacy-conversion requirement. The direct-format local
 block-interface comparison is reproducible with
 `cargo run --locked -p cairn-installation --example local_storage_measurement`;

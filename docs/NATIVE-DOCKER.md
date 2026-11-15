@@ -256,3 +256,13 @@ additionally checks concurrent administrator daemons, raw volume ownership acros
 both mode changes, interrupted container metadata, normal turn completion and
 retained-store resume without implicit restarts. These network-local checks do
 not replace the disposable ublk qualification or measure production latency.
+
+### Filesystem holders during retirement
+
+Native close attempts ordinary unmount and checks the block attachment's device
+identity, including private mount copies that survive a successful host unmount.
+A holder report names the PID, short process name and cgroup. Automatic stopping
+is limited to the current attempt and canonical legacy Docker scopes; another
+attempt or an unknown holder retains ownership and requires diagnosis. A PID is
+pinned and revalidated before signalling. The node must never treat a timeout as
+proof that the filesystem or device was retired.

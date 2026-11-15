@@ -1,5 +1,6 @@
 //! Host-mounted ext4 over the same local journal and base blocks as VMs.
 mod closing;
+mod holders;
 
 use super::{atomic_write, workspace};
 use crate::{
@@ -241,8 +242,45 @@ fn verify_host_mount(state: &Path, mounted: &HostMount) -> Result<()> {
 /// The controller and system manager share a namespace; host mounts survive a
 /// controller crash. Fence every attributed workload and non-lazily unmount only
 /// verified private attachments before the existing nonce-safe device cleanup.
+struct RecoveryLeases {
+    _workspace: crate::file_lock::Guard,
+    disk: environment::Lease,
+}
+
 pub async fn recover_host_mounts(state: &Path) -> Result<()> {
-    let mounts = host_mounts(state, &std::fs::read_to_string("/proc/self/mountinfo")?)?;
+    let mut mounts = host_mounts(state, &std::fs::read_to_string("/proc/self/mountinfo")?)?;
+    // Host unmount may have succeeded before a controller crash while a private
+    // namespace still holds the filesystem. Retained attachments remain candidates.
+    let directory = state.join("native-block");
+    if directory.is_dir() {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let run = entry.file_name().to_string_lossy().into_owned();
+            crate::validation::uuid(&run)?;
+            if mounts.iter().any(|mounted| mounted.run == run) {
+                continue;
+            }
+            let attachment = entry.path().join("root/disk.blk");
+            let metadata = match std::fs::symlink_metadata(attachment) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !metadata.file_type().is_block_device() {
+                return Err(Error::conflict("Invalid native block attachment."));
+            }
+            mounts.push(HostMount {
+                path: workspace::directory(state, &run)?.join("data"),
+                run,
+                device: format!(
+                    "{}:{}",
+                    libc::major(metadata.rdev()),
+                    libc::minor(metadata.rdev())
+                ),
+            });
+        }
+    }
     for mounted in mounts {
         let root = workspace::directory(state, &mounted.run)?;
         let _workspace = crate::file_lock::exclusive(
@@ -250,41 +288,123 @@ pub async fn recover_host_mounts(state: &Path) -> Result<()> {
             "Native workspace is still active.",
         )?;
         let owner = environment::lock(state, &mounted.run, "Native disk is still owned.").await?;
-        if !storage::runtime::exists(&owner.directory) {
-            return Err(Error::conflict("Mounted native journal is missing."));
-        }
-        verify_host_mount(state, &mounted)?;
-        let identity: Value =
-            serde_json::from_slice(&tokio::fs::read(owner.directory.join("runtime.json")).await?)?;
-        if identity["backend"] != "native"
-            || !matches!(
-                identity["storage"].as_str(),
-                Some("ublk" | LEGACY_ROOTLESS_STORAGE | STORAGE)
-            )
-        {
-            return Err(Error::conflict("Mounted disk is not a native journal."));
-        }
-        let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
-        crate::validation::uuid(&attempt)?;
-        super::systemd::request_stop(&attempt).await?;
+        let leases = Arc::new(RecoveryLeases {
+            _workspace,
+            disk: owner,
+        });
         let state = state.to_owned();
-        let run = mounted.run.clone();
-        let ownership = tokio::task::spawn_blocking(move || -> Result<_> {
-            // Keep both leases with kernel operations if startup is cancelled.
-            let ownership = (_workspace, owner);
+        // The spawned operation owns its leases. Dropping the startup waiter
+        // does not cancel a running kernel unmount or release its ownership.
+        tokio::spawn(async move {
+            use std::os::unix::fs::MetadataExt;
 
-            storage::ublk::quiesce_stale_host_disk(&state, &run)?;
-            Ok(ownership)
-        })
-        .await
-        .map_err(Error::internal)??;
-        // A dead backend can leave blocked D-state consumers. Abort its I/O
-        // before waiting for their cgroup fence, but never delete it yet.
-        super::systemd::stop(&attempt).await?;
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let _ownership = ownership;
-            unmount_sync(&mounted.path)?;
-            Ok(())
+            if !storage::runtime::exists(&leases.disk.directory) {
+                return Err(Error::conflict("Mounted native journal is missing."));
+            }
+            verify_host_mount(&state, &mounted)?;
+            let identity: Value = serde_json::from_slice(
+                &tokio::fs::read(leases.disk.directory.join("runtime.json")).await?,
+            )?;
+            if identity["backend"] != "native"
+                || !matches!(
+                    identity["storage"].as_str(),
+                    Some("ublk" | LEGACY_ROOTLESS_STORAGE | STORAGE)
+                )
+            {
+                return Err(Error::conflict("Mounted disk is not a native journal."));
+            }
+            let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
+            crate::validation::uuid(&attempt)?;
+            let attachment = state.join("native-block").join(&mounted.run).join("root");
+            let checked_state = state.clone();
+            let checked_run = mounted.run.clone();
+            let checked_leases = leases.clone();
+            let current_device = tokio::task::spawn_blocking(move || {
+                let _leases = checked_leases;
+                storage::ublk::verify_stale_host_disk(&checked_state, &checked_run)
+            })
+            .await
+            .map_err(Error::internal)??;
+            if current_device == storage::ublk::HostDiskIdentity::PreviousBoot {
+                if target_has_mount(&mounted.path, &std::fs::read_to_string("/proc/self/mountinfo")?)? {
+                    return Err(Error::conflict("Previous-boot native attachment has a new host mount; ownership retained."));
+                }
+                retire_attachment(&attachment).await?;
+                return Ok(());
+            }
+            if current_device == storage::ublk::HostDiskIdentity::Absent {
+                // No current nonce-owned device survives. Never act on a reused
+                // numeric ID or inspect it as if it belonged to this run.
+                // No nonce authorizes a process signal. Refuse residual views
+                // rather than deleting a device or killing an unowned holder.
+                let address = std::fs::symlink_metadata(attachment.join("disk.blk"))?.rdev();
+                let holders = tokio::task::spawn_blocking(move || holders::scan(address, true)).await.map_err(Error::internal)??;
+                if !holders.is_empty() {
+                    return Err(Error::unavailable("Unowned native attachment still has filesystem holders; ownership retained."));
+                }
+                require_unmounted_registration(&attachment).await?;
+                retire_attachment(&attachment).await?;
+                return Ok(());
+            }
+            // A healthy filesystem and already-stopped workload can retire without
+            // aborting I/O. Only fall back to the dead-backend path if this fails.
+            super::systemd::request_stop(&attempt).await?;
+            let stopped = super::systemd::stop(&attempt).await.is_ok();
+            let mut initial = None;
+            if stopped {
+                let path = mounted.path.clone();
+                let attachment = attachment.clone();
+                let held = leases.clone();
+                let mut task = tokio::spawn(async move { unmount(&path, &attachment, Some(held)).await });
+                match tokio::time::timeout(std::time::Duration::from_secs(3), &mut task).await {
+                    Ok(Ok(Ok(()))) => return Ok::<(), Error>(()),
+                    Ok(_) => {},
+                    Err(_) => initial = Some(task),
+                }
+            }
+            let diagnostic_device = std::fs::symlink_metadata(attachment.join("disk.blk"))?;
+            let diagnostic_device = diagnostic_device.rdev();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(4),
+                tokio::task::spawn_blocking(move || holders::scan(diagnostic_device, true)),
+            )
+            .await
+            {
+                Ok(Ok(Ok(holders))) => tracing::warn!(
+                    attempt,
+                    ?holders,
+                    "Dead native backend requires I/O abort after normal unmount failed"
+                ),
+                _ => tracing::warn!(
+                    attempt,
+                    "Dead native backend holder inspection incomplete before I/O abort"
+                ),
+            }
+            let backend_state = state.clone();
+            let run = mounted.run.clone();
+            let owned_leases = leases.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let _ownership = owned_leases;
+                storage::ublk::quiesce_stale_host_disk(&backend_state, &run)?;
+                Ok(())
+            })
+            .await
+            .map_err(Error::internal)??;
+            // A dead backend can leave blocked D-state consumers. Abort its I/O
+            // before waiting for their cgroup fence, but never delete it yet.
+            super::systemd::stop(&attempt).await?;
+            if let Some(initial) = initial {
+                // STOP releases blocked I/O. The first operation still owns
+                // its leases and must settle before another unmount starts.
+                tokio::time::timeout(std::time::Duration::from_secs(5), initial).await
+                    .map_err(|_| Error::unavailable("Native unmount remains blocked after I/O stop; ownership retained."))?
+                    .map_err(Error::internal)??;
+                return Ok(());
+            }
+            // Keep the same leases while retiring private copies as well as the
+            // host mount. The native cleanup step follows only confirmed unmount.
+            unmount(&mounted.path, &attachment, Some(leases.clone())).await?;
+            Ok::<(), Error>(())
         })
         .await
         .map_err(Error::internal)??;
@@ -302,12 +422,220 @@ fn unmount_sync(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn unmount(path: &Path) -> Result<()> {
+fn target_has_mount(path: &Path, inventory: &str) -> std::io::Result<bool> {
+    for line in inventory.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 6 {
+            return Err(std::io::Error::other("Invalid mount inventory"));
+        }
+        let mounted = fields[4]
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\");
+        if Path::new(&mounted) == path {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn owned_mount_present(path: &Path, device: u64, inventory: &str) -> std::io::Result<bool> {
+    let expected = format!("{}:{}", libc::major(device), libc::minor(device));
+    let mut found = false;
+    for line in inventory.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() < 6 {
+            return Err(std::io::Error::other("Invalid mount inventory"));
+        }
+        let mounted = fields[4]
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\");
+        if Path::new(&mounted) != path {
+            continue;
+        }
+        if fields[2] != expected || found {
+            return Err(std::io::Error::other("Native mount ownership changed"));
+        }
+        found = true;
+    }
+    Ok(found)
+}
+
+async fn unmount_owned(
+    path: &Path,
+    device: u64,
+    leases: Option<Arc<RecoveryLeases>>,
+) -> std::io::Result<()> {
     let path = path.to_owned();
-    tokio::task::spawn_blocking(move || unmount_sync(&path))
+    tokio::task::spawn_blocking(move || {
+        let _leases = leases;
+        if owned_mount_present(
+            &path,
+            device,
+            &std::fs::read_to_string("/proc/self/mountinfo")?,
+        )? {
+            unmount_sync(&path)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+async fn unmount(
+    path: &Path,
+    attachment: &Path,
+    leases: Option<Arc<RecoveryLeases>>,
+) -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let path = path.to_owned();
+    let metadata = tokio::fs::symlink_metadata(attachment.join("disk.blk")).await?;
+    if !metadata.file_type().is_block_device() {
+        return Err(Error::conflict("Native attachment is not a block device."));
+    }
+    let device = metadata.rdev();
+    let attempt = tokio::fs::read_to_string(path.parent().unwrap().join("attempt")).await?;
+    crate::validation::uuid(&attempt)?;
+    let first = unmount_owned(&path, device, leases.clone()).await;
+    match first {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EBUSY) => {
+            // Passive propagated copies retire with the host unmount. Only
+            // explicit references prevent that first unmount from succeeding.
+            quiesce_holders(device, &attempt, false).await?;
+            unmount_owned(&path, device, leases.clone())
+                .await
+                .map_err(Error::from)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    quiesce_holders(device, &attempt, true).await?;
+    unmount_owned(&path, device, leases.clone())
         .await
+        .map_err(|error| {
+            Error::unavailable(format!(
+                "Native disk could not unmount: {error}; ownership retained."
+            ))
+        })?;
+    require_unmounted_registration(attachment).await
+}
+
+async fn require_unmounted_registration(attachment: &Path) -> Result<()> {
+    let run_directory = attachment
+        .parent()
+        .ok_or_else(|| Error::bad("Invalid native attachment."))?;
+    let run = run_directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::bad("Invalid native attachment identity."))?
+        .to_owned();
+    crate::validation::uuid(&run)?;
+    let state = run_directory
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Error::bad("Invalid native attachment state."))?
+        .to_owned();
+    tokio::task::spawn_blocking(move || {
+        storage::ublk::require_host_filesystems_unmounted(&state, &run)
+    })
+    .await
+    .map_err(Error::internal)?
+    .map_err(|error| Error::unavailable(error.to_string()))
+}
+
+async fn quiesce_holders(device: u64, attempt: &str, private_copies: bool) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+    // Even after the host mount disappears, a private namespace may retain a
+    // copy. Do not enter synchronous kernel retirement while that copy survives.
+    for round in 0..3 {
+        let observed = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            tokio::task::spawn_blocking(move || holders::scan(device, private_copies)),
+        )
+        .await
+        .map_err(|_| {
+            Error::unavailable("Native disk holder inspection timed out; ownership retained.")
+        })?
         .map_err(Error::internal)??;
-    Ok(())
+        if observed.is_empty() {
+            return Ok(());
+        }
+        tracing::warn!(
+            attempt,
+            ?observed,
+            "Native disk has live filesystem holders; refusing device retirement"
+        );
+        let description = observed
+            .iter()
+            .take(16)
+            .map(|holder| format!("{} pid {} ({})", holder.name, holder.pid, holder.cgroup))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if round == 2
+            || observed
+                .iter()
+                .any(|holder| holders::unit(holder, attempt).is_none())
+        {
+            return Err(Error::unavailable(format!(
+                "Native disk is held by {description}; ownership retained."
+            )));
+        }
+        for holder in observed {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::unavailable(
+                    "Native disk holder shutdown timed out; ownership retained.",
+                ));
+            }
+            let exact_unit = holders::unit(&holder, attempt).unwrap();
+            // Pin and revalidate attribution before asking systemd to stop the
+            // entire unit; retain that process identity through the request.
+            let checking = holder.clone();
+            let pinned = tokio::time::timeout_at(
+                deadline,
+                tokio::task::spawn_blocking(move || holders::pin(&checking, device)),
+            )
+            .await
+            .map_err(|_| {
+                Error::unavailable("Native disk holder identity timed out; ownership retained.")
+            })?
+            .map_err(Error::internal)??;
+            let Some(_pinned) = pinned else {
+                continue;
+            };
+            if round == 0 {
+                let mut command = tokio::process::Command::new("/usr/bin/systemctl");
+                command
+                    .env_clear()
+                    .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+                    .args(["--no-block", "stop", &exact_unit])
+                    .kill_on_drop(true);
+                let stopped =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), command.output()).await;
+                if matches!(stopped, Ok(Ok(ref output)) if output.status.success()) {
+                    continue;
+                }
+            }
+            let signal = if round == 0 {
+                libc::SIGTERM
+            } else {
+                libc::SIGKILL
+            };
+            tokio::time::timeout_at(
+                deadline,
+                tokio::task::spawn_blocking(move || holders::signal(&holder, device, signal)),
+            )
+            .await
+            .map_err(|_| {
+                Error::unavailable("Native disk holder signal timed out; ownership retained.")
+            })?
+            .map_err(Error::internal)??;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    unreachable!()
 }
 
 pub struct Mounted {
@@ -543,6 +871,16 @@ struct CloseOperations<'a> {
 #[async_trait::async_trait]
 impl closing::Operations for CloseOperations<'_> {
     async fn flush(&self) -> std::io::Result<Option<u64>> {
+        use std::os::unix::fs::MetadataExt;
+        let device = tokio::fs::symlink_metadata(self.jail.join("disk.blk"))
+            .await?
+            .rdev();
+        let attempt =
+            tokio::fs::read_to_string(self.target.parent().unwrap().join("attempt")).await?;
+        crate::validation::uuid(&attempt).map_err(std::io::Error::other)?;
+        quiesce_holders(device, &attempt, false)
+            .await
+            .map_err(std::io::Error::other)?;
         self.volume.finish_fenced(sync_io(self.target)).await?;
         Ok(used_bytes(self.target).ok())
     }
@@ -562,7 +900,7 @@ impl closing::Operations for CloseOperations<'_> {
     }
 
     async fn unmount(&self) -> Result<()> {
-        unmount(self.target).await
+        unmount(self.target, self.jail, None).await
     }
 
     async fn record_usage(&self, used: u64) -> Result<()> {
@@ -870,6 +1208,26 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_mount_is_not_confused_with_the_parent_filesystem() {
+        let dev = libc::makedev(259, 10);
+        let path = Path::new("/state/native/run/data");
+        assert!(!target_has_mount(path, "1 0 8:1 / / rw - ext4 /dev/root rw").unwrap());
+        assert!(
+            target_has_mount(
+                path,
+                "1 0 8:1 / /state/native/run/data rw - ext4 /dev/new rw"
+            )
+            .unwrap()
+        );
+        assert!(target_has_mount(path, "malformed").is_err());
+        assert!(!owned_mount_present(path, dev, "1 0 8:1 / / rw - ext4 /dev/root rw").unwrap());
+        let mounted = "1 0 259:10 / /state/native/run/data rw - ext4 /dev/ublkb1 rw";
+        assert!(owned_mount_present(path, dev, mounted).unwrap());
+        assert!(owned_mount_present(path, dev, &format!("{mounted}\n{mounted}")).is_err());
+        assert!(owned_mount_present(path, dev, &mounted.replace("259:10", "259:11")).is_err());
+    }
 
     #[tokio::test]
     async fn native_volume_admission_consolidates_overwrites_before_the_task_allowance_is_exhausted()

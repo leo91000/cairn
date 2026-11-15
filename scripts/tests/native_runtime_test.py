@@ -195,6 +195,85 @@ def retained_health(api, run):
     return eventually(sample)
 
 
+@contextmanager
+def escaped_docker_holder(root, docker_tools, disk, raw_device=None, probe=None):
+    """An independent legacy engine on this disposable host, outside any run."""
+    # The controller shares the host mount namespace. Docker/runc must receive
+    # the real host path, not a procfs magic link into another process's root.
+    source = disk.resolve(strict=True)
+    assert source.is_dir() and source.samefile(disk), 'Legacy holder source changed.'
+    directory = root / 'legacy-docker'
+    directory.mkdir(mode=0o700)
+    unit = 'cairn-fixture-legacy-' + uuid.uuid4().hex + '.service'
+    endpoint = 'unix://' + str(directory / 'docker.sock')
+    environment = dict(os.environ, PATH=str(docker_tools / 'bin') + ':' + os.defpath,
+                       DOCKER_CONFIG=str(directory / 'client'))
+    (directory / 'daemon.json').write_text('{}')
+
+    def docker(*args):
+        try:
+            return command(str(docker_tools / 'bin/docker'), '--host', endpoint, *args,
+                           env=environment).stdout.strip()
+        except subprocess.CalledProcessError as error:
+            # This isolated engine uses only synthetic fixture inputs. Preserve
+            # its bounded failure reason rather than only the command exit code.
+            detail = (error.stderr or '')[-4096:].replace(SECRET, '[fixture-secret]')
+            raise AssertionError('Legacy Docker fixture failed: ' + detail) from error
+
+    def ready():
+        try:
+            result = subprocess.run([str(docker_tools / 'bin/docker'), '--host', endpoint,
+                                     'info', '--format', '{{.CgroupDriver}}'],
+                                    env=environment, capture_output=True, text=True, timeout=5)
+            return result.returncode == 0 and result.stdout.strip() == 'systemd'
+        except subprocess.TimeoutExpired:
+            return False
+
+    try:
+        command('systemd-run', '--collect', '--unit=' + unit,
+                '--setenv=PATH=' + environment['PATH'],
+                str(docker_tools / 'bin/dockerd'), '--host=' + endpoint,
+                '--config-file=' + str(directory / 'daemon.json'),
+                '--data-root=' + str(directory / 'data'),
+                '--exec-root=' + str(directory / 'exec'),
+                '--pidfile=' + str(directory / 'pid'), '--storage-driver=vfs',
+                '--exec-opt=native.cgroupdriver=systemd', '--bridge=none',
+                '--iptables=false', '--ip6tables=false', '--ip-forward=false', '--ip-masq=false')
+        eventually(ready)
+        docker('pull', 'alpine:3.22.2')
+        container = docker('run', '-d', '--network=none', '--name=cairn-legacy-holder',
+                           '-v', str(source) + ':/held', 'alpine:3.22.2', 'sh', '-c',
+                           'exec 3>/held/escaped-held; echo ready >&3; while :; do sleep 1; done')
+        info = json.loads(docker('inspect', container))[0]
+        pid = info['State']['Pid']
+        expected = '/system.slice/docker-' + container + '.scope'
+        assert Path('/proc', str(pid), 'cgroup').read_text().strip() == '0::' + expected
+        eventually(lambda: (disk / 'escaped-held').exists())
+        mapped = None
+        if raw_device is not None:
+            mapped = docker('run', '-d', '--network=none',
+                            '--device', str(raw_device.resolve(strict=True)) + ':/dev/held:r',
+                            '-v', str(probe.resolve(strict=True)) + ':/probe:ro',
+                            'alpine:3.22.2', '/probe', 'raw-mmap', '/dev/held')
+            eventually(lambda: docker('logs', mapped).strip() == 'mapped')
+            mapped_pid = json.loads(docker('inspect', mapped))[0]['State']['Pid']
+            assert Path('/proc', str(mapped_pid), 'cgroup').read_text().strip() == '0::/system.slice/docker-' + mapped + '.scope'
+            address = raw_device.stat().st_rdev
+            for descriptor in Path('/proc', str(mapped_pid), 'fd').iterdir():
+                metadata = descriptor.stat()
+                assert not (stat.S_ISBLK(metadata.st_mode) and metadata.st_rdev == address), 'Raw probe kept its block descriptor open.'
+        yield pid
+        assert not Path('/proc', str(pid)).exists(), 'Escaped legacy container survived disk retirement.'
+        assert json.loads(docker('inspect', container))[0]['State']['Running'] is False
+        if mapped is not None:
+            assert not Path('/proc', str(mapped_pid)).exists(), 'Raw device mapping survived retirement.'
+            assert json.loads(docker('inspect', mapped))[0]['State']['Running'] is False
+    finally:
+        # Stop only this fixture engine; normal daemon shutdown reaps any container
+        # left by an earlier assertion, without touching other Docker services.
+        command('systemctl', 'stop', unit)
+
+
 # Identical workload for the direct host reference and the actual sandbox engine.
 # Each run performs fsynced writes and reads the deterministic seeded asset.
 MEASURE = '''import json,os,time
@@ -454,11 +533,27 @@ def main():
             command('systemd-run', '--quiet', '--collect', '--service-type=exec', '--unit=' + supervisor,
                 '--property=LimitNOFILE=1024:524288',
                 *['--setenv=' + key + '=' + value for key, value in environment.items()], str(active_binary), *entrypoint)
-            eventually(lambda: api('/health', method='GET').get('backend') == 'native')
-            if candidate:
-                eventually(fixture_master.heartbeat_seen.is_set)
-                metrics['candidateEntryPoint'] = 'node-daemon'
-                metrics['offlineMasterHeartbeatObserved'] = True
+            try:
+                eventually(lambda: api('/health', method='GET').get('backend') == 'native')
+                if candidate:
+                    eventually(fixture_master.heartbeat_seen.is_set)
+                    metrics['candidateEntryPoint'] = 'node-daemon'
+                    metrics['offlineMasterHeartbeatObserved'] = True
+            except Exception:
+                diagnostics = []
+                for args in [('systemctl', 'show', supervisor,
+                              '--property=ActiveState,SubState,Result,ExecMainStatus'),
+                             ('journalctl', '--no-pager', '--output=cat', '--lines=80', '--unit=' + supervisor)]:
+                    result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+                    diagnostics.append(result.stdout + result.stderr)
+                diagnostic_text = '\n'.join(diagnostics)
+                for context in contexts.values():
+                    diagnostic_text = redact_fixture_diagnostics(diagnostic_text, token, context)
+                print(diagnostic_text, file=sys.stderr)
+                evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
+                evidence.mkdir(parents=True, exist_ok=True)
+                (evidence / 'controller-start-failure.txt').write_text(diagnostic_text)
+                raise
             assert (state / 'controller.sock').stat().st_mode & 0o777 == 0o600
             pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
             limits = Path('/proc/' + pid + '/limits').read_text().splitlines()
@@ -1238,8 +1333,8 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 metrics['dockerCgroup']['descendantNames'] = sorted(set(process_names))
                 assert int((group / 'memory.max').read_text()) == 1024 * 1024 * 1024
                 assert (group / 'cpu.max').read_text().split()[0] != 'max'
-                with socket.socket() as probe:
-                    assert probe.connect_ex(('127.0.0.1', 57431)) != 0, 'Docker published on the host network.'
+                with socket.socket() as network_probe:
+                    assert network_probe.connect_ex(('127.0.0.1', 57431)) != 0, 'Docker published on the host network.'
                 progress('docker-concurrent')
                 parallel = start(docker_other, lease=300000, docker_script=docker_script('other'))
                 owner_a = json.loads((state / 'native-data' / docker_run / 'data/.cairn-identity.json').read_text())
@@ -1296,8 +1391,28 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                     partial.mkdir(mode=0o700)
                     if digit == 'e':
                         (partial / 'hostconfig.json').write_text('{')
-                api('/runs/' + administrator_docker, method='DELETE')
-                fenced(docker_run, administrator_docker)
+                with escaped_docker_holder(root, docker_tools, managed(docker_run),
+                                           None, probe):
+                    try:
+                        api('/runs/' + administrator_docker, method='DELETE')
+                        fenced(docker_run, administrator_docker)
+                    except Exception:
+                        # Preserve the controller's exact holder/close refusal before
+                        # the context manager reaps this synthetic legacy engine.
+                        result = subprocess.run(
+                            ['journalctl', '--no-pager', '--output=cat', '--lines=100', '--unit=' + supervisor],
+                            capture_output=True, text=True, timeout=10)
+                        diagnostic = result.stdout + result.stderr
+                        for context in contexts.values():
+                            diagnostic = redact_fixture_diagnostics(diagnostic, token, context)
+                        evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
+                        evidence.mkdir(parents=True, exist_ok=True)
+                        (evidence / 'legacy-holder-close-failure.txt').write_text(diagnostic[-65536:])
+                        print(diagnostic[-65536:], file=sys.stderr)
+                        raise
+                    metrics['legacyEscapedHolderRetired'] = True
+                    metrics['legacyRawMappingRetired'] = False
+                    metrics['legacyRawMappingNotApplicable'] = 'Direct native directories expose no private block device; legacy block mappings are qualified by the journal-format prerequisite.'
                 assert not Path('/proc', str(managed_pid)).exists(), 'Administrator Docker survived suspension.'
                 # Retire the earlier disk while the later-started daemon stays
                 # alive. A recursively private clone would retain its mount.

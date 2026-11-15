@@ -138,6 +138,24 @@ fn workload_slice() -> Result<String> {
     ))
 }
 
+pub(super) fn workload_cgroup() -> Result<String> {
+    let slice = workload_slice()?;
+    Ok(slice_cgroup(&slice))
+}
+
+fn slice_cgroup(slice: &str) -> String {
+    let name = slice.strip_suffix(".slice").unwrap_or(slice);
+    let mut path = String::new();
+    for (position, _) in name.match_indices('-') {
+        path.push('/');
+        path.push_str(&name[..position]);
+        path.push_str(".slice");
+    }
+    path.push('/');
+    path.push_str(slice);
+    path
+}
+
 /// All attempts share one host ceiling. Per-attempt limits alone multiply the
 /// owner's CPU/RAM budget when several conversations execute concurrently.
 pub(super) async fn apply_budget(budget: &crate::microvm::budget::Budget) -> Result<()> {
@@ -825,6 +843,23 @@ pub async fn set_paused(attempt: &str, paused: bool) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod slice_path_tests {
+    use super::*;
+
+    #[test]
+    fn cgroup_path_contains_each_systemd_slice_ancestor() {
+        assert_eq!(
+            slice_cgroup("cairn-native-node-workloads.slice"),
+            "/cairn.slice/cairn-native.slice/cairn-native-node.slice/cairn-native-node-workloads.slice"
+        );
+        assert_eq!(
+            slice_cgroup("custom_node-workloads.slice"),
+            "/custom_node.slice/custom_node-workloads.slice"
+        );
+    }
 }
 
 #[cfg(test)]
