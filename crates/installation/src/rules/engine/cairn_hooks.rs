@@ -419,7 +419,8 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
             "SELECT id,type,text,payload,created_at FROM events WHERE run_id=?1 AND id>?2 AND (type IN \
              ('chat.user','chat.wakeup','turn.started','turn.completed','turn.failed','retry.scheduled') \
              OR (type='status' AND (text IN ('failed','cancelled','interrupted') \
-             OR json_extract(payload,'$.chatOperation')='compact'))) ORDER BY id LIMIT ?3",
+             OR json_extract(payload,'$.chatOperation')='compact' \
+             OR json_type(payload,'$.hookRuleDepth')='integer'))) ORDER BY id LIMIT ?3",
         )?
         .query_map(params![run, cursor, EVENTS], |row| {
             Ok((
@@ -470,6 +471,15 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
             }
         }
         match kind.as_str() {
+            "status" if payload["hookRuleDepth"].is_number() => {
+                if let Some(depth) = payload["hookRuleDepth"]
+                    .as_u64()
+                    .and_then(|depth| u32::try_from(depth).ok())
+                    .filter(|depth| *depth <= MAX_CHAIN_DEPTH)
+                {
+                    watch.depth = watch.depth.max(depth);
+                }
+            }
             "chat.user" => {
                 let message = payload["messageId"].as_str().unwrap_or_default();
                 let input = recorded_input(db, message)?.unwrap_or_else(|| Input {

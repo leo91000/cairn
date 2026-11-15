@@ -246,8 +246,8 @@ pub(crate) fn record_input(db: &Db<'_>, chat: &str, message: &str, origin: &Orig
     let (depth, tracked): (u32, bool) = db.0.query_row(
         "SELECT CASE WHEN ?2 THEN 0 ELSE max( \
            coalesce((SELECT depth FROM hook_rule_chain_depths WHERE chat_id=?1),0), \
-           coalesce((SELECT json_extract(watch,'$.depth') FROM hook_rule_conversations WHERE chat_id=?1),0), \
-           coalesce((SELECT d.depth FROM hook_rule_run_depths d JOIN conversations c ON c.run_id=d.run_id WHERE c.id=?1),0), \
+           coalesce((SELECT d.depth FROM hook_rule_run_depths d JOIN conversations c ON c.run_id=d.run_id WHERE c.id=?1), \
+                    (SELECT json_extract(watch,'$.depth') FROM hook_rule_conversations WHERE chat_id=?1),0), \
            ?3) END, \
          EXISTS(SELECT 1 FROM hook_rule_chain_depths WHERE chat_id=?1) OR \
          EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=?1) OR \
@@ -258,6 +258,16 @@ pub(crate) fn record_input(db: &Db<'_>, chat: &str, message: &str, origin: &Orig
     // delegated or installation-created conversation inherits the source depth
     // even if it has no rule key and consequently no asynchronous watcher.
     if tracked || depth > 0 {
+        if !tracked {
+            // A chain can first reach an already working ordinary chat. Its
+            // current turn is still at zero until this new input is delivered.
+            db.0.execute(
+                "INSERT OR IGNORE INTO hook_rule_run_depths(run_id,depth) \
+                 SELECT c.run_id,0 FROM conversations c JOIN runs r ON r.id=c.run_id \
+                 WHERE c.id=? AND r.trigger='chat'",
+                [chat],
+            )?;
+        }
         record_depth(db, chat, depth)?;
         db.0.execute(
             "INSERT INTO hook_rule_turn_origins(message_id,chat_id,origin,depth) VALUES(?1,?2,?3,?4) \
@@ -277,14 +287,15 @@ pub(crate) fn record_input(db: &Db<'_>, chat: &str, message: &str, origin: &Orig
 fn source_depth(db: &Db<'_>, origin: &Origin) -> Result<u32> {
     match origin {
         Origin::Run(run) | Origin::DelegatedTask(run) => Ok(db.0.query_row(
-            "SELECT max( \
-               coalesce((SELECT depth FROM hook_rule_run_depths WHERE run_id=?1),0), \
-               coalesce((SELECT max(max(coalesce(d.depth,0),coalesce(json_extract(k.watch,'$.depth'),0))) \
+            "SELECT coalesce( \
+               (SELECT depth FROM hook_rule_run_depths WHERE run_id=?1), \
+               (SELECT max(max(coalesce(d.depth,0),coalesce(json_extract(k.watch,'$.depth'),0))) \
                  FROM conversations c LEFT JOIN hook_rule_chain_depths d ON d.chat_id=c.id \
-                 LEFT JOIN hook_rule_conversations k ON k.chat_id=c.id WHERE c.run_id=?1),0))",
-            [run], |row| row.get(0),
+                 LEFT JOIN hook_rule_conversations k ON k.chat_id=c.id WHERE c.run_id=?1),0)",
+            [run],
+            |row| row.get(0),
         )?),
-        Origin::Stored(task) => task_depth(db, text(task,"id")),
+        Origin::Stored(task) => task_depth(db, text(task, "id")),
         _ => Ok(0),
     }
 }
@@ -329,42 +340,40 @@ pub(crate) fn record_run(db: &Db<'_>, run: &Json, origin: &Origin) -> Result<()>
         source_depth(db, origin)?.max(task_depth(db, text(run, "taskId"))?)
     };
     if depth > 0 {
-        db.0.execute(
-            "INSERT INTO hook_rule_run_depths(run_id,depth) VALUES(?1,?2) \
-             ON CONFLICT(run_id) DO UPDATE SET depth=max(depth,excluded.depth)",
-            params![text(run, "id"), depth],
-        )?;
+        extend_run_depth(db, text(run, "id"), depth)?;
     }
     Ok(())
 }
 
-/// A mission continued as a conversation reuses its run. Its frozen cause stays
-/// active until the next message really launches a turn: queuing a human input
-/// must not lower the cause of work that is still running. Independent mission
-/// runs retain their own admission depth.
+/// Every chat turn in a chain freezes its active cause at launch, independently
+/// of queued input and asynchronous hook observation. This also replaces a
+/// converted mission's cause, without changing independent mission runs.
 pub(crate) fn begin_chat_turn(
     db: &Db<'_>,
     chat: &str,
     run: &str,
     message: Option<&str>,
 ) -> Result<()> {
-    let previous: Option<u32> = db.0.query_row(
-        "SELECT d.depth FROM conversations c JOIN hook_rule_run_depths d ON d.run_id=c.run_id WHERE c.id=?",
-        [chat], |row| row.get(0),
-    ).optional()?;
-    let Some(previous) = previous else {
-        return Ok(());
-    };
-    let depth = if let Some(message) = message {
+    let input: Option<u32> = if let Some(message) = message {
         db.0.query_row(
             "SELECT depth FROM hook_rule_turn_origins WHERE chat_id=?1 AND message_id=?2",
             params![chat, message],
             |row| row.get::<_, u32>(0),
         )
         .optional()?
-        .unwrap_or(previous)
     } else {
-        previous
+        None
+    };
+    let previous = db.0.query_row(
+        "SELECT coalesce(r.depth,max(coalesce(d.depth,0),coalesce(json_extract(k.watch,'$.depth'),0))) \
+         FROM conversations c LEFT JOIN hook_rule_run_depths r ON r.run_id=c.run_id \
+         LEFT JOIN hook_rule_chain_depths d ON d.chat_id=c.id \
+         LEFT JOIN hook_rule_conversations k ON k.chat_id=c.id WHERE c.id=? \
+         AND (r.run_id IS NOT NULL OR d.chat_id IS NOT NULL OR k.chat_id IS NOT NULL)",
+        [chat], |row|row.get::<_,u32>(0),
+    ).optional()?;
+    let Some(depth) = input.or(previous) else {
+        return Ok(());
     };
     db.0.execute(
         "INSERT INTO hook_rule_run_depths(run_id,depth) VALUES(?1,?2) \
@@ -374,14 +383,28 @@ pub(crate) fn begin_chat_turn(
     Ok(())
 }
 
-/// Steering or answering can join an already working converted mission. Such
-/// delivery extends its active cause; a queued human message resets it only in
+/// Steering or answering can join an already working turn. Such delivery
+/// extends its active cause; a queued human message resets it only in
 /// begin_chat_turn, rather than retroactively changing the preceding turn.
 pub(crate) fn delivered_input(db: &Db<'_>, chat: &str, run: &str, message: &str) -> Result<()> {
+    if let Some(depth) =
+        db.0.query_row(
+            "SELECT depth FROM hook_rule_turn_origins WHERE chat_id=?1 AND message_id=?2",
+            params![chat, message],
+            |row| row.get::<_, u32>(0),
+        )
+        .optional()?
+    {
+        extend_run_depth(db, run, depth)?;
+    }
+    Ok(())
+}
+
+fn extend_run_depth(db: &Db<'_>, run: &str, depth: u32) -> Result<()> {
     db.0.execute(
-        "UPDATE hook_rule_run_depths SET depth=max(depth,coalesce(( \
-           SELECT depth FROM hook_rule_turn_origins WHERE chat_id=?1 AND message_id=?3),depth)) WHERE run_id=?2",
-        params![chat,run,message],
+        "INSERT INTO hook_rule_run_depths(run_id,depth) VALUES(?1,?2) \
+         ON CONFLICT(run_id) DO UPDATE SET depth=max(depth,excluded.depth)",
+        params![run, depth],
     )?;
     Ok(())
 }
@@ -745,10 +768,18 @@ fn cancel(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
         return Ok(json!({ "conversationId": chat.id, "cancelled": false }));
     };
     crate::worker::control::stop_chat_in(db, &chat.id, acting.executing)?;
+    extend_run_depth(db, run, acting.depth)?;
+    // The observer may still be replaying an earlier turn. Persist the cause in
+    // the ordered stream instead of mutating its asynchronous cursor's depth.
+    db.event(
+        run,
+        &cairn_contracts::EventKind::Status,
+        "Stop requested by a rule",
+        Some(&json!({ "hookRuleDepth": acting.depth, "ruleId": acting.row.id })),
+    )?;
     db.0.execute(
-        "UPDATE hook_rule_conversations SET cancelled_run=CASE WHEN ?4 THEN ?2 END,\
-         watch=json_set(watch,'$.depth',max(coalesce(json_extract(watch,'$.depth'),0),?3)) WHERE chat_id=?1",
-        params![chat.id, run, acting.depth, rule_owns_pause],
+        "UPDATE hook_rule_conversations SET cancelled_run=CASE WHEN ?3 THEN ?2 END WHERE chat_id=?1",
+        params![chat.id, run, rule_owns_pause],
     )?;
     Ok(json!({ "conversationId": chat.id, "runId": run, "cancelled": true }))
 }

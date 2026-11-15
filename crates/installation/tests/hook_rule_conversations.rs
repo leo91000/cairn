@@ -241,6 +241,21 @@ async fn launched(f: &Fixture, chat: &str) -> String {
 }
 
 async fn event(f: &Fixture, run: &str, kind: &str, text: &str, payload: Option<Value>) {
+    if kind == "chat.user"
+        && let Some(message) = payload.as_ref().and_then(|p| p["messageId"].as_str())
+    {
+        let (checked_run, checked_message) = (run.to_owned(), message.to_owned());
+        let recorded: bool = f.s.store.read(move |db| Ok(db.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_messages m JOIN conversations c ON c.id=m.chat_id WHERE c.run_id=?1 AND m.id=?2)",
+            rusqlite::params![checked_run,checked_message], |row|row.get(0),
+        )?)).await.unwrap();
+        if recorded {
+            // Real controller delivery records chat.user together with the
+            // active causal frame; retain raw events only for unknown input.
+            f.s.chat_acknowledge(run, message).await.unwrap();
+            return;
+        }
+    }
     f.s.store
         .event(run, &EventKind::from_adapter(kind), text, payload)
         .await
@@ -871,6 +886,12 @@ async fn cancelling_by_key_stops_the_turn_and_reports_its_end() {
     );
     let state = f.s.store.run(&run).await.unwrap();
     assert!(state["cancelRequestedAt"].is_number(), "{state}");
+    let checked = run.clone();
+    let marker: u32 = f.s.store.read(move |db| Ok(db.0.query_row(
+        "SELECT json_extract(payload,'$.hookRuleDepth') FROM events WHERE run_id=? AND type='status' AND json_type(payload,'$.hookRuleDepth')='integer' ORDER BY id DESC LIMIT 1",
+        [checked], |row|row.get(0),
+    )?)).await.unwrap();
+    assert_eq!(marker, 1);
 
     event(&f, &run, "status", "cancelled", None).await;
     engine::tick(&f.s).await.unwrap();
@@ -1282,6 +1303,7 @@ async fn set_status(f: &Fixture, run: &str, status: cairn_contracts::RunStatus) 
             run,
             cairn_installation::runs::RunChanges {
                 status: Some(status),
+                recovery_pending: Some(false),
                 ..Default::default()
             },
         )
@@ -2031,7 +2053,7 @@ async fn queued_agent_input_cannot_lower_an_unobserved_rules_chain() {
     engine::tick(&f.s).await.unwrap();
     let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
     let run = launched(&f, &chat).await;
-    let token = fixture::running_conversation(&f.s, &chat).await;
+    fixture::running_conversation(&f.s, &chat).await;
     let looping = rule_on(
         &f,
         OWNER,
@@ -2054,6 +2076,9 @@ async fn queued_agent_input_cannot_lower_an_unobserved_rules_chain() {
         .await;
         engine::tick(&f.s).await.unwrap();
     }
+    set_status(&f, &run, cairn_contracts::RunStatus::Succeeded).await;
+    let token = fixture::running_conversation(&f.s, &chat).await;
+    let run = text(&f.s.chat_detail(&chat).await.unwrap()["run"], "id").to_owned();
     let next = uuid::Uuid::new_v4().to_string();
     let sent = f
         .mcp(
@@ -2266,7 +2291,7 @@ async fn a_mission_run_preserves_its_callers_chain_after_the_caller_starts_a_new
     let scheduled_target = bound(&f, OWNER, "chat:carol").await.unwrap();
     let fresh_target = bound(&f, OWNER, "chat:dave").await.unwrap();
     let run = launched(&f, &chat).await;
-    let token = fixture::running_conversation(&f.s, &chat).await;
+    fixture::running_conversation(&f.s, &chat).await;
     let looping = rule_on(
         &f,
         OWNER,
@@ -2289,6 +2314,9 @@ async fn a_mission_run_preserves_its_callers_chain_after_the_caller_starts_a_new
         .await;
         engine::tick(&f.s).await.unwrap();
     }
+    set_status(&f, &run, cairn_contracts::RunStatus::Succeeded).await;
+    let token = fixture::running_conversation(&f.s, &chat).await;
+    let run = text(&f.s.chat_detail(&chat).await.unwrap()["run"], "id").to_owned();
     let task =
         f.s.task_fixture(
             json!({ "name": "Chain mission", "prompt": "Follow up", "agentId": MAIN_AGENT_ID }),
@@ -2323,7 +2351,12 @@ async fn a_mission_run_preserves_its_callers_chain_after_the_caller_starts_a_new
     let scheduled_task = text(&scheduled["result"]["structuredContent"]["result"], "id").to_owned();
     // The source can now begin another chain; this mission keeps its admitted one.
     let human = person_sends(&f, &chat, "A new human request").await;
-    replied(&f, &run, &human, "New chain").await;
+    event(&f, &run, "turn.completed", "", None).await;
+    set_status(&f, &run, cairn_contracts::RunStatus::Succeeded).await;
+    engine::tick(&f.s).await.unwrap();
+    fixture::running_conversation(&f.s, &chat).await;
+    let human_run = text(&f.s.chat_detail(&chat).await.unwrap()["run"], "id").to_owned();
+    replied(&f, &human_run, &human, "New chain").await;
     engine::tick(&f.s).await.unwrap();
     let scheduled_run =
         f.s.enqueue(&scheduled_task, "schedule", None)
@@ -2581,4 +2614,202 @@ async fn changing_the_profile_backend_does_not_remove_a_native_conversations_aut
             history[0]
         );
     }
+}
+
+#[tokio::test]
+async fn queued_human_input_preserves_the_active_chain_until_its_own_turn_launches() {
+    use common::run_fixture::RunFixture;
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    for author in ["alice", "bob", "carol", "dave"] {
+        emit(&f, author, message(author, "hello")).await;
+    }
+    engine::tick(&f.s).await.unwrap();
+    let source = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let targets = [
+        bound(&f, OWNER, "chat:bob").await.unwrap(),
+        bound(&f, OWNER, "chat:carol").await.unwrap(),
+    ];
+    let fresh = bound(&f, OWNER, "chat:dave").await.unwrap();
+    let mut token = fixture::running_conversation(&f.s, &source).await;
+    let mut run = text(&f.s.chat_detail(&source).await.unwrap()["run"], "id").to_owned();
+    f.s.store
+        .change_run_fixture(&run, json!({"sessionId":"source-session"}))
+        .await
+        .unwrap();
+    f.s.store
+        .save_checkpoint_boundary(
+            &run,
+            json!({"completed":true,"launched":true,"prepared":{"workspace":"/saved/workspace"}}),
+        )
+        .await
+        .unwrap();
+    rule_on(
+        &f,
+        OWNER,
+        cairn("replyReady"),
+        json!([steer(
+            "again",
+            &json!({"type":"formula","expression":"key"}),
+            &json!({"type":"literal","value":"again"})
+        )]),
+        json!({"triggeringsPerHour":600,"conversationsPerHour":100}),
+    )
+    .await;
+    for turn in 1..MAX_CHAIN_DEPTH {
+        replied(
+            &f,
+            &run,
+            &last_message(&f, &source).await,
+            &format!("turn {turn}"),
+        )
+        .await;
+        set_status(&f, &run, cairn_contracts::RunStatus::Succeeded).await;
+        engine::tick(&f.s).await.unwrap();
+        token = fixture::running_conversation(&f.s, &source).await;
+        run = text(&f.s.chat_detail(&source).await.unwrap()["run"], "id").to_owned();
+    }
+    let created = f
+        .mcp(
+            "/mcp-installation",
+            &token,
+            "create_chat",
+            json!({"agentId":MAIN_AGENT_ID}),
+        )
+        .await;
+    assert_ne!(created["result"]["isError"], true, "{created}");
+    let unkeyed = text(&created["result"]["structuredContent"]["result"], "id").to_owned();
+    let sent = f.mcp("/mcp-installation",&token,"send_chat_message",json!({
+        "chatId":unkeyed,"message":{"id":uuid::Uuid::new_v4().to_string(),"text":"An unkeyed chain"},
+    })).await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    let unkeyed_token = fixture::running_conversation(&f.s, &unkeyed).await;
+    // Reaching an ordinary chat must not attribute a merely queued input to
+    // its still working human turn. It enters the chain on actual delivery.
+    let ordinary =
+        f.s.chat_create(json!({ "agentId": MAIN_AGENT_ID }))
+            .await
+            .unwrap();
+    let ordinary = text(&ordinary, "id").to_owned();
+    person_sends(&f, &ordinary, "An ordinary human request").await;
+    let ordinary_token = fixture::running_conversation(&f.s, &ordinary).await;
+    let queued = f.mcp("/mcp-installation",&token,"send_chat_message",json!({
+        "chatId":ordinary,"message":{"id":uuid::Uuid::new_v4().to_string(),"text":"A future chain input"},
+    })).await;
+    assert_ne!(queued["result"]["isError"], true, "{queued}");
+    let ordinary_message = uuid::Uuid::new_v4().to_string();
+    let sent = f.mcp("/mcp-installation",&ordinary_token,"send_chat_message",json!({
+        "chatId":fresh,"message":{"id":ordinary_message,"text":"The ordinary turn still acts"},
+    })).await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    let depth: u32 =
+        f.s.store
+            .read(move |db| {
+                Ok(db.0.query_row(
+                    "SELECT depth FROM hook_rule_turn_origins WHERE message_id=?",
+                    [ordinary_message],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(depth, 1);
+    for ((chat, token), target) in [(source.clone(), token), (unkeyed, unkeyed_token)]
+        .into_iter()
+        .zip(targets)
+    {
+        person_sends(&f, &chat, "Queue a human request while the old turn works").await;
+        let message = uuid::Uuid::new_v4().to_string();
+        let sent = f
+            .mcp(
+                "/mcp-installation",
+                &token,
+                "send_chat_message",
+                json!({
+                    "chatId":target,"message":{"id":message,"text":"The previous turn still acts"},
+                }),
+            )
+            .await;
+        assert_ne!(sent["result"]["isError"], true, "{sent}");
+        f.s.store
+            .read(move |db| {
+                let depth: u32 = db.0.query_row(
+                    "SELECT depth FROM hook_rule_turn_origins WHERE message_id=?",
+                    [message],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(u64::from(depth), MAX_CHAIN_DEPTH);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    event(&f, &run, "turn.completed", "", None).await;
+    set_status(&f, &run, cairn_contracts::RunStatus::Succeeded).await;
+    let human_token = fixture::running_conversation(&f.s, &source).await;
+    let message = uuid::Uuid::new_v4().to_string();
+    let sent = f
+        .mcp(
+            "/mcp-installation",
+            &human_token,
+            "send_chat_message",
+            json!({
+                "chatId":fresh,"message":{"id":message,"text":"The new human turn now acts"},
+            }),
+        )
+        .await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    f.s.store
+        .read(move |db| {
+            let depth: u32 = db.0.query_row(
+                "SELECT depth FROM hook_rule_turn_origins WHERE message_id=?",
+                [message],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                depth, 1,
+                "the old observer must not override the new active frame"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_cancel_cause_survives_observation_after_a_new_human_turn() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let ended = rule_on(
+        &f,
+        OWNER,
+        cairn("ended"),
+        json!([remember("end", "end", "outcome")]),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    replied(&f, &run, &last_message(&f, &chat).await, "Old turn").await;
+    let human = person_sends(&f, &chat, "A new human turn").await;
+    event(&f, &run, "chat.user", "", Some(json!({"messageId":human}))).await;
+    // A delayed action can cancel this new turn before its input is observed.
+    event(
+        &f,
+        &run,
+        "status",
+        "Stop requested by a rule",
+        Some(json!({"hookRuleDepth":8})),
+    )
+    .await;
+    event(&f, &run, "status", "cancelled", None).await;
+    set_status(&f, &run, cairn_contracts::RunStatus::Cancelled).await;
+    engine::tick(&f.s).await.unwrap();
+    let depth:u32 = f.s.store.read(move |db| Ok(db.0.query_row(
+        "SELECT json_extract(event,'$.cairn.depth') FROM hook_rule_triggerings WHERE rule_id=? AND json_extract(event,'$.payload.outcome')='cancelled'",
+        [ended],|row|row.get(0),
+    )?)).await.unwrap();
+    assert_eq!(u64::from(depth), MAX_CHAIN_DEPTH);
 }
