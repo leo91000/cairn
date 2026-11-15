@@ -780,23 +780,26 @@ fn cancel(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
         .flatten()
         .is_some_and(|run| run.status.is_active());
     let Some(run) = chat.run_id.as_deref().filter(|_| active) else {
-        // Nothing is working: only a scheduled continuation remains to cancel, and the
-        // conversation stays open to later steering.
+        // The worker may have stopped before an environment retirement or
+        // engine switch resumes it. Cancel those retained continuations too;
+        // the conversation stays open to later steering.
         if let Some(run) = chat.run_id.as_deref() {
+            crate::chats::coding_agent::cancel_in(db, run)?;
+            crate::environment_expiration::cancel_continuation_in(db, run)?;
             crate::chats::continuation::cancel_for_run(db, run)?;
         }
         return Ok(json!({ "conversationId": chat.id, "cancelled": false }));
     };
-    crate::worker::control::stop_chat_in(db, &chat.id, acting.executing)?;
     extend_run_depth(db, run, acting.depth)?;
     // The observer may still be replaying an earlier turn. Persist the cause in
-    // the ordered stream instead of mutating its asynchronous cursor's depth.
+    // the ordered stream before Stop can emit a synchronous terminal status.
     db.event(
         run,
         &cairn_contracts::EventKind::Status,
         "Stop requested by a rule",
         Some(&json!({ "hookRuleDepth": acting.depth, "ruleId": acting.row.id })),
     )?;
+    crate::worker::control::stop_chat_in(db, &chat.id, acting.executing)?;
     Ok(json!({ "conversationId": chat.id, "runId": run, "cancelled": true }))
 }
 

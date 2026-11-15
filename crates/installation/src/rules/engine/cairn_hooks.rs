@@ -178,6 +178,7 @@ fn reply(db: &Db<'_>, run: &str, started: i64, end: i64) -> Result<Json> {
         .query_row(
             "SELECT json_extract(payload,'$.item.text') FROM events WHERE run_id=?1 AND id>?2 AND id<?3 \
              AND json_extract(payload,'$.item.type') IN ('agent_message','proposed_plan') \
+             AND coalesce(json_extract(payload,'$.item.parent_id'),'')='' \
              AND json_type(payload,'$.item.text')='text' AND length(json_extract(payload,'$.item.text'))>0 \
              ORDER BY (json_extract(payload,'$.item.type')='proposed_plan') DESC,id DESC LIMIT 1",
             params![run, answered, end],

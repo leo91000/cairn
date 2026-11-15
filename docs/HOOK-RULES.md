@@ -229,8 +229,9 @@ turn, as for a person who writes again, also after a failed or stopped turn. A p
 conversation cannot be steered or answered until a person resumes it.
 `cancelConversation` stops the current turn like Stop in Cairn, which pauses the
 conversation. Only a person can resume it, including after a rule's cancellation.
-With nothing working, `cancelConversation` only cancels a scheduled
-wakeup.
+With nothing working, `cancelConversation` cancels scheduled wakeups and pending
+continuations from an environment change or engine switch, leaving the conversation
+open to later messages.
 `answerQuestion` answers the oldest pending question of the conversation's current
 run: a text answers every question of it, an object answers each question by its id
 with a text or `{selected, comment}`.
@@ -262,7 +263,7 @@ access to the conversation's agent:
 
 | Hook | When | Payload, besides `key`, `conversationId`, `agentId`, `origin` and `values` |
 | --- | --- | --- |
-| `replyReady` | a turn completed | `text` (the final proposed approach in a Plan turn, otherwise the last nonempty agent message; at most 128 KiB, `truncated` when cut) and `deliverables` (at most 10: `id`, `name`, `title`, `mediaType`, `size`) |
+| `replyReady` | a turn completed | `text` (the conversation's final proposed approach in a Plan turn, otherwise its last nonempty agent message, excluding child-agent items; at most 128 KiB, `truncated` when cut) and `deliverables` (at most 10: `id`, `name`, `title`, `mediaType`, `size`) |
 | `questionAsked` | the agent asks, once per creation even if it is answered or withdrawn before observation; ordered before that turn's `replyReady` and `ended` | `questionId`, `title`, `text` (every question with its options) and `fields` |
 | `progress` | about every 8 seconds of a working turn | `step`, a short step without detail |
 | `ended` | an admitted turn completed, failed or was cancelled, including startup failure before input delivery or a queued wakeup cancelled before it started | `outcome` and, for a failure, `error` (the turn's or the run's, such as an exceeded time limit) |

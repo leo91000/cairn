@@ -131,6 +131,15 @@ fn start_or_steer() -> Value {
     }])
 }
 
+fn start_or_cancel() -> Value {
+    json!([{
+        "type": "if", "id": "bound",
+        "condition": { "type": "conversationExists", "key": key() },
+        "then": [action("stop", &json!({ "type": "cancelConversation", "key": key() }))],
+        "otherwise": [start("start")],
+    }])
+}
+
 async fn rule_on(
     f: &Fixture,
     account: &str,
@@ -845,22 +854,7 @@ async fn a_paused_conversation_refuses_steering_and_answers_until_a_person_resum
 #[tokio::test]
 async fn cancelling_by_key_stops_the_turn_and_reports_its_end() {
     let f = granted().await;
-    let canceller = rule_on(
-        &f,
-        OWNER,
-        plugin(&f),
-        json!([{
-            "type": "if",
-            "id": "bound",
-            "condition": { "type": "conversationExists", "key": key() },
-            "then": [action(
-        "stop",
-        &json!({ "type": "cancelConversation", "key": key() }))],
-            "otherwise": [start("start")],
-        }]),
-        limits(),
-    )
-    .await;
+    let canceller = rule_on(&f, OWNER, plugin(&f), start_or_cancel(), limits()).await;
     let ended = rule_on(
         &f,
         OWNER,
@@ -898,6 +892,77 @@ async fn cancelling_by_key_stops_the_turn_and_reports_its_end() {
     assert_eq!(values(&f, &ended).await["outcome"], "cancelled");
     // The end belongs to the cancelling rule's chain.
     assert_eq!(depth_of(&f, &ended).await, [1]);
+}
+
+#[tokio::test]
+async fn cancelling_a_retry_keeps_the_cancelling_hooks_chain_depth() {
+    use common::run_fixture::RunFixture;
+
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let ended = rule_on(
+        &f,
+        OWNER,
+        cairn("ended"),
+        json!([remember("end", "end", "outcome")]),
+        limits(),
+    )
+    .await;
+    let canceller = rule_on(
+        &f,
+        OWNER,
+        cairn("progress"),
+        json!([action(
+            "stop",
+            &json!({
+                "type": "cancelConversation",
+                "key": { "type": "formula", "expression": "key" },
+            })
+        )]),
+        limits(),
+    )
+    .await;
+    emit(&f, "start", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    event(
+        &f,
+        &run,
+        "chat.user",
+        "",
+        Some(json!({ "messageId": first_message(&f, &chat).await })),
+    )
+    .await;
+    event(&f, &run, "turn.started", "", None).await;
+    engine::tick(&f.s).await.unwrap();
+
+    // A retry retains this depth-1 turn. Cancelling its queued retry writes a
+    // terminal status synchronously, before any worker can observe the stop.
+    f.s.store
+        .change_run_fixture(
+            &run,
+            json!({
+                "status": "queued",
+                "retry": {
+                    "attempt": 1, "limit": 5,
+                    "nextAttemptAt": cairn_installation::config::now() + 60_000,
+                    "cause": { "kind": "connection", "message": "Temporary disconnect" },
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    f.s.store
+        .transaction(move |db| age_progress(db, &chat))
+        .await
+        .unwrap();
+    engine::tick(&f.s).await.unwrap();
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(triggerings(&f, &canceller).await[0]["status"], "completed");
+    assert_eq!(depth_of(&f, &canceller).await, [1]);
+    assert_eq!(values(&f, &ended).await["end"], "cancelled");
+    assert_eq!(depth_of(&f, &ended).await, [2]);
 }
 
 #[tokio::test]
@@ -3067,11 +3132,126 @@ async fn reply_ready_includes_the_proposed_plan_of_a_human_plan_turn() {
             )
             .await;
         }
+        // Child proposals stay visible in the transcript, but they are not the
+        // conversation's final answer, even when they arrive after its proposal.
+        let mut child = cairn_installation::chat_process::chat_item(
+            json!({ "type": "plan", "text": "Partial child approach" }),
+            true,
+        );
+        child["parent_id"] = "child-agent".into();
+        event(
+            &f,
+            &run,
+            "item.completed",
+            "Partial child approach",
+            Some(json!({ "item": child })),
+        )
+        .await;
         event(&f, &run, "turn.completed", "", None).await;
         engine::tick(&f.s).await.unwrap();
         assert_eq!(values(&f, &reply).await["reply"], plan);
         assert_eq!(depth_of(&f, &reply).await, [1, 0]);
     }
+}
+
+#[tokio::test]
+async fn cancelling_an_inactive_turn_also_stops_its_pending_environment_continuation() {
+    use common::run_fixture::RunFixture;
+
+    for cancel in [false, true] {
+        let f = granted().await;
+        rule_on(&f, OWNER, plugin(&f), start_or_cancel(), limits()).await;
+        emit(&f, "start", message("alice", "hello")).await;
+        engine::tick(&f.s).await.unwrap();
+        let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+        let run = launched(&f, &chat).await;
+        let environment = f.s.store.run(&run).await.unwrap();
+
+        // A self move has retained its old environment and continuation while
+        // the interrupted worker settles. Its terminal status precedes detach.
+        f.s.store
+            .change_run_fixture(&run, json!({ "status": "cancelled" }))
+            .await
+            .unwrap();
+        f.s.store
+            .transaction({
+                let run = run.clone();
+                move |db| {
+                    db.put(
+                        "environment-expirations",
+                        &json!({
+                            "id": run, "runId": run, "expiredAt": cairn_installation::config::now(),
+                            "cause": "node-change", "continueTurn": true, "cancelled": false,
+                            "environment": environment,
+                        }),
+                    )
+                }
+            })
+            .await
+            .unwrap();
+        if cancel {
+            emit(&f, "cancel", message("alice", "stop before resuming")).await;
+            engine::tick(&f.s).await.unwrap();
+        }
+        f.s.detach_stopped_environments().await.unwrap();
+        let current = f.s.store.run(&run).await.unwrap();
+        assert_eq!(
+            current["status"],
+            if cancel { "cancelled" } else { "queued" }
+        );
+        // Cancelling an already inactive turn does not pause later new work.
+        assert_eq!(f.s.chat_detail(&chat).await.unwrap()["paused"], false);
+    }
+}
+
+#[tokio::test]
+async fn cancelling_an_inactive_turn_also_stops_its_pending_engine_switch() {
+    use common::run_fixture::RunFixture;
+
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), start_or_cancel(), limits()).await;
+    emit(&f, "start", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    let current = f.s.store.run(&run).await.unwrap();
+    let request = uuid::Uuid::new_v4().to_string();
+    let pending = cairn_installation::chats::engine_switch::EngineSwitch {
+        chat_id: chat.clone(),
+        request_id: request.clone(),
+        run_id: run.clone(),
+        turn_id: text(&current["chatExecution"], "messageId").to_owned(),
+        provider: "claude".into(),
+        model: String::new(),
+        pending: true,
+        error: None,
+        retry_at: None,
+        receipt_expires_at: cairn_installation::config::now() + 60_000,
+        current_expires_at: None,
+    };
+    f.s.store
+        .transaction(move |db| db.save_engine_switch(&pending))
+        .await
+        .unwrap();
+    // The old worker has settled, but the switch has not yet advanced.
+    f.s.store
+        .change_run_fixture(&run, json!({ "status": "cancelled" }))
+        .await
+        .unwrap();
+    emit(&f, "cancel", message("alice", "stop before switching")).await;
+    engine::tick(&f.s).await.unwrap();
+    let state =
+        f.s.store
+            .read(move |db| db.engine_switch(&chat))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(state.request_id, request);
+    assert!(
+        !state.pending,
+        "A cancelled turn must not resume via an engine switch."
+    );
+    assert_eq!(f.s.store.run(&run).await.unwrap()["status"], "cancelled");
 }
 
 #[tokio::test]
