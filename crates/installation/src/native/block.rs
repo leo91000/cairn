@@ -950,6 +950,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/native");
         let block = 4 * 1024 * 1024u64;
+        let policy = json!({ "reserveMiB": 64, "reservePercent": 1 });
+        // Keep consolidation's node policy consistent with write admission.
+        std::fs::write(
+            root.path().join("storage-policy.json"),
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
         let disk = storage::runtime::create(
             &directory.join("lazy"),
             &json!({
@@ -958,7 +965,7 @@ mod tests {
             }),
             &json!({
                 "master": "http://127.0.0.1:1/", "grant": "native-allowance",
-                "policy": { "reserveMiB": 64, "reservePercent": 1 }
+                "policy": policy
             }),
         )
         .await
