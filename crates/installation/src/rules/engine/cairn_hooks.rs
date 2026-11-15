@@ -35,6 +35,9 @@ struct Input {
 #[serde(rename_all = "camelCase", default)]
 struct Watch {
     open: bool,
+    /// Manual context maintenance is not a reply or a new user turn. Retain the
+    /// marker through retries and restarts until real input opens the next turn.
+    compacting: bool,
     origin: Json,
     depth: u32,
     /// The event that opened the turn.
@@ -398,7 +401,8 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
         .prepare_cached(
             "SELECT id,type,text,payload,created_at FROM events WHERE run_id=?1 AND id>?2 AND (type IN \
              ('chat.user','chat.wakeup','turn.started','turn.completed','turn.failed','retry.scheduled') \
-             OR (type='status' AND text IN ('failed','cancelled','interrupted'))) ORDER BY id LIMIT ?3",
+             OR (type='status' AND (text IN ('failed','cancelled','interrupted') \
+             OR json_extract(payload,'$.chatOperation')='compact'))) ORDER BY id LIMIT ?3",
         )?
         .query_map(params![run, cursor, EVENTS], |row| {
             Ok((
@@ -415,6 +419,20 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
         let payload: Json = payload
             .and_then(|payload| serde_json::from_str(&payload).ok())
             .unwrap_or(Json::Null);
+        if kind == "status" && payload["chatOperation"] == crate::chats::COMPACT {
+            watch.compacting = true;
+            watch.open = false;
+            watch.awaiting_input = false;
+            watch.failed = None;
+        }
+        if watch.compacting {
+            if matches!(kind.as_str(), "chat.user" | "chat.wakeup") {
+                watch.compacting = false;
+            } else {
+                cursor = id;
+                continue;
+            }
+        }
         // The questions a turn asked are reported before it ends.
         if matches!(kind.as_str(), "turn.completed" | "status") && watch.open {
             watch.ask(&mut emissions, &questions, Some(created_at));

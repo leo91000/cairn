@@ -970,6 +970,8 @@ fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
          DROP TABLE hook_rule_conversation_values;
          DROP TABLE hook_rule_turn_origins;
          DROP TABLE hook_rule_chain_depths;
+         DROP TABLE hook_rule_task_depths;
+         DROP TABLE hook_rule_run_depths;
          DROP TABLE hook_rule_author_triggerings;
          DROP TABLE hook_rule_conversation_counts;
          PRAGMA user_version=34;",
@@ -987,6 +989,8 @@ fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
             "hook_rule_conversation_values",
             "hook_rule_turn_origins",
             "hook_rule_chain_depths",
+            "hook_rule_task_depths",
+            "hook_rule_run_depths",
             "hook_rule_author_triggerings",
             "hook_rule_conversation_counts",
         ] {
@@ -2185,4 +2189,179 @@ async fn a_public_members_message_resets_the_chain_and_takes_back_the_pause() {
         })
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn manual_compaction_does_not_emit_reply_or_end_hooks_even_when_observed_late() {
+    for observe_during in [false, true] {
+        let f = granted().await;
+        rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+        let reply = rule_on(
+            &f,
+            OWNER,
+            cairn("replyReady"),
+            json!([remember("reply", "reply", "text")]),
+            limits(),
+        )
+        .await;
+        let ended = rule_on(
+            &f,
+            OWNER,
+            cairn("ended"),
+            json!([remember("end", "outcome", "outcome")]),
+            limits(),
+        )
+        .await;
+        emit(&f, "first", message("alice", "hello")).await;
+        engine::tick(&f.s).await.unwrap();
+        let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+        let run = launched(&f, &chat).await;
+        replied(&f, &run, &last_message(&f, &chat).await, "Before compact").await;
+        engine::tick(&f.s).await.unwrap();
+        event(
+            &f,
+            &run,
+            "status",
+            "Compacting the conversation context",
+            Some(json!({ "chatOperation": "compact" })),
+        )
+        .await;
+        event(&f, &run, "turn.started", "", None).await;
+        if observe_during {
+            engine::tick(&f.s).await.unwrap();
+        }
+        event(&f, &run, "turn.completed", "", None).await;
+        // A new real turn starts before the observer reads compaction completion.
+        let next = person_sends(&f, &chat, "Another request").await;
+        replied(&f, &run, &next, "After compact").await;
+        engine::tick(&f.s).await.unwrap();
+        assert_eq!(
+            triggerings(&f, &reply).await.len(),
+            2,
+            "observe_during={observe_during}"
+        );
+        assert_eq!(
+            triggerings(&f, &ended).await.len(),
+            2,
+            "observe_during={observe_during}"
+        );
+        assert_eq!(values(&f, &reply).await["reply"], "After compact");
+    }
+}
+
+#[tokio::test]
+async fn a_mission_run_preserves_its_callers_chain_after_the_caller_starts_a_new_one() {
+    use common::MissionFixture;
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    emit(&f, "alice", message("alice", "hello")).await;
+    emit(&f, "bob", message("bob", "hello")).await;
+    emit(&f, "carol", message("carol", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let target = bound(&f, OWNER, "chat:bob").await.unwrap();
+    let scheduled_target = bound(&f, OWNER, "chat:carol").await.unwrap();
+    let run = launched(&f, &chat).await;
+    let token = fixture::running_conversation(&f.s, &chat).await;
+    let looping = rule_on(
+        &f,
+        OWNER,
+        cairn("replyReady"),
+        json!([steer(
+            "again",
+            &json!({ "type": "formula", "expression": "key" }),
+            &json!({ "type": "literal", "value": "again" }),
+        )]),
+        json!({ "triggeringsPerHour": 600, "conversationsPerHour": 100 }),
+    )
+    .await;
+    for turn in 1..MAX_CHAIN_DEPTH {
+        replied(
+            &f,
+            &run,
+            &last_message(&f, &chat).await,
+            &format!("turn {turn}"),
+        )
+        .await;
+        engine::tick(&f.s).await.unwrap();
+    }
+    let task =
+        f.s.task_fixture(
+            json!({ "name": "Chain mission", "prompt": "Follow up", "agentId": MAIN_AGENT_ID }),
+            None,
+        )
+        .await
+        .unwrap();
+    let queued = f
+        .mcp(
+            "/mcp-installation",
+            &token,
+            "run_task",
+            json!({ "taskId": task["id"] }),
+        )
+        .await;
+    assert_ne!(queued["result"]["isError"], true, "{queued}");
+    let mission_run = text(&queued["result"]["structuredContent"]["result"], "id").to_owned();
+    let scheduled = f
+        .mcp(
+            "/mcp-installation",
+            &token,
+            "create_task",
+            json!({
+                "settings": {
+                    "name": "Scheduled chain", "prompt": "Continue later", "agentId": MAIN_AGENT_ID,
+                    "cron": "0 9 * * 1", "timezone": "UTC", "worktree": false,
+                },
+            }),
+        )
+        .await;
+    assert_ne!(scheduled["result"]["isError"], true, "{scheduled}");
+    let scheduled_task = text(&scheduled["result"]["structuredContent"]["result"], "id").to_owned();
+    // The source can now begin another chain; this mission keeps its admitted one.
+    let human = person_sends(&f, &chat, "A new human request").await;
+    replied(&f, &run, &human, "New chain").await;
+    engine::tick(&f.s).await.unwrap();
+    let scheduled_run =
+        f.s.enqueue(&scheduled_task, "schedule", None)
+            .await
+            .unwrap();
+    for (mission_run, target) in [
+        (mission_run, target),
+        (text(&scheduled_run, "id").to_owned(), scheduled_target),
+    ] {
+        set_status(&f, &mission_run, cairn_contracts::RunStatus::Running).await;
+        let stored = f.s.store.run(&mission_run).await.unwrap();
+        let config = f.s.mcps.run_configuration(&f.s, &stored).await.unwrap();
+        f.s.store
+            .save_checkpoint_boundary(&mission_run, json!({ "completed": true, "launched": true }))
+            .await
+            .unwrap();
+        let mission_token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
+        let next = uuid::Uuid::new_v4().to_string();
+        let sent = f
+            .mcp(
+                "/mcp-installation",
+                mission_token,
+                "send_chat_message",
+                json!({
+                    "chatId": target,
+                    "message": { "id": next, "text": "The mission continues the old chain" },
+                }),
+            )
+            .await;
+        assert_ne!(sent["result"]["isError"], true, "{sent}");
+        f.s.store
+            .read(move |db| {
+                let depth: u32 = db.0.query_row(
+                    "SELECT depth FROM hook_rule_turn_origins WHERE message_id=?",
+                    [next],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(u64::from(depth), MAX_CHAIN_DEPTH);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    assert!(!triggerings(&f, &looping).await.is_empty());
 }

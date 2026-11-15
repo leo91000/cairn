@@ -49,6 +49,14 @@ CREATE TABLE IF NOT EXISTS hook_rule_chain_depths(
  chat_id TEXT PRIMARY KEY NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
  depth INTEGER NOT NULL CHECK(depth BETWEEN 0 AND 8)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS hook_rule_task_depths(
+ task_id TEXT PRIMARY KEY NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+ depth INTEGER NOT NULL CHECK(depth BETWEEN 0 AND 8)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS hook_rule_run_depths(
+ run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+ depth INTEGER NOT NULL CHECK(depth BETWEEN 0 AND 8)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hook_rule_author_triggerings(
  rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
  author TEXT NOT NULL CHECK(length(author) BETWEEN 1 AND 200),
@@ -230,18 +238,13 @@ pub(super) fn origin_of(origin: &Origin) -> Json {
 /// a rule cancelled. Any other entry stays in the chain of the conversation, and of the
 /// run that caused it: an agent's delegated task, or `cairn_installation`.
 pub(crate) fn record_input(db: &Db<'_>, chat: &str, message: &str, origin: &Origin) -> Result<()> {
-    let causing = match origin {
-        Origin::Run(run) | Origin::DelegatedTask(run) => Some(run.as_str()),
-        _ => None,
-    };
     let person = matches!(origin, Origin::Human(_) | Origin::PublicAccount(_));
+    let causing = source_depth(db, origin)?;
     let (depth, tracked): (u32, bool) = db.0.query_row(
         "SELECT CASE WHEN ?2 THEN 0 ELSE max( \
            coalesce((SELECT depth FROM hook_rule_chain_depths WHERE chat_id=?1),0), \
            coalesce((SELECT json_extract(watch,'$.depth') FROM hook_rule_conversations WHERE chat_id=?1),0), \
-           coalesce((SELECT max(max(coalesce(d.depth,0),coalesce(json_extract(k.watch,'$.depth'),0))) \
-             FROM conversations c LEFT JOIN hook_rule_chain_depths d ON d.chat_id=c.id \
-             LEFT JOIN hook_rule_conversations k ON k.chat_id=c.id WHERE c.run_id=?3),0)) END, \
+           ?3) END, \
          EXISTS(SELECT 1 FROM hook_rule_chain_depths WHERE chat_id=?1) OR \
          EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=?1)",
         params![chat,person,causing], |row| Ok((row.get(0)?,row.get(1)?)),
@@ -259,6 +262,73 @@ pub(crate) fn record_input(db: &Db<'_>, chat: &str, message: &str, origin: &Orig
     }
     if person {
         release_pause(db, chat)?;
+    }
+    Ok(())
+}
+
+/// The source's depth is independent of native authority and of whether its run
+/// belongs to a conversation. Mission admissions freeze it before the caller can
+/// accept another person's input or finish its own conversation.
+fn source_depth(db: &Db<'_>, origin: &Origin) -> Result<u32> {
+    match origin {
+        Origin::Run(run) | Origin::DelegatedTask(run) => Ok(db.0.query_row(
+            "SELECT max( \
+               coalesce((SELECT depth FROM hook_rule_run_depths WHERE run_id=?1),0), \
+               coalesce((SELECT max(max(coalesce(d.depth,0),coalesce(json_extract(k.watch,'$.depth'),0))) \
+                 FROM conversations c LEFT JOIN hook_rule_chain_depths d ON d.chat_id=c.id \
+                 LEFT JOIN hook_rule_conversations k ON k.chat_id=c.id WHERE c.run_id=?1),0))",
+            [run], |row| row.get(0),
+        )?),
+        Origin::Stored(task) => task_depth(db, text(task,"id")),
+        _ => Ok(0),
+    }
+}
+
+fn task_depth(db: &Db<'_>, task: &str) -> Result<u32> {
+    Ok(db.0.query_row(
+        "SELECT coalesce((SELECT depth FROM hook_rule_task_depths WHERE task_id=?1),0)",
+        [task],
+        |row| row.get(0),
+    )?)
+}
+
+/// Agent-created or edited scheduled work retains its causal chain for later
+/// admissions, even if its caller no longer has a current conversation turn.
+pub(crate) fn record_task(db: &Db<'_>, task: &str, origin: &Origin) -> Result<()> {
+    if matches!(origin, Origin::Human(_) | Origin::PublicAccount(_)) {
+        db.0.execute("DELETE FROM hook_rule_task_depths WHERE task_id=?", [task])?;
+        return Ok(());
+    }
+    let depth = source_depth(db, origin)?.max(task_depth(db, task)?);
+    if depth > 0 {
+        db.0.execute(
+            "INSERT INTO hook_rule_task_depths(task_id,depth) VALUES(?1,?2) \
+             ON CONFLICT(task_id) DO UPDATE SET depth=excluded.depth",
+            params![task, depth],
+        )?;
+    }
+    Ok(())
+}
+
+/// Freeze the cause of a mission run in its admission transaction. Repeated
+/// admissions of an existing run can narrow neither its original chain nor a
+/// chain retained with the scheduled task.
+pub(crate) fn record_run(db: &Db<'_>, run: &Json, origin: &Origin) -> Result<()> {
+    if run["trigger"] == "chat" {
+        return Ok(());
+    }
+    let person = matches!(origin, Origin::Human(_) | Origin::PublicAccount(_));
+    let depth = if person {
+        0
+    } else {
+        source_depth(db, origin)?.max(task_depth(db, text(run, "taskId"))?)
+    };
+    if depth > 0 {
+        db.0.execute(
+            "INSERT INTO hook_rule_run_depths(run_id,depth) VALUES(?1,?2) \
+             ON CONFLICT(run_id) DO UPDATE SET depth=max(depth,excluded.depth)",
+            params![text(run, "id"), depth],
+        )?;
     }
     Ok(())
 }

@@ -453,7 +453,7 @@ fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -
         text(&run, "id"),
         &EventKind::Status,
         "Compacting the conversation context",
-        None,
+        Some(&json!({ "chatOperation": COMPACT })),
     )?;
     let saved = db.save_conversation(&chat)?;
     Ok(serde_json::to_value(conversation_view(db, saved)?)?)
@@ -2314,6 +2314,11 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 withdraw(db, "chat", &queued)?;
 
                 let started = compact(db, "chat", &origin)?;
+                let marker: String = db.0.query_row(
+                    "SELECT payload FROM events WHERE run_id='run' AND type='status' AND text='Compacting the conversation context' ORDER BY id DESC LIMIT 1",
+                    [], |row| row.get(0),
+                )?;
+                assert_eq!(serde_json::from_str::<Value>(&marker)?, json!({ "chatOperation": COMPACT }));
                 assert_eq!(started["compaction"]["running"], true);
                 assert_eq!(started["compaction"]["available"], false);
                 let compacting = db.run("run")?.unwrap();

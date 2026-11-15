@@ -196,6 +196,12 @@ the limit. Only Cairn records the depth, beside the event and outside its payloa
 a plugin's payload cannot supply or lower it. A tool call that makes the service emit
 a plugin event again is not a chain Cairn can follow: the hourly caps bound it.
 
+The depth also follows mission runs started through `cairn_installation` and
+scheduled work created or edited by an agent. It is saved with that work and its
+run, independently of later input in the conversation that caused it. Manual
+context compaction is maintenance: it emits neither a new reply nor an end-of-turn
+hook, including when its events are observed after the next real turn starts.
+
 ### History
 
 Every member sees the state of every triggering of every rule
