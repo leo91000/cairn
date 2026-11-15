@@ -177,6 +177,7 @@ async fn record_reading(s: &Service, run: &Value, name: &str, args: &Value) -> R
     if OUTSIDE_CONVERSATIONS.contains(&name) {
         return Ok(());
     }
+    let unattested_side_questions = name == "list_chat_side_questions";
     let run_id = text(run, "id").to_owned();
     let (chat, target_run) = (
         args["chatId"].as_str().map(str::to_owned),
@@ -187,7 +188,10 @@ async fn record_reading(s: &Service, run: &Value, name: &str, args: &Value) -> R
             let Some(own) = db.conversation_for_run(&run_id)? else {
                 return Ok(());
             };
-            let only_own = (chat.is_some() || target_run.is_some())
+            // Side questions have no writer attestation, even in this conversation.
+            // Their text and answers may come from another person or an agent.
+            let only_own = !unattested_side_questions
+                && (chat.is_some() || target_run.is_some())
                 && chat.as_ref().is_none_or(|chat| *chat == own.id)
                 && target_run.as_ref().is_none_or(|run| *run == run_id);
             if !only_own {

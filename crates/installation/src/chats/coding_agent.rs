@@ -283,6 +283,7 @@ impl Service {
         let input = serde_json::to_value(input)?;
         let target = Provider::parse(text(&input, "provider"))?;
         let origin = policy::origin();
+        let writer = crate::conversation_writers::EntryWriter::of(&origin);
         if origin.known() {
             policy::refresh_chat(self, text(&input, "chatId")).await?;
         }
@@ -363,6 +364,9 @@ impl Service {
                     current_expires_at: None,
                 };
                 db.save_engine_switch(&pending)?;
+                // The requester chose the instructions this conversation will follow.
+                // Retain that entry with acceptance, before recovery can retry or crash.
+                crate::conversation_writers::record_entry(db, id, &writer)?;
                 db.change_run(
                     text(&run, "id"),
                     crate::runs::RunChanges {

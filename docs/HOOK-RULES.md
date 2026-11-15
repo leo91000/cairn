@@ -332,7 +332,12 @@ it belongs to whoever saved the profile. A profile save that moves an engine to 
 instruction source, even without changing any text, reaches that agent's conversations
 as an entry of whoever saved it. Wakeups and engine switches never launch a qualifying
 turn, but the instructions and skills they freeze join the conversation's permanent
-history like any launch. Codex compaction prompt files
+history like any launch. Accepting an engine switch also records whoever requested
+it as a conversation entry, before asynchronous recovery: another person, an agent
+or an unknown requester closes the conversation even after a return to the original
+engine. Reading side questions through `cairn_installation` always counts as an agent
+entry, including in the calling conversation, because their content has no writer
+attestation. Removing those questions does not restore eligibility. Codex compaction prompt files
 (`experimental_compact_prompt_file`) cannot be configured, like instruction files.
 Reading another conversation, run or task through `cairn_installation` (`list_chats`,
 `get_chat`, `read_chat_content`, `list_runs`, `get_run`, `read_run_content`, `get_task`)

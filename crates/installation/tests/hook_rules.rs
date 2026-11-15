@@ -1994,6 +1994,85 @@ async fn finish_turn(f: &Fixture, chat: &str) -> String {
 }
 
 #[tokio::test]
+async fn reading_own_side_questions_closes_rule_authority_for_good() {
+    for account in [MEMBER, OWNER] {
+        let f = granted().await;
+        common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+        person_provider(&f, "claude", "Human instructions").await;
+        let (chat, bearer) = person_conversation(&f, OWNER).await;
+        let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+        assert!(!refused(
+            &agent(&f, &bearer, "create_hook_rule", write.clone()).await
+        ));
+        let detail = f.s.chat_detail(&chat).await.unwrap();
+        let run = text(&detail["run"], "id").to_owned();
+        f.s.side_questions_available(&run, true).await.unwrap();
+        f.s.store
+            .event(
+                &run,
+                &cairn_contracts::EventKind::ItemCompleted,
+                "A reply",
+                Some(json!({
+                    "item": {
+                        "id": "reply",
+                        "type": "agent_message",
+                        "text": "A reply",
+                    },
+                })),
+            )
+            .await
+            .unwrap();
+        let question = cairn_installation::config::id();
+        let (status, asked) = call(
+            &f,
+            account,
+            "POST",
+            &format!("/api/chats/{chat}/side-questions"),
+            json!({
+                "id": question,
+                "text": "Foreign instructions beside the reply",
+                "itemId": "reply",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{asked}");
+        let read = agent(
+            &f,
+            &bearer,
+            "list_chat_side_questions",
+            json!({ "chatId": chat }),
+        )
+        .await;
+        assert!(!refused(&read), "{read}");
+        assert_eq!(
+            mcp_result(&read)["sideQuestions"][0]["text"],
+            "Foreign instructions beside the reply"
+        );
+        refused_because(
+            &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+            "Another writer reached this conversation",
+        );
+
+        // Removing the untrusted stored content and starting a human turn cannot
+        // restore authority. This policy also covers questions without any author.
+        f.s.store
+            .delete(&format!("chat-side-question:{chat}:{question}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            f.s.chat_detail(&chat).await.unwrap()["sideQuestions"],
+            json!([])
+        );
+        finish_turn(&f, &chat).await;
+        let later = next_person_turn(&f, &chat).await;
+        refused_because(
+            &agent(&f, &later, "create_hook_rule", write).await,
+            "Another writer reached this conversation",
+        );
+    }
+}
+
+#[tokio::test]
 async fn wakeups_record_the_skills_they_freeze_for_good() {
     let f = granted().await;
     let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
@@ -2152,6 +2231,207 @@ async fn engine_switches_record_the_instructions_they_freeze_for_good() {
         &agent(&f, &later, "create_hook_rule", write).await,
         "An earlier turn followed instructions without a recorded human writer",
     );
+}
+
+#[tokio::test]
+async fn engine_switch_requesters_reach_the_conversation_for_good() {
+    for surface in [
+        "http-member",
+        "public-member",
+        "installation",
+        "unknown-public",
+        "http-owner",
+        "public-owner",
+    ] {
+        let f = granted().await;
+        common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+        let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+        person_provider(&f, "codex", "Human profile instructions").await;
+        // Both providers follow human-written instructions; the switch author matters.
+        native_configuration(
+            &f,
+            "claude",
+            None,
+            r#"{"alwaysThinkingEnabled":true}"#,
+            None,
+        )
+        .await;
+        let (chat, bearer) = person_conversation(&f, OWNER).await;
+        let created = agent(&f, &bearer, "create_hook_rule", write.clone()).await;
+        assert!(!refused(&created), "{created}");
+        let detail = f.s.chat_detail(&chat).await.unwrap();
+        let run = text(&detail["run"], "id").to_owned();
+        let turn = f.s.store.run(&run).await.unwrap()["chatExecution"]["messageId"].clone();
+        f.s.store
+            .change_run(
+                &run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Queued),
+                    account_wait_reason: Some(Some(
+                        "Waiting for a Codex account with available usage.".into(),
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut account = serde_json::to_value(
+            f.s.accounts
+                .create(
+                    &f.s,
+                    cairn_installation::provider::Provider::Claude,
+                    "Alternative",
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        account["state"] = "ready".into();
+        f.s.store.save_account_fixture(account).await.unwrap();
+        let input = json!({
+            "chatId": chat,
+            "requestId": cairn_installation::config::id(),
+            "runId": run,
+            "turnId": turn,
+            "provider": "claude",
+        });
+        let foreign = matches!(
+            surface,
+            "http-member" | "public-member" | "installation" | "unknown-public"
+        );
+        let account = if surface.ends_with("member") {
+            MEMBER
+        } else {
+            OWNER
+        };
+        if surface.starts_with("http") {
+            let (status, accepted) = call(
+                &f,
+                account,
+                "POST",
+                &format!("/api/chats/{chat}/coding-agent"),
+                input.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{surface}: {accepted}");
+        } else if surface == "unknown-public" {
+            // Exercise the shared public dispatcher with scopes but no recorded
+            // account. Scopes cannot attest who chose the instruction source.
+            let mut identity = InstallationIdentity::trusted(InstallationRole::Member, "");
+            identity.mcp_scopes = Some(vec!["run".into()]);
+            let app = cairn_installation::http::router(f.s.clone()).await.unwrap();
+            let request = common::request("POST", "/api/mcp")
+                .extension(identity)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": common::mcp_arguments("switch_chat_coding_agent", &input),
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let response = common::send(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let accepted = common::read_json(response).await;
+            assert!(!refused(&accepted), "{surface}: {accepted}");
+        } else {
+            let (endpoint, token) = if surface == "installation" {
+                ("/mcp-installation", f.bearer.clone())
+            } else {
+                let token = common::relay_fixture::grant(&f.s, &["run"]).await;
+                f.s.store
+                    .set(
+                        &format!("test-relay:{}", cairn_installation::auth::digest(&token)),
+                        json!({ "account": account, "scopes": ["run"] }),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                ("/mcp", token)
+            };
+            let accepted = f
+                .mcp(endpoint, &token, "switch_chat_coding_agent", input.clone())
+                .await;
+            assert!(!refused(&accepted), "{surface}: {accepted}");
+        }
+        // The entry is retained with the acceptance, before asynchronous recovery, and
+        // retrying the same request as the owner cannot replace the original author.
+        let checked = chat.clone();
+        let reached = f.s.store
+            .read(move |db| {
+                Ok(db.0.query_row(
+                    "SELECT reached_by,reached_account_id FROM conversation_writers WHERE chat_id=?",
+                    [&checked],
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        let (status, retried) = call(
+            &f,
+            OWNER,
+            "POST",
+            &format!("/api/chats/{chat}/coding-agent"),
+            input,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retried}");
+        f.s.worker.tick(&f.s).await.unwrap();
+        common::eventually(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+            async || {
+                let switched = f.s.store.run(&run).await.unwrap();
+                (switched["snapshot"]["agent"]["provider"] == "claude").then_some(())
+            },
+        )
+        .await;
+        // The person's next turn returns to Codex, which follows human instructions only.
+        finish_turn(&f, &chat).await;
+        let (status, sent) = call(
+            &f,
+            OWNER,
+            "POST",
+            &format!("/api/chats/{chat}/messages"),
+            json!({
+                "id": cairn_installation::config::id(),
+                "text": "Back to Codex.",
+                "provider": "codex",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        let later = fixture::running_conversation(&f.s, &chat).await;
+        let back = f.s.store.run(&run).await.unwrap();
+        assert_eq!(back["snapshot"]["agent"]["provider"], "codex");
+        let result = agent(&f, &later, "create_hook_rule", write).await;
+        if foreign {
+            refused_because(&result, "Another writer reached this conversation");
+        } else {
+            assert!(!refused(&result), "{surface}: {result}");
+        }
+        if foreign {
+            assert_eq!(
+                reached.0.as_deref(),
+                Some(match surface {
+                    "installation" => "agent",
+                    "unknown-public" => "unknown",
+                    _ => "person",
+                }),
+                "{surface}"
+            );
+            assert_eq!(
+                reached.1.as_deref(),
+                surface.ends_with("member").then_some(MEMBER),
+                "{surface}"
+            );
+        } else {
+            assert_eq!(reached, (None, None), "{surface}");
+        }
+    }
 }
 
 #[tokio::test]
