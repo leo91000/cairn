@@ -434,6 +434,91 @@ async fn persisted_usage_errors_do_not_poison_the_replacement_provider() {
     );
 }
 
+#[tokio::test]
+async fn unknown_go_usage_can_recover_and_resume_the_same_native_session() {
+    let (listener, address) = common::bind().await;
+    let usage = axum::Router::new().route(
+        "/usage",
+        axum::routing::get(|| async {
+            axum::Json(json!({
+                "usage": {
+                    "rolling": { "status": "ok", "percent": 25, "resetInSec": 7200 },
+                    "weekly": { "status": "ok", "percent": 60, "resetInSec": 86400 },
+                    "monthly": { "status": "ok", "percent": 85, "resetInSec": 604800 },
+                },
+            }))
+        }),
+    );
+    let usage_server = common::serve(listener, usage);
+    let root = TempDir::new().unwrap();
+    let s = Service::new(Config {
+        opencode_bin: common::fixture("opencode.mjs"),
+        opencode_go_usage_url: format!("http://{address}/usage"),
+        ..common::config(root.path())
+    })
+    .await
+    .unwrap();
+    let account = s
+        .accounts
+        .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", KEY, None)
+        .await
+        .unwrap();
+    let account_id = account.id.to_string();
+    assert!(
+        s.accounts
+            .account(&s, &account_id)
+            .await
+            .unwrap()
+            .usage
+            .is_none()
+    );
+
+    let mut first = plan(&root, "fixture:opencode-limit Build the status panel.");
+    first["model"] = "opencode-go/ling-3.1-flash-free".into();
+    let (result, events) = run(&s, first.clone()).await;
+    assert!(result.unwrap_err().message.contains("Usage limit reached"));
+    let session = text(
+        events
+            .iter()
+            .find(|event| event["type"] == "thread.started")
+            .unwrap(),
+        "thread_id",
+    )
+    .to_owned();
+
+    s.accounts
+        .exhausted(&s, &account_id, text(&first, "model"))
+        .await
+        .unwrap();
+
+    // Recovery compares millisecond timestamps. Pin exhaustion before the new
+    // reading even when the loopback request completes within one clock tick.
+    let mut exhausted = s.accounts.account(&s, &account_id).await.unwrap();
+    exhausted.exhausted.as_mut().unwrap().at -= 1;
+    s.store.save_coding_account(&exhausted).await.unwrap();
+
+    s.accounts.refresh(&s, &account_id).await.unwrap();
+    let recovered = s.accounts.account(&s, &account_id).await.unwrap();
+    assert!(recovered.exhausted.is_none());
+    assert!(recovered.usage.is_some());
+
+    // A new healthy reading can restore the same account. The saved terminal
+    // error must not prevent another native request on that account and session.
+    let mut resumed = first;
+    resumed["sessionId"] = session.clone().into();
+    resumed["execution"]["recovery"] = true.into();
+    let (result, events) = run(&s, resumed).await;
+    assert!(result.unwrap_err().message.contains("Usage limit reached"));
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "thread.started" && event["thread_id"] == session)
+    );
+    assert!(events.iter().any(|event| event["type"] == "turn.started"));
+
+    usage_server.abort();
+}
+
 async fn read_startup_pid(pid_file: &Path) -> Option<i32> {
     let content = match tokio::fs::read_to_string(pid_file).await {
         Ok(content) => content,
