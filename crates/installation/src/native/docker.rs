@@ -21,9 +21,14 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub mod administrator;
+
+pub use lifecycle::stop_current;
+
 mod config;
 mod containers;
 mod hardening;
+pub(crate) mod lifecycle;
 mod mounts;
 mod proxy;
 

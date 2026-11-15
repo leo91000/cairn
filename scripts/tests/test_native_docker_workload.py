@@ -7,6 +7,8 @@ import unittest
 from unittest.mock import patch
 
 import native_docker_workload as workload
+import native_runtime_test as runtime
+import native_administrator_network as network
 
 
 class ComposeReadinessTests(unittest.TestCase):
@@ -69,6 +71,115 @@ class ComposeReadinessTests(unittest.TestCase):
         expired = subprocess.TimeoutExpired(['synthetic'], 10)
         with self.assertRaisesRegex(AssertionError, 'redis.*timed out'):
             self.run_probe([expired] * 5)
+
+
+class AdministratorNetworkQualificationTests(unittest.TestCase):
+    def test_mount_inspection_observes_live_threads_after_the_leader_exits(self):
+        import select
+        import sys
+        import tempfile
+        import time
+        child = '''import ctypes, os, threading
+def worker():
+    print('ready', flush=True)
+    os.read(0, 1)
+    os._exit(0)
+threading.Thread(target=worker).start()
+ctypes.CDLL(None).pthread_exit(None)
+'''
+        with tempfile.TemporaryDirectory(prefix='native-thread-root-') as temporary:
+            marker = Path(temporary) / 'mounted'
+            marker.touch()
+            process = subprocess.Popen([sys.executable, '-c', child], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                self.assertTrue(select.select([process.stdout], [], [], 3)[0])
+                self.assertEqual(process.stdout.readline().strip(), 'ready')
+                leader = Path('/proc', str(process.pid), 'root') / marker.relative_to('/')
+                deadline = time.monotonic() + 3
+                while leader.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(leader.exists(), 'Leader did not exit in the owned fixture')
+                roots = network.live_thread_roots(process.pid)
+                self.assertTrue(any((root / marker.relative_to('/')).exists() for root in roots),
+                                'A live thread still sees the marker despite the missing leader root')
+            finally:
+                try:
+                    process.communicate('x', timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=3)
+                self.assertEqual(process.returncode, 0)
+
+    def test_retained_bind_rejects_a_replaced_directory_after_mount_success(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='native-bind-') as temporary:
+            original, replacement = Path(temporary) / 'original', Path(temporary) / 'replacement'
+            original.mkdir()
+            replacement.mkdir()
+            descriptor = os.open(original, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with patch.object(network.subprocess, 'run'):
+                    with self.assertRaisesRegex(AssertionError, 'Retained directory was not restored'):
+                        network.bind_directory(descriptor, str(replacement))
+            finally:
+                os.close(descriptor)
+
+    def test_owned_systemd_unit_has_explicit_sbin_tool_lookup(self):
+        arguments = network.unit_command('fixture.service', 'attempt', '/candidate/cairn',
+                                         '/candidate/rootfs.tar', '/candidate/go', '/candidate/tools')
+        environments = [argument.removeprefix('--setenv=') for argument in arguments
+                        if argument.startswith('--setenv=')]
+        environment = dict(value.split('=', 1) for value in environments)
+        self.assertEqual(environment['PATH'].split(':'), ['/usr/sbin', '/usr/bin', '/sbin', '/bin'])
+        # Ubuntu keeps iptables-save in /usr/sbin, whereas systemd's compiled
+        # default can omit it. A real subprocess lookup models that split.
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='native-tool-path-') as root:
+            root = Path(root)
+            for directory in ['usr/sbin', 'usr/bin', 'sbin', 'bin']:
+                (root / directory).mkdir(parents=True)
+            tool = root / 'usr/sbin/iptables-save'
+            tool.write_text('#!/bin/sh\nprintf fixture-tool\n')
+            tool.chmod(0o755)
+            with self.assertRaises(FileNotFoundError):
+                subprocess.run(['iptables-save'], env={'PATH': str(root / 'usr/bin')}, check=True)
+            path = ':'.join(str(root / directory.lstrip('/')) for directory in environment['PATH'].split(':'))
+            result = subprocess.run(['iptables-save'], env={'PATH': path}, check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout, 'fixture-tool')
+
+    def test_failed_qualifier_preserves_bounded_synthetic_diagnostics(self):
+        result = SimpleNamespace(returncode=1, stdout='fixture phase reached\n', stderr='fortified compiler failure\n')
+        with patch.object(runtime.subprocess, 'run', return_value=result) as run:
+            with self.assertRaisesRegex(AssertionError, 'fortified compiler failure') as error:
+                runtime.qualify_administrator_network('/candidate/cairn', '/candidate/docker-tools')
+        self.assertIn('fixture phase reached', str(error.exception))
+        self.assertEqual(run.call_args.kwargs['timeout'], 150)
+
+    def test_success_requires_the_completed_probe_receipt(self):
+        for output, succeeds in [('', False), ('READY cgroup\n', False), ('PASS cgroup ancestry, TCP/UDP publication\n', True)]:
+            result = SimpleNamespace(returncode=0, stdout=output, stderr='')
+            with self.subTest(output=output), patch.object(runtime.subprocess, 'run', return_value=result):
+                if succeeds:
+                    runtime.qualify_administrator_network('/candidate/cairn', '/candidate/docker-tools')
+                else:
+                    with self.assertRaisesRegex(AssertionError, 'completion receipt=False'):
+                        runtime.qualify_administrator_network('/candidate/cairn', '/candidate/docker-tools')
+
+    def test_timeout_and_large_failure_keep_only_the_bounded_tail(self):
+        error = subprocess.TimeoutExpired(['fixture'], 150, output=b'early output\n', stderr=b'network still pending\n')
+        with patch.object(runtime.subprocess, 'run', side_effect=error):
+            with self.assertRaisesRegex(AssertionError, 'network still pending'):
+                runtime.qualify_administrator_network('/candidate/cairn', '/candidate/docker-tools')
+        result = SimpleNamespace(returncode=1, stdout='old output' + 'x' * 20000, stderr='last diagnostic')
+        with patch.object(runtime.subprocess, 'run', return_value=result):
+            with self.assertRaises(AssertionError) as captured:
+                runtime.qualify_administrator_network('/candidate/cairn', '/candidate/docker-tools')
+        self.assertLess(len(str(captured.exception)), 17000)
+        self.assertNotIn('old output', str(captured.exception))
+        self.assertIn('last diagnostic', str(captured.exception))
 
 
 if __name__ == '__main__':

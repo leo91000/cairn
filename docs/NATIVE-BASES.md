@@ -7,7 +7,7 @@ and decompressing another ZIP; it still creates private files and verifies their
 contents. File ownership, links and xattrs are preserved. The cache shares no
 mutable working-file inodes with conversations.
 
-[ADR-0085](adr/0085-native-directories-and-direct-vm-images.md) supersedes the
+[ADR-0086](adr/0086-native-directories-and-direct-vm-images.md) supersedes the
 journal-clone format in [ADR-0058](adr/0058-prepared-native-project-bases.md).
 A durable environment-qualified initialization pin keeps the verified source
 through copying, rename and format publication. Interrupted copies retry their

@@ -287,7 +287,7 @@ async fn migrate(data: &Path, transition: &Transition, observation: &Trace) -> R
                 for entry in std::fs::read_dir(&path)? {
                     let entry = entry?;
                     if path == data
-                        && [MARKER, TRANSITION, PENDING]
+                        && [MARKER, TRANSITION, PENDING, "docker-administrator"]
                             .iter()
                             .any(|name| entry.file_name() == *name)
                     {
@@ -372,6 +372,46 @@ pub(in crate::native) async fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rootful_docker_metadata_is_opaque_to_identity_transitions() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path();
+        let store = data.join("docker-administrator");
+        std::fs::create_dir_all(&store).unwrap();
+        let file = store.join("raw-volume");
+        std::fs::write(&file, b"rootful bytes").unwrap();
+        let metadata = std::fs::metadata(&file).unwrap();
+        let previous = Identity {
+            user: "fixture".into(),
+            root_uid: 900,
+            root_gid: 901,
+            subuid: 100000,
+            subgid: 100000,
+            host_engine: Some((998, 997)),
+        };
+        let protected = Identity {
+            host_engine: None,
+            ..previous.clone()
+        };
+        atomic_write(&data.join(MARKER), &serde_json::to_vec(&previous).unwrap())
+            .await
+            .unwrap();
+        for target in [&protected, &previous] {
+            let registry = crate::native::bootstrap::Registry::new("fixture".into(), None);
+            let attempt = crate::config::id();
+            let scope = registry.begin(&attempt);
+            reconcile(data, target, &scope.trace()).await.unwrap();
+            let report = serde_json::to_value(registry.get(&attempt).unwrap()).unwrap();
+            assert_eq!(count(&report, Counter::EntriesSeen), 1);
+        }
+        let retained = std::fs::metadata(&file).unwrap();
+        assert_eq!(
+            (retained.uid(), retained.gid(), retained.mode()),
+            (metadata.uid(), metadata.gid(), metadata.mode())
+        );
+        assert_eq!(std::fs::read(file).unwrap(), b"rootful bytes");
+    }
 
     fn count(report: &serde_json::Value, counter: Counter) -> u64 {
         let counter = serde_json::to_value(counter).unwrap();

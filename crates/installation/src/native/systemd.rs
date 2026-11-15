@@ -242,10 +242,17 @@ pub(super) async fn request_stop(attempt: &str) -> Result<()> {
 }
 
 pub async fn stop_workload(attempt: &str) -> Result<()> {
+    stop_workload_in(&super::state_dir(), attempt).await
+}
+
+pub(super) async fn stop_workload_in(state_directory: &Path, attempt: &str) -> Result<()> {
     let unit = unit(attempt)?;
     // systemd refuses stop jobs for frozen units. Protection/lease fencing can
     // leave an owned workload frozen; restore signal delivery before stopping.
     let _ = output("/usr/bin/systemctl", &["thaw", &unit]).await?;
+    if let Err(error) = super::docker::lifecycle::stop_attempt(state_directory, attempt).await {
+        tracing::warn!(attempt, %error, "Native Docker could not stop cleanly; fencing its cgroup");
+    }
     let stopped = output("/usr/bin/systemctl", &["stop", &unit]).await?;
     // A collected or never-started transient unit has no processes to fence.
     let state = output(
@@ -417,6 +424,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     let mut property = |value: String| args.push(format!("--property={value}"));
     for value in [
         "KillMode=control-group",
+        "ExecStop=!/run/cairn-entrypoint/cairn native-docker-stop",
         "TimeoutStopSec=10s",
         "SendSIGKILL=yes",
         "ProtectProc=invisible",
@@ -441,6 +449,13 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         if !administrator || !restriction {
             property(value.into());
         }
+    }
+    if administrator {
+        // Keep daemon and runner in one leaf while cgroupfs containers create
+        // sibling leaves under the resource-controlled service. systemd owns
+        // freeze/stop of the complete delegated tree, including containerd.
+        property("Delegate=yes".into());
+        property("DelegateSubgroup=runner".into());
     }
     if launch.conversation.is_some() {
         // RootlessKit's newuidmap/newgidmap need their standard setuid transition
@@ -602,6 +617,12 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
             "BindReadOnlyPaths={}:/opt/cairn-docker",
             path_property(Path::new(&tools))?
         ));
+        if administrator {
+            property(format!(
+                "BindReadOnlyPaths={}:/run/cairn-entrypoint/docker",
+                path_property(&docker_runtime.join("docker"))?
+            ));
+        }
         let channel = launch
             .data
             .join("runs")
@@ -614,8 +635,10 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
                 path_property(&channel)?
             ));
         }
-        property("DeviceAllow=/dev/net/tun rw".into());
-        property("BindPaths=/dev/net/tun".into());
+        if !administrator {
+            property("DeviceAllow=/dev/net/tun rw".into());
+            property("BindPaths=/dev/net/tun".into());
+        }
     }
     let bindings: Vec<super::home::Binding> = serde_json::from_value(
         launch
@@ -734,7 +757,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         );
     } else {
         args.extend([
-            "--setenv=PATH=/opt/cairn-native-tools/bin:/run/cairn-entrypoint:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "--setenv=PATH=/run/cairn-entrypoint:/opt/cairn-native-tools/bin:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
             "--", "/run/cairn-entrypoint/cairn", "runner-entry",
         ].map(String::from));
     }

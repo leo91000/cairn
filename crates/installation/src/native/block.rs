@@ -20,7 +20,8 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(crate) const STORAGE: &str = "ublk-rootless-v1";
+pub(crate) const STORAGE: &str = "ublk-rootless-v2";
+const LEGACY_ROOTLESS_STORAGE: &str = "ublk-rootless-v1";
 
 /// Where a conversation's files live in its mounted filesystems. Native disks
 /// keep them at the filesystem root; VM disks keep the guest's layout, with
@@ -114,12 +115,15 @@ async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
             .iter()
             .any(|field| previous[*field] != runtime[*field])
             || previous["disk"] == "vm"
-            || !matches!(previous["storage"].as_str(), Some("ublk") | Some(STORAGE))
+            || !matches!(
+                previous["storage"].as_str(),
+                Some("ublk" | LEGACY_ROOTLESS_STORAGE | STORAGE)
+            )
         {
             return Err(Error::conflict("Native disk platform changed."));
         }
     }
-    // Older controllers require storage="ublk" before mounting/reconciling.
+    // The v2 marker fences readers that would translate raw rootful owners.
     // Commit the isolation fence while preserving current tool-bundle updates.
     atomic_write(
         &directory.join("runtime.json"),
@@ -253,7 +257,10 @@ pub async fn recover_host_mounts(state: &Path) -> Result<()> {
         let identity: Value =
             serde_json::from_slice(&tokio::fs::read(owner.directory.join("runtime.json")).await?)?;
         if identity["backend"] != "native"
-            || !matches!(identity["storage"].as_str(), Some("ublk") | Some(STORAGE))
+            || !matches!(
+                identity["storage"].as_str(),
+                Some("ublk" | LEGACY_ROOTLESS_STORAGE | STORAGE)
+            )
         {
             return Err(Error::conflict("Mounted disk is not a native journal."));
         }
@@ -964,11 +971,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_disks_resume_with_current_tools_and_keep_the_platform_boundary() {
+    async fn legacy_native_disks_acquire_the_rootful_ownership_fence_without_rewriting_files() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.json");
         let previous = json!({
             "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
+            "runtimeId": "legacy-release",
+        });
+        atomic_write(&path, &serde_json::to_vec(&previous).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(root.path().join("retained"), b"untouched")
+            .await
+            .unwrap();
+        record_runtime(root.path(), &json!({ "runtimeId": "current-release" }))
+            .await
+            .unwrap();
+        let saved: Value = serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
+        assert_eq!(saved["storage"], STORAGE);
+        assert_ne!(saved["storage"], LEGACY_ROOTLESS_STORAGE);
+        assert_eq!(
+            tokio::fs::read(root.path().join("retained")).await.unwrap(),
+            b"untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_disks_resume_with_current_tools_and_keep_the_platform_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.json");
+        let previous = json!({
+            "backend": "native", "storage": LEGACY_ROOTLESS_STORAGE, "os": "linux", "arch": "x86_64",
             "runtimeId": "previous-release",
         });
         atomic_write(&path, &serde_json::to_vec(&previous).unwrap())
@@ -993,7 +1026,7 @@ mod tests {
         // A future isolation/storage implementation must never be downgraded
         // by rewriting its marker or touching the retained payload.
         let mut future = current.clone();
-        future["storage"] = "ublk-rootless-v2".into();
+        future["storage"] = "ublk-rootless-v3".into();
         atomic_write(&path, &serde_json::to_vec(&future).unwrap())
             .await
             .unwrap();

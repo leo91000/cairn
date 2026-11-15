@@ -58,6 +58,19 @@ where
         }
     }
 
+    if args
+        .first()
+        .is_some_and(|arg| arg == "native-administrator-daemon")
+    {
+        // Namespace changes must precede TLS/runtime/helper threads.
+        return match cairn_installation::native::docker::administrator::daemon(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{}", error.message);
+                ExitCode::FAILURE
+            }
+        };
+    }
     if args.first().is_some_and(|arg| arg == "plugin-worker") {
         return match cairn_plugin_runtime::worker() {
             Ok(()) => ExitCode::SUCCESS,
@@ -206,6 +219,20 @@ where
         "guest" => cairn_installation::microvm::guest::serve(stop).await?,
         "native-controller" => cairn_installation::native::serve(stop).await?,
         "native-enclave" => return cairn_installation::native::docker::enclave(stop).await,
+        "native-administrator-docker" => {
+            cairn_installation::native::docker::administrator::ensure(stop).await?;
+        }
+        "native-administrator-docker-ready" => {
+            println!(
+                "{}",
+                cairn_installation::native::docker::administrator::ready().await?
+            );
+        }
+        "native-docker-stop" => {
+            if let Err(error) = cairn_installation::native::docker::stop_current().await {
+                tracing::warn!(%error, "Docker graceful shutdown incomplete; systemd must fence the workload");
+            }
+        }
         "native-docker" => cairn_installation::native::docker::ensure().await?,
         "native-docker-reset" => cairn_installation::native::docker::reset().await?,
         "native-watchdog" => {

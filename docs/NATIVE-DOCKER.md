@@ -6,6 +6,30 @@ conversation's shell. The daemon starts on the first command requiring a server;
 client version/help commands do not start it. Images are pulled only when needed.
 The host's Docker daemon, personal home and desktop sockets are never mounted.
 
+## Administrator execution
+
+Administrator runs also provide the managed Docker command. Its rootful daemon
+and containers use the run's delegated service cgroup for CPU, RAM, freeze and
+termination. Each daemon has its own network namespace and private `/run`, with
+slirp egress and published IPv4 TCP/UDP ports forwarded onto the host. It never
+edits host Docker bridges, firewall chains or firewalld. IPv6/SCTP publications
+and binding to a specific non-loopback host interface are explicitly refused;
+use IPv4 loopback or wildcard bindings. Defaults publish on loopback. This remains cooperative host administration: an agent with sudo
+can bypass the managed command. Use the managed command for development services;
+do not start a separate host dockerd or give it the run's disk as a data-root.
+
+Administrator and protected Docker stores are separate and both survive mode
+changes. Saved administrator containers remain stopped when the daemon resumes;
+start them explicitly. Restart policies, foreign cgroup parents, host cgroup
+namespaces, Swarm and managed daemon plugins are refused. Builds use a named
+`cairn-managed` docker-container Buildx builder with image loading enabled;
+embedded build/gRPC endpoints are refused because they bypass container lifecycle
+checks. Build cache resides in the builder's volume. Client Compose/Buildx plugins
+are provided by the same managed bundle. Normal completion and explicit stop
+request graceful container shutdown before the systemd cgroup fence.
+
+Decision: [ADR-0085](adr/0085-managed-administrator-docker-lifecycle.md).
+
 ## Boundary and lifecycle
 
 Each conversation has its own nologin host account and non-overlapping 65,536-entry
@@ -128,7 +152,7 @@ before confirming; history, attachments and published artifacts remain available
 `docker cairn-reset --confirm-delete-state` separately deletes conversation Docker
 state after confirmed shutdown while retaining ordinary workspace/home/output files.
 
-The native runtime records `storage: ublk-rootless-v1` before mounting or
+The native runtime records `storage: ublk-rootless-v2` before mounting or
 reconciling file owners. Older controllers require `storage: ublk` and refuse the
 new identity, including during restore on another node. Current tool bundles may
 advance without changing the disk platform or conversation identity. Unknown
@@ -139,14 +163,19 @@ The current [production contract](PRODUCTION-CAIRN.md#data-preserving-upgrades)
 preserves supported installation data and requires matching manager, runner,
 node and guest versions. Version-11 manager databases upgrade to version 12;
 other manager or runtime storage formats need explicit compatibility checks.
-The inventory migration does not convert rootless Docker storage identities.
+The inventory migration does not convert rootless Docker storage identities. Version 2 of the native storage marker also
+fences older controllers from translating raw rootful store ownership; `ublk` and
+`ublk-rootless-v1` disks upgrade without changing their journal or files. See
+[the ownership migration](migrations/0035-native-rootful-docker-ownership.md).
 Do not run an older
 controller against conversation state written with the rootless identity.
 
 Administrator mode retains its existing owner-reviewed host execution and sudo
-contract; it does not receive this managed rootless daemon or socket. Switching
-modes translates only the engine owner, preserving Docker container identities,
-volume permissions and recovery journals. Rootless services stop with the turn
+contract and uses the separate rootful daemon described above. Switching
+modes translates the engine owner and protected store identities, preserving
+container identities, volume permissions and recovery journals. The rootful
+`docker-administrator` store is opaque to this translation: its raw host UID/GID
+values, ACLs and capabilities remain unchanged. Rootless services stop with the turn
 and can be recreated after returning to protected. Administrator root can alter
 host state and does not claim the protected conversation isolation boundary.
 
@@ -210,3 +239,20 @@ Cold file reads use advisory `POSIX_FADV_DONTNEED`; a controller restart clears
 its userspace cache. This is local disk evidence, not production WAN latency. Results
 must be attached from successful CI before the PR is considered qualified; no
 unavailable measurement is represented as zero or as a passed test.
+
+
+The standalone administrator network qualifier runs before native disk mounts on
+an explicitly disposable systemd host. It imports a small local static image (no
+registry or WAN), checks TCP/UDP publications, cgroup ancestry and freeze/thaw,
+natural-exit port cleanup, graceful stop and unchanged outer firewall/interfaces:
+
+```sh
+sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 python3 scripts/tests/native_administrator_network.py \
+  target/debug/cairn --docker-tools /opt/cairn-native/docker-tools/v2
+```
+
+The complete native runtime qualifier invokes this before its ext4/ublk cases and
+additionally checks concurrent administrator daemons, raw volume ownership across
+both mode changes, interrupted container metadata, normal turn completion and
+retained-store resume without implicit restarts. These network-local checks do
+not replace the disposable ublk qualification or measure production latency.

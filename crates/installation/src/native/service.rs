@@ -1222,13 +1222,18 @@ impl Controller {
             )
             .await?;
             let view = block::view(&controller.state, text(&plan, "runId")).await?;
-            let docker_data = view.docker_data()?;
+            let administrator = plan["nativeMode"]["mode"] == "administrator";
+            let docker_data = if administrator {
+                view.docker_data()?.with_file_name("docker-administrator")
+            } else {
+                view.docker_data()?
+            };
             check.lock().map_err(Error::internal)?.admit(5120)?;
             tokio::fs::create_dir_all(&docker_data).await?;
             std::os::unix::fs::lchown(
                 &docker_data,
-                Some(identity.root_uid),
-                Some(identity.root_gid),
+                Some(if administrator { 0 } else { identity.root_uid }),
+                Some(if administrator { 0 } else { identity.root_gid }),
             )?;
             tokio::fs::set_permissions(&docker_data, std::fs::Permissions::from_mode(0o700))
                 .await?;
@@ -1293,7 +1298,11 @@ impl Controller {
             .await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
         let temporary = block::temporary(&self.state, text(plan, "runId")).await?;
-        let docker_data = view.docker_data()?;
+        let docker_data = if administrator {
+            view.docker_data()?.with_file_name("docker-administrator")
+        } else {
+            view.docker_data()?
+        };
         // Keep the existing prepared-base admission marker. The authoritative
         // ownership mapping is stored inside the local filesystem.
         atomic_write(
@@ -1302,6 +1311,7 @@ impl Controller {
         )
         .await?;
         trace.phase(Phase::RuntimePrepare);
+
         let runtime = root.join("docker-runtime");
         if runtime.exists() {
             tokio::fs::remove_dir_all(&runtime).await?;
@@ -1309,7 +1319,24 @@ impl Controller {
         for name in ["runtime", "rootlesskit", "plugins"] {
             let path = runtime.join(name);
             private_dir(&path).await?;
-            std::os::unix::fs::lchown(&path, Some(identity.root_uid), Some(identity.root_gid))?;
+            std::os::unix::fs::lchown(
+                &path,
+                Some(if administrator { 0 } else { identity.root_uid }),
+                Some(if administrator {
+                    self.identity.gid
+                } else {
+                    identity.root_gid
+                }),
+            )?;
+            if administrator {
+                tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o710)).await?;
+            }
+        }
+        if administrator {
+            atomic_write(&runtime.join("runtime/daemon.json"), b"{}").await?;
+            let wrapper = runtime.join("docker");
+            atomic_write(&wrapper, super::docker::administrator::WRAPPER.as_bytes()).await?;
+            tokio::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755)).await?;
         }
         trace.phase(Phase::PoolAccounting);
         if disk::used(&self.data, &self.state).await? > self.disk_limit().await? {
@@ -1348,6 +1375,9 @@ impl Controller {
             tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).await?;
         }
         let mut plan = plan.clone();
+        if administrator {
+            plan["nativeDockerGid"] = self.identity.gid.into();
+        }
         plan["guestDataRoot"] = guest_data(&plan, &self.data)
             .to_string_lossy()
             .into_owned()
@@ -1362,8 +1392,8 @@ impl Controller {
         let mcp_stop = stop.child_token();
         let _mcp_guard = mcp_stop.clone().drop_guard();
         if administrator {
-            // Preserve administrator's host execution and existing local relay;
-            // it does not enter the protected Docker namespace or receive its socket.
+            // Preserve administrator's host execution and existing local relay.
+            // Managed rootful Docker uses its own store and the workload cgroup.
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
             for field in ["codexConfig", "claudeMcps", "opencodeConfig", "args"] {
@@ -1441,8 +1471,8 @@ impl Controller {
             output: &view.output,
             identity: &self.identity,
             conversation: (!administrator).then_some(&identity),
-            docker_data: (!administrator).then_some(docker_data.as_path()),
-            docker_runtime: (!administrator).then_some(runtime.as_path()),
+            docker_data: Some(docker_data.as_path()),
+            docker_runtime: Some(runtime.as_path()),
             temporary: &temporary,
             auth: auth.as_deref(),
         };

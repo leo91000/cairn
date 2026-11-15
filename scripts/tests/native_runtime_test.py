@@ -150,6 +150,24 @@ def command(*args, **options):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=60, **options)
 
 
+def qualify_administrator_network(binary, docker_tools):
+    arguments = [sys.executable, str(Path(__file__).with_name('native_administrator_network.py')),
+                 str(binary), '--docker-tools', str(docker_tools)]
+    try:
+        result = subprocess.run(arguments, capture_output=True, text=True, timeout=150)
+        output = (result.stdout or '') + (result.stderr or '')
+        passed = any(line.startswith('PASS cgroup ancestry,') for line in result.stdout.splitlines())
+        if result.returncode or not passed:
+            raise AssertionError('Administrator network qualification failed '
+                                 f'(exit {result.returncode}, completion receipt={passed}):\n' + output[-16384:])
+    except subprocess.TimeoutExpired as error:
+        def decoded(value):
+            return value.decode('utf-8', errors='replace') if isinstance(value, bytes) else (value or '')
+        output = decoded(error.stdout) + decoded(error.stderr)
+        raise AssertionError('Administrator network qualification exceeded its outer deadline:\n'
+                             + output[-16384:]) from error
+
+
 def eventually(check, timeout=60):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -274,6 +292,11 @@ def main():
         probe_source = Path(__file__).with_name('native_docker_probe.c')
         command('cc', '-static', '-O2', '-Wall', '-Wextra', '-Werror', str(probe_source), '-o', str(probe))
         metrics['dockerProbe'] = dict(compiler=command('cc', '--version').stdout.splitlines()[0], flags='-static -O2 -Wall -Wextra -Werror', sourceSha256=hashlib.sha256(probe_source.read_bytes()).hexdigest())
+        if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
+            progress('administrator-network-qualification')
+            qualify_administrator_network(binary, docker_tools)
+            metrics['administratorNetworkQualified'] = True
+
         (data / 'runner-secret').write_text(token)
         (tools / 'manifest.json').write_text('{}')
         (tools.parent / 'release.json').write_text(json.dumps({'runtimeId': 'synthetic', 'os': 'linux', 'arch': 'x86_64'}))
@@ -1194,18 +1217,83 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 fenced(docker_other, parallel)
                 # Preserve real Docker state through the upstream administrator
                 # execution contract and back to isolated protected execution.
+                def host_network_state():
+                    import re
+                    def rules(binary):
+                        lines = command(binary).stdout.splitlines()
+                        return [re.sub(r'\[\d+:\d+\]', '[counters]', line) for line in lines if line and not line.startswith('#')]
+                    return dict(ipv4=rules('iptables-save'), ipv6=rules('ip6tables-save'),
+                                forwarding=Path('/proc/sys/net/ipv4/ip_forward').read_text(),
+                                loopback=Path('/proc/sys/net/ipv4/conf/all/route_localnet').read_text())
+                host_network = host_network_state()
                 progress('docker-administrator-transition')
                 target = dict(mode='administrator', generation=str(uuid.uuid4()))
                 assert api('/native-mode', target)['status'] == 'applied'
                 current_mode.update(target)
                 fenced(docker_run, fresh)
-                administrator_docker = start(docker_run, lease=300000)
+                administrator_workload = Path(__file__).with_name('native_administrator_docker_workload.py').read_text()
+                administrator_script = "/usr/bin/python3 - " + str(owner_a['subuid'] + 999) + ' ' + str(owner_a['subgid'] + 999) + " <<'ADMINISTRATOR_DOCKER'\n" + administrator_workload + '\nADMINISTRATOR_DOCKER\n'
+                administrator_docker = start(docker_run, lease=300000, docker_script=administrator_script)
+                managed_container = json.loads((managed(docker_run) / 'administrator-docker.json').read_text())
+                managed_pid = managed_container['pid']
+                membership = Path('/proc', str(managed_pid), 'cgroup').read_text()
+                owned_group = command('systemctl', 'show', 'cairn-native-' + administrator_docker + '.service', '--property=ControlGroup', '--value').stdout.strip()
+                assert membership.startswith('0::' + owned_group + '/'), membership
+                # A second administrator daemon must not reuse the first's
+                # default bridge or disturb its published localhost service.
+                administrator_parallel = start(docker_other, lease=300000, docker_script=administrator_script)
+                assert urllib.request.urlopen('http://127.0.0.1:' + managed_container['port'], timeout=5).read() == b'managed'
+                assert host_network_state() == host_network, 'Managed Docker changed host firewall or forwarding policy.'
+                parallel_container = json.loads((managed(docker_other) / 'administrator-docker.json').read_text())
+                writes = managed(docker_run) / 'docker-writes'
+                eventually(lambda: writes.exists() and writes.stat().st_size > 0)
+                pressure_policy = dict(contexts[docker_run]['policy'], reserveMiB=16 * 1024 * 1024)
+                storage_policy(pressure_policy)
+                eventually(lambda: api('/disks/' + docker_run + '/storage-status')['paused'] is True)
+                size = writes.stat().st_size
+                time.sleep(0.3)
+                assert writes.stat().st_size == size, 'Administrator Docker escaped the run freeze.'
+                storage_policy(contexts[docker_run]['policy'])
+                eventually(lambda: writes.stat().st_size > size)
+                administrator_store = state / 'native' / docker_run / 'data/docker-administrator'
+                for digit in ['d', 'e']:
+                    partial = administrator_store / 'containers' / (digit * 64)
+                    partial.mkdir(mode=0o700)
+                    if digit == 'e':
+                        (partial / 'hostconfig.json').write_text('{')
+                api('/runs/' + administrator_docker, method='DELETE')
+                fenced(docker_run, administrator_docker)
+                assert not Path('/proc', str(managed_pid)).exists(), 'Administrator Docker survived suspension.'
+                # Retire the earlier disk while the later-started daemon stays
+                # alive. A recursively private clone would retain its mount.
+                assert urllib.request.urlopen('http://127.0.0.1:' + parallel_container['port'], timeout=5).read() == b'managed'
+                api('/runs/' + administrator_parallel, method='DELETE')
+                fenced(docker_other, administrator_parallel)
+                # Reopen the same store: the prior container must remain stopped.
+                administrator_docker = start(docker_run, long=False, lease=300000, docker_script=administrator_script)
+                fenced(docker_run, administrator_docker)
+                # The next reopen checks the stop marker from normal completion.
+                administrator_docker = start(docker_run, lease=300000, docker_script=administrator_script)
+                metrics['administratorDockerLifecycle'] = dict(cgroupConfined=True, freezeConfirmed=True, stoppedBeforeUnmount=True, noImplicitRestart=True)
                 target = dict(mode='protected', generation=str(uuid.uuid4()))
                 assert api('/native-mode', target)['status'] == 'applied'
                 current_mode.update(target)
                 fenced(docker_run, administrator_docker)
                 fresh = start(docker_run, lease=300000, docker_script=docker_script('resume'))
                 metrics['dockerAfterAdministrator'] = docker_result(docker_run)
+                # A raw rootful volume UID can coincide with protected namespace
+                # UID1000. It must stay raw through both directions of translation.
+                target = dict(mode='administrator', generation=str(uuid.uuid4()))
+                assert api('/native-mode', target)['status'] == 'applied'
+                current_mode.update(target)
+                fenced(docker_run, fresh)
+                owner_verification = start(docker_run, long=False, lease=300000, docker_script=administrator_script)
+                fenced(docker_run, owner_verification)
+                target = dict(mode='protected', generation=str(uuid.uuid4()))
+                assert api('/native-mode', target)['status'] == 'applied'
+                current_mode.update(target)
+                fresh = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                metrics['administratorRawVolumeOwnersPreserved'] = True
                 # Seed the durable state left after an interrupted ownership
                 # batch. A hard link keeps the old empty target inode alive
                 # across unmount, publication and restart without pinning mounts.

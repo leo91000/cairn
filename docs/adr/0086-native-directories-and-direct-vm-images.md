@@ -100,6 +100,18 @@ drops that capability from the copy child and checks allocated quota usage befor
 committing the copy, retaining
 the legacy source when the copy exceeds its allowance. Disposable quota tests drop
 that capability explicitly; they do not claim adversarial root confinement.
+The additional ingress qualification keeps it in the parent process and checks
+that the dedicated writer cannot bypass byte or inode limits. Cold project
+seeding, home targets and live imports use a dedicated thread and runtime whose
+filesystem workers lack that capability. Storage and access guards outlive the
+runtime's blocking writes, including a disconnected caller. Native installed
+`node-daemon` initializes legacy IO state before creating runtime workers.
+
+Every copied payload chunk and new entry checks the current physical reserve
+and shared allocated budget. The native data pool and controller-cache filesystem
+are sampled separately; unobserved allocation debits survive accounting refreshes.
+An admission failure retains existing work and stops further writes. Cache
+extraction uses the same checks instead of a fixed free-space allowance.
 
 Les bases natives préparées deviennent des modèles de répertoires vérifiés,
 remplaçant le clonage par préfixe de journal de l’[ADR-0058](0058-prepared-native-project-bases.md).
