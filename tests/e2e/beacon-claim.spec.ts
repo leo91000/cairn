@@ -27,7 +27,7 @@ function claimProcess(binary: string, args: string[], env: NodeJS.ProcessEnv) {
   let spawnError: Error | undefined
   const retain = (chunk: Buffer) => {
     output = (output + chunk.toString()).slice(-16384)
-    listener ??= output.match(/^Listening on (http:\/\/127\.0\.0\.1:\d+)$/m)?.[1]
+    listener ??= output.match(/^Listening on (http:\/\/127\.0\.0\.1:\d+)\r?\n/m)?.[1]
   }
 
   child.stdout.on('data', retain)
