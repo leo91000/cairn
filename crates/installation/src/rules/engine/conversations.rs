@@ -523,7 +523,13 @@ fn native_origin(db: &Db<'_>, row: &RuleRow, version: &VersionRow) -> Result<Ori
 
 /// An action that resolves a native agent or conversation needs both the authority
 /// saved with the rule's version and its creator's current native authority.
-fn require_native(db: &Db<'_>, version: &VersionRow, agent: &Json, origin: &Origin) -> Result<()> {
+fn require_native(
+    db: &Db<'_>,
+    version: &VersionRow,
+    agent: &Json,
+    origin: &Origin,
+    node_id: Option<&str>,
+) -> Result<()> {
     if !crate::native::policy::native(agent) {
         return Ok(());
     }
@@ -532,7 +538,7 @@ fn require_native(db: &Db<'_>, version: &VersionRow, agent: &Json, origin: &Orig
             "This rule version was saved without native authority, so it cannot reach a native agent or conversation. Its creator can save it again from the app.",
         ));
     }
-    crate::native::policy::authorize_origin(db, agent, origin)
+    crate::native::policy::authorize_origin_on_node(db, agent, origin, node_id)
         .map(|_| ())
         .map_err(|_| {
             Error::forbidden(
@@ -544,7 +550,7 @@ fn require_native(db: &Db<'_>, version: &VersionRow, agent: &Json, origin: &Orig
 /// A conversation keeps its run's environment until explicitly migrated. A later
 /// profile edit cannot turn an existing native environment into a VM for the
 /// authority check, even for actions which do not send a new message.
-fn conversation_agent(db: &Db<'_>, chat: &Conversation) -> Result<Json> {
+fn conversation_environment(db: &Db<'_>, chat: &Conversation) -> Result<(Json, Option<String>)> {
     let mut agent = db.agent_snapshot(&chat.agent_id)?.unwrap_or_default();
     let run = chat
         .run_id
@@ -558,7 +564,11 @@ fn conversation_agent(db: &Db<'_>, chat: &Conversation) -> Result<Json> {
     {
         agent["access"]["backend"] = backend.into();
     }
-    Ok(agent)
+    let node = run
+        .as_ref()
+        .and_then(|run| run["nodeId"].as_str())
+        .map(str::to_owned);
+    Ok((agent, node))
 }
 
 /// Everything an action on a key-bound conversation needs, checked in its transaction.
@@ -587,7 +597,8 @@ fn reach(db: &Db<'_>, row: &RuleRow, version: &VersionRow, key: &str) -> Result<
         &crate::conversation_writers::EntryWriter::Rule(row.id.clone()),
     )?;
     let origin = native_origin(db, row, version)?;
-    require_native(db, version, &conversation_agent(db, &chat)?, &origin)?;
+    let (agent, node) = conversation_environment(db, &chat)?;
+    require_native(db, version, &agent, &origin, node.as_deref())?;
     Ok(Reached {
         bound,
         chat,
@@ -650,7 +661,7 @@ fn start(
     }
     let profile = required(db.agent_snapshot(&agent)?, "The agent no longer exists.")?;
     let origin = native_origin(db, row, version)?;
-    require_native(db, version, &profile, &origin)?;
+    require_native(db, version, &profile, &origin, None)?;
     let prompt = text_input(input, "prompt", "prompt")?;
     let key = input["key"].as_str().map(str::to_owned);
     if let Some(key) = &key {

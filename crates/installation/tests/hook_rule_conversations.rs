@@ -2556,6 +2556,106 @@ async fn more_than_one_page_of_pending_questions_is_reported_once_across_restart
 }
 
 #[tokio::test]
+async fn native_conversation_actions_require_authority_on_the_runs_actual_node() {
+    use common::run_fixture::RunFixture;
+
+    let f = granted().await;
+    let mut first = native_node(&f, &json!([OWNER])).await;
+    let other = native_node(&f, &json!([OWNER])).await;
+    let agent =
+        f.s.agent_fixture(
+            json!({
+                "name": "Two native nodes",
+                "access": { "backend": "native", "nodes": [first["id"], other["id"]] },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    rule_on(
+        &f,
+        OWNER,
+        plugin(&f),
+        start_or_steer_agent(text(&agent, "id")),
+        limits(),
+    )
+    .await;
+    emit(&f, "start", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    f.s.store
+        .change_run_fixture(&run, json!({ "nodeId": first["id"] }))
+        .await
+        .unwrap();
+
+    let mut actions = Vec::new();
+    for operation in [
+        json!({ "type": "cancelConversation", "key": key() }),
+        json!({ "type": "storeValue", "scope": "conversation", "key": key(), "name": "seen", "value": { "type": "literal", "value": true } }),
+    ] {
+        actions.push(
+            rule_on(
+                &f,
+                OWNER,
+                plugin(&f),
+                json!([action("operate", &operation)]),
+                limits(),
+            )
+            .await,
+        );
+    }
+    first["nativeAccounts"] = json!([]);
+    f.s.store.put_node_fixture(first.clone()).await.unwrap();
+    emit(
+        &f,
+        "operate",
+        message("alice", "only the other node is authorized"),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    for rule in &actions {
+        let history = triggerings(&f, rule).await;
+        assert_eq!(history[0]["status"], "failed", "{:?}", history[0]);
+        assert!(
+            text(&history[0], "error").contains("native authority"),
+            "{:?}",
+            history[0]
+        );
+    }
+    assert!(f.s.store.run(&run).await.unwrap()["cancelRequestedAt"].is_null());
+    let count: i64 =
+        f.s.store
+            .read(move |db| {
+                Ok(db.0.query_row(
+                    "SELECT count(*) FROM hook_rule_conversation_values WHERE chat_id=?1",
+                    [&chat],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+
+    // Restoring authority on the actual node permits both effects, even though
+    // another authorized node remains available throughout the scenario.
+    first["nativeAccounts"] = json!([OWNER]);
+    f.s.store.put_node_fixture(first).await.unwrap();
+    emit(
+        &f,
+        "restored",
+        message("alice", "the actual node is authorized again"),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    for rule in actions {
+        let history = triggerings(&f, &rule).await;
+        assert_eq!(history[0]["status"], "completed", "{:?}", history[0]);
+    }
+    assert!(!f.s.store.run(&run).await.unwrap()["cancelRequestedAt"].is_null());
+}
+
+#[tokio::test]
 async fn changing_the_profile_backend_does_not_remove_a_native_conversations_authority_check() {
     let f = granted().await;
     let mut node = native_node(&f, &json!([])).await;

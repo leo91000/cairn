@@ -435,6 +435,17 @@ fn allows_agent(
 }
 
 pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> Result<Value> {
+    authorize_origin_on_node(db, agent, source, None)
+}
+
+/// Existing environments must be authorized on their actual node, rather than
+/// any other node where a prospective new environment could run.
+pub(crate) fn authorize_origin_on_node(
+    db: &Db<'_>,
+    agent: &Value,
+    source: &Origin,
+    node_id: Option<&str>,
+) -> Result<Value> {
     let grant = provenance(db, source)?;
     if !native(agent) {
         return Ok(grant);
@@ -451,6 +462,9 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
     let mut run = json!({ "snapshot": { "agent": agent } });
     apply(&mut run, &grant);
     for node in db.nodes_boundary()? {
+        if node_id.is_some_and(|id| node["id"] != id) {
+            continue;
+        }
         if authority_allows(db, &run, &node)? {
             return Ok(grant);
         }
