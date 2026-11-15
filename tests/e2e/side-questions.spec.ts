@@ -68,14 +68,25 @@ test('asks before the first assistant reply appears', async ({ page, workspace }
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:side-before-reply', provider: 'claude' })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  await expect(page.locator('.activity-message')).toHaveCount(0)
-  await page.getByRole('button', { name: 'Ask a side question' }).click()
-  const panel = page.getByRole('dialog', { name: 'Side questions' })
-  await expect(panel.getByText(/managed-policy hooks can run/)).toBeVisible()
-  await panel.getByRole('textbox', { name: 'Your question', exact: true }).fill('What are you doing?')
-  await panel.getByRole('button', { name: 'Ask', exact: true }).click()
-  await expect(panel.getByText(/Side answer: What are you doing/)).toBeVisible()
-  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+  const messages = page.locator('.activity-message')
+  const user = page.getByText('You', { exact: true })
+  const replies = messages.filter({ hasNot: user })
+
+  try {
+    // Load the transcript first: pending user messages also use activity-message.
+    await expect(messages.filter({ has: user })).toBeVisible()
+    await expect(replies).toHaveCount(0)
+    await page.getByRole('button', { name: 'Ask a side question' }).click()
+    const panel = page.getByRole('dialog', { name: 'Side questions' })
+    await expect(panel.getByText(/managed-policy hooks can run/)).toBeVisible()
+    await panel.getByRole('textbox', { name: 'Your question', exact: true }).fill('What are you doing?')
+    await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+    await expect(panel.getByText(/Side answer: What are you doing/)).toBeVisible()
+    await expect(replies).toHaveCount(0)
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+  }
 })
 
 test('asks side questions about a running reply without steering, queuing or recording them', async ({ page, workspace }) => {
