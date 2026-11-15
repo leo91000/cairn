@@ -75,6 +75,10 @@ qualification must name a known journal-format reference; record both exact SHAs
 The reference selector validates a nonzero full SHA and archives that revision's
 fixture, without modifying its lifecycle assertions. A manual run can
 provide test evidence for the PR; it cannot supply reusable release provenance.
+For `validation-only` runs on a multi-commit branch, set `native-reference` to
+the full reviewed PR base SHA when its first parent contains an intermediate
+failure. The default remains the event base or first parent. The override is
+ignored by publication runs and still passes the immutable-SHA selector checks.
 
 For direct-storage development, `ci-diagnostic=storage`, `validation-only=true`
 and `backend-only=false` run the dedicated project-quota lifecycle test and image

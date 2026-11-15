@@ -366,6 +366,13 @@ jobs:
       - name: Measure bounded Native terminal-reason metadata
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
         run: node scripts/test-backend.mjs --workspace --lib native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture
+      - name: Prepare ublk for native device observation qualification
+        run: |
+          if ! sudo modprobe ublk_drv; then
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe ublk_drv
+          fi
+          test -c /dev/ublk-control
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
         run: node scripts/test-native-namespace.mjs --sudo

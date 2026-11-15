@@ -58,7 +58,14 @@ fn open_export_sync(path: &Path, root: &Path) -> Result<std::fs::File> {
 }
 
 pub async fn snapshot(path: &Path, root: &Path) -> Result<(tempfile::NamedTempFile, u64)> {
-    snapshot_to(path, root, tempfile::NamedTempFile::new()?, MAX_FILE).await
+    snapshot_to(
+        path,
+        root,
+        tempfile::NamedTempFile::new()?,
+        MAX_FILE,
+        &mut |_| Ok(()),
+    )
+    .await
 }
 
 pub(crate) async fn snapshot_in(
@@ -66,11 +73,13 @@ pub(crate) async fn snapshot_in(
     root: &Path,
     directory: &Path,
     budget: u64,
+    mut admit: impl FnMut(u64) -> Result<()> + Send,
 ) -> Result<(tempfile::NamedTempFile, u64)> {
+    admit(5120)?;
     let temporary = tempfile::Builder::new()
         .prefix("native-artifact-")
         .tempfile_in(directory)?;
-    snapshot_to(path, root, temporary, budget.min(MAX_FILE)).await
+    snapshot_to(path, root, temporary, budget.min(MAX_FILE), &mut admit).await
 }
 
 async fn snapshot_to(
@@ -78,6 +87,7 @@ async fn snapshot_to(
     root: &Path,
     temporary: tempfile::NamedTempFile,
     maximum: u64,
+    admit: &mut (impl FnMut(u64) -> Result<()> + Send),
 ) -> Result<(tempfile::NamedTempFile, u64)> {
     use std::os::unix::fs::MetadataExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -90,11 +100,22 @@ async fn snapshot_to(
         ));
     }
     let mut output = tokio::fs::File::from_std(temporary.reopen()?);
-    let size = tokio::io::copy(
-        &mut (&mut source).take(maximum.saturating_add(1)),
-        &mut output,
-    )
-    .await?;
+    let mut size = 0u64;
+    let mut buffer = [0; 65536];
+    loop {
+        let count = source.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        size = size.saturating_add(count as u64);
+        if size > maximum {
+            return Err(Error::unavailable(
+                "Insufficient disk budget for artifact staging.",
+            ));
+        }
+        admit((count as u64).div_ceil(4096).saturating_mul(4096))?;
+        output.write_all(&buffer[..count]).await?;
+    }
     let after = source.metadata().await?;
     if size > maximum
         || size != before.len()
@@ -283,6 +304,29 @@ pub(crate) mod tests {
         sync::{LazyLock, Mutex, mpsc},
         time::Duration,
     };
+
+    #[tokio::test]
+    async fn checked_snapshot_refuses_initial_and_mid_copy_admission_without_partial_files() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let exports = root.path().join("exports");
+        std::fs::create_dir(&exports).unwrap();
+        std::fs::write(&source, vec![42; 200_000]).unwrap();
+        for refusal in [0, 2] {
+            let mut checks = 0;
+            let result = snapshot_in(&source, root.path(), &exports, MAX_FILE, |_| {
+                if checks == refusal {
+                    return Err(Error::new(507, "Physical reserve reached."));
+                }
+                checks += 1;
+                Ok(())
+            })
+            .await;
+            assert_eq!(result.unwrap_err().status, 507);
+            assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 0);
+            assert_eq!(std::fs::metadata(&source).unwrap().len(), 200_000);
+        }
+    }
 
     struct Gate {
         started: mpsc::Sender<()>,

@@ -130,6 +130,7 @@ pub(super) fn require_no_mounts(root: &Path) -> Result<()> {
 /// A new execution invalidates restore idempotence after acquiring exclusive
 /// ownership. Retrying an old backup after later work must really restore it.
 pub async fn execution_ownership(state: &Path, run: &str) -> Result<crate::file_lock::Guard> {
+    super::cleanup::check(state, run)?;
     let root = directory(state, run)?;
     private_dir(&root).await?;
     let owner = crate::file_lock::exclusive(

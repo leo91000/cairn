@@ -127,6 +127,7 @@ pub struct Volume {
     pub(crate) assignment: Arc<Assignment>,
     pub stop: CancellationToken,
     directory: PathBuf,
+    maintenance: Option<tokio::runtime::Handle>,
     policy: RwLock<Policy>,
     task_limit: AtomicU64,
     task_usage: Mutex<Option<TaskUsage>>,
@@ -301,6 +302,7 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
         assignment,
         stop,
         directory: directory.to_owned(),
+        maintenance: tokio::runtime::Handle::try_current().ok(),
         policy: RwLock::new(policy),
         task_limit: AtomicU64::new(u64::MAX),
         task_usage: Mutex::new(None),
@@ -333,7 +335,7 @@ static CONSOLIDATIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_ne
 /// seal a crash-consistent boundary once the journal exceeds its bound, as
 /// a periodic capture did. The guest keeps running; the task ends with the volume.
 fn monitor_consolidation(volume: &Arc<Volume>, journal_threshold: u64) {
-    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+    let Some(runtime) = volume.maintenance.as_ref() else {
         return;
     };
     if volume.consolidates()
@@ -400,7 +402,10 @@ async fn consolidate(disk: Arc<LazyDisk>) -> bool {
     while disk.sealed_pending() {
         let permit = tokio::select! {
             () = stop.cancelled() => return true,
-            permit = CONSOLIDATIONS.acquire() => match permit {
+            permit = async {
+                if ISOLATED_NATIVE.get() { return Ok(None); }
+                CONSOLIDATIONS.acquire().await.map(Some)
+            } => match permit {
                 Ok(permit) => permit,
                 Err(_) => return false,
             }
@@ -490,12 +495,28 @@ pub async fn replacement(directory: &Path) -> Result<Replacement> {
     }
 }
 
+thread_local! {
+    // Native physical workers already have a bounded per-disk scheduler. A
+    // kernel-blocked call there must not consume the VM/shared metadata pool.
+    static ISOLATED_NATIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn isolated_native_io() {
+    ISOLATED_NATIVE.set(true);
+}
+
 async fn blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
     static IO: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+    if ISOLATED_NATIVE.get() {
+        // This runtime's blocking pool belongs solely to the physical worker.
+        // Leave its event loop live so consolidation can relieve write pressure.
+        return tokio::task::spawn_blocking(operation)
+            .await
+            .map_err(Error::internal)?;
+    }
     let permit = IO.acquire().await.map_err(Error::internal)?;
-
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         operation()
@@ -677,7 +698,7 @@ impl Volume {
         let disk = self.disk.clone();
         let generation = blocking(move || Ok(disk.seal_completed()?)).await?;
         if self.consolidates()
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+            && let Some(runtime) = self.maintenance.as_ref()
         {
             runtime.spawn(consolidate(self.disk.clone()));
         }
@@ -694,8 +715,10 @@ impl Volume {
         if self.disk.journal_bytes() > 0 {
             self.seal().await?;
         }
-        if self.disk.sealed_pending() {
-            tokio::spawn(consolidate(self.disk.clone()));
+        if self.disk.sealed_pending()
+            && let Some(runtime) = self.maintenance.as_ref()
+        {
+            runtime.spawn(consolidate(self.disk.clone()));
         }
         Ok(())
     }
@@ -965,8 +988,11 @@ impl Volume {
                         self.flush_budget_failed.store(true, Ordering::Release);
                         continue;
                     }
-                    let Ok(permit) = CONSOLIDATIONS.try_acquire() else {
-                        continue;
+                    let permit = if ISOLATED_NATIVE.get() {
+                        None
+                    } else {
+                        let Ok(permit) = CONSOLIDATIONS.try_acquire() else { continue; };
+                        Some(permit)
                     };
                     let volume = self.clone();
                     let result = tokio::task::spawn_blocking(move || -> io::Result<bool> {
@@ -1171,6 +1197,46 @@ mod tests {
 
     fn prepared_context() -> Value {
         json!({ "unassigned": true, "policy": { "reserveMiB": 64, "reservePercent": 1 } })
+    }
+
+    #[tokio::test]
+    async fn isolated_native_workers_do_not_consume_shared_io_permits() {
+        let (entered, received) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let released = Arc::new(Mutex::new(released));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let entered = entered.clone();
+            let released = released.clone();
+            workers.push(std::thread::spawn(move || {
+                isolated_native_io();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime
+                    .block_on(blocking(move || {
+                        entered.send(()).unwrap();
+                        released.lock().unwrap().recv().unwrap();
+                        Ok(())
+                    }))
+                    .unwrap();
+            }));
+        }
+        for _ in 0..8 {
+            received
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+        }
+        let healthy =
+            tokio::time::timeout(std::time::Duration::from_secs(1), blocking(|| Ok(42))).await;
+        for _ in 0..8 {
+            release.send(()).unwrap();
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(healthy.unwrap().unwrap(), 42);
     }
 
     #[tokio::test]

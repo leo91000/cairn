@@ -79,7 +79,7 @@ pub async fn fence_process(identity: &ProcessIdentity) -> Result<()> {
 
 /// Observe the existing attempt before stopping it or deciding whether to replay.
 /// This never acquires a workspace, starts an agent, or replays retained output.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum ObservationAction {
     Reserve,
     Release,
@@ -240,7 +240,26 @@ async fn fence_attempt_authorized(
             .unwrap_or(run_id);
         let runner_url = crate::nodes::transport::url_for_node(s, node.as_deref());
         authorize.recheck().await?;
-        fence_runner(s, &runner_url, attempt, &authorize).await?;
+        if let Some(result) = fence_runner(s, &runner_url, attempt, &authorize).await? {
+            let id = run_id.to_owned();
+            let attempt = attempt.to_owned();
+            let cleanup_authorize = authorize.clone();
+            s.store
+                .transaction(move |db| {
+                    cleanup_authorize.check_local(db)?;
+                    if let Some(mut saved) = RunCheckpoint::load_in(db, &id)?
+                        && saved.runner_id() == Some(attempt.as_str())
+                        && saved
+                            .prepared()
+                            .is_some_and(|plan| plan["backend"] == "native")
+                    {
+                        saved.record_controller_result(db, &id, &attempt, Some(result))?;
+                        saved.store_in(db, &id)?;
+                    }
+                    Ok(())
+                })
+                .await?;
+        }
     }
     let id = run_id.to_owned();
     let expected = expected
@@ -316,7 +335,7 @@ async fn fence_runner(
     runner_url: &str,
     attempt: &str,
     authorize: &crate::authorization::Authorization,
-) -> Result<()> {
+) -> Result<Option<crate::runner::ControllerResult>> {
     authorize.recheck().await?;
     if runner_url.is_empty() {
         return Err(Error::unavailable(
@@ -332,14 +351,23 @@ async fn fence_runner(
         .timeout(Duration::from_secs(10))
         .send()
         .await;
-    let confirmed =
-        response.is_ok_and(|response| response.status().is_success() || response.status() == 404);
+    let mut cleanup = None;
+    let confirmed = match response {
+        Ok(response) if response.status().is_success() => {
+            if let Ok(value) = response.json::<Value>().await {
+                cleanup = crate::runner::client_cleanup_result(&value, attempt);
+            }
+            true
+        }
+        Ok(response) if response.status() == 404 => true,
+        _ => false,
+    };
     if !confirmed && !node_lease_expired(s, attempt).await? {
         return Err(Error::unavailable(
             "Waiting for the previous VM execution lease to expire.",
         ));
     }
-    Ok(())
+    Ok(cleanup)
 }
 
 /// An unreachable runner is only presumed stopped once its node lease has lapsed.

@@ -85,6 +85,7 @@ pub(crate) struct Admission {
     policy: storage::policy::Policy,
     limit: u64,
     initial_target: u64,
+    reservation: u64,
     submitted: u64,
     observation: Observation,
 }
@@ -130,6 +131,7 @@ impl Admission {
             policy: policy.clone(),
             limit,
             initial_target,
+            reservation: 0,
             submitted: 0,
             observation: Observation {
                 at: Instant::now(),
@@ -138,6 +140,12 @@ impl Admission {
                 outstanding: 0,
             },
         })
+    }
+
+    pub fn with_reservation(mut self, bytes: u64) -> Self {
+        self.reservation = bytes;
+        self.observation.used = self.observation.used.saturating_sub(bytes);
+        self
     }
 
     pub fn admit(&mut self, allocation: u64) -> Result<()> {
@@ -158,7 +166,7 @@ impl Admission {
 
         if self.observation.at.elapsed() >= Duration::from_millis(250) {
             let started = Instant::now();
-            let used = disk::usage_sync(&self.data, &self.state)?;
+            let used = disk::usage_sync(&self.data, &self.state)?.saturating_sub(self.reservation);
             let growth = allocated(&self.target)?.saturating_sub(self.initial_target);
             // Delayed allocation and small-file overhead must not erase a
             // debit merely because a new usage sample does not show it yet.
@@ -317,6 +325,44 @@ mod tests {
         .await
         .unwrap();
         assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn own_reservation_is_not_charged_twice_while_foreign_reservations_remain() {
+        let state = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let own = super::super::disk::Preparation::reserve(
+            state.path(),
+            &crate::config::id(),
+            3 * disk::MIB,
+        )
+        .await
+        .unwrap();
+        let foreign = super::super::disk::Preparation::reserve(
+            state.path(),
+            &crate::config::id(),
+            2 * disk::MIB,
+        )
+        .await
+        .unwrap();
+        let used = disk::usage_sync(data.path(), state.path()).unwrap();
+        let policy =
+            storage::policy::for_node(&serde_json::json!({"reserveMiB": 64, "reservePercent": 1}))
+                .unwrap();
+        let target = state.path().join("incoming");
+        let mut admission = Admission::new(
+            data.path(),
+            state.path(),
+            &target,
+            state.path(),
+            used + disk::MIB,
+            &policy,
+        )
+        .unwrap()
+        .with_reservation(own.bytes);
+        admission.admit(own.bytes).unwrap();
+        assert_eq!(admission.admit(1).unwrap_err().status, 507);
+        drop((own, foreign));
     }
 
     #[test]

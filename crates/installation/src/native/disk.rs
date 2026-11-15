@@ -25,9 +25,22 @@ pub(crate) async fn used(data: &Path, state: &Path) -> Result<u64> {
         .map_err(Error::internal)?
 }
 
+pub(crate) async fn actual_used(data: &Path, state: &Path) -> Result<u64> {
+    let (data, state) = (data.to_owned(), state.to_owned());
+    tokio::task::spawn_blocking(move || measure_usage(&data, &state, false))
+        .await
+        .map_err(Error::internal)?
+}
+
+/// Admission includes reserved incoming bytes; supervision uses only bytes
+/// already materialized, so a copy cannot be charged twice and stop a peer.
+pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
+    measure_usage(data, state, true)
+}
+
 /// Count file-backed staging conservatively, but charge journal/cache blocks
 /// by allocated bytes. Mounted views refer to those same blocks and add no charge.
-pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
+fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Result<u64> {
     fn size(
         path: &Path,
         physical: bool,
@@ -98,6 +111,35 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
                     )?);
                 }
             }
+        } else if name == "native-preparations" {
+            if !include_reservations {
+                continue;
+            }
+            for reservation in std::fs::read_dir(entry.path())? {
+                let reservation = reservation?;
+                if reservation
+                    .file_name()
+                    .to_str()
+                    .is_none_or(|name| crate::validation::uuid(name).is_err())
+                {
+                    continue;
+                }
+                let kind = match reservation.file_type() {
+                    Ok(kind) => kind,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if !kind.is_file() {
+                    return Err(Error::conflict("Invalid native preparation reservation."));
+                }
+                let text = match std::fs::read_to_string(reservation.path()) {
+                    Ok(text) => text,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let bytes = text.parse::<u64>().map_err(Error::internal)?;
+                used = used.saturating_add(bytes);
+            }
         } else {
             let physical = name == "native-bases"
                 || name == "native-data"
@@ -108,6 +150,64 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
         }
     }
     Ok(used)
+}
+
+/// Incoming bytes remain charged while the copy's physical worker is alive.
+pub(super) struct Preparation {
+    path: std::path::PathBuf,
+    pub bytes: u64,
+}
+
+impl Preparation {
+    /// Caller serializes this publication with the native storage pool gate.
+    pub async fn reserve(state: &Path, attempt: &str, bytes: u64) -> Result<Self> {
+        crate::validation::uuid(attempt)?;
+        let root = state.join("native-preparations");
+        crate::skills::private_dir(&root).await?;
+        let path = root.join(attempt);
+        if path.try_exists()? {
+            return Err(Error::conflict("Native preparation is already reserved."));
+        }
+        super::atomic_write(&path, bytes.to_string().as_bytes()).await?;
+        Ok(Self { path, bytes })
+    }
+}
+
+impl Drop for Preparation {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::error!(%error, "Native preparation reservation remains retained");
+        }
+    }
+}
+
+pub(super) fn recover_preparations(
+    state: &Path,
+    pending: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    let root = state.join("native-preparations");
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(attempt) = name.to_str() else {
+            continue;
+        };
+        if crate::validation::uuid(attempt).is_err() {
+            continue;
+        }
+        if pending.values().any(|id| id == attempt) {
+            continue;
+        }
+        std::fs::remove_file(entry.path())?;
+    }
+    Ok(())
 }
 
 /// Controller ownership is already exclusive at startup. Only this process's
@@ -259,6 +359,72 @@ mod tests {
         assert_eq!(usage_sync(&data, &state).unwrap(), 4096);
         std::fs::remove_file(archive).unwrap();
         assert_eq!(usage_sync(&data, &state).unwrap(), 4096);
+    }
+
+    #[tokio::test]
+    async fn releasing_reservations_does_not_fail_unrelated_usage_inventory() {
+        let state = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (started, wait) = std::sync::mpsc::channel();
+        let path = state.path().to_owned();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let _ = started.send(());
+                for _ in 0..500 {
+                    let reservation = Preparation::reserve(&path, &crate::config::id(), 4096)
+                        .await
+                        .unwrap();
+                    drop(reservation);
+                }
+            });
+        });
+        wait.recv().unwrap();
+        for _ in 0..500 {
+            usage_sync(data.path(), state.path()).unwrap();
+        }
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn materialized_copy_is_not_charged_against_its_incoming_reservation() {
+        let state = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let baseline = std::fs::File::create(data.path().join("existing")).unwrap();
+        baseline.set_len(700 * MIB).unwrap();
+        let reservation = Preparation::reserve(state.path(), &crate::config::id(), 323 * MIB)
+            .await
+            .unwrap();
+        let copied = std::fs::File::create(data.path().join("copied")).unwrap();
+        copied.set_len(10 * MIB).unwrap();
+        assert_eq!(
+            actual_used(data.path(), state.path()).await.unwrap(),
+            710 * MIB
+        );
+        assert!(used(data.path(), state.path()).await.unwrap() > 1024 * MIB);
+        assert_eq!(
+            available(1024 * MIB, used(data.path(), state.path()).await.unwrap()),
+            0
+        );
+        drop(reservation);
+        assert_eq!(used(data.path(), state.path()).await.unwrap(), 710 * MIB);
+    }
+
+    #[tokio::test]
+    async fn simultaneous_preparations_charge_incoming_bytes_until_their_copy_finishes() {
+        let state = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let first = Preparation::reserve(state.path(), &crate::config::id(), 700 * MIB)
+            .await
+            .unwrap();
+        let charged = used(data.path(), state.path()).await.unwrap();
+        assert!(charged >= 700 * MIB);
+        assert!(available(1024 * MIB, charged) < 700 * MIB);
+        drop(first);
+        assert!(used(data.path(), state.path()).await.unwrap() < MIB);
     }
 
     #[tokio::test]

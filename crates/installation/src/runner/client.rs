@@ -280,12 +280,40 @@ impl TerminalReason {
 
 /// Read only the terminal result of this exact attempt. Both controller backends
 /// publish it after finalization and physical ownership release.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ControllerResult {
     pub code: i32,
     pub finalization_failed: bool,
     pub physical_finalized: bool,
     pub terminal_reason: Option<TerminalReason>,
+    pub native_cleanup: Option<String>,
+}
+
+pub(crate) fn cleanup_result(value: &Value, attempt: &str) -> Option<ControllerResult> {
+    if value["StatusCode"] != super::CONTROLLER_FAILED
+        || value["FinalizationFailed"] != true
+        || value["PhysicalFinalized"] == true
+        || value["NativeCleanup"]["attemptId"] != attempt
+        || value["NativeCleanup"]["workloadFenced"] != true
+    {
+        return None;
+    }
+    let message = value["NativeCleanup"]["message"]
+        .as_str()
+        .filter(|text| text.len() <= 8192)?;
+    Some(ControllerResult {
+        code: super::CONTROLLER_FAILED,
+        finalization_failed: true,
+        physical_finalized: false,
+        terminal_reason: None,
+        native_cleanup: Some(
+            message
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(2048)
+                .collect(),
+        ),
+    })
 }
 
 pub(crate) async fn wait_for_exit(
@@ -320,7 +348,10 @@ pub(crate) async fn wait_for_exit(
     } else {
         None
     };
+    let expected = url.rsplit('/').next().unwrap_or_default();
+    let native_cleanup = cleanup_result(&value, expected).and_then(|result| result.native_cleanup);
     Ok(ControllerResult {
+        native_cleanup,
         code,
         finalization_failed,
         physical_finalized,
@@ -667,6 +698,24 @@ mod tests {
 #[cfg(test)]
 mod physical_result_tests {
     use super::*;
+
+    #[test]
+    fn cleanup_evidence_is_attempt_bound_and_never_physical_finalization() {
+        let attempt = crate::config::id();
+        let mut value = json!({"StatusCode":70,"FinalizationFailed":true,"NativeCleanup":{"attemptId":attempt,"workloadFenced":true,"message":"disk held by valkey pid 42"}});
+        let result = cleanup_result(&value, &attempt).unwrap();
+        assert!(!result.physical_finalized);
+        assert_eq!(
+            result.native_cleanup.as_deref(),
+            Some("disk held by valkey pid 42")
+        );
+        assert!(cleanup_result(&value, &crate::config::id()).is_none());
+        value["PhysicalFinalized"] = true.into();
+        assert!(cleanup_result(&value, &attempt).is_none());
+        value["PhysicalFinalized"] = false.into();
+        value["NativeCleanup"]["workloadFenced"] = false.into();
+        assert!(cleanup_result(&value, &attempt).is_none());
+    }
 
     #[tokio::test]
     async fn terminal_reason_requires_a_closed_value_and_failed_physically_finalized_status() {

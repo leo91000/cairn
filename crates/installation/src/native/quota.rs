@@ -251,9 +251,30 @@ pub(super) fn usage(root_path: &Path) -> Result<u64> {
     Ok(quota.space)
 }
 
+async fn allocator_lock(state: &Path) -> Result<crate::file_lock::Guard> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match crate::file_lock::exclusive(
+                &state.join("native-project-allocation.lock"),
+                "Native project allocation is busy.",
+            ) {
+                Ok(owner) => return Ok(owner),
+                Err(error) if error.is_conflict() => {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await
+    .map_err(|_| Error::unavailable("Native project allocation timed out; ownership retained."))?
+}
+
 pub(super) async fn prepare(state: &Path, root: &Path, bytes: u64) -> Result<()> {
     let counter = state.join("native-project-next");
-    // The controller's process-safe storage gate serializes this allocator.
+    // Mount workers do not hold the global storage gate. Serialize identity
+    // allocation here across runtimes/processes, including durable publication.
+    let _allocator = allocator_lock(state).await?;
     // Consumed IDs are never reused, including after interrupted creation.
     let file = open(root)?;
     if filesystem(&file)?.f_type != libc::EXT4_SUPER_MAGIC {
@@ -501,6 +522,24 @@ mod tests {
     use std::{fs::OpenOptions, io::Write};
     use tokio::io::{AsyncBufReadExt, BufReader};
 
+    #[tokio::test]
+    async fn project_allocator_is_exclusive_across_independent_waiters() {
+        let state = tempfile::tempdir().unwrap();
+        let held = allocator_lock(state.path()).await.unwrap();
+        let waiting = allocator_lock(state.path());
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(held);
+        let _next = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     #[test]
     fn filesystem_identity_survives_device_renumbering_but_rejects_a_replaced_tree() {
         let root = tempfile::tempdir().unwrap();
@@ -607,6 +646,32 @@ mod tests {
             std::env::var_os("CAIRN_NATIVE_QUOTA_TEST_STATE").expect("dedicated fixture state"),
         );
         require(&state).unwrap();
+        let mut concurrent = Vec::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            concurrent.push(tokio::spawn(async move {
+                let control = state.join("native").join(crate::config::id());
+                crate::skills::private_dir(&control).await.unwrap();
+                let workload = super::super::workspace::workload_for_control(&control).unwrap();
+                crate::skills::private_dir(&workload).await.unwrap();
+                prepare(&state, &workload, 4 * 1024 * 1024).await.unwrap();
+                let project = attributes(&open(&workload).unwrap()).unwrap().project;
+                (control, project)
+            }));
+        }
+        let mut allocated = std::collections::HashSet::new();
+        let mut controls = Vec::new();
+        for task in concurrent {
+            let (control, project) = task.await.unwrap();
+            assert!(
+                allocated.insert(project),
+                "Concurrent environments shared a project quota"
+            );
+            controls.push(control);
+        }
+        for control in controls {
+            retire(&control).await.unwrap();
+        }
         let root = state.join("native").join(crate::config::id());
         crate::skills::private_dir(&root).await.unwrap();
         let foreign = state.join("native").join(crate::config::id());

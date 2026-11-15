@@ -88,6 +88,46 @@ impl Controller {
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_physical_worker_does_not_delay_health_or_cancellation() {
+        struct Stalled(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+        #[async_trait::async_trait]
+        impl super::super::super::cleanup::Work for Stalled {
+            async fn run(&mut self) -> Result<()> {
+                self.0.send(()).unwrap();
+                self.1.recv().unwrap();
+                Ok(())
+            }
+        }
+        let (_root, controller) = super::super::tests::fixture().await;
+        let (entered, received) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let mut ticket = controller
+            .cleanup
+            .start(
+                &controller.state,
+                &crate::config::id(),
+                &crate::config::id(),
+                Stalled(entered, blocked),
+            )
+            .unwrap();
+        received.recv_timeout(Duration::from_secs(3)).unwrap();
+        let health = tokio::time::timeout(Duration::from_millis(100), controller.health()).await;
+        controller.stop.cancel();
+        let shutting_down = controller.clone();
+        tokio::time::timeout(Duration::from_millis(100), async move {
+            drop(shutting_down);
+        })
+        .await
+        .unwrap();
+        release.send(()).unwrap();
+        assert_eq!(health.unwrap()["backend"], "native");
+        assert!(matches!(
+            ticket.wait(Duration::from_secs(3)).await,
+            super::super::super::cleanup::Outcome::Complete
+        ));
+    }
+
     #[tokio::test]
     async fn retained_credit_sampling_cannot_reject_a_stopped_workspace_delete() {
         use std::io::Write;

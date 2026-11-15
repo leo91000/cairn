@@ -9,7 +9,7 @@ responsibility.
 
 ## Retained native directories and VM images
 
-[ADR-0087](adr/0087-native-directories-and-direct-vm-images.md) defines the current
+[ADR-0088](adr/0088-native-directories-and-direct-vm-images.md) defines the current
 formats. Native working files, home, private Docker data and managed temporary
 files live in ordinary directories under `state/native-data/<run>/`. This is one
 dedicated ext4 filesystem with project quotas, separate from controller metadata

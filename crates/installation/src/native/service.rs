@@ -1,4 +1,5 @@
 //! Native implementation of the existing authenticated node controller protocol.
+mod cleanup;
 mod exclusive;
 #[cfg(test)]
 mod exclusive_tests;
@@ -91,7 +92,14 @@ async fn erase_native_attempts(
             return Err(Error::conflict("A native attempt is still active."));
         }
         atomic_write(&controller.file(&id, "stopped"), b"1").await?;
-        for extension in ["active", "vm.json", "log", "lease", "terminal"] {
+        for extension in [
+            "active",
+            "vm.json",
+            "log",
+            "lease",
+            "terminal",
+            "cleanup-result",
+        ] {
             require_removed(tokio::fs::remove_file(controller.file(&id, extension)).await)?;
         }
         require_removed(
@@ -281,6 +289,12 @@ impl StorageClose {
         &mut self,
         closing: impl std::future::Future<Output = Result<block::Completion>>,
     ) -> Result<block::Completion> {
+        self.drain().await?;
+        // The clean backend namespace removes host mount-inventory coupling.
+        closing.await
+    }
+
+    pub(super) async fn drain(&mut self) -> Result<()> {
         if !self.mutations_drained {
             // Cancellation is already published and the workload is fenced.
             // Drain admitted mutations once; later ones observe cancellation.
@@ -294,8 +308,7 @@ impl StorageClose {
             drop(admitted);
             self.mutations_drained = true;
         }
-        // The clean backend namespace removes host mount-inventory coupling.
-        closing.await
+        Ok(())
     }
 }
 
@@ -396,6 +409,7 @@ struct Controller {
     bootstrap: bootstrap::Registry,
     stop: CancellationToken,
     identity: Arc<systemd::Identity>,
+    cleanup: super::cleanup::Registry,
 }
 
 impl Controller {
@@ -638,6 +652,7 @@ impl Controller {
         let trace = observation.trace();
         trace.phase(Phase::Plan);
         let plan = self.plan(id).await?;
+        super::cleanup::check(&self.state, text(&plan, "runId"))?;
         observation.context(text(&plan, "runId"), plan["runtimeId"].as_str());
         mode::check_plan(&*self.mode.lock().await, &plan)?;
         let resources: crate::nodes::Resources = serde_json::from_value(plan["resources"].clone())?;
@@ -655,10 +670,11 @@ impl Controller {
         trace.phase(Phase::StorageAdmission);
         let _disk = self.start_storage(id, &plan).await?;
         trace.phase(Phase::PoolAccounting);
-        self.check_preparation_space(&plan).await?;
-        let root = workspace::directory(&self.state, text(&plan, "runId"))?;
+        let incoming = self.check_preparation_space(&plan).await?;
+        let preparation = disk::Preparation::reserve(&self.state, id, incoming).await?;
         trace.phase(Phase::WorkspaceOwnership);
-        let owner = workspace::execution_ownership(&self.state, text(&plan, "runId")).await?;
+        let owner =
+            Arc::new(workspace::execution_ownership(&self.state, text(&plan, "runId")).await?);
         let stop = self.stop.child_token();
         let live_access = Arc::new(Mutex::new(()));
         atomic_write(&self.file(id, "run"), text(&plan, "runId").as_bytes()).await?;
@@ -682,128 +698,159 @@ impl Controller {
             resources.disk_mi_b.saturating_mul(disk::MIB),
         );
         let (controller, id) = (self.clone(), id.to_owned());
-        let observation = std::mem::take(observation);
+        let observation = Arc::new(std::mem::take(observation));
         let (lease_controller, lease_id, lease_stop) =
             (controller.clone(), id.clone(), stop.clone());
         tokio::spawn(async move {
             lease_controller.watch_lease(&lease_id, lease_stop).await;
         });
-        tokio::spawn(async move {
-            let result = controller
-                .execute(&id, &plan, stop.clone(), &observation)
-                .await;
+        super::cleanup::spawn(async move {
+            let execution_guard = Arc::new(Mutex::new(()));
+            let launch_guard = Arc::new(Mutex::new(()));
+            let execution_launch = launch_guard.clone();
+            let execution_owner = execution_guard.clone().lock_owned().await;
+            let execution_controller = controller.clone();
+            let execution_id = id.clone();
+            let execution_plan = plan.clone();
+            let execution_stop = stop.clone();
+            let execution_workspace = owner.clone();
+            let execution_observation = observation.clone();
+            let executing = super::cleanup::spawn(async move {
+                let _execution_owner = execution_owner;
+                execution_controller
+                    .execute(
+                        &execution_id,
+                        &execution_plan,
+                        execution_stop,
+                        &execution_observation,
+                        execution_workspace,
+                        preparation,
+                        execution_launch,
+                    )
+                    .await
+            });
+            let result = match executing {
+                Ok(mut result) => {
+                    tokio::select! {
+                        result = &mut result => result.map_err(Error::internal).and_then(|result| result),
+                        () = stop.cancelled() => {
+                            match tokio::time::timeout(Duration::from_secs(20), result).await {
+                                Ok(result) => result.map_err(Error::internal).and_then(|result| result),
+                                Err(_) => Err(Error::unavailable("Native filesystem operation did not settle after cancellation; cleanup retains ownership.")),
+                            }
+                        }
+                    }
+                }
+                Err(error) => Err(error),
+            };
             if result.is_err() {
                 observation.rejected();
             }
             // The observation ends at submission, or at an interrupted bootstrap;
             // it never waits for fencing, filesystem close, or a telemetry sink.
             drop(observation);
-            // Reject in-flight file mutations before flushing/unmounting. Any
-            // already admitted access retains both its pool and attempt guards.
+            // Reject in-flight file mutations before flushing/unmounting.
+            // Already admitted access retains its attempt guard on its worker.
             stop.cancel();
+            let launch_fence = launch_guard.lock().await;
             // The physical owner lock and active marker survive any uncertain stop.
             while let Err(error) = systemd::stop(&id).await {
                 let _ = controller.abort_disk(&id).await;
                 tracing::error!(attempt = id, message = %error.message, "Native workload fencing must be retried");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
+            drop(launch_fence);
             let protection = controller
                 .active
                 .lock()
                 .await
                 .get_mut(&id)
                 .and_then(|attempt| attempt.protection.take());
-            if let Some(protection) = protection {
-                // A late freeze/thaw must finish before this mount's leases or
-                // volume can be released to a following attempt.
-                let _ = protection.await;
-            }
             let mut code = controller.execution_status(&id, result).await;
-            let mut finalization_failed = false;
-            // Deliver the result path consumed by the node connector.
-            let output = block::view(&controller.state, text(&plan, "runId"))
+            let finalization_failed;
+            let mounted = controller
+                .mounted
+                .lock()
                 .await
-                .map_or_else(|_| root.join("data/output"), |view| view.output);
-            let result = output.join("result.md");
-            if let Ok(file) = crate::artifacts::file::open_export(&result, &output).await {
-                let file = tokio::fs::File::from_std(file);
-                let mut bytes = Vec::new();
-                if file.take(1_000_001).read_to_end(&mut bytes).await.is_ok()
-                    && bytes.len() <= 1_000_000
-                {
-                    let target = controller
-                        .data
-                        .join("runs")
-                        .join(text(&plan, "runId"))
-                        .join("output/result.md");
-                    let _ = atomic_write(&target, &bytes).await;
-                }
-            }
-            {
-                let mounted = {
-                    controller
-                        .mounted
-                        .lock()
-                        .await
-                        .get(text(&plan, "runId"))
-                        .cloned()
-                };
-                let had_mount = mounted.is_some();
-                if let Some(mounted) = mounted {
-                    let mut storage_close = StorageClose::new(live_access);
-                    loop {
-                        let result = storage_close
-                            .finish(async {
-                                let _ingress = mounted.ingress.lock().await;
-                                mounted.mount.lock().await.close().await
-                            })
-                            .await;
-                        match result {
-                            Ok(completion) => {
-                                (code, finalization_failed) = completion_status(code, completion);
-                                if finalization_failed {
-                                    tracing::error!(
-                                        attempt = id,
-                                        "Native filesystem could not be flushed; the durable crash prefix was retained"
-                                    );
-                                    let exit = exit_record(code, true, None);
-                                    if !matches!(
-                                        tokio::time::timeout(
-                                            Duration::from_secs(1),
-                                            atomic_write(
-                                                &controller.file(&id, "exit"),
-                                                exit.as_bytes()
-                                            )
-                                        )
-                                        .await,
-                                        Ok(Ok(()))
-                                    ) {
-                                        tracing::error!(
-                                            attempt = id,
-                                            "Native flush evidence could not be saved before physical cleanup"
-                                        );
-                                    }
-                                }
-                                break;
-                            }
-                            Err(error) => {
-                                tracing::error!(attempt = id, %error, "Native filesystem must finish flushing and unmounting before ownership release");
-                                tokio::time::sleep(Duration::from_secs(2)).await;
-                            }
-                        }
-                    }
-                }
-                controller.mounted.lock().await.remove(text(&plan, "runId"));
-                while !had_mount
-                    && let Err(error) =
-                        block::recover_completed(&controller.state, text(&plan, "runId"), &id).await
-                {
-                    tracing::error!(attempt = id, %error, "Native completed generation must be recovered before ownership release");
+                .get(text(&plan, "runId"))
+                .cloned();
+            let suspension = controller
+                .active
+                .lock()
+                .await
+                .get(&id)
+                .expect("owned native attempt")
+                .suspension
+                .clone();
+            let completion_lock = Arc::new(Mutex::new(()));
+            let work = cleanup::CloseWork {
+                protection,
+                mounted,
+                mounts: controller.mounted.clone(),
+                storage_close: StorageClose::new(live_access),
+                completion_lock: completion_lock.clone(),
+                execution_guard,
+                _owner: Some(owner.clone()),
+                data: controller.data.clone(),
+                exported: false,
+                suspension,
+                state: controller.state.clone(),
+                run: text(&plan, "runId").into(),
+                attempt: id.clone(),
+                completion: None,
+            };
+            let closing =
+                controller
+                    .cleanup
+                    .start(&controller.state, text(&plan, "runId"), &id, work);
+            let outcome = match closing {
+                Ok(mut ticket) => ticket.wait(super::cleanup::WAIT).await,
+                Err(error) => super::cleanup::Outcome::Pending(error.message),
+            };
+            if let super::cleanup::Outcome::Pending(message) = outcome {
+                let _completion = completion_lock.lock().await;
+                while let Err(error) = controller.record_cleanup_pending(&id, &message).await {
+                    tracing::error!(attempt = id, %error, "Native cleanup fence must be persisted before releasing workload accounting");
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
+                let suspension = controller
+                    .active
+                    .lock()
+                    .await
+                    .get(&id)
+                    .map(|attempt| attempt.suspension.clone());
+                if let Some(suspension) = suspension {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), suspension.finish()).await;
+                }
+                if controller
+                    .file(&id, "cleanup-result")
+                    .try_exists()
+                    .unwrap_or(false)
+                {
+                    let _ = tokio::fs::remove_file(controller.file(&id, "active")).await;
+                }
+                controller.active.lock().await.remove(&id);
+                controller.capacity.lock().await.attempts.remove(&id);
+                controller.leases.lock().await.remove(&id);
+                controller.changed.notify_waiters();
+                return;
             }
-            // Release physical ownership before reporting completion to a replacement.
-            drop(owner);
+            // A worker only completes after the existing close phases and its
+            // physical ownership have ended.
+            controller.mounted.lock().await.remove(text(&plan, "runId"));
+            match tokio::fs::read(controller.file(&id, "cleanup-result"))
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<cleanup::Completed>(&bytes).ok())
+            {
+                Some(completion) => {
+                    (code, finalization_failed) = completion_status(code, completion.completion);
+                }
+                None => {
+                    code = crate::runner::CONTROLLER_FAILED;
+                    finalization_failed = true;
+                }
+            }
             let suspension = controller
                 .active
                 .lock()
@@ -843,7 +890,7 @@ impl Controller {
             controller.capacity.lock().await.attempts.remove(&id);
             controller.leases.lock().await.remove(&id);
             controller.changed.notify_waiters();
-        });
+        })?;
         Ok(())
     }
 
@@ -991,11 +1038,20 @@ impl Controller {
         plan: &Value,
         stop: &CancellationToken,
         wait: Duration,
-    ) -> Result<(disk::StorageGuard, bool, block::Mounted)> {
-        self.mount_after_release_observed(id, plan, stop, wait, &bootstrap::Trace::default())
-            .await
+    ) -> Result<(bool, block::Mounted)> {
+        self.mount_after_release_observed(
+            id,
+            plan,
+            stop,
+            wait,
+            &bootstrap::Trace::default(),
+            None,
+            0,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn mount_after_release_observed(
         &self,
         id: &str,
@@ -1003,7 +1059,9 @@ impl Controller {
         stop: &CancellationToken,
         wait: Duration,
         trace: &bootstrap::Trace,
-    ) -> Result<(disk::StorageGuard, bool, block::Mounted)> {
+        workspace_owner: Option<Arc<crate::file_lock::Guard>>,
+        reserved: u64,
+    ) -> Result<(bool, block::Mounted)> {
         let (deadline, time_limited) = disk_admission_deadline(plan, wait);
         let mut reported = false;
         loop {
@@ -1044,18 +1102,39 @@ impl Controller {
             }
             let result: Result<(bool, block::Mounted)> = async {
                 trace.phase(Phase::PoolAccounting);
-                self.check_preparation_space(plan).await?;
+                if workspace_owner.is_none() {
+                    self.check_preparation_space(plan).await?;
+                }
                 trace.phase(Phase::FilesystemInitialize);
-                let from_base = self.bases().initialize(plan, stop).await?;
+                let from_base = self
+                    .bases()
+                    .initialize_reserved(plan, stop, reserved)
+                    .await?;
                 trace.phase(Phase::Mount);
-                let mounted = block::mount(&self.state, text(plan, "runId"), plan, stop).await?;
+                drop(owner);
+                let state = self.state.clone();
+                let owned_plan = plan.clone();
+                let owned_stop = stop.clone();
+                let receive = super::cleanup::prepare(workspace_owner.clone(), move || {
+                    Box::pin(async move {
+                        block::mount(&state, text(&owned_plan, "runId"), &owned_plan, &owned_stop)
+                            .await
+                    })
+                })?;
+                let mut receive = receive;
+                let mounted = match tokio::time::timeout_at(deadline, &mut receive).await {
+                    Ok(result) => result.map_err(Error::internal)??,
+                    Err(_) => {
+                        stop.cancel();
+                        receive.await.map_err(Error::internal)??
+                    }
+                };
                 Ok((from_base, mounted))
             }
             .await;
             match result {
-                Ok((from_base, mounted)) => return Ok((owner, from_base, mounted)),
+                Ok((from_base, mounted)) => return Ok((from_base, mounted)),
                 Err(error) if error.is_conflict() && error.message == block::DISK_BUSY => {
-                    drop(owner);
                     trace.phase(Phase::WorkspaceOwnership);
                     if !reported {
                         tracing::info!(
@@ -1163,6 +1242,7 @@ impl Controller {
             .await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_files(
         &self,
         plan: Value,
@@ -1171,10 +1251,12 @@ impl Controller {
         mounted: Arc<block::Handle>,
         trace: bootstrap::Trace,
         stop: CancellationToken,
+        reservation: disk::Preparation,
     ) -> Result<Vec<super::home::Binding>> {
         let controller = self.clone();
         let ingress = mounted.ingress.clone().lock_owned().await;
-        super::ingress::write((mounted.clone(), ingress), async move {
+        let reserved = reservation.bytes;
+        super::ingress::write((mounted.clone(), ingress, reservation), async move {
             let _mounted = mounted.mount.lock().await;
             let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
             let admission = super::ingress::Admission::new(
@@ -1185,7 +1267,8 @@ impl Controller {
                 controller.disk_limit().await?,
                 &policy,
             )?;
-            let check = std::sync::Arc::new(std::sync::Mutex::new(admission));
+            let check =
+                std::sync::Arc::new(std::sync::Mutex::new(admission.with_reservation(reserved)));
             let copied = check.clone();
             let admit = std::sync::Arc::new(std::sync::Mutex::new(move |bytes| {
                 if stop.is_cancelled() {
@@ -1200,7 +1283,7 @@ impl Controller {
                 &plan,
                 controller
                     .disk_budget(&plan)
-                    .min(controller.disk_growth().await?),
+                    .min(controller.disk_growth().await?.saturating_add(reserved)),
                 admit,
             )
             .await?;
@@ -1242,15 +1325,22 @@ impl Controller {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute(
         &self,
         id: &str,
         plan: &Value,
         stop: CancellationToken,
         observation: &bootstrap::Scope,
+        owner: Arc<crate::file_lock::Guard>,
+        preparation: disk::Preparation,
+        launch_guard: Arc<Mutex<()>>,
     ) -> Result<i32> {
         let trace = observation.trace();
         let root = workspace::directory(&self.state, text(plan, "runId"))?;
+        if stop.is_cancelled() {
+            return Ok(143);
+        }
         atomic_write(&root.join("attempt"), id.as_bytes()).await?;
         atomic_write(
             &root.join("resources.json"),
@@ -1267,8 +1357,16 @@ impl Controller {
             .as_str()
             .ok_or_else(|| Error::bad("Missing pinned native runtime."))?;
         super::systemd::tools(runtime)?;
-        let (disk_owner, from_base, mounted) = self
-            .mount_after_release_observed(id, plan, &stop, DISK_RELEASE_WAIT, &trace)
+        let (from_base, mounted) = self
+            .mount_after_release_observed(
+                id,
+                plan,
+                &stop,
+                DISK_RELEASE_WAIT,
+                &trace,
+                Some(owner),
+                preparation.bytes,
+            )
             .await?;
         let mounted = Arc::new(block::Handle::new(mounted));
         self.mounted
@@ -1294,6 +1392,7 @@ impl Controller {
                 mounted,
                 trace.clone(),
                 stop.clone(),
+                preparation,
             )
             .await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
@@ -1339,20 +1438,23 @@ impl Controller {
             tokio::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755)).await?;
         }
         trace.phase(Phase::PoolAccounting);
-        if disk::used(&self.data, &self.state).await? > self.disk_limit().await? {
+        if disk::actual_used(&self.data, &self.state).await? > self.disk_limit().await? {
             return Err(Error::conflict(
                 "Native preparation exceeds the shared node disk budget; local work is retained.",
             ));
         }
-        super::bases::release_pin(
-            &self.data.join("runs").join(text(plan, "runId")),
-            text(plan, "id"),
-        )
-        .await?;
-        if from_base || plan.get("nativeProjectBase").is_some() {
-            self.bases()
-                .trim(super::bases::cache_limit(self.disk_limit().await?), 0, None)
-                .await?;
+        {
+            let _pool = disk::lock(&self.state).await?;
+            super::bases::release_pin(
+                &self.data.join("runs").join(text(plan, "runId")),
+                text(plan, "id"),
+            )
+            .await?;
+            if from_base || plan.get("nativeProjectBase").is_some() {
+                self.bases()
+                    .trim(super::bases::cache_limit(self.disk_limit().await?), 0, None)
+                    .await?;
+            }
         }
         trace.phase(Phase::RuntimePrepare);
         let container = self.state.join("roots").join(id);
@@ -1476,7 +1578,8 @@ impl Controller {
             temporary: &temporary,
             auth: auth.as_deref(),
         };
-        drop(disk_owner);
+        let arguments = systemd::arguments(&launch)?;
+        let launch_fence = launch_guard.lock().await;
         if !self.leased(id).await || stop.is_cancelled() {
             return Ok(143);
         }
@@ -1485,9 +1588,27 @@ impl Controller {
         }
         trace.phase(Phase::WorkloadLaunch);
         systemd::start_guardian(id, &self.file(id, "lease")).await?;
-        let mut child = systemd::spawn(&launch)?;
-        // This only proves submission to systemd-run, not unit readiness or a
-        // coding-engine turn. Those retain their existing protocol evidence.
+        if stop.is_cancelled() {
+            return Ok(143);
+        }
+        let mut child = systemd::spawn_prepared(arguments)?;
+        // Keep launch admission until systemd observed the submitted unit or
+        // the submitting process has exited. Cancellation cannot attest an
+        // absent unit while systemd-run may still enqueue it later.
+        let startup_wait = CancellationToken::new();
+        let started = tokio::select! {
+            result = systemd::wait_started(id, &startup_wait) => result,
+            result = child.wait() => result.map(|_| ()).map_err(Error::from),
+        };
+        if let Err(error) = started {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            drop(launch_fence);
+            return Err(error);
+        }
+        drop(launch_fence);
+        // The submission has settled; coding-engine readiness and first
+        // output retain their separate protocol observations.
         observation.submitted();
         let storage_stop = stop.child_token();
         let _storage_guard = storage_stop.clone().drop_guard();
@@ -1559,7 +1680,7 @@ impl Controller {
                     let (workspace_bytes, temporary_bytes) = block::usage(&self.state, text(&plan, "runId")).await?;
                     let conversation_bytes = workspace_bytes.saturating_add(temporary_bytes);
                     let conversation_limit = self.monitor_capacity(id, &plan, workspace_bytes, temporary_bytes).await?;
-                    let node_bytes = disk::used(&self.data, &self.state).await?;
+                    let node_bytes = disk::actual_used(&self.data, &self.state).await?;
                     let node_limit = self.disk_limit().await?;
                     let reason = supervision_stop_reason(
                         leased,
@@ -1673,7 +1794,7 @@ impl Controller {
             let attempt = id.to_owned();
             // The lifecycle lock pins the mount through the metadata commit and
             // resize, while supervision remains responsive to lease/cancellation.
-            tokio::spawn(async move {
+            let _ = super::cleanup::spawn(async move {
                 let Ok(mut mount) = mounted.mount.try_lock() else {
                     return;
                 };
@@ -1711,7 +1832,7 @@ impl Controller {
     }
 
     async fn usage(&self) -> Result<Value> {
-        let used = disk::used(&self.data, &self.state).await?;
+        let used = disk::actual_used(&self.data, &self.state).await?;
         Ok(json!({
             "memoryMiB": 0,
             "diskMiB": used.div_ceil(disk::MIB),
@@ -1721,7 +1842,7 @@ impl Controller {
 
     /// Ceilings are not preallocated reservations. Charge actual retained
     /// payloads, then bound every additional copy by the remaining shared pool.
-    async fn check_preparation_space(&self, plan: &Value) -> Result<()> {
+    async fn check_preparation_space(&self, plan: &Value) -> Result<u64> {
         let run = text(plan, "runId");
         let root = workspace::directory(&self.state, run)?;
         let has_journal = block::exists(&self.state, run).await?;
@@ -1784,7 +1905,7 @@ impl Controller {
                 "Retained native work leaves insufficient shared disk budget for this preparation.",
             ));
         }
-        Ok(())
+        Ok(incoming)
     }
 
     /// Admission is global before it is attempt-scoped: a queued pool waiter
@@ -1797,7 +1918,9 @@ impl Controller {
         operation: F,
     ) -> Result<T>
     where
-        F: FnOnce(Self, String, CancellationToken) -> Fut + Send + 'static,
+        F: FnOnce(Self, String, CancellationToken, tokio::sync::OwnedMutexGuard<()>) -> Fut
+            + Send
+            + 'static,
         Fut: std::future::Future<Output = Result<T>> + Send + 'static,
     {
         uuid(id)?;
@@ -1812,6 +1935,7 @@ impl Controller {
             }
             attempt.live_access.clone()
         };
+        drop(pool);
         let admitted = live_access.clone().lock_owned().await;
         let (run, stop) = {
             let active = self.active.lock().await;
@@ -1826,7 +1950,15 @@ impl Controller {
             }
             (attempt.run.clone(), attempt.stop.clone())
         };
-        super::ingress::write((pool, admitted), operation(self.clone(), run, stop)).await
+        operation(self.clone(), run, stop, admitted).await
+    }
+
+    async fn reserve_copy(&self, maximum: u64) -> Result<(disk::Preparation, u64)> {
+        let _pool = disk::lock(&self.state).await?;
+        let budget = maximum.min(self.disk_growth().await?);
+        let reservation =
+            disk::Preparation::reserve(&self.state, &crate::config::id(), budget).await?;
+        Ok((reservation, budget))
     }
 
     async fn artifact_snapshot(
@@ -1839,7 +1971,7 @@ impl Controller {
             id,
             value["runId"].clone(),
             "Wrong native artifact scope.",
-            move |controller, run, stop| async move {
+            move |controller, run, stop, admitted| async move {
                 let plan = controller.plan(&attempt).await?;
                 let view = block::view(&controller.state, &run).await?;
                 let path = Path::new(text(&value, "path"));
@@ -1862,14 +1994,20 @@ impl Controller {
                     ));
                 };
                 let exports = controller.state.join("exports");
+                let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
+                let limit = controller.disk_limit().await?;
+                let mut admission = super::ingress::Admission::new(&controller.data, &controller.state, &exports, &controller.state, limit, &policy)?;
+                admission.admit(5120)?;
                 private_dir(&exports).await?;
-                let (snapshot, size) = crate::artifacts::file::snapshot_in(
-                    &source,
-                    &allowed,
-                    &exports,
-                    controller.disk_growth().await?,
-                )
-                .await?;
+                let (reservation, budget) = controller.reserve_copy(crate::artifacts::file::MAX_FILE).await?;
+                let mut admission = super::ingress::Admission::new(&controller.data, &controller.state, &exports, &controller.state, limit, &policy)?.with_reservation(reservation.bytes);
+                let copying_stop = stop.clone();
+                let (snapshot, size) = super::ingress::write((reservation, admitted), async move {
+                    crate::artifacts::file::snapshot_in(&source, &allowed, &exports, budget, |bytes| {
+                        if copying_stop.is_cancelled() { return Err(Error::forbidden("Native artifact export stopped.")); }
+                        admission.admit(bytes)
+                    }).await
+                }).await?;
                 if stop.is_cancelled() {
                     return Err(Error::forbidden("Native artifact attempt stopped."));
                 }
@@ -1888,72 +2026,72 @@ impl Controller {
             id,
             value["runId"].clone(),
             "Wrong native project scope.",
-            move |controller, run, stop| async move {
-                let plan = controller.plan(&attempt).await?;
-                if stop.is_cancelled() {
-                    return Err(Error::conflict("Native project import stopped."));
-                }
-                let manager = guest_data(&plan, &controller.data);
-                let expected = crate::execution::project_seed_path(
-                    &manager.join("runs").join(&run),
-                    &plan,
-                    &project,
-                )?;
-                if value["source"] != expected.to_string_lossy().as_ref()
-                    || value["target"] != expected.to_string_lossy().as_ref()
-                {
-                    return Err(Error::forbidden("Invalid native project path."));
-                }
-                let relative = expected.strip_prefix(&manager).map_err(Error::internal)?;
-                let source = controller.data.join(relative);
-                if tokio::fs::canonicalize(&source).await? != source {
-                    return Err(Error::bad("Native project seed changed location."));
-                }
-                let view = block::view(&controller.state, &run).await?;
-                let target = view.workspace.join(&project);
-                if !target.exists() {
-                    let data = view.filesystem_of(&view.workspace)?;
-                    // Stage on the mounted filesystem so installation is an atomic
-                    // rename, and do not walk all lazy files to estimate free space.
-                    let staged = tempfile::tempdir_in(data)?;
-                    let received = staged.path().join("project");
-                    let remaining = block::free_bytes(data)?;
-                    let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
-                    let mut admission = super::ingress::Admission::new(
-                        &controller.data,
-                        &controller.state,
-                        staged.path(),
-                        &workspace::data_root(&controller.state),
-                        controller.disk_limit().await?,
-                        &policy,
+            move |controller, run, stop, admitted| {
+                super::ingress::write(admitted, async move {
+                    let plan = controller.plan(&attempt).await?;
+                    if stop.is_cancelled() {
+                        return Err(Error::conflict("Native project import stopped."));
+                    }
+                    let manager = guest_data(&plan, &controller.data);
+                    let expected = crate::execution::project_seed_path(
+                        &manager.join("runs").join(&run),
+                        &plan,
+                        &project,
                     )?;
-                    workspace::copy_admitted(
-                        &source,
-                        &received,
-                        remaining.min(controller.disk_growth().await?),
-                        &mut |bytes| {
+                    if value["source"] != expected.to_string_lossy().as_ref()
+                        || value["target"] != expected.to_string_lossy().as_ref()
+                    {
+                        return Err(Error::forbidden("Invalid native project path."));
+                    }
+                    let relative = expected.strip_prefix(&manager).map_err(Error::internal)?;
+                    let source = controller.data.join(relative);
+                    if tokio::fs::canonicalize(&source).await? != source {
+                        return Err(Error::bad("Native project seed changed location."));
+                    }
+                    let view = block::view(&controller.state, &run).await?;
+                    let target = view.workspace.join(&project);
+                    if !target.exists() {
+                        let data = view.filesystem_of(&view.workspace)?;
+                        // Stage on the mounted filesystem so installation is an atomic
+                        // rename, and do not walk all lazy files to estimate free space.
+                        let staged = tempfile::tempdir_in(data)?;
+                        let received = staged.path().join("project");
+                        let remaining = block::free_bytes(data)?;
+                        let (reservation, budget) = controller.reserve_copy(remaining).await?;
+                        let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
+                        let mut admission = super::ingress::Admission::new(
+                            &controller.data,
+                            &controller.state,
+                            staged.path(),
+                            &workspace::data_root(&controller.state),
+                            controller.disk_limit().await?,
+                            &policy,
+                        )?
+                        .with_reservation(reservation.bytes);
+                        workspace::copy_admitted(&source, &received, budget, &mut |bytes| {
                             if stop.is_cancelled() {
                                 return Err(Error::conflict("Native project import stopped."));
                             }
                             admission.admit(bytes)
-                        },
-                    )
-                    .await?;
-                    if stop.is_cancelled() {
-                        return Err(Error::conflict("Native project import stopped."));
+                        })
+                        .await?;
+                        if stop.is_cancelled() {
+                            return Err(Error::conflict("Native project import stopped."));
+                        }
+                        let mut identity =
+                            super::identity::provision(&controller.state, &run).await?;
+                        if plan["nativeMode"]["mode"] == "administrator" {
+                            identity.host_engine =
+                                Some((controller.identity.uid, controller.identity.gid));
+                        }
+                        workspace::own_tree(&received, identity.uid(), identity.gid()).await?;
+                        if stop.is_cancelled() {
+                            return Err(Error::conflict("Native project import stopped."));
+                        }
+                        tokio::fs::rename(received, &target).await?;
                     }
-                    let mut identity = super::identity::provision(&controller.state, &run).await?;
-                    if plan["nativeMode"]["mode"] == "administrator" {
-                        identity.host_engine =
-                            Some((controller.identity.uid, controller.identity.gid));
-                    }
-                    workspace::own_tree(&received, identity.uid(), identity.gid()).await?;
-                    if stop.is_cancelled() {
-                        return Err(Error::conflict("Native project import stopped."));
-                    }
-                    tokio::fs::rename(received, &target).await?;
-                }
-                Ok(json!({ "ok": true }))
+                    Ok(json!({ "ok": true }))
+                })
             },
         )
         .await
@@ -1992,7 +2130,9 @@ impl Controller {
                 "Could not persist the native stop marker.",
             ));
         }
-        let _admission = self.admission.lock().await;
+        {
+            let _admission = self.admission.lock().await;
+        }
         self.stop_admitted(id).await
     }
 
@@ -2369,7 +2509,10 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("DELETE", ["runs", id]) => {
             controller.stop_attempt(id).await?;
-            json!({})
+            match tokio::fs::read(controller.file(id, "exit")).await {
+                Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({})),
+                Err(_) => json!({}),
+            }
         }
         ("POST", ["runs", id, "wait"]) => {
             uuid(id)?;
@@ -2487,6 +2630,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
             let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
+            super::cleanup::check(&controller.state, run)?;
             let value = input(request, 4096).await?;
             let retirement = if *action == "delete" {
                 crate::storage::retirement::Retirement::begin(&controller.state, run, &value)
@@ -2641,6 +2785,12 @@ async fn bind_controller(path: &Path) -> Result<tokio::net::UnixListener> {
     Ok(listener)
 }
 
+fn interrupted_attempt(pending: &mut HashMap<String, String>, run: String, attempt: String) {
+    // Published before execute writes any workspace files; it remains valid
+    // after a crash before the first mount. An existing quarantine wins.
+    pending.entry(run).or_insert(attempt);
+}
+
 pub async fn serve(stop: CancellationToken) -> Result<()> {
     super::limits::configure()?;
     let data = crate::nodes::node_data_dir();
@@ -2681,30 +2831,73 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
             uuid(&attempt)?;
             let run = tokio::fs::read_to_string(entry.path()).await?;
             uuid(&run)?;
-            systemd::request_stop(&attempt).await?;
             interrupted.push((attempt, run, entry.path()));
         }
     }
-    // Host mounts survive controller death. Recovery aborts only verified dead
-    // backends to release blocked I/O, confirms fencing, then unmounts. Complete
-    // all other attributed fences before retiring any kernel device.
-    block::recover_host_mounts(&state).await?;
-    for (attempt, _, _) in &interrupted {
-        systemd::stop(attempt).await?;
-        super::suspension::recover(&state, attempt).await?;
+    // Read-only attestation and private namespace preparation precede serving;
+    // physical retirement is owned by per-run workers, never by startup.
+    let cleanup = super::cleanup::Registry::default();
+    let mut pending = super::cleanup::records(&state)?
+        .into_iter()
+        .map(|record| (record.run, record.attempt))
+        .collect::<HashMap<_, _>>();
+    for (attempt, run, _) in interrupted {
+        interrupted_attempt(&mut pending, run, attempt);
     }
-
-    {
-        let state = state.clone();
-        tokio::task::spawn_blocking(move || storage::ublk::cleanup_stale(&state))
-            .await
-            .map_err(Error::internal)??;
+    for run in storage::ublk::stale_runs(&state)? {
+        if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(run) {
+            let root = workspace::directory(&state, entry.key())?;
+            let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
+            uuid(&attempt)?;
+            entry.insert(attempt);
+        }
     }
-    for (attempt, run, marker) in interrupted {
-        block::recover_completed(&state, &run, &attempt).await?;
-        preserve_interrupted_exit(&marker).await?;
-        tokio::fs::remove_file(marker).await?;
+    disk::recover_preparations(&state, &pending)?;
+    for (run, attempt) in &pending {
+        super::cleanup::quarantine(&state, run, attempt)?;
     }
+    let recovery_state = state.clone();
+    let recovery_cleanup = cleanup.clone();
+    std::thread::Builder::new()
+        .name("native-storage-recovery".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::error!(%error, "Native recovery executor could not start");
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                for (run, attempt) in pending {
+                    let progress = Arc::new(Mutex::new(cleanup::RecoveryProgress::default()));
+                    let work = cleanup::RecoveryWork {
+                        state: recovery_state.clone(),
+                        run: run.clone(),
+                        attempt: attempt.clone(),
+                        unmounted: false,
+                        retired: false,
+                        owner: None,
+                        disk: None,
+                        fenced: None,
+                        progress: progress.clone(),
+                    };
+                    match recovery_cleanup.start(&recovery_state, &run, &attempt, work) {
+                        Ok(ticket) => {
+                            if let Err(error) = cleanup::observe_recovery(recovery_state.clone(), attempt, progress, ticket) {
+                                tracing::error!(%error, %run, "Native recovery observer could not start");
+                            }
+                        }
+                        Err(error) => tracing::error!(%error, %run, "Native disk recovery remains quarantined"),
+                    }
+                }
+            });
+        })
+        .map_err(Error::internal)?;
+    // Ownership recovery only touches journal metadata, not native consumers.
     recover_preparations(&data, &state).await?;
     let budget_path = state.join(crate::microvm::budget::FILE);
     let checked = load_budget(&budget_path).await?;
@@ -2745,6 +2938,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         telemetry: health::Telemetry::default(),
         stop: stop.clone(),
         identity,
+        cleanup,
     };
     controller.recover_exclusive().await?;
     let exclusive_monitor = tokio::spawn(controller.clone().monitor_exclusive());
@@ -2765,11 +2959,21 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         result = &mut server => { stop.cancel(); Some(result) }
     };
     let active: Vec<_> = controller.active.lock().await.keys().cloned().collect();
+    let mut stopping = tokio::task::JoinSet::new();
     for id in active {
-        controller.stop_attempt(&id).await?;
+        let controller = controller.clone();
+        stopping.spawn(async move { controller.stop_attempt(&id).await });
     }
-    while !controller.active.lock().await.is_empty() {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    let drained = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(result) = stopping.join_next().await {
+            if !matches!(result, Ok(Ok(()))) {
+                tracing::error!("Native shutdown left a retained recovery marker");
+            }
+        }
+    })
+    .await;
+    if drained.is_err() {
+        stopping.abort_all();
     }
     exclusive_monitor.await.map_err(Error::internal)?;
     telemetry_monitor.abort();
@@ -2777,7 +2981,14 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     controller.base_warmer.wait_idle().await;
     match result {
         Some(result) => result.map_err(Error::internal)??,
-        None => server.await.map_err(Error::internal)??,
+        None => {
+            if tokio::time::timeout(Duration::from_secs(2), &mut server)
+                .await
+                .is_err()
+            {
+                server.abort();
+            }
+        }
     }
     tokio::fs::remove_file(socket).await?;
     Ok(())
@@ -2802,6 +3013,31 @@ pub(crate) mod tests {
         );
         assert!(reader.is_finished());
         assert!(output.write_all(b"closed").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_copy_reservations_never_spend_the_same_pool_capacity() {
+        let (_root, controller) = fixture().await;
+        let budget = controller.disk_growth().await.unwrap();
+        let requested = budget.saturating_mul(2) / 3;
+        let (first, first_bytes) = controller.reserve_copy(requested).await.unwrap();
+        let (second, second_bytes) = controller.reserve_copy(requested).await.unwrap();
+        assert_eq!(first_bytes, requested);
+        assert!(first_bytes + second_bytes <= budget);
+        assert!(second_bytes < requested);
+        drop((first, second));
+        assert_eq!(controller.disk_growth().await.unwrap(), budget);
+    }
+
+    #[test]
+    fn interrupted_admission_recovers_without_workspace_attempt_and_preserves_quarantine() {
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        let mut pending = HashMap::new();
+        interrupted_attempt(&mut pending, run.clone(), attempt.clone());
+        assert_eq!(pending[&run], attempt);
+        interrupted_attempt(&mut pending, run.clone(), crate::config::id());
+        assert_eq!(pending[&run], attempt);
     }
 
     #[tokio::test]
@@ -3298,6 +3534,7 @@ pub(crate) mod tests {
             log_lock: Arc::default(),
             telemetry: health::Telemetry::default(),
             stop: CancellationToken::new(),
+            cleanup: crate::native::cleanup::Registry::default(),
             identity: Arc::new(systemd::Identity {
                 user: "synthetic-workload".into(),
                 uid: 65534,
@@ -4170,6 +4407,16 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+        super::super::atomic_write(
+            &controller.state.join("storage-policy.json"),
+            &serde_json::to_vec(
+                &storage::policy::for_node(&json!({"reserveMiB": 64, "reservePercent": 1}))
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
         controller.active.lock().await.insert(
             attempt.clone(),
             Attempt {
@@ -4765,6 +5012,15 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+        atomic_write(
+            &controller.state.join("storage-policy.json"),
+            &serde_json::to_vec(
+                &storage::policy::for_node(&json!({"reserveMiB":64,"reservePercent":1})).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
         controller.active.lock().await.insert(
             attempt.clone(),
             Attempt {
@@ -4781,6 +5037,32 @@ pub(crate) mod tests {
             },
         );
         (fixture, controller, run, attempt, environment)
+    }
+
+    #[tokio::test]
+    async fn artifact_refuses_controller_filesystem_reserve_without_leaving_exports() {
+        let (_fixture, controller, run, attempt, environment) = artifact_fixture().await;
+        let source = environment.join("tmp/result");
+        tokio::fs::write(&source, b"retained artifact")
+            .await
+            .unwrap();
+        let (total, _) = storage::policy::physical_space(&controller.state).unwrap();
+        let mut policy =
+            storage::policy::for_node(&json!({"reserveMiB":64,"reservePercent":1})).unwrap();
+        policy.reserve_mi_b = total / disk::MIB + 1;
+        atomic_write(
+            &controller.state.join("storage-policy.json"),
+            &serde_json::to_vec(&policy).unwrap(),
+        )
+        .await
+        .unwrap();
+        let error = controller
+            .artifact_snapshot(&attempt, json!({"runId":run,"path":"/tmp/result"}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 507);
+        assert!(!controller.state.join("exports").exists());
+        assert_eq!(tokio::fs::read(source).await.unwrap(), b"retained artifact");
     }
 
     #[tokio::test]
@@ -4920,11 +5202,11 @@ pub(crate) mod tests {
             .unwrap()
             .stop
             .cancel();
-        let pool_retained = crate::file_lock::exclusive(
+        let pool_available = crate::file_lock::exclusive(
             &controller.state.join("storage.lock"),
-            "admitted filesystem work must retain pool ownership",
+            "admitted filesystem work must not block other disks",
         )
-        .is_err();
+        .is_ok();
         let entered = Arc::new(Notify::new());
         let live_access = controller
             .active
@@ -4953,8 +5235,8 @@ pub(crate) mod tests {
         let _ = release.send(());
         let closed = tokio::time::timeout(Duration::from_secs(5), closing).await;
         assert!(
-            pool_retained,
-            "request cancellation detached IO from its ownership"
+            pool_available,
+            "request cancellation blocked the global pool despite isolated IO ownership"
         );
         assert!(
             !drained_too_early,
@@ -5077,7 +5359,7 @@ pub(crate) mod tests {
         let opened = opening.recv_timeout(Duration::from_secs(5));
         let physical_owner = crate::file_lock::exclusive(
             &controller.state.join("storage.lock"),
-            "Export must retain physical ownership",
+            "An isolated export must release the global pool",
         );
         let controls = controller.clone();
         let (progress, observed) = std::sync::mpsc::channel();
@@ -5129,7 +5411,8 @@ pub(crate) mod tests {
         let exported = runtime.block_on(export).unwrap();
         runtime.block_on(control).unwrap();
         opened.expect("The native artifact must reach its filesystem open");
-        assert!(physical_owner.is_err());
+        assert!(physical_owner.is_ok());
+        drop(physical_owner);
         responsive
             .expect("Health, lease renewal and cancellation must finish during the delayed open");
         assert_eq!(exported.unwrap_err().status, 403);

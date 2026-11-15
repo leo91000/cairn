@@ -1,4 +1,4 @@
-> Format et transport remplacés par [ADR-0087](0087-native-directories-and-direct-vm-images.md). Les règles de rétention, d’autorisation et de changement de node restent applicables.
+> Format et transport remplacés par [ADR-0088](0088-native-directories-and-direct-vm-images.md). Les règles de rétention, d’autorisation et de changement de node restent applicables.
 
 # Disques de conversation locaux à leur node, sans S3
 

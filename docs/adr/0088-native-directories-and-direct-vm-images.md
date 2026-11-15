@@ -172,3 +172,17 @@ conservant la source retenue et les intentions nécessaires à la reprise.
 Les namespaces de montage épinglés par un montage nsfs sont parcourus même sans
 processus ni descripteur ouvert. Leur type et leur inode sont vérifiés avant
 chaque parcours ; une référence inconnue conserve les données et leur propriété.
+
+L’isolation du nettoyage de l’[ADR-0087](0087-isolated-native-disk-cleanup.md)
+s’applique aussi aux répertoires : la quarantaine conserve leurs propriétaires
+jusqu’à la fin réelle des écrivains et du flush. Les nouvelles admissions
+refusent cet environnement pendant ce temps. Les copies gardent leur réservation
+jusqu’à la fin des tâches de fichiers, même si leur appelant disparaît.
+Les vérifications de copie déduisent seulement leur propre réservation, sans
+ignorer les copies concurrentes ; les fichiers déjà alloués restent facturés.
+
+L’allocation des identifiants de quota possède son verrou interprocessus dédié :
+les travailleurs de préparation concurrents ne peuvent partager un même projet.
+Les snapshots d’artefacts vérifient la réserve physique du système de fichiers
+de contrôle avant de créer leur temporaire et avant chaque fragment écrit ;
+leur garde d’accès et réservation durent jusqu’au drainage des écritures.

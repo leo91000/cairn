@@ -229,7 +229,7 @@ live memory reclamation preserve the running VMM; memory snapshots and the paire
 filesystem layout are no longer supported.
 
 
-## Pool de répertoires locaux (ADR-0087)
+## Pool de répertoires locaux (ADR-0088)
 
 Les nouveaux environnements utilisent des répertoires ordinaires dans
 `/var/lib/cairn-native/state/native-data/<conversation UUID>/`. Ce pool doit être

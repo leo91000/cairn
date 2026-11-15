@@ -959,6 +959,19 @@ pub(super) fn finish_recovery(
         return Ok(false);
     }
     if let Some(checkpoint) = checkpoint {
+        // A controller can report a failed physical close only during DELETE,
+        // after the provider outcome was tentatively settled. Preserve explicit
+        // user cancellation above, but never let that older outcome hide it.
+        if checkpoint.runner_id().is_some()
+            && checkpoint.runner_id() == checkpoint.finalization_failure_attempt.as_deref()
+            && let Some(error) = checkpoint.finalization_error()
+        {
+            let settled = Settled::failure(RunStatus::Failed, error);
+            let mut patch = settled.run_changes();
+            patch.wakeup = Some(None);
+            db.change_run(id, patch)?;
+            return Ok(false);
+        }
         if let Some(settled) = checkpoint.settled() {
             let mut patch = settled.run_changes();
             if settled.status == RunStatus::Waiting {

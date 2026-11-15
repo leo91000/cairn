@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 pub(crate) use block::initialize;
-pub(crate) use block::{Completion, DISK_BUSY, free_bytes, recover_host_mounts, view};
+pub(crate) use block::{Completion, DISK_BUSY, free_bytes, view};
 
 pub(crate) const STORAGE: &str = "local-directory-v1";
 
@@ -170,6 +170,7 @@ pub async fn mount(
     plan: &Value,
     stop: &CancellationToken,
 ) -> Result<Mounted> {
+    super::cleanup::check(state, run)?;
     if stop.is_cancelled() {
         return Err(Error::unavailable("Native preparation stopped."));
     }
@@ -356,7 +357,7 @@ async fn migrate(
             let required = tokio::task::spawn_blocking(move || super::bases::clone_footprint(&measured))
                 .await.map_err(Error::internal)??;
             let fallback = storage::policy::for_node(&plan["storage"]["policy"])?;
-            check_copy_headroom(state, required, &fallback).await?;
+            check_copy_headroom(state, required, &fallback, 0).await?;
             quota::prepare(
                 state,
                 &workload,
@@ -368,7 +369,7 @@ async fn migrate(
             .await?;
             private_dir(&staging).await?;
             let capacity = CopyCapacity {
-                state: state.to_owned(), workload: workload.clone(), required, fallback,
+                state: state.to_owned(), workload: workload.clone(), required, fallback, reserved: 0,
             };
             copy_verified_with_capacity(&source, &staging, stop, Some(&capacity)).await?;
             // Verify the final allocated total as well as the kernel-enforced
@@ -631,6 +632,7 @@ pub(super) struct CopyCapacity {
     workload: PathBuf,
     required: u64,
     fallback: storage::policy::Policy,
+    reserved: u64,
 }
 
 impl CopyCapacity {
@@ -645,7 +647,13 @@ impl CopyCapacity {
             workload: workload.to_owned(),
             required,
             fallback,
+            reserved: 0,
         }
+    }
+
+    pub(super) fn with_reservation(mut self, reserved: u64) -> Self {
+        self.reserved = reserved;
+        self
     }
 
     pub(super) async fn check(&self) -> Result<()> {
@@ -657,6 +665,7 @@ impl CopyCapacity {
             &self.state,
             self.required.saturating_sub(allocated),
             &self.fallback,
+            self.reserved,
         )
         .await
     }
@@ -666,6 +675,7 @@ async fn check_copy_headroom(
     state: &Path,
     remaining: u64,
     fallback: &storage::policy::Policy,
+    reserved: u64,
 ) -> Result<()> {
     let state = state.to_owned();
     let fallback = fallback.clone();
@@ -684,7 +694,8 @@ async fn check_copy_headroom(
             Ok(bytes) => {
                 let budget = super::native_budget(&serde_json::from_slice(&bytes)?)?;
                 crate::microvm::budget::invalidate_disk_usage(&state)?;
-                let used = crate::microvm::budget::committed_disk_bytes(&state)?;
+                let used =
+                    crate::microvm::budget::committed_disk_bytes(&state)?.saturating_sub(reserved);
                 (budget.limits.disk_mi_b * super::disk::MIB)
                     .saturating_sub(used)
                     .saturating_sub(pending)
@@ -995,6 +1006,7 @@ pub async fn recover_completed(state: &Path, run: &str, attempt: &str) -> Result
 }
 
 pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>> {
+    super::cleanup::check(state, run)?;
     let lease = environment::lock(state, run, DISK_BUSY).await?;
     if delete {
         let root = workspace::directory(state, run)?;
@@ -1325,14 +1337,14 @@ mod tests {
         let required = 96 * super::super::disk::MIB;
         copy_budget(state.path(), 128).await;
         assert_eq!(
-            check_copy_headroom(state.path(), required, &policy)
+            check_copy_headroom(state.path(), required, &policy, 0)
                 .await
                 .unwrap_err()
                 .status,
             507
         );
         copy_budget(state.path(), 256).await;
-        check_copy_headroom(state.path(), required, &policy)
+        check_copy_headroom(state.path(), required, &policy, 0)
             .await
             .unwrap();
         std::fs::OpenOptions::new()
@@ -1342,7 +1354,7 @@ mod tests {
             .set_len(128 * super::super::disk::MIB)
             .unwrap();
         assert!(
-            check_copy_headroom(state.path(), required, &policy)
+            check_copy_headroom(state.path(), required, &policy, 0)
                 .await
                 .is_err()
         );
@@ -1361,7 +1373,11 @@ mod tests {
             serde_json::to_vec(&reserve).unwrap(),
         )
         .unwrap();
-        assert!(check_copy_headroom(state.path(), 0, &policy).await.is_err());
+        assert!(
+            check_copy_headroom(state.path(), 0, &policy, 0)
+                .await
+                .is_err()
+        );
         assert_eq!(
             std::fs::metadata(data.path().join("retained-source"))
                 .unwrap()
@@ -1482,6 +1498,7 @@ mod tests {
             workload: workload.clone(),
             required: 96 * super::super::disk::MIB,
             fallback: policy,
+            reserved: 0,
         };
         capacity.check().await.unwrap();
         let marker = data.path().join("copy-processes");

@@ -3,6 +3,7 @@
 //! registration for verified startup cleanup; it never guesses that a VM died.
 mod io;
 mod namespace;
+mod observation;
 
 pub(crate) use namespace::BackendNamespace;
 
@@ -271,17 +272,75 @@ fn stop_owned(
     Ok(())
 }
 
-fn retire(
+fn delete_native(
+    asynchronous: impl FnOnce() -> stdio::Result<()>,
+    synchronous: impl FnOnce() -> stdio::Result<()>,
+) -> stdio::Result<()> {
+    match asynchronous() {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::EOPNOTSUPP | libc::ENOTTY | 524)
+            ) =>
+        {
+            synchronous()
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn retire_with_mode(
     state: &Path,
     record: &Record,
     control: &libublk::ctrl::UblkCtrl,
     reaped: bool,
+    native: bool,
 ) -> stdio::Result<()> {
     stop_owned(state, record, control, reaped)?;
-    control.del_dev().map_err(error).map(|_| ())
+    if !native {
+        return control.del_dev().map_err(error).map(|_| ());
+    }
+    let device_id = i32::try_from(control.dev_info().dev_id).map_err(stdio::Error::other)?;
+    // Older kernels use synchronous deletion on this same isolated worker.
+    delete_native(
+        || control.del_dev_async().map_err(error).map(|_| ()),
+        || control.del_dev().map_err(error).map(|_| ()),
+    )?;
+    // Async acknowledgement schedules teardown. Keep Cairn's receipt until a
+    // subsequent control lookup proves absence or a different nonce.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match observation::native_control(device_id) {
+            Ok(current) if current.dev_info().ublksrv_flags != record.token => return Ok(()),
+            Ok(_) => {}
+            Err(failure) => {
+                if matches!(failure.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) {
+                    return Ok(());
+                }
+                return Err(failure);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(stdio::Error::new(
+                stdio::ErrorKind::WouldBlock,
+                "Native kernel device retirement is still pending",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn cleanup(state: &Path, record: &Record, joined: bool) -> stdio::Result<()> {
+    cleanup_with_mode(state, record, joined, false)
+}
+
+fn cleanup_with_mode(
+    state: &Path,
+    record: &Record,
+    joined: bool,
+    native: bool,
+) -> stdio::Result<()> {
     record.validate()?;
     if record.boot_id != boot_id()? {
         return forget(state, record);
@@ -316,15 +375,22 @@ fn cleanup(state: &Path, record: &Record, joined: bool) -> stdio::Result<()> {
                 }
             };
             if control.dev_info().ublksrv_flags == record.token {
-                retire(state, record, &control, joined)?;
+                retire_with_mode(state, record, &control, joined, native)?;
             }
         }
         return forget(state, record);
     };
-    let control = match UblkCtrlBuilder::default().id(device_id).build() {
+    let opened = if native {
+        observation::native_control(device_id)
+    } else {
+        UblkCtrlBuilder::default()
+            .id(device_id)
+            .build()
+            .map_err(error)
+    };
+    let control = match opened {
         Ok(control) => control,
         Err(error) => {
-            let error = self::error(error);
             if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) {
                 return forget(state, record);
             }
@@ -336,7 +402,7 @@ fn cleanup(state: &Path, record: &Record, joined: bool) -> stdio::Result<()> {
         // The kernel reused this numeric ID. The new device is not ours.
         return forget(state, record);
     }
-    retire(state, record, &control, joined)?;
+    retire_with_mode(state, record, &control, joined, native)?;
     forget(state, record)
 }
 
@@ -413,10 +479,9 @@ pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<H
                 "Native backend remains active",
             ));
         }
-        let control = match UblkCtrlBuilder::default().id(id).build() {
+        let control = match observation::native_control(id) {
             Ok(control) => control,
             Err(failure) => {
-                let failure = error(failure);
                 if matches!(failure.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) {
                     continue;
                 }
@@ -597,6 +662,33 @@ pub(crate) fn quiesce_stale_host_disk(state: &Path, run: &str) -> stdio::Result<
     Ok(())
 }
 
+/// Inventory without kernel control operations. Native recovery schedules each
+/// run independently and keeps its durable quarantine until all receipts retire.
+pub(crate) fn stale_runs(state: &Path) -> stdio::Result<Vec<String>> {
+    let mut runs = records(state)?
+        .into_iter()
+        .map(|record| record.vm_id)
+        .collect::<Vec<_>>();
+    runs.sort();
+    runs.dedup();
+    Ok(runs)
+}
+
+pub(crate) fn cleanup_native_run(state: &Path, run: &str) -> stdio::Result<()> {
+    let records = records(state)?
+        .into_iter()
+        .filter(|record| record.vm_id == run)
+        .collect::<Vec<_>>();
+    let boot = boot_id()?;
+    if records.iter().any(|record| record.boot_id == boot) {
+        require_host_filesystems_unmounted(state, run)?;
+    }
+    for record in records {
+        cleanup_with_mode(state, &record, false, true)?;
+    }
+    Ok(())
+}
+
 /// Called only under the controller lock, after fencing consumers and unmounting
 /// host filesystems. Never retires an unrecorded owner or a live backend/VMM.
 pub fn cleanup_stale(state: &Path) -> stdio::Result<()> {
@@ -651,6 +743,14 @@ impl MountedDisk {
     /// The caller has fenced all consumers and unmounted any host filesystem.
     /// Retaining the handle on error permits safe retry of kernel retirement.
     pub(crate) fn close_in_place(&mut self) -> stdio::Result<()> {
+        self.close_with_mode(false)
+    }
+
+    pub(crate) fn close_native(&mut self) -> stdio::Result<()> {
+        self.close_with_mode(true)
+    }
+
+    fn close_with_mode(&mut self, native: bool) -> stdio::Result<()> {
         if self.thread.is_some() {
             self.stop()?;
             self.thread
@@ -659,7 +759,7 @@ impl MountedDisk {
                 .join()
                 .map_err(|_| stdio::Error::other("ublk backend panicked"))??;
         }
-        cleanup(&self.state, &self.record, true)
+        cleanup_with_mode(&self.state, &self.record, true, native)
     }
 }
 
@@ -1059,5 +1159,28 @@ mod tests {
         );
         cleanup_stale(root.path()).unwrap();
         assert!(!record.path(root.path()).exists());
+    }
+}
+
+#[cfg(test)]
+mod native_delete_tests {
+    use super::*;
+
+    #[test]
+    fn old_kernels_fall_back_only_for_explicit_unsupported_commands() {
+        use std::cell::Cell;
+        for code in [libc::EOPNOTSUPP, libc::ENOTTY, 524, libc::EIO, libc::EPERM] {
+            let fallback = Cell::new(false);
+            let result = delete_native(
+                || Err(stdio::Error::from_raw_os_error(code)),
+                || {
+                    fallback.set(true);
+                    Ok(())
+                },
+            );
+            let unsupported = matches!(code, libc::EOPNOTSUPP | libc::ENOTTY | 524);
+            assert_eq!(fallback.get(), unsupported);
+            assert_eq!(result.is_ok(), unsupported);
+        }
     }
 }

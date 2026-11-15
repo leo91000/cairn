@@ -379,7 +379,17 @@ impl Bases {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn initialize(&self, plan: &Value, stop: &CancellationToken) -> Result<bool> {
+        self.initialize_reserved(plan, stop, 0).await
+    }
+
+    pub async fn initialize_reserved(
+        &self,
+        plan: &Value,
+        stop: &CancellationToken,
+        reserved: u64,
+    ) -> Result<bool> {
         let run = text(plan, "runId");
         let directory = environment::directory(&self.state, run)?;
         let root = workspace::directory(&self.state, run)?;
@@ -522,6 +532,7 @@ impl Bases {
             ready.metadata_bytes,
             crate::storage::policy::for_node(&plan["storage"]["policy"])?,
         );
+        let capacity = capacity.with_reservation(reserved);
         capacity.check().await?;
         let existing_data = match tokio::fs::symlink_metadata(&data).await {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,

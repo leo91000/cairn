@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "{}",
                 json!({ "mode": mode, "sample": sample, "logicalCapacity": SIZE,
                 "payloadBytes": asset.len() + text.len(), "encodedBytes": encoded, "allocatedBytes": allocated,
-                "assetWrite": asset_write, "writes128Fsynced4KiB": writes, "coldHintRead": cold, "warmRead": warm,
+                "assetWrite": asset_write, "writes128x4KiBThenSync": writes, "coldHintRead": cold, "warmRead": warm,
                 "conditions": "One process, local block-interface IO, identical deterministic BLAKE3 asset/text; development build; no VMM, ext4 guest, cgroup or WAN. Cold uses reopen + POSIX_FADV_DONTNEED, not a guaranteed hardware-cold cache. Journal remains unconsolidated." })
             );
         }
