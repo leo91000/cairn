@@ -1,5 +1,15 @@
 # Android 0.6.0 / web parity
 
+## Installation navigation before draft handoff (2026-11-15)
+
+Web suspends background direct negotiation as soon as installation navigation
+begins, including canonical UUID-to-slug redirects after MCP OAuth. Draft
+handoff still completes before leaving; a failed handoff restores the current
+page's transport. Android uses its existing native installation navigation and
+does not load intermediate web documents or transfer drafts across browser
+origins. Both apps retain direct connections with relay fallback; public MCP
+and `cairn_installation` operations and authorization are unchanged.
+
 ## Model picker during catalog loading (2026-11-14)
 
 Web keeps its model-picker button as the pointer target while catalog results
