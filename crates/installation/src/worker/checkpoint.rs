@@ -363,9 +363,9 @@ impl RunCheckpoint {
         if self.runner_id().is_some()
             && self.runner_id() == self.finalization_failure_attempt.as_deref()
         {
-            return Some(
+            return Some(self.last_error().strip_prefix("Native cleanup: ").unwrap_or(
                 "The filesystem could not be flushed. Working files were preserved; automatic replay was stopped.",
-            );
+            ));
         }
         if !self.managed() || !self.completed() || self.terminal_code() == Some(0) {
             return None;
@@ -390,18 +390,47 @@ impl RunCheckpoint {
                 "Execution attempt changed during observation.",
             ));
         }
-        self.terminal_code = Some(result.map(|result| result.code));
-        if result.is_some_and(|result| result.physical_finalized && !result.finalization_failed)
+        self.terminal_code = Some(result.as_ref().map(|result| result.code));
+        if result
+            .as_ref()
+            .is_some_and(|result| result.physical_finalized && !result.finalization_failed)
             && let Some(progress) = &mut self.progress
             && progress.runner_id.as_deref() == Some(attempt)
         {
             progress.confirm_finalized(now());
         }
-        if result.is_some_and(|result| result.finalization_failed)
+        let native_cleanup = self
+            .prepared()
+            .is_some_and(|prepared| prepared["backend"] == "native")
+            .then(|| {
+                result
+                    .as_ref()
+                    .and_then(|result| result.native_cleanup.as_ref())
+            })
+            .flatten();
+        if let Some(message) = native_cleanup
+            && self.finalization_failure_attempt.as_deref() == Some(attempt)
+        {
+            self.last_error = Some(Some(format!("Native cleanup: {message}")));
+        }
+        if result
+            .as_ref()
+            .is_some_and(|result| result.finalization_failed)
             && self.finalization_failure_attempt.as_deref() != Some(attempt)
         {
             self.finalization_failure_attempt = Some(attempt.to_owned());
-            db.event(id, &cairn_contracts::EventKind::Error, "The filesystem could not be flushed. Working files were preserved; automatic replay was stopped.", None)?;
+            let native = self
+                .prepared()
+                .is_some_and(|prepared| prepared["backend"] == "native");
+            let native_cleanup_failure = result
+                .as_ref()
+                .filter(|_| native)
+                .and_then(|result| result.native_cleanup.clone());
+            if let Some(message) = native_cleanup_failure {
+                self.last_error = Some(Some(format!("Native cleanup: {message}")));
+            }
+            let message = self.finalization_error().unwrap();
+            db.event(id, &cairn_contracts::EventKind::Error, message, None)?;
         }
         if let Some(result) = result
             && result.code == crate::runner::CONTROLLER_FAILED
@@ -619,6 +648,33 @@ impl Checkpoint {
             self.account_pause(attempt, total);
         }
         Ok(())
+    }
+
+    /// Serialize controller fencing with every live checkpoint writer. Recovery
+    /// may add authenticated evidence directly to the store, including on a
+    /// partially failed fence; reload it before permitting another write.
+    pub async fn fence(&self, service: &crate::service::Service, run: &Value) -> Result<()> {
+        let mut state = self.state.lock().await;
+        let result = crate::recovery::fence_attempt(service, run, Some(&state)).await;
+        let saved = RunCheckpoint::load(&self.store, &self.id)
+            .await?
+            .ok_or_else(|| {
+                crate::error::Error::conflict("Execution checkpoint disappeared during fencing.")
+            })?;
+        if saved.runner_id() != state.runner_id()
+            || saved.node_id != state.node_id
+            || (saved.process() != state.process() && saved.process().is_some())
+        {
+            return Err(crate::error::Error::conflict(
+                "Execution attempt changed during fencing.",
+            ));
+        }
+        *state = saved;
+        result
+    }
+
+    pub fn try_snapshot(&self) -> Option<RunCheckpoint> {
+        self.state.try_lock().ok().map(|state| state.clone())
     }
 
     pub async fn snapshot(&self) -> RunCheckpoint {
@@ -1241,6 +1297,7 @@ mod tests {
                         code: 70,
                         finalization_failed: true,
                         physical_finalized: false,
+                        native_cleanup: None,
                         terminal_reason: None,
                     }),
                 )?;

@@ -934,7 +934,9 @@ impl Execution<'_> {
                 .await?;
             }
             if workspace.isolated() {
-                recovery::fence(s, &s.store.run(&self.id).await?).await?;
+                self.checkpoint
+                    .fence(s, &s.store.run(&self.id).await?)
+                    .await?;
             }
             self.switch_account(workspace).await?;
             return Ok(Attempt::Resume(session.clone()));

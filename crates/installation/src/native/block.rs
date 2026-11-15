@@ -21,7 +21,8 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(crate) const STORAGE: &str = "ublk-rootless-v2";
+pub(crate) const STORAGE: &str = "ublk-rootless-v3";
+const CONFINED_STORAGE: &str = "ublk-rootless-v2";
 const LEGACY_ROOTLESS_STORAGE: &str = "ublk-rootless-v1";
 
 /// Where a conversation's files live in its mounted filesystems. Native disks
@@ -118,7 +119,7 @@ async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
             || previous["disk"] == "vm"
             || !matches!(
                 previous["storage"].as_str(),
-                Some("ublk" | LEGACY_ROOTLESS_STORAGE | STORAGE)
+                Some("ublk" | LEGACY_ROOTLESS_STORAGE | CONFINED_STORAGE | STORAGE)
             )
         {
             return Err(Error::conflict("Native disk platform changed."));
@@ -247,7 +248,18 @@ struct RecoveryLeases {
     disk: environment::Lease,
 }
 
-pub async fn recover_host_mounts(state: &Path) -> Result<()> {
+pub(super) fn recovery_mounts(state: &Path) -> Result<Vec<(PathBuf, String)>> {
+    let mounts = host_mounts(state, &std::fs::read_to_string("/proc/self/mountinfo")?)?;
+    for mounted in &mounts {
+        verify_host_mount(state, mounted)?;
+    }
+    Ok(mounts
+        .into_iter()
+        .map(|mounted| (mounted.path, mounted.device))
+        .collect())
+}
+
+pub(super) async fn recover_host_mounts(state: &Path, selected_run: &str) -> Result<()> {
     let mut mounts = host_mounts(state, &std::fs::read_to_string("/proc/self/mountinfo")?)?;
     // Host unmount may have succeeded before a controller crash while a private
     // namespace still holds the filesystem. Retained attachments remain candidates.
@@ -282,6 +294,9 @@ pub async fn recover_host_mounts(state: &Path) -> Result<()> {
         }
     }
     for mounted in mounts {
+        if mounted.run != selected_run {
+            continue;
+        }
         let root = workspace::directory(state, &mounted.run)?;
         let _workspace = crate::file_lock::exclusive(
             &root.join("owner.lock"),
@@ -308,7 +323,7 @@ pub async fn recover_host_mounts(state: &Path) -> Result<()> {
             if identity["backend"] != "native"
                 || !matches!(
                     identity["storage"].as_str(),
-                    Some("ublk" | LEGACY_ROOTLESS_STORAGE | STORAGE)
+                    Some("ublk" | LEGACY_ROOTLESS_STORAGE | CONFINED_STORAGE | STORAGE)
                 )
             {
                 return Err(Error::conflict("Mounted disk is not a native journal."));
@@ -641,6 +656,7 @@ async fn quiesce_holders(device: u64, attempt: &str, private_copies: bool) -> Re
 /// Keep the volume available to local consolidation even while a
 /// filesystem flush holds its lifecycle lock waiting for journal headroom.
 pub struct Handle {
+    abort_started: std::sync::atomic::AtomicBool,
     pub volume: Arc<Volume>,
     pub filesystem: Arc<AtomicU64>,
     pub mount: tokio::sync::Mutex<Mounted>,
@@ -649,16 +665,39 @@ pub struct Handle {
 impl Handle {
     pub fn new(mount: Mounted) -> Self {
         Self {
+            abort_started: std::sync::atomic::AtomicBool::new(false),
             volume: mount.volume.clone(),
             filesystem: mount.filesystem.clone(),
             mount: tokio::sync::Mutex::new(mount),
         }
     }
 
-    pub async fn abort_io(&self) -> Result<()> {
-        // Wake a blocked flush before waiting for its lifecycle lock.
+    pub async fn abort_io(self: &Arc<Self>) -> Result<()> {
         self.volume.stop.cancel();
-        self.mount.lock().await.abort_io().await
+        if self.abort_started.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let handle = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("native-disk-abort".into())
+            .spawn(move || {
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(Error::internal)
+                    .and_then(|runtime| {
+                        runtime.block_on(async { handle.mount.lock().await.abort_io().await })
+                    });
+                if let Err(error) = result {
+                    handle.abort_started.store(false, Ordering::Release);
+                    tracing::error!(%error, "Isolated native I/O abort failed; ownership retained");
+                }
+            });
+        if let Err(error) = spawned {
+            self.abort_started.store(false, Ordering::Release);
+            return Err(Error::internal(error));
+        }
+        Ok(())
     }
 }
 
@@ -673,7 +712,7 @@ pub struct Mounted {
     device: Arc<std::sync::Mutex<storage::ublk::MountedDisk>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Completion {
     Flushed,
     Aborted,
@@ -704,6 +743,7 @@ pub(super) async fn mount(
     _identity: Option<&super::identity::Identity>,
 ) -> Result<Mounted> {
     {
+        super::cleanup::check(state, run)?;
         let owner = environment::ownership(state, run, DISK_BUSY).await?;
         let directory = &owner.directory;
         let root = workspace::directory(state, run)?;
@@ -794,10 +834,23 @@ pub(super) async fn mount(
         };
         if let Err(error) = mounted {
             let _ = tokio::task::spawn_blocking(move || {
-                device
-                    .lock()
-                    .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
-                    .close_in_place()
+                // Leases remain owned until the failed mount's device really
+                // retires; an error cannot unlock it for a following attempt.
+                let _owner = owner;
+                let _physical = physical;
+                loop {
+                    match device
+                        .lock()
+                        .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
+                        .close_native()
+                    {
+                        Ok(()) => return Ok::<(), std::io::Error>(()),
+                        Err(error) => {
+                            tracing::warn!(%error, "Failed native mount retirement deferred");
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                    }
+                }
             })
             .await;
             return Err(error.into());
@@ -1031,7 +1084,7 @@ impl closing::Operations for CloseOperations<'_> {
             device
                 .lock()
                 .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
-                .close_in_place()
+                .close_native()
         })
         .await
         .map_err(Error::internal)??;
@@ -1177,23 +1230,58 @@ impl Drop for Mounted {
 }
 
 pub async fn status(state: &Path, run: &str) -> Result<Value> {
-    let directory = environment::directory(state, run)?;
-    match tokio::fs::metadata(directory.join("lazy/journal-v2.sqlite")).await {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(json!({
-                "mode": "native",
-                "availability": "unavailable",
-                "reason": crate::native::MISSING_NATIVE_JOURNAL_CODE
-            }));
-        }
-        Err(error) => return Err(error.into()),
-    }
+    static STATUS_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+    crate::validation::uuid(run)?;
+    let permit = STATUS_WORKERS
+        .try_acquire()
+        .map_err(|_| Error::unavailable("Native disk status capacity is occupied."))?;
+    let state = state.to_owned();
+    let run = run.to_owned();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("native-disk-status".into())
+        .spawn(move || {
+            storage::runtime::isolated_native_io();
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            let metrics = runtime.metrics();
+            runtime.block_on(async move {
+                let result = async {
+                    let directory = environment::directory(&state, &run)?;
+                    match tokio::fs::metadata(directory.join("lazy/journal-v2.sqlite")).await {
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            return Ok(json!({
+                                "mode": "native",
+                                "availability": "unavailable",
+                                "reason": crate::native::MISSING_NATIVE_JOURNAL_CODE
+                            }));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
 
-    let volume = storage::runtime::load_for_inspection(&directory).await?;
-    let mut status = volume.inspect().await?;
-    status["paused"] = volume.paused().into();
-    Ok(status)
+                    let volume = storage::runtime::load_for_inspection(&directory).await?;
+                    let mut status = volume.inspect().await?;
+                    status["paused"] = volume.paused().into();
+                    Ok(status)
+                }
+                .await;
+                let _ = send.send(result);
+                drop(permit);
+                while metrics.num_alive_tasks() > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            });
+        })
+        .map_err(Error::internal)?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), receive)
+        .await
+        .map_err(|_| Error::unavailable("Native disk status is still pending."))?
+        .map_err(Error::internal)?
 }
 
 pub fn free_bytes(path: &Path) -> Result<u64> {
@@ -1220,6 +1308,7 @@ async fn remove(path: &Path) -> Result<()> {
 }
 
 pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>> {
+    super::cleanup::check(state, run)?;
     let lease = environment::lock(state, run, DISK_BUSY).await?;
     let directory = &lease.directory;
     let replacement = storage::runtime::replacement(directory).await?;
@@ -1300,6 +1389,66 @@ mod tests {
         assert!(owned_mount_present(path, dev, mounted).unwrap());
         assert!(owned_mount_present(path, dev, &format!("{mounted}\n{mounted}")).is_err());
         assert!(owned_mount_present(path, dev, &mounted.replace("259:10", "259:11")).is_err());
+    }
+
+    #[tokio::test]
+    async fn isolated_opener_keeps_maintenance_alive_after_handing_off_the_volume() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/native");
+        let block = 4 * 1024 * 1024u64;
+        let policy = json!({"reserveMiB":64, "reservePercent":1});
+        std::fs::write(
+            root.path().join("storage-policy.json"),
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
+        let disk = storage::runtime::create(&directory.join("lazy"), &json!({
+            "version":1, "size":4*block, "blockSize":block,
+            "blocks":(0..4).map(|index| json!({"offset":index*block,"size":block,"hash":null})).collect::<Vec<_>>()
+        }), &json!({"master":"http://127.0.0.1:1/", "grant":"maintenance", "policy":policy})).await.unwrap();
+        for value in 1..=3 {
+            disk.write_at(0, &vec![value; block as usize]).unwrap();
+        }
+        drop(disk);
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let worker = std::thread::spawn(move || {
+            storage::runtime::isolated_native_io();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let volume = open_volume(&directory, 2 * block).await.unwrap();
+                let weak = Arc::downgrade(&volume.disk);
+                send.send(volume)
+                    .unwrap_or_else(|_| panic!("volume observer lost"));
+                while weak.strong_count() > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            });
+        });
+        let volume = receive.await.unwrap();
+        let writing = volume.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            tokio::task::spawn_blocking(move || writing.write_at(0, b"maintained")),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let mut bytes = [0; 10];
+        volume.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"maintained");
+        drop(volume);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::task::spawn_blocking(move || worker.join()),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1464,7 +1613,7 @@ mod tests {
         // A future isolation/storage implementation must never be downgraded
         // by rewriting its marker or touching the retained payload.
         let mut future = current.clone();
-        future["storage"] = "ublk-rootless-v3".into();
+        future["storage"] = "ublk-rootless-v4".into();
         atomic_write(&path, &serde_json::to_vec(&future).unwrap())
             .await
             .unwrap();

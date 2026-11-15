@@ -3,6 +3,79 @@ use crate::run_fixture::DbRunFixture;
 use serde_json::json;
 
 #[tokio::test]
+async fn native_cleanup_cause_survives_checkpoint_roundtrip_without_claiming_physical_release() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let message = "Native disk is held by valkey pid 42; ownership retained.";
+    let saved = store.transaction(move |db| {
+        db.add_run_fixture(&json!({"id":"cleanup-run", "taskId":"cleanup-run", "status":"running"}), None)?;
+        let mut saved = RunCheckpoint::from_value(json!({
+            "runnerId":"cleanup-attempt", "prepared":{"backend":"native", "isolated":true}, "remainingMs":null,
+        }))?;
+        saved.record_controller_result(db, "cleanup-run", "cleanup-attempt", Some(crate::runner::ControllerResult {
+            code:70, finalization_failed:true, physical_finalized:false, terminal_reason:None,
+            native_cleanup:Some(message.into()),
+        }))?;
+        saved.record_controller_result(db, "cleanup-run", "cleanup-attempt", Some(crate::runner::ControllerResult {
+            code:70, finalization_failed:true, physical_finalized:false, terminal_reason:None,
+            native_cleanup:Some("Updated holder diagnostic".into()),
+        }))?;
+        saved.store_in(db, "cleanup-run")?;
+        assert_eq!(db.events_fixture("cleanup-run", 0, 100)?.len(), 1);
+        RunCheckpoint::load_in(db, "cleanup-run")
+    }).await.unwrap().unwrap();
+    assert_eq!(
+        saved.finalization_error(),
+        Some("Updated holder diagnostic")
+    );
+    assert_eq!(saved.terminal_code(), Some(70));
+    assert_eq!(
+        saved.finalization_failure_attempt.as_deref(),
+        Some("cleanup-attempt")
+    );
+    assert!(saved.progress.is_none());
+}
+
+#[tokio::test]
+async fn unrelated_provider_error_does_not_replace_vm_flush_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let saved = store
+        .transaction(|db| {
+            db.add_run_fixture(
+                &json!({"id":"vm-flush", "taskId":"vm-flush", "status":"running"}),
+                None,
+            )?;
+            let mut saved = RunCheckpoint::from_value(json!({
+                "runnerId":"attempt", "prepared":{"backend":"firecracker", "isolated":true},
+                "remainingMs":null, "lastError":"Provider unavailable",
+            }))?;
+            saved.record_controller_result(
+                db,
+                "vm-flush",
+                "attempt",
+                Some(crate::runner::ControllerResult {
+                    code: 70,
+                    finalization_failed: true,
+                    physical_finalized: false,
+                    native_cleanup: None,
+                    terminal_reason: None,
+                }),
+            )?;
+            Ok(saved)
+        })
+        .await
+        .unwrap();
+    assert!(
+        saved
+            .finalization_error()
+            .unwrap()
+            .contains("filesystem could not be flushed")
+    );
+    assert_eq!(saved.last_error(), "Provider unavailable");
+}
+
+#[tokio::test]
 async fn controller_reason_preserves_provider_finalization_completion_and_cancellation_policy() {
     use crate::runner::{ControllerResult, TerminalReason::NativeOutputLimit};
 
@@ -12,6 +85,7 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
         code: 70,
         physical_finalized: true,
         finalization_failed: false,
+        native_cleanup: None,
         terminal_reason: Some(NativeOutputLimit),
     };
     for (name, prior, cancelled, result, expected_error, records_reason) in [
@@ -19,7 +93,7 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
             "provider",
             json!({ "providerFailed": true, "lastError": "Provider unavailable" }),
             false,
-            reported,
+            reported.clone(),
             "Provider unavailable",
             true,
         ),
@@ -27,7 +101,7 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
             "earlier",
             json!({ "lastError": "Earlier failure" }),
             false,
-            reported,
+            reported.clone(),
             "Earlier failure",
             true,
         ),
@@ -35,7 +109,7 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
             "completed",
             json!({ "completed": true }),
             false,
-            reported,
+            reported.clone(),
             NativeOutputLimit.message(),
             true,
         ),
@@ -43,7 +117,7 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
             "cancelled",
             json!({}),
             true,
-            reported,
+            reported.clone(),
             NativeOutputLimit.message(),
             true,
         ),
@@ -55,7 +129,7 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
                 code: 70,
                 physical_finalized: false,
                 finalization_failed: true,
-                ..reported
+                ..reported.clone()
             },
             "",
             false,
@@ -65,8 +139,9 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
             json!({}),
             false,
             ControllerResult {
+                native_cleanup: None,
                 terminal_reason: None,
-                ..reported
+                ..reported.clone()
             },
             "",
             false,
@@ -77,7 +152,7 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
             false,
             ControllerResult {
                 code: 0,
-                ..reported
+                ..reported.clone()
             },
             "",
             false,
@@ -88,7 +163,7 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
             false,
             ControllerResult {
                 physical_finalized: false,
-                ..reported
+                ..reported.clone()
             },
             "",
             false,
@@ -97,7 +172,7 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
             "vm",
             json!({ "prepared": { "backend": "firecracker", "isolated": true } }),
             false,
-            reported,
+            reported.clone(),
             "",
             false,
         ),
@@ -188,6 +263,7 @@ async fn controller_reason_rejects_a_different_attempt_without_committing_eviden
                     code: 70,
                     physical_finalized: true,
                     finalization_failed: false,
+                    native_cleanup: None,
                     terminal_reason: Some(crate::runner::TerminalReason::NativeOutputLimit),
                 }),
             )
@@ -233,7 +309,7 @@ async fn native_output_limit_survives_guard_authenticated_wait_and_checkpoint_re
     let decision_attempt = attempt.clone();
     checkpoint
         .decide(move |saved, db| {
-            saved.record_controller_result(db, run_id, &decision_attempt, Some(result))?;
+            saved.record_controller_result(db, run_id, &decision_attempt, Some(result.clone()))?;
             saved.record_controller_result(db, run_id, &decision_attempt, Some(result))?;
             Ok(())
         })

@@ -764,9 +764,9 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     Ok(args)
 }
 
-pub fn spawn(launch: &Launch<'_>) -> Result<Child> {
+pub(super) fn spawn_prepared(arguments: Vec<String>) -> Result<Child> {
     command("/usr/bin/systemd-run")
-        .args(arguments(launch)?)
+        .args(arguments)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
