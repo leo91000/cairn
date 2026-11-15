@@ -428,4 +428,125 @@ mod tests {
             f.s.shutdown.cancel();
         }
     }
+
+    #[tokio::test]
+    async fn member_oauth_refresh_rechecks_remote_membership_after_the_lock_wait() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const MEMBER: &str = "resource-member";
+        for membership in ["current", "removed", "replaced", "removed-during-refresh"] {
+            let f = Fixture::new().await;
+            let mut manifest = f.manifest.clone();
+            manifest["version"] = "2".into();
+            manifest["credential"] = json!({
+                "label": "Probe OAuth",
+                "header": "authorization",
+                "prefix": "Bearer ",
+                "oauth": {
+                    "authorizationUrl": "https://service.example.test/authorize",
+                    "tokenUrl": "https://service.example.test/token",
+                    "clientIdSetting": "marker",
+                },
+            });
+            f.publish(&manifest).await.unwrap();
+            f.set(json!([contribution("hook", "message", support())]))
+                .await;
+            crate::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+            let input: ListPluginResourcesInput = serde_json::from_value(json!({
+                "pluginId": "grant-probe",
+                "instanceId": f.instance,
+                "resourceType": "channel",
+                "agentId": MAIN_AGENT_ID,
+            }))
+            .unwrap();
+            let member = Authority::member(&f.s, MEMBER, MAIN_AGENT_ID)
+                .await
+                .unwrap();
+            let read = prepare_list(&f.s, &input, Some(MAIN_AGENT_ID), Some(member))
+                .await
+                .unwrap();
+            let Scope::Managed(_, authority) = &read.scope else {
+                panic!("the member read retains its authority");
+            };
+            let connection = connections::get(&f.s, "grant-probe", &f.instance)
+                .await
+                .unwrap();
+            let saved = json!({
+                "token": "synthetic-expired-token",
+                "oauth": {
+                    "expiresAt": 0,
+                    "tokenUrl": "https://service.example.test/token",
+                    "refreshToken": "synthetic-refresh-token",
+                    "clientId": "fixture-client",
+                    "scope": "",
+                },
+            });
+            let key = connections::credential_key(&f.instance);
+            f.s.vault.set(&key, &saved).await.unwrap();
+            let posts = Arc::new(AtomicUsize::new(0));
+            let count = posts.clone();
+            let service = f.s.clone();
+            let (origin, server) = crate::common::serve_locally(axum::Router::new().route(
+                "/token",
+                axum::routing::post(move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let service = service.clone();
+                    async move {
+                        if membership == "removed-during-refresh" {
+                            crate::relay_fixture::remove_member(&service, MEMBER).await;
+                        }
+                        axum::Json(json!({
+                            "access_token": "synthetic-refreshed-token",
+                            "token_type": "Bearer",
+                            "expires_in": 3600,
+                        }))
+                    }
+                }),
+            ))
+            .await;
+            f.s.plugins.route_http_to(Some(origin));
+
+            let lock = f.s.plugins.oauth_flows.lock(&f.instance);
+            let held = lock.lock().await;
+            let access =
+                super::super::oauth::access_token_managed(&f.s, &connection, Some(authority));
+            tokio::pin!(access);
+            assert!(futures_util::poll!(&mut access).is_pending());
+            match membership {
+                "removed" => crate::relay_fixture::remove_member(&f.s, MEMBER).await,
+                "replaced" => {
+                    crate::relay_fixture::add_member(&f.s, MEMBER, "replacement-membership").await;
+                }
+                _ => {}
+            }
+            // Beacon changed while the call waited. No synchronization has
+            // removed the original local access row or changed the plugin grant.
+            let local_access =
+                f.s.store
+                    .read(|db| db.member_agent_access(MEMBER, MAIN_AGENT_ID))
+                    .await
+                    .unwrap();
+            assert_eq!(local_access.as_deref(), Some("membership-resource-member"));
+            drop(held);
+
+            let result = access.await;
+            if membership == "current" {
+                assert_eq!(posts.load(Ordering::SeqCst), 1);
+                assert!(result.unwrap().is_some());
+            } else {
+                let permitted_posts = usize::from(membership == "removed-during-refresh");
+                assert_eq!(
+                    posts.load(Ordering::SeqCst),
+                    permitted_posts,
+                    "a {membership} Beacon membership must fence OAuth effects and publication"
+                );
+                let error = result.unwrap_err();
+                assert_eq!(error.status, 403);
+                assert!(error.message.contains("membership changed"));
+                assert!(f.s.vault.get(&key).await.unwrap().as_ref() == Some(&saved));
+            }
+            server.abort();
+            f.s.shutdown.cancel();
+        }
+    }
 }

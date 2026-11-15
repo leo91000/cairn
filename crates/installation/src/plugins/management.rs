@@ -178,6 +178,16 @@ impl Authority {
             })
     }
 
+    /// Refresh the member's Beacon identity without invoking resource resolution
+    /// that could recursively acquire the OAuth mutex. The caller must still
+    /// authorize the complete proof in its final local read/write.
+    pub(crate) async fn recheck_member(&self, s: &Service) -> Result<()> {
+        if let Some(preparation) = &self.preparation {
+            preparation.recheck_member(s).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         if let Some(snapshot) = &self.snapshot {
             Box::pin(snapshot.recheck(s)).await?;

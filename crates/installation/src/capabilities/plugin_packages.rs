@@ -370,6 +370,20 @@ impl Authority {
                 ));
             }
         }
+        self.recheck_member(s).await?;
+        if let Some(guard) = &self.recheck_guard {
+            let authority = self.clone();
+            s.store.read(move |db| authority.authorize(db)).await?;
+            guard(s).await?;
+        }
+        let authority = self.clone();
+        s.store.read(move |db| authority.authorize(db)).await
+    }
+
+    /// Remote membership only: safe under an OAuth mutex because it never
+    /// resolves plugin resources. Effect boundaries still take their complete
+    /// local authority snapshot after this asynchronous check.
+    pub(crate) async fn recheck_member(&self, s: &Service) -> Result<()> {
         if let Some(member) = &self.member {
             let current = crate::relay::task_author_policy(s)
                 .await?
@@ -385,13 +399,7 @@ impl Authority {
                 ));
             }
         }
-        if let Some(guard) = &self.recheck_guard {
-            let authority = self.clone();
-            s.store.read(move |db| authority.authorize(db)).await?;
-            guard(s).await?;
-        }
-        let authority = self.clone();
-        s.store.read(move |db| authority.authorize(db)).await
+        Ok(())
     }
 
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {

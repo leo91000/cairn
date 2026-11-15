@@ -543,6 +543,9 @@ async fn access_token_with(
 ) -> Result<Option<String>> {
     let lock = s.plugins.oauth_flows.lock(&connection.id);
     let _guard = lock.lock().await;
+    if let Some(authority) = management {
+        authority.recheck_member(s).await?;
+    }
     if !editing {
         connections::ensure_owner(s, connection).await?;
     }
@@ -591,7 +594,7 @@ async fn access_token_with(
         fields.push(("client_secret".into(), secret.to_owned()));
     }
     let expected = connection.clone();
-    let management = management.cloned();
+    let local_authority = management.cloned();
     let selected_package = (!package.builtin).then(|| {
         (
             package.manifest.id.clone(),
@@ -600,7 +603,7 @@ async fn access_token_with(
         )
     });
     let authorize_refresh = Arc::new(move |db: &crate::store::Db<'_>| -> Result<()> {
-        if let Some(authority) = &management {
+        if let Some(authority) = &local_authority {
             authority.authorize(db)?;
         }
         authorize_token(db, &expected, editing)?;
@@ -617,8 +620,11 @@ async fn access_token_with(
         Ok(())
     });
     // Credential/package retrieval awaited after the mutex's initial check.
-    // Fence local revocation again immediately before the provider effect;
-    // semantic resolution here could recursively require this same OAuth lock.
+    // Refresh remote membership before the final local proof. Full semantic
+    // resolution here could recursively require this same OAuth mutex.
+    if let Some(authority) = management {
+        authority.recheck_member(s).await?;
+    }
     let before_send = authorize_refresh.clone();
     s.store.read(move |db| before_send(db)).await?;
     let response = post(s, &package.manifest, &oauth.token_url, &fields).await?;
@@ -646,6 +652,9 @@ async fn access_token_with(
     };
     let refreshed = credentials(&response, &flow, oauth, Some(&saved))?;
     let encrypted = s.vault.encrypt(&key, &refreshed)?;
+    if let Some(authority) = management {
+        authority.recheck_member(s).await?;
+    }
     s.store
         .transaction(move |db| {
             authorize_refresh(db)?;
