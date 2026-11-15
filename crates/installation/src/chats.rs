@@ -1056,6 +1056,7 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     }
     message.status = MessageStatus::Delivered;
     db.save_message(&message)?;
+    crate::rules::engine::conversations::delivered_input(db, &chat_id, run_id, message_id)?;
     let private = db.private_answer_message(message_id)?;
     if let Some(question_id) = message.question_id.as_deref()
         && let Some(mut question) = find_question(db, &chat_id, question_id)?
@@ -1436,6 +1437,12 @@ fn launch_turn(
         Some(message) => crate::conversation_writers::record_turn(db, &run_id, message)?,
         None => crate::conversation_writers::record_relaunch(db, &run_id, &chat.id)?,
     }
+    crate::rules::engine::conversations::begin_chat_turn(
+        db,
+        &chat.id,
+        &run_id,
+        launched_by.as_deref(),
+    )?;
     chat.cancelled_by_deletion = false;
     chat.session_restart_requested = false;
     chat.environment_state = None;

@@ -2253,16 +2253,18 @@ async fn manual_compaction_does_not_emit_reply_or_end_hooks_even_when_observed_l
 
 #[tokio::test]
 async fn a_mission_run_preserves_its_callers_chain_after_the_caller_starts_a_new_one() {
-    use common::MissionFixture;
+    use common::{MissionFixture, run_fixture::RunFixture};
     let f = granted().await;
     rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
     emit(&f, "alice", message("alice", "hello")).await;
     emit(&f, "bob", message("bob", "hello")).await;
     emit(&f, "carol", message("carol", "hello")).await;
+    emit(&f, "dave", message("dave", "hello")).await;
     engine::tick(&f.s).await.unwrap();
     let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
     let target = bound(&f, OWNER, "chat:bob").await.unwrap();
     let scheduled_target = bound(&f, OWNER, "chat:carol").await.unwrap();
+    let fresh_target = bound(&f, OWNER, "chat:dave").await.unwrap();
     let run = launched(&f, &chat).await;
     let token = fixture::running_conversation(&f.s, &chat).await;
     let looping = rule_on(
@@ -2364,6 +2366,70 @@ async fn a_mission_run_preserves_its_callers_chain_after_the_caller_starts_a_new
             })
             .await
             .unwrap();
+        // Continuing this completed mission in chat reuses its run. Its next
+        // human turn starts a new chain without altering independent missions.
+        f.s.store
+            .change_run_fixture(
+                &mission_run,
+                json!({"status":"succeeded","sessionId":"saved-session"}),
+            )
+            .await
+            .unwrap();
+        f.s.store
+            .save_checkpoint_boundary(
+                &mission_run,
+                json!({
+                    "completed":true,"launched":true,"prepared":{"workspace":"/saved/workspace"},
+                }),
+            )
+            .await
+            .unwrap();
+        let converted = f.s.chat_from_run(&mission_run).await.unwrap();
+        let converted = text(&converted, "id").to_owned();
+        person_sends(&f, &converted, "A new human chain").await;
+        let checked = mission_run.clone();
+        f.s.store
+            .read(move |db| {
+                let depth: u32 = db.0.query_row(
+                    "SELECT depth FROM hook_rule_run_depths WHERE run_id=?",
+                    [checked],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(
+                    u64::from(depth),
+                    MAX_CHAIN_DEPTH,
+                    "queuing is not launching a new turn"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let converted_token = fixture::running_conversation(&f.s, &converted).await;
+        let message = uuid::Uuid::new_v4().to_string();
+        let sent = f
+            .mcp(
+                "/mcp-installation",
+                &converted_token,
+                "send_chat_message",
+                json!({
+                    "chatId": fresh_target,
+                    "message": { "id": message, "text": "From the new human turn" },
+                }),
+            )
+            .await;
+        assert_ne!(sent["result"]["isError"], true, "{sent}");
+        f.s.store
+            .read(move |db| {
+                let depth: u32 = db.0.query_row(
+                    "SELECT depth FROM hook_rule_turn_origins WHERE message_id=?",
+                    [message],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(depth, 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
     assert!(!triggerings(&f, &looping).await.is_empty());
 }
@@ -2454,4 +2520,65 @@ async fn more_than_one_page_of_pending_questions_is_reported_once_across_restart
         .await
         .unwrap();
     assert_eq!(count, 101);
+}
+
+#[tokio::test]
+async fn changing_the_profile_backend_does_not_remove_a_native_conversations_authority_check() {
+    let f = granted().await;
+    let mut node = native_node(&f, &json!([])).await;
+    let agent = f.s.agent_fixture(json!({
+        "name": "Originally native", "access": { "backend": "native", "nodes": [node["id"]] },
+    }), None).await.unwrap();
+    let agent = text(&agent, "id").to_owned();
+    let mut unprivileged = Vec::new();
+    for operation in [
+        json!({ "type": "cancelConversation", "key": key() }),
+        json!({ "type": "storeValue", "scope": "conversation", "key": key(), "name": "seen", "value": { "type": "literal", "value": true } }),
+    ] {
+        unprivileged.push(
+            rule_on(
+                &f,
+                OWNER,
+                plugin(&f),
+                json!([action("operate", &operation)]),
+                limits(),
+            )
+            .await,
+        );
+    }
+    node["nativeAccounts"] = json!([OWNER]);
+    f.s.store.put_node_fixture(node).await.unwrap();
+    rule_on(
+        &f,
+        OWNER,
+        plugin(&f),
+        start_or_steer_agent(&agent),
+        limits(),
+    )
+    .await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    assert_eq!(
+        f.s.store.run(&run).await.unwrap()["snapshot"]["agent"]["access"]["backend"],
+        "native"
+    );
+    f.s.agent_fixture(
+        json!({ "access": { "backend": "firecracker", "nodes": null } }),
+        Some(&agent),
+    )
+    .await
+    .unwrap();
+    emit(&f, "second", message("alice", "still native")).await;
+    engine::tick(&f.s).await.unwrap();
+    for rule in unprivileged {
+        let history = triggerings(&f, &rule).await;
+        assert_eq!(history[0]["status"], "failed", "{:?}", history[0]);
+        assert!(
+            text(&history[0], "error").contains("saved without native authority"),
+            "{:?}",
+            history[0]
+        );
+    }
 }

@@ -24,6 +24,9 @@ One immediate transaction creates nine empty tables and advances `user_version`:
   agent-created or edited scheduled work and with a mission run's admission. A
   mission cannot lose the chain of the conversation that started it, even if
   that conversation subsequently accepts another person's input or is deleted.
+  If a mission is continued as a conversation, its message turns update the
+  reused run's depth. A queued human input resets it when its turn launches,
+  preserving the cause of the preceding work until then.
 - `hook_rule_reported_questions`: once-only question notifications, retained until
   their question is deleted. Pending questionnaires are processed in bounded
   batches without dropping deduplication at a cache limit or after restart.

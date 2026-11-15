@@ -247,9 +247,11 @@ pub(crate) fn record_input(db: &Db<'_>, chat: &str, message: &str, origin: &Orig
         "SELECT CASE WHEN ?2 THEN 0 ELSE max( \
            coalesce((SELECT depth FROM hook_rule_chain_depths WHERE chat_id=?1),0), \
            coalesce((SELECT json_extract(watch,'$.depth') FROM hook_rule_conversations WHERE chat_id=?1),0), \
+           coalesce((SELECT d.depth FROM hook_rule_run_depths d JOIN conversations c ON c.run_id=d.run_id WHERE c.id=?1),0), \
            ?3) END, \
          EXISTS(SELECT 1 FROM hook_rule_chain_depths WHERE chat_id=?1) OR \
-         EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=?1)",
+         EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=?1) OR \
+         EXISTS(SELECT 1 FROM hook_rule_run_depths d JOIN conversations c ON c.run_id=d.run_id WHERE c.id=?1)",
         params![chat,person,causing], |row| Ok((row.get(0)?,row.get(1)?)),
     )?;
     // Ordinary conversations outside a rule chain need no rule metadata. A
@@ -333,6 +335,54 @@ pub(crate) fn record_run(db: &Db<'_>, run: &Json, origin: &Origin) -> Result<()>
             params![text(run, "id"), depth],
         )?;
     }
+    Ok(())
+}
+
+/// A mission continued as a conversation reuses its run. Its frozen cause stays
+/// active until the next message really launches a turn: queuing a human input
+/// must not lower the cause of work that is still running. Independent mission
+/// runs retain their own admission depth.
+pub(crate) fn begin_chat_turn(
+    db: &Db<'_>,
+    chat: &str,
+    run: &str,
+    message: Option<&str>,
+) -> Result<()> {
+    let previous: Option<u32> = db.0.query_row(
+        "SELECT d.depth FROM conversations c JOIN hook_rule_run_depths d ON d.run_id=c.run_id WHERE c.id=?",
+        [chat], |row| row.get(0),
+    ).optional()?;
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    let depth = if let Some(message) = message {
+        db.0.query_row(
+            "SELECT depth FROM hook_rule_turn_origins WHERE chat_id=?1 AND message_id=?2",
+            params![chat, message],
+            |row| row.get::<_, u32>(0),
+        )
+        .optional()?
+        .unwrap_or(previous)
+    } else {
+        previous
+    };
+    db.0.execute(
+        "INSERT INTO hook_rule_run_depths(run_id,depth) VALUES(?1,?2) \
+         ON CONFLICT(run_id) DO UPDATE SET depth=excluded.depth",
+        params![run, depth],
+    )?;
+    Ok(())
+}
+
+/// Steering or answering can join an already working converted mission. Such
+/// delivery extends its active cause; a queued human message resets it only in
+/// begin_chat_turn, rather than retroactively changing the preceding turn.
+pub(crate) fn delivered_input(db: &Db<'_>, chat: &str, run: &str, message: &str) -> Result<()> {
+    db.0.execute(
+        "UPDATE hook_rule_run_depths SET depth=max(depth,coalesce(( \
+           SELECT depth FROM hook_rule_turn_origins WHERE chat_id=?1 AND message_id=?3),depth)) WHERE run_id=?2",
+        params![chat,run,message],
+    )?;
     Ok(())
 }
 
@@ -468,8 +518,9 @@ fn require_native(db: &Db<'_>, version: &VersionRow, agent: &Json, origin: &Orig
         })
 }
 
-/// The agent a conversation runs as: an automatic profile follows the environment its
-/// run was placed in, as native policy does.
+/// A conversation keeps its run's environment until explicitly migrated. A later
+/// profile edit cannot turn an existing native environment into a VM for the
+/// authority check, even for actions which do not send a new message.
 fn conversation_agent(db: &Db<'_>, chat: &Conversation) -> Result<Json> {
     let mut agent = db.agent_snapshot(&chat.agent_id)?.unwrap_or_default();
     let run = chat
@@ -478,10 +529,9 @@ fn conversation_agent(db: &Db<'_>, chat: &Conversation) -> Result<Json> {
         .map(|run| db.run(run))
         .transpose()?
         .flatten();
-    if agent["access"]["backend"] == "auto"
-        && let Some(backend @ ("native" | "firecracker")) = run
-            .as_ref()
-            .and_then(|run| run["snapshot"]["agent"]["access"]["backend"].as_str())
+    if let Some(backend @ ("native" | "firecracker")) = run
+        .as_ref()
+        .and_then(|run| run["snapshot"]["agent"]["access"]["backend"].as_str())
     {
         agent["access"]["backend"] = backend.into();
     }
