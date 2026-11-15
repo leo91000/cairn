@@ -103,7 +103,12 @@ pub async fn serve(path: &Path, attempt: &str, stop: CancellationToken) -> Resul
     }
     // BindsTo also stops the workload if this guardian dies or its own 5 s
     // systemd watchdog expires, even if this explicit stop cannot complete.
-    super::systemd::stop_workload(attempt).await
+    super::systemd::stop_workload_in(
+        path.parent()
+            .ok_or_else(|| Error::bad("Invalid lease directory."))?,
+        attempt,
+    )
+    .await
 }
 
 #[cfg(test)]
