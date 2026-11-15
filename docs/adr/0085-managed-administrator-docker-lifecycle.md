@@ -32,6 +32,9 @@ digest so builder image verification does not require the refused embedded API.
 Run dockerd in private mount/network namespaces established before runtime
 threads. A private `/run` preserves only this attempt's Docker runtime/plugin
 bindings; it hides host Docker/containerd/DBus sockets, including firewalld.
+Record the host resolver's canonical target before hiding `/run`. For a target
+under `/run`, create only a private placeholder before binding the slirp resolver;
+this supports systemd-resolved symlinks without changing the host resolver.
 Slirp supplies egress and explicit IPv4 TCP/UDP host forwarding, whose lifecycle
 follows container start/stop/deletion. Mutation responses reconcile the current
 complete container inventory before reusing host ports; a one-second observer

@@ -10,7 +10,10 @@ use std::{
     collections::HashMap,
     fs::File,
     net::Ipv4Addr,
-    os::{fd::AsRawFd, unix::process::CommandExt},
+    os::{
+        fd::AsRawFd,
+        unix::{ffi::OsStrExt, process::CommandExt},
+    },
     path::Path,
     process::Stdio,
     sync::Arc,
@@ -40,6 +43,30 @@ fn filesystem<T>(operation: &str, result: std::io::Result<T>) -> Result<T> {
     result.map_err(|error| {
         Error::unavailable(format!("Managed Docker could not {operation}: {error}"))
     })
+}
+
+fn prepare_resolver_target(target: &Path, private_run: &Path) -> Result<()> {
+    if !target.starts_with(private_run) {
+        return Ok(());
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| Error::unavailable("Invalid private resolver target."))?;
+    filesystem(
+        "prepare the private resolver directory",
+        std::fs::create_dir_all(parent),
+    )?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(Error::unavailable(format!(
+            "Managed Docker could not prepare its private resolver target: {error}"
+        ))),
+    }
 }
 
 /// Called by main before any runtime threads. The bind descriptors retain only
@@ -83,6 +110,10 @@ pub fn daemon(args: &[String]) -> Result<()> {
     let plugins = filesystem(
         "open its plugin directory",
         File::open("/run/docker/plugins"),
+    )?;
+    let resolver_target = filesystem(
+        "resolve the host resolver target",
+        std::fs::canonicalize("/etc/resolv.conf"),
     )?;
     let cgroups = filesystem(
         "retain the workload cgroup mount",
@@ -165,11 +196,14 @@ pub fn daemon(args: &[String]) -> Result<()> {
         },
         "restore the workload cgroup mount",
     )?;
+    prepare_resolver_target(&resolver_target, Path::new("/run"))?;
+    let resolver_target =
+        std::ffi::CString::new(resolver_target.as_os_str().as_bytes()).map_err(Error::internal)?;
     checked(
         unsafe {
             libc::mount(
                 c"/run/cairn-docker/resolv.conf".as_ptr(),
-                c"/etc/resolv.conf".as_ptr(),
+                resolver_target.as_ptr(),
                 std::ptr::null(),
                 libc::MS_BIND,
                 std::ptr::null(),
@@ -561,6 +595,54 @@ pub(super) async fn response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symlinked_resolver_target_is_recreated_only_in_the_private_run() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join("run");
+        let host = root.path().join("host-run");
+        let etc = root.path().join("etc");
+        let relative = Path::new("systemd/resolve/stub-resolv.conf");
+        std::fs::create_dir_all(run.join(relative).parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::write(run.join(relative), b"nameserver 127.0.0.53\n").unwrap();
+        symlink(run.join(relative), etc.join("resolv.conf")).unwrap();
+        let target = std::fs::canonicalize(etc.join("resolv.conf")).unwrap();
+        // Model mounting a fresh /run: the original host directory still
+        // exists independently, while the symlink's pathname is now dangling.
+        std::fs::rename(&run, &host).unwrap();
+        std::fs::create_dir(&run).unwrap();
+        assert!(!etc.join("resolv.conf").exists());
+        prepare_resolver_target(&target, &run).unwrap();
+        assert!(etc.join("resolv.conf").is_file());
+        assert_eq!(
+            std::fs::read(host.join(relative)).unwrap(),
+            b"nameserver 127.0.0.53\n"
+        );
+        assert!(std::fs::read(target).unwrap().is_empty());
+    }
+
+    #[test]
+    fn regular_host_resolver_contents_are_never_rewritten() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("resolv.conf");
+        std::fs::write(&target, b"nameserver 192.0.2.53\n").unwrap();
+        prepare_resolver_target(&target, &root.path().join("run")).unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), b"nameserver 192.0.2.53\n");
+    }
+
+    #[test]
+    fn existing_private_resolver_target_is_not_truncated() {
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join("run");
+        std::fs::create_dir(&run).unwrap();
+        let target = run.join("resolv.conf");
+        std::fs::write(&target, b"private existing contents").unwrap();
+        prepare_resolver_target(&target, &run).unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), b"private existing contents");
+    }
 
     #[tokio::test]
     async fn slirp_control_accepts_a_fragmented_reply_without_waiting_for_eof() {

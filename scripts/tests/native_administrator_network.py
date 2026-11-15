@@ -30,6 +30,13 @@ def inside(arguments):
         if path.exists()
     )
     docker = os.open(tools, os.O_RDONLY | os.O_DIRECTORY)
+    # Debian's iptables executables traverse /etc/alternatives. Retain this
+    # tool-only directory before replacing /etc with the synthetic fixture.
+    alternatives = (
+        os.open("/etc/alternatives", os.O_RDONLY | os.O_DIRECTORY)
+        if Path("/etc/alternatives").is_dir()
+        else None
+    )
 
     def command(*args, **kw):
         return subprocess.run(
@@ -54,6 +61,16 @@ def inside(arguments):
         "mount", "--bind", "/proc/self/fd/" + str(docker), "/opt/cairn-docker", pass_fds=(docker,)
     )
     os.close(docker)
+    if alternatives is not None:
+        Path("/etc/alternatives").mkdir()
+        command(
+            "mount",
+            "--bind",
+            "/proc/self/fd/" + str(alternatives),
+            "/etc/alternatives",
+            pass_fds=(alternatives,),
+        )
+        os.close(alternatives)
     for directory in ["/run/cairn-docker", "/run/docker/plugins"]:
         Path(directory).mkdir(parents=True)
     Path("/etc/passwd").write_text("root:x:0:0:root:/run:/bin/sh\n")
@@ -62,7 +79,11 @@ def inside(arguments):
     Path("/etc/ssl/cert.pem").write_bytes(ca)
     Path("/etc/ssl/certs/ca-certificates.crt").write_bytes(ca)
     Path("/etc/hosts").write_text("127.0.0.1 localhost\n")
-    Path("/etc/resolv.conf").write_text("nameserver 127.0.0.1\n")
+    resolver = Path("/run/systemd/resolve/stub-resolv.conf")
+    resolver.parent.mkdir(parents=True)
+    resolver.write_text("nameserver 127.0.0.53\n")
+    Path("/etc/resolv.conf").symlink_to(resolver)
+    resolver_before = resolver.read_bytes()
     Path("/run/cairn-plan.json").write_text(
         json.dumps(
             dict(
@@ -79,6 +100,7 @@ def inside(arguments):
     helper = subprocess.Popen([binary, "native-administrator-docker"], stdout=log, stderr=log)
     try:
         parent = command(binary, "native-administrator-docker-ready")
+        assert resolver.read_bytes() == resolver_before, "Docker changed the outer resolver"
         client = "/opt/cairn-docker/bin/docker"
         env = dict(
             PATH="/usr/sbin:/usr/bin:/sbin:/bin",
