@@ -6,12 +6,15 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class ResolvePluginResourceInput(
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val agentId: String? = null,
     val id: String,
     val instanceId: String,
     val pluginId: String,
     val resourceType: String,
 ) {
     init {
+        agentId?.let { java.util.UUID.fromString(it) }
         java.util.UUID.fromString(instanceId)
     }
 }

@@ -398,6 +398,15 @@ fn owner_operation(method: &str, path: &str) -> bool {
         .collect::<Vec<_>>();
     let read = matches!(method, "GET" | "HEAD");
     match segments.as_slice() {
+        // Members read resources through an agent they may use and poll those reads;
+        // the plugin capability refuses them everything else.
+        ["plugins", _, "connections", _, "resources"]
+        | ["plugins", _, "connections", _, "resources", "ancestors"]
+        | ["plugins", "resources" | "packages", "operations", _]
+            if read =>
+        {
+            false
+        }
         // Storage configuration lives under nodes; credentials also include
         // MCP connection flows and plugin instances, with their sign-ins and sources.
         [

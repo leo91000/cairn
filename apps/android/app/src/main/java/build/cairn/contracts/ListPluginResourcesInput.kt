@@ -6,6 +6,8 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class ListPluginResourcesInput(
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val agentId: String? = null,
     val instanceId: String,
     val page: Int = 1,
     val pluginId: String,
@@ -13,6 +15,7 @@ data class ListPluginResourcesInput(
     val resourceType: String,
 ) {
     init {
+        agentId?.let { java.util.UUID.fromString(it) }
         java.util.UUID.fromString(instanceId)
         require(page in 1..10000)
     }
