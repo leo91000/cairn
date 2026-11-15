@@ -18,6 +18,7 @@ import random
 import resource
 import select
 import shutil
+import shlex
 import stat
 import socketserver
 import subprocess
@@ -1040,8 +1041,13 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 administrator_runs = [create(), create()]
                 administrator_attempts = []
                 rootful_source = Path(__file__).with_name('native_rootful_consumer.py').read_text()
-                rootful = 'sudo -n env CAIRN_NATIVE_DISPOSABLE_HOST=1 /usr/bin/python3 - ' + str(docker_tools / 'bin') + ' ' + str(probe) + " <<'ROOTFUL'\n" + rootful_source + '\nROOTFUL\n'
                 for current in administrator_runs:
+                    retained = state / 'native-data' / current / 'data/workspaces'
+                    # Keep Unix socket names short in the execution's managed /tmp.
+                    runtime = '/tmp/crf-' + current.replace('-', '')[:12]
+                    rootful = shlex.join(['sudo', '-n', 'env', 'CAIRN_NATIVE_DISPOSABLE_HOST=1',
+                        '/usr/bin/python3', '-', str(docker_tools / 'bin'), str(probe), str(retained), runtime])
+                    rootful += " <<'ROOTFUL'\n" + rootful_source + '\nROOTFUL\n'
                     administrator_attempts.append(start(current, lease=300000, docker_script=rootful))
                 records = [json.loads((managed(current) / 'administrator-consumer.json').read_text()) for current in administrator_runs]
                 assert records[0]['cgroup'] != records[1]['cgroup']

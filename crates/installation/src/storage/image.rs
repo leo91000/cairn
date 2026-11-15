@@ -198,6 +198,7 @@ pub(crate) async fn prepare_locked(
                 };
                 if record.format != FORMAT
                     || record.size == 0
+                    || record.size > size
                     || owner(&record.context)? != owner(context)?
                 {
                     return Err(Error::conflict(
@@ -229,7 +230,10 @@ pub(crate) async fn prepare_locked(
         };
         // No writer has been admitted before image.json. This owned intent
         // permits rebuilding an incomplete mkfs, including after its rename.
-        if !image.exists() || check(&image).await.is_err() {
+        let temporary = directory.join("image.partial");
+        let image_present = regular_image_present(&image).await?;
+        let temporary_present = regular_image_present(&temporary).await?;
+        if !image_present || check(&image).await.is_err() {
             let policy = super::policy::for_node(&context["policy"])?;
             let (total, free) = if super::reservation::reserved(directory)? {
                 super::policy::physical_space(directory)?
@@ -242,8 +246,23 @@ pub(crate) async fn prepare_locked(
                     "Free disk reserve prevents preparing a local image.",
                 ));
             }
-            let temporary = directory.join("image.partial");
-            let file = tokio::fs::File::create(&temporary).await?;
+            // This is a positively owned, never-booted initialization. Retire
+            // failed mkfs files before allocating their replacement: admission
+            // already credits those reclaimable bytes toward the one image.
+            if image_present {
+                tokio::fs::remove_file(&image).await?;
+            }
+            if temporary_present {
+                tokio::fs::remove_file(&temporary).await?;
+            }
+            if image_present || temporary_present {
+                tokio::fs::File::open(directory).await?.sync_all().await?;
+            }
+            let file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .await?;
             file.set_len(record.size).await?;
             drop(file);
             crate::microvm::host::command("mkfs.ext4", &["-q", "-F", path(&temporary)?]).await?;
@@ -296,6 +315,17 @@ pub(crate) async fn prepare_locked(
         Err(error) => return Err(error.into()),
     }
     Ok(image)
+}
+
+async fn regular_image_present(path: &Path) -> Result<bool> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(Error::conflict(
+            "Local image initialization contains an alias; source retained.",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn compatible_owner(current: &Value, requested: &Value) -> Result<()> {
@@ -740,6 +770,106 @@ mod tests {
             .unwrap();
         assert!(exists(root.path()));
         assert!(!root.path().join("image.pending.json").exists());
+    }
+
+    #[tokio::test]
+    async fn incomplete_fresh_mkfs_rejects_shrinks_aliases_and_overlapping_rebuilds() {
+        use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+        const CHILD: &str = "CAIRN_TEST_IMAGE_PENDING_REBUILD";
+        if std::env::var_os(CHILD).is_none() {
+            let fixture = tempfile::tempdir().unwrap();
+            let wrapper = fixture.path().join("bin");
+            std::fs::create_dir(&wrapper).unwrap();
+            let real_path = std::env::var_os("PATH").unwrap();
+            let original = std::env::split_paths(&real_path)
+                .map(|path| path.join("mkfs.ext4"))
+                .find(|path| path.is_file())
+                .unwrap();
+            let check = wrapper.join("mkfs.ext4");
+            std::fs::write(&check, b"#!/bin/sh\ntest ! -e \"$CAIRN_IMAGE_EXPECT_RAW_ABSENT\" || exit 97\nexec \"$CAIRN_IMAGE_REAL_MKFS\" \"$@\"\n").unwrap();
+            std::fs::set_permissions(&check, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let first = fixture.path().join("disks").join(crate::config::id());
+            let paths = std::iter::once(wrapper).chain(std::env::split_paths(&real_path));
+            let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .env_clear().env(CHILD, "1").env("PATH", std::env::join_paths(paths).unwrap())
+                .env("CAIRN_IMAGE_TEST_ROOT", fixture.path()).env("CAIRN_IMAGE_TEST_DIRECTORY", &first)
+                .env("CAIRN_IMAGE_EXPECT_RAW_ABSENT", first.join("data.ext4"))
+                .env("CAIRN_IMAGE_REAL_MKFS", original).env("TMPDIR", std::env::temp_dir())
+                .args(["--exact", "storage::image::tests::incomplete_fresh_mkfs_rejects_shrinks_aliases_and_overlapping_rebuilds", "--nocapture"])
+                .status().await.unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = PathBuf::from(std::env::var_os("CAIRN_IMAGE_TEST_ROOT").unwrap());
+        let first = PathBuf::from(std::env::var_os("CAIRN_IMAGE_TEST_DIRECTORY").unwrap());
+        std::fs::create_dir_all(&first).unwrap();
+        let context = context();
+        let pending = Record {
+            format: FORMAT.into(),
+            size: SIZE,
+            context: context.clone(),
+            conversion: None,
+        };
+        atomic_write(
+            &first.join("image.pending.json"),
+            &serde_json::to_vec(&pending).unwrap(),
+        )
+        .await
+        .unwrap();
+        let image = first.join("data.ext4");
+        std::fs::write(&image, b"uncommitted mkfs").unwrap();
+        assert_eq!(
+            prepare(&first, SIZE / 2, &context, &CancellationToken::new())
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(std::fs::read(&image).unwrap(), b"uncommitted mkfs");
+        let foreign = root.join("foreign-canary");
+        std::fs::write(&foreign, b"foreign work").unwrap();
+        std::os::unix::fs::symlink(&foreign, first.join("image.partial")).unwrap();
+        assert_eq!(
+            prepare(&first, SIZE, &context, &CancellationToken::new())
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign work");
+        std::fs::remove_file(first.join("image.partial")).unwrap();
+        let budget = crate::microvm::budget::Budget {
+            slots: 1,
+            limits: crate::nodes::Resources {
+                cpu: 1,
+                memory_mi_b: 1024,
+                disk_mi_b: 192,
+            },
+        };
+        std::fs::write(
+            root.join(crate::microvm::budget::FILE),
+            serde_json::to_vec(&budget).unwrap(),
+        )
+        .unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, SIZE as libc::off_t) },
+            0
+        );
+        drop(file);
+        let policy = super::super::policy::for_node(&context["policy"]).unwrap();
+        let promise = super::super::reservation::reserve(&root, &first, SIZE, &policy)
+            .await
+            .unwrap();
+        prepare(&first, SIZE, &context, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(exists(&first));
+        assert!(!first.join("image.pending.json").exists());
+        promise.release().await.unwrap();
     }
 
     #[tokio::test]

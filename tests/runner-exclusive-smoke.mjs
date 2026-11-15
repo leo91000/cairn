@@ -147,7 +147,9 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       sandbox: 'yolo',
       cwd: `${runRoot}/workspace`,
       storage: { ...storage, owner: runId },
-      resources: { cpu: 2, memoryMiB: envelopeMiB, diskMiB: 32768 },
+      // Ordinary exclusivity probes write only small fixtures. Reserve the
+      // full 32 GiB only for the nested Android guest that needs that capacity.
+      resources: { cpu: 2, memoryMiB: envelopeMiB, diskMiB: android && mode === 'victim' ? 32768 : 1024 },
       command: ['node', `${runRoot}/workspace/probe.mjs`],
       chat: { provider: 'codex' },
       imports: [

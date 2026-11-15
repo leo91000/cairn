@@ -128,3 +128,9 @@ physique du pool de données, observe le coût restant de la copie sous quota, e
 interrompt son groupe rsync si ces conditions cessent d’être remplies. La source
 reste retenue, le groupe est signalé avant de réutiliser son identifiant, et ses
 consommateurs sont attendus avant la suppression de la copie partielle.
+
+Lors d’un redimensionnement historique interrompu, l’ancien `data.ext4` reste
+facturé pendant l’export du nouveau `image.partial`. Sa présence ne réduit pas la
+promesse de capacité de remplacement. Le reçu de réservation distingue cet inode
+historique de l’inode exporté : le crédit du nouveau fichier suit son renommage,
+sans double promesse ni crédit des octets qui doivent encore coexister.

@@ -85,7 +85,8 @@ To qualify VM storage in a full non-publishing run, also set
 store and runs the real KVM smoke and retention suites. This opt-in requires
 `validation-only=true`; publishing, promotion and deployment remain disabled.
 The growth scenario crosses 32 GiB with a 33 GiB image reservation. The retention
-memory scenario uses 1 GiB images, since writable direct images now reserve their
+memory and ordinary CPU/RAM exclusivity scenarios use 1 GiB images. The nested
+Android exclusivity victim retains its 32 GiB image. Writable direct images reserve their
 full capacity against node/free-space admission. Missing physical capacity is a
 qualification failure, not a reason to skip the case. Before smoke tests, this
 opt-in requires 48 GiB free on the VM fixture filesystem. If needed, it prunes

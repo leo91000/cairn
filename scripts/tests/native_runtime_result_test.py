@@ -46,6 +46,68 @@ class RootfulDockerDiagnosticTest(unittest.TestCase):
         self.process.return_value = subprocess.CompletedProcess(['docker', 'inspect'], 0, b'identity\n', b'')
         self.assertEqual(self.docker('inspect'), 'identity')
 
+    def test_private_daemons_use_retained_paths_owned_config_and_a_private_containerd(self):
+        source = Path(__file__).with_name('native_rootful_consumer.py')
+        calls = []
+
+        class SetupComplete(Exception):
+            pass
+
+        class OwnedProcess:
+            def __init__(self):
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = 0
+
+            def kill(self):
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        def launch(arguments, **kwargs):
+            process = OwnedProcess()
+            calls.append((arguments, process))
+            return process
+
+        def invoke(arguments, **kwargs):
+            if 'import' in arguments:
+                raise SetupComplete()
+            self.assertIn('info', arguments)
+            return subprocess.CompletedProcess(arguments, 0, b'{}', b'')
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / 'bin'
+            binary.mkdir()
+            probe = root / 'probe'
+            probe.write_bytes(b'fixture binary')
+            retained = root / 'retained/workspaces'
+            retained.mkdir(parents=True)
+            logical = root / 'logical/workspace'
+            logical.mkdir(parents=True)
+            runtime_path = root / 'runtime'
+            arguments = [str(source), str(binary), str(probe), str(retained), str(runtime_path)]
+            with patch.object(sys, 'argv', arguments), patch.dict('os.environ', {'CAIRN_NATIVE_DISPOSABLE_HOST': '1'}, clear=True), \
+                    patch('os.geteuid', return_value=0), patch.object(Path, 'cwd', return_value=logical), \
+                    patch.object(Path, 'is_socket', return_value=True), patch('subprocess.Popen', side_effect=launch), \
+                    patch('subprocess.run', side_effect=invoke), self.assertRaises(SetupComplete):
+                exec(compile(source.read_text(), str(source), 'exec'), {'__name__': 'rootful_fixture_test'})
+            self.assertEqual(len(calls), 2)
+            containerd, daemon = (item[0] for item in calls)
+            self.assertIn('--root=' + str(retained / 'administrator-docker/containerd/daemon'), containerd)
+            self.assertIn('--address=' + str(runtime_path / 'containerd.sock'), containerd)
+            self.assertIn('--containerd=' + str(runtime_path / 'containerd.sock'), daemon)
+            self.assertIn('--data-root=' + str(retained / 'administrator-docker'), daemon)
+            self.assertIn('--config-file=' + str(runtime_path / 'daemon.json'), daemon)
+            self.assertFalse((logical / 'administrator-docker').exists())
+            self.assertTrue(all(process.returncode == 0 for _, process in calls))
+
+
 
 class RetainedWorkspaceTest(unittest.TestCase):
     def test_prepared_peer_canary_uses_its_project_directory_after_stop(self):
