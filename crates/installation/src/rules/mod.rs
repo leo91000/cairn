@@ -205,7 +205,7 @@ fn warn_open(
     if !author.agent() {
         return Ok(());
     }
-    let Some(warning) = validation::warnings(db, definition)?
+    let Some(warning) = validation::warnings(db, definition, &writer.creator.account)?
         .into_iter()
         .find(|warning| warning.kind == "openToAnyone")
     else {

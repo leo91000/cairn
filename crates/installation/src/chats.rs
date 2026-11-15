@@ -1559,6 +1559,22 @@ pub(crate) fn create_as(
     input: Value,
     origin: &crate::native::policy::Origin,
 ) -> Result<Value> {
+    create_as_writer(
+        db,
+        input,
+        origin,
+        &crate::conversation_writers::EntryWriter::of(origin),
+    )
+}
+
+/// Native authority and the writer of the entry are distinct: a rule carries its
+/// saved native grant, but never becomes the person who saved it.
+pub(crate) fn create_as_writer(
+    db: &Db<'_>,
+    input: Value,
+    origin: &crate::native::policy::Origin,
+    writer: &crate::conversation_writers::EntryWriter,
+) -> Result<Value> {
     let input: cairn_contracts::CreateChatInput =
         serde_json::from_value(input).map_err(|e| Error::bad(e.to_string()))?;
     let agent = required(
@@ -1582,11 +1598,7 @@ pub(crate) fn create_as(
     task_projects(&agent, &chat, &db.projects()?)?;
     let chat: Conversation = serde_json::from_value(chat)?;
     let saved = db.save_conversation(&chat)?;
-    crate::conversation_writers::record_creation(
-        db,
-        &saved,
-        &crate::conversation_writers::EntryWriter::of(origin),
-    )?;
+    crate::conversation_writers::record_creation(db, &saved, writer)?;
     Ok(serde_json::to_value(saved)?)
 }
 

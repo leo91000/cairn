@@ -440,7 +440,7 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
         return Ok(grant);
     }
 
-    // Only saved tasks are stored origins. An edit never replaces unknown provenance,
+    // Saved tasks and rules are stored origins. An edit never replaces unknown provenance,
     // so a fresh authenticated commitment is the only way back to native execution.
     if matches!(source, Origin::Stored(_)) && grant["nativeProvenanceUnknown"] != false {
         return Err(Error::forbidden(
@@ -572,7 +572,9 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         }) {
             continue;
         }
-        if (parent.is_some() || directing_self)
+        // A saved commitment carries a ceiling even without a delegated parent.
+        // New host grants must not enlarge a rule version or a saved task.
+        if (parent.is_some() || directing_self || matches!(source, Origin::Stored(_)))
             && !explicit(&incoming["nativeAuthorityNodes"], text(&node, "id"))
         {
             continue;

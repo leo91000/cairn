@@ -38,7 +38,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 34;
+pub(crate) const DATABASE_VERSION: i64 = 35;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -1840,7 +1840,7 @@ mod schema_tests {
     #[test]
     fn startup_steps_accept_a_database_upgraded_by_another_startup() {
         type Upgrade = fn(&mut Connection) -> Result<()>;
-        let steps: [(&str, Upgrade); 11] = [
+        let steps: [(&str, Upgrade); 12] = [
             ("accounts", crate::accounts::migration::upgrade),
             ("conversations", crate::chats::migration::upgrade),
             ("questions", crate::chats::question_migration::upgrade),

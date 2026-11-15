@@ -354,6 +354,19 @@ async fn messages_start_one_keyed_conversation_per_author_and_then_steer_it() {
         .map(|message| text(message, "text").to_owned())
         .collect();
     assert_eq!(texts, ["hello", "and then"], "{messages}");
+    let reached = chat.clone();
+    let writers = f.s.store.read(move |db| {
+        let origin: (String, String, Option<String>) = db.0.query_row(
+            "SELECT reached_by,reached_rule_id,account_id FROM conversation_writers WHERE chat_id=?",
+            [&reached], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let entries = db.0.prepare("SELECT writer,rule_id FROM conversation_entry_writers WHERE chat_id=?")?
+            .query_map([&reached], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((origin, entries))
+    }).await.unwrap();
+    assert_eq!(writers.0, ("rule".to_owned(), rule.clone(), None));
+    assert_eq!(writers.1, vec![("rule".to_owned(), rule.clone()); 2]);
     let other = bound(&f, OWNER, "chat:bob").await.expect("bob's key");
     assert_ne!(other, chat);
 }
@@ -639,31 +652,30 @@ async fn chains_followed_by_cairn_stop_at_their_documented_depth() {
 #[tokio::test]
 async fn author_predicates_and_quotas_read_the_creators_keys() {
     let f = granted().await;
-    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
-    let quota = rule_on(
-        &f,
-        OWNER,
-        plugin(&f),
-        json!([{
-            "type": "if",
-            "id": "allowed",
-            "condition": {
-                "type": "all",
-                "conditions": [
-                    { "type": "authorQuota", "author": { "type": "formula", "expression": "author" }, "limit": 2, "windowMinutes": 60 },
-                    {
-                        "type": "authorStartedConversation",
-                        "author": { "type": "formula", "expression": "author" },
-                        "key": { "type": "literal", "value": "chat:alice" },
-                    },
-                ],
-            },
-            "then": [remember("yes", "allowed", "large")],
-            "otherwise": [remember("no", "refused", "large")],
-        }]),
-        limits(),
-    )
-    .await;
+    // Check the key before creating it in the same rule. Independent rules run
+    // concurrently, so their creation order cannot determine the first result.
+    let mut steps = json!([{
+        "type": "if",
+        "id": "allowed",
+        "condition": {
+            "type": "all",
+            "conditions": [
+                { "type": "authorQuota", "author": { "type": "formula", "expression": "author" }, "limit": 2, "windowMinutes": 60 },
+                {
+                    "type": "authorStartedConversation",
+                    "author": { "type": "formula", "expression": "author" },
+                    "key": { "type": "literal", "value": "chat:alice" },
+                },
+            ],
+        },
+        "then": [remember("yes", "allowed", "large")],
+        "otherwise": [remember("no", "refused", "large")],
+    }]);
+    steps
+        .as_array_mut()
+        .unwrap()
+        .extend(start_or_steer().as_array().unwrap().iter().cloned());
+    let quota = rule_on(&f, OWNER, plugin(&f), steps, limits()).await;
     for (index, (author, text)) in [
         ("alice", "one"),
         ("bob", "bob"),
@@ -949,7 +961,7 @@ async fn the_conversation_cap_suspends_a_rule_that_starts_too_many() {
 }
 
 #[test]
-fn version_33_adds_the_conversation_tables_and_reopens_without_changing_them() {
+fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
     let root = tempfile::tempdir().unwrap();
     drop(cairn_installation::store::Store::open(root.path()).unwrap());
     let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
@@ -957,9 +969,10 @@ fn version_33_adds_the_conversation_tables_and_reopens_without_changing_them() {
         "DROP TABLE hook_rule_conversations;
          DROP TABLE hook_rule_conversation_values;
          DROP TABLE hook_rule_turn_origins;
+         DROP TABLE hook_rule_chain_depths;
          DROP TABLE hook_rule_author_triggerings;
          DROP TABLE hook_rule_conversation_counts;
-         PRAGMA user_version=33;",
+         PRAGMA user_version=34;",
     )
     .unwrap();
     for _ in 0..2 {
@@ -967,12 +980,13 @@ fn version_33_adds_the_conversation_tables_and_reopens_without_changing_them() {
         assert_eq!(
             db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            34
+            35
         );
         for table in [
             "hook_rule_conversations",
             "hook_rule_conversation_values",
             "hook_rule_turn_origins",
+            "hook_rule_chain_depths",
             "hook_rule_author_triggerings",
             "hook_rule_conversation_counts",
         ] {
@@ -1956,4 +1970,219 @@ async fn a_cairn_hook_over_the_recorded_data_budget_is_counted_as_not_admitted()
     assert_eq!(status, StatusCode::OK, "{listed}");
     assert_eq!(listed["triggerings"], json!([]), "{listed}");
     assert_eq!(listed["notAdmitted"], 1, "{listed}");
+}
+
+#[tokio::test]
+async fn new_native_nodes_cannot_expand_a_saved_rules_conversation_grant() {
+    let f = granted().await;
+    let first = native_node(&f, &json!([OWNER])).await;
+    let mut later = native_node(&f, &json!([])).await;
+    let agent =
+        f.s.agent_fixture(
+            json!({
+                "name": "Native ceiling",
+                "access": { "backend": "native", "nodes": [first["id"], later["id"]] },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let rule = rule_on(
+        &f,
+        OWNER,
+        plugin(&f),
+        start_or_steer_agent(text(&agent, "id")),
+        limits(),
+    )
+    .await;
+    later["nativeAccounts"] = json!([OWNER]);
+    f.s.store.put_node_fixture(later).await.unwrap();
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let saved = f.s.conversation_boundary(&chat).await.unwrap();
+    assert_eq!(
+        saved["nativeAuthorityNodes"],
+        json!([first["id"]]),
+        "{saved}"
+    );
+    emit(&f, "second", message("alice", "again")).await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(triggerings(&f, &rule).await[0]["status"], "completed");
+    let saved = f.s.conversation_boundary(&chat).await.unwrap();
+    assert_eq!(
+        saved["nativeAuthorityNodes"],
+        json!([first["id"]]),
+        "{saved}"
+    );
+}
+
+#[tokio::test]
+async fn queued_agent_input_cannot_lower_an_unobserved_rules_chain() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    let token = fixture::running_conversation(&f.s, &chat).await;
+    let looping = rule_on(
+        &f,
+        OWNER,
+        cairn("replyReady"),
+        json!([steer(
+            "again",
+            &json!({ "type": "formula", "expression": "key" }),
+            &json!({ "type": "literal", "value": "again" }),
+        )]),
+        json!({ "triggeringsPerHour": 600, "conversationsPerHour": 100 }),
+    )
+    .await;
+    for turn in 1..MAX_CHAIN_DEPTH {
+        replied(
+            &f,
+            &run,
+            &last_message(&f, &chat).await,
+            &format!("turn {turn}"),
+        )
+        .await;
+        engine::tick(&f.s).await.unwrap();
+    }
+    let next = uuid::Uuid::new_v4().to_string();
+    let sent = f
+        .mcp(
+            "/mcp-installation",
+            &token,
+            "send_chat_message",
+            json!({
+                "chatId": chat,
+                "message": { "id": next, "text": "Queued before the watcher catches up" },
+            }),
+        )
+        .await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    let checked = next.clone();
+    let depth: u32 =
+        f.s.store
+            .read(move |db| {
+                Ok(db.0.query_row(
+                    "SELECT depth FROM hook_rule_turn_origins WHERE message_id=?",
+                    [checked],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(u64::from(depth), MAX_CHAIN_DEPTH);
+    // The same ceiling crosses an installation-created conversation with no
+    // rule key and hence no hook watcher of its own.
+    let created = f
+        .mcp(
+            "/mcp-installation",
+            &token,
+            "create_chat",
+            json!({ "agentId": MAIN_AGENT_ID }),
+        )
+        .await;
+    assert_ne!(created["result"]["isError"], true, "{created}");
+    let child = text(&created["result"]["structuredContent"]["result"], "id").to_owned();
+    let sent = f.mcp("/mcp-installation", &token, "send_chat_message", json!({
+        "chatId": child,
+        "message": { "id": uuid::Uuid::new_v4().to_string(), "text": "Continue this chain" },
+    })).await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    let child_token = fixture::running_conversation(&f.s, &child).await;
+    let continued = uuid::Uuid::new_v4().to_string();
+    let sent = f
+        .mcp(
+            "/mcp-installation",
+            &child_token,
+            "send_chat_message",
+            json!({
+                "chatId": child,
+                "message": { "id": continued, "text": "Continue inside the unkeyed conversation" },
+            }),
+        )
+        .await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    let checked = continued;
+    f.s.store
+        .read(move |db| {
+            let depth: u32 = db.0.query_row(
+                "SELECT depth FROM hook_rule_turn_origins WHERE message_id=?",
+                [checked],
+                |row| row.get(0),
+            )?;
+            assert_eq!(u64::from(depth), MAX_CHAIN_DEPTH);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    replied(&f, &run, &next, "Another turn").await;
+    engine::tick(&f.s).await.unwrap();
+    let history = triggerings(&f, &looping).await;
+    assert_eq!(history[0]["status"], "failed", "{:?}", history[0]);
+    assert!(text(&history[0], "error").contains("maximum depth"));
+}
+
+#[tokio::test]
+async fn a_public_members_message_resets_the_chain_and_takes_back_the_pause() {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    let checked = chat.clone();
+    f.s.store.transaction(move |db| {
+        db.0.execute("UPDATE hook_rule_conversations SET watch=json_set(watch,'$.depth',8),cancelled_run=?2 WHERE chat_id=?1", rusqlite::params![checked,run])?;
+        Ok(())
+    }).await.unwrap();
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let token = common::relay_fixture::grant(&f.s, &["read", "write", "run", "manage"]).await;
+    f.s.store
+        .set(
+            &format!("test-relay:{}", cairn_installation::auth::digest(&token)),
+            json!({
+                "account": MEMBER,
+                "scopes": ["read", "write", "run", "manage"],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let message = uuid::Uuid::new_v4().to_string();
+    let sent = f
+        .mcp(
+            "/mcp",
+            &token,
+            "send_chat_message",
+            json!({
+                "chatId": chat,
+                "message": { "id": message, "text": "A person takes over" },
+            }),
+        )
+        .await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    f.s.store
+        .read(move |db| {
+            let (depth, origin): (u32, String) = db.0.query_row(
+                "SELECT depth,origin FROM hook_rule_turn_origins WHERE message_id=?",
+                [message],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(depth, 0);
+            let origin: Value = serde_json::from_str(&origin)?;
+            assert_eq!(origin["kind"], "person");
+            assert_eq!(origin["accountId"], MEMBER);
+            let cancelled: Option<String> = db.0.query_row(
+                "SELECT cancelled_run FROM hook_rule_conversations WHERE chat_id=?",
+                [chat],
+                |row| row.get(0),
+            )?;
+            assert_eq!(cancelled, None);
+            Ok(())
+        })
+        .await
+        .unwrap();
 }

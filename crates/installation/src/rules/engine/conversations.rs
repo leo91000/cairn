@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS hook_rule_turn_origins(
  depth INTEGER NOT NULL CHECK(depth BETWEEN 0 AND 8)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS hook_rule_turn_origins_chat ON hook_rule_turn_origins(chat_id);
+CREATE TABLE IF NOT EXISTS hook_rule_chain_depths(
+ chat_id TEXT PRIMARY KEY NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+ depth INTEGER NOT NULL CHECK(depth BETWEEN 0 AND 8)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hook_rule_author_triggerings(
  rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
  author TEXT NOT NULL CHECK(length(author) BETWEEN 1 AND 200),
@@ -62,20 +66,20 @@ CREATE TABLE IF NOT EXISTS hook_rule_conversation_counts(
 ) WITHOUT ROWID;
 ";
 
-/// Version 33 to 34. No conversation is bound to a key before.
+/// Version 34 to 35. No conversation is bound to a key before.
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if (34..=crate::store::DATABASE_VERSION).contains(&version) {
+    if (35..=crate::store::DATABASE_VERSION).contains(&version) {
         return Ok(());
     }
-    if version != 33 {
+    if version != 34 {
         return Err(Error::bad(
             "Unexpected installation database version during upgrade.",
         ));
     }
     tx.execute_batch(SCHEMA)?;
-    tx.pragma_update(None, "user_version", 34)?;
+    tx.pragma_update(None, "user_version", 35)?;
     tx.commit()?;
     Ok(())
 }
@@ -208,7 +212,9 @@ pub(super) fn record_authors(db: &Db<'_>, t: &Triggering) -> Result<()> {
 /// Who wrote an entry, as Cairn hooks report it.
 pub(super) fn origin_of(origin: &Origin) -> Json {
     match origin {
-        Origin::Human(account) => json!({ "kind": "person", "accountId": account }),
+        Origin::Human(account) | Origin::PublicAccount(account) => {
+            json!({ "kind": "person", "accountId": account })
+        }
         // `cairn_installation` acts within its run; delegated tasks are agents.
         Origin::Run(_) => json!({ "kind": "installation" }),
         Origin::DelegatedTask(_) => json!({ "kind": "agent" }),
@@ -216,8 +222,9 @@ pub(super) fn origin_of(origin: &Origin) -> Json {
     }
 }
 
-/// Records who wrote an entry of a conversation bound to a key, so that the Cairn hooks
-/// of the turn it starts report it. Other conversations record nothing.
+/// Records who wrote an entry of a rule's conversation, so that the Cairn hooks
+/// of the turn it starts report it. Unkeyed rule conversations retain their depth
+/// too: their agent can write to another conversation through installation access.
 ///
 /// Only a person's entry starts a new chain, and takes back from rules a conversation
 /// a rule cancelled. Any other entry stays in the chain of the conversation, and of the
@@ -227,26 +234,43 @@ pub(crate) fn record_input(db: &Db<'_>, chat: &str, message: &str, origin: &Orig
         Origin::Run(run) | Origin::DelegatedTask(run) => Some(run.as_str()),
         _ => None,
     };
-    let person = matches!(origin, Origin::Human(_));
-    db.0.prepare_cached(
-        "INSERT INTO hook_rule_turn_origins(message_id,chat_id,origin,depth) \
-         SELECT ?1,?2,?3,CASE WHEN ?4 THEN 0 ELSE max( \
-          coalesce(json_extract(k.watch,'$.depth'),0), \
-          coalesce((SELECT max(json_extract(o.watch,'$.depth')) FROM hook_rule_conversations o \
-           JOIN conversations c ON c.id=o.chat_id WHERE ?5 IS NOT NULL AND c.run_id=?5),0)) END \
-         FROM hook_rule_conversations k WHERE k.chat_id=?2 AND k.key IS NOT NULL \
-         ON CONFLICT(message_id) DO UPDATE SET origin=excluded.origin,depth=excluded.depth",
-    )?
-    .execute(params![
-        message,
-        chat,
-        origin_of(origin).to_string(),
-        person,
-        causing
-    ])?;
+    let person = matches!(origin, Origin::Human(_) | Origin::PublicAccount(_));
+    let (depth, tracked): (u32, bool) = db.0.query_row(
+        "SELECT CASE WHEN ?2 THEN 0 ELSE max( \
+           coalesce((SELECT depth FROM hook_rule_chain_depths WHERE chat_id=?1),0), \
+           coalesce((SELECT json_extract(watch,'$.depth') FROM hook_rule_conversations WHERE chat_id=?1),0), \
+           coalesce((SELECT max(max(coalesce(d.depth,0),coalesce(json_extract(k.watch,'$.depth'),0))) \
+             FROM conversations c LEFT JOIN hook_rule_chain_depths d ON d.chat_id=c.id \
+             LEFT JOIN hook_rule_conversations k ON k.chat_id=c.id WHERE c.run_id=?3),0)) END, \
+         EXISTS(SELECT 1 FROM hook_rule_chain_depths WHERE chat_id=?1) OR \
+         EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=?1)",
+        params![chat,person,causing], |row| Ok((row.get(0)?,row.get(1)?)),
+    )?;
+    // Ordinary conversations outside a rule chain need no rule metadata. A
+    // delegated or installation-created conversation inherits the source depth
+    // even if it has no rule key and consequently no asynchronous watcher.
+    if tracked || depth > 0 {
+        record_depth(db, chat, depth)?;
+        db.0.execute(
+            "INSERT INTO hook_rule_turn_origins(message_id,chat_id,origin,depth) VALUES(?1,?2,?3,?4) \
+             ON CONFLICT(message_id) DO UPDATE SET origin=excluded.origin,depth=excluded.depth",
+            params![message,chat,origin_of(origin).to_string(),depth],
+        )?;
+    }
     if person {
         release_pause(db, chat)?;
     }
+    Ok(())
+}
+
+/// The watcher may not have observed a queued message yet. Keep the input
+/// frontier in its write transaction, independently of event observation.
+fn record_depth(db: &Db<'_>, chat: &str, depth: u32) -> Result<()> {
+    db.0.execute(
+        "INSERT INTO hook_rule_chain_depths(chat_id,depth) VALUES(?1,?2) \
+         ON CONFLICT(chat_id) DO UPDATE SET depth=excluded.depth",
+        params![chat, depth],
+    )?;
     Ok(())
 }
 
@@ -268,12 +292,19 @@ fn record_rule_input(
     rule: &RuleRow,
     depth: u32,
 ) -> Result<()> {
+    crate::conversation_writers::record_message(
+        db,
+        chat,
+        message,
+        &crate::conversation_writers::EntryWriter::Rule(rule.id.clone()),
+    )?;
     let origin = json!({ "kind": "rule", "ruleId": rule.id, "accountId": rule.creator_account_id });
     db.0.prepare_cached(
         "INSERT INTO hook_rule_turn_origins(message_id,chat_id,origin,depth) VALUES(?1,?2,?3,?4) \
          ON CONFLICT(message_id) DO UPDATE SET origin=excluded.origin,depth=excluded.depth",
     )?
     .execute(params![message, chat, origin.to_string(), depth])?;
+    record_depth(db, chat, depth)?;
     Ok(())
 }
 
@@ -404,6 +435,11 @@ fn reach(db: &Db<'_>, row: &RuleRow, version: &VersionRow, key: &str) -> Result<
         ));
     }
     let chat = crate::chats::conversation(db, &bound.chat)?;
+    crate::conversation_writers::record_entry(
+        db,
+        &chat.id,
+        &crate::conversation_writers::EntryWriter::Rule(row.id.clone()),
+    )?;
     let origin = native_origin(db, row, version)?;
     require_native(db, version, &conversation_agent(db, &chat)?, &origin)?;
     Ok(Reached {
@@ -485,10 +521,11 @@ fn start(
     }
     let author = input["author"].as_str().map(str::to_owned);
 
-    let chat = crate::chats::create_as(
+    let chat = crate::chats::create_as_writer(
         db,
         json!({ "agentId": agent, "projectId": project }),
         &origin,
+        &crate::conversation_writers::EntryWriter::Rule(row.id.clone()),
     )?;
     let chat = text(&chat, "id").to_owned();
     let external = json!({
