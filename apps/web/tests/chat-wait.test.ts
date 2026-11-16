@@ -617,3 +617,32 @@ it('includes delegated task failures in group summaries and distinguishes delete
     .toEqual({ tone: 'error', title: 'All 2 results in', detail: '1 failed · 1 succeeded' })
   expect(waitOutcome({ ...failed, status: 'deleted', error: null })).toEqual({ tone: 'warning', title: 'The task was deleted', detail: '' })
 })
+
+it('shows the background job exit, elapsed time and bounded log from its observation', () => {
+  const condition: WaitCondition = { type: 'job_finished', jobId: 'job' }
+  expect(waitTarget(wakeup({ condition }))).toMatchObject({ short: 'Background job', details: ['job'] })
+  expect(waitOutcome({
+    state: 'completed',
+    type: 'job_finished',
+    jobId: 'job',
+    jobResult: {
+      state: 'finished',
+      receipt: {
+        exitCode: 7,
+        signal: null,
+        elapsedMs: 1200,
+        logTail: 'last line',
+      },
+    },
+  })).toEqual({ tone: 'error', title: 'Background job stopped', detail: 'Exit 7 · 1.2s\nlast line' })
+})
+
+it('does not report an interrupted job as successful when its TERM handler exits zero', () => {
+  for (const flag of ['stopped', 'timedOut']) {
+    expect(waitOutcome({
+      state: 'completed',
+      type: 'job_finished',
+      jobResult: { state: 'finished', receipt: { exitCode: 0, [flag]: true } },
+    })).toMatchObject({ tone: 'error', title: 'Background job stopped' })
+  }
+})

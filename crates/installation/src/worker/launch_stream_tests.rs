@@ -125,6 +125,8 @@ async fn rpc_flood_on_service(
         directory: root.path().into(),
         attempt_id: "fixture-attempt".into(),
         reservation: None,
+        retained: false,
+        turn: String::new(),
         output_probe: Some(probe.clone()),
     };
     let mut stderr = String::new();
@@ -243,6 +245,8 @@ async fn canonical_refresh_preserves_account_rotations_on_retained_output_path()
         directory: root.path().into(),
         attempt_id: crate::config::id(),
         reservation: None,
+        retained: false,
+        turn: String::new(),
         output_probe: None,
     };
     for value in ["8471", "17381", "19873"] {
@@ -482,6 +486,8 @@ async fn actual_attempt_cleanup_precedes_same_account_refresh_and_real_account_s
         directory: s.config.data_dir.join("fixture-run"),
         attempt_id: crate::config::id(),
         reservation: None,
+        retained: false,
+        turn: String::new(),
         output_probe: None,
     };
     let mut cleanup = Box::pin(execution.close_account_output(Some(active.broker)));

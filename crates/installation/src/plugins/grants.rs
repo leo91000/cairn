@@ -1401,7 +1401,7 @@ DROP TABLE coding_agent_configurations;
 DROP TABLE skill_source_refs; DROP TABLE skill_sources;
 DROP TABLE artifact_visibility; DROP TABLE artifact_versions; DROP TABLE artifacts;
 DROP TABLE agent_account_access; DELETE FROM kv WHERE key='agent-access-rollout';
-DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP TABLE plugin_credential_suppliers; PRAGMA user_version=23;").unwrap();
+DROP TABLE background_jobs; DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP TABLE plugin_credential_suppliers; PRAGMA user_version=23;").unwrap();
         assert!(db.prepare("SELECT plan FROM chat_messages").is_err());
         assert!(db.prepare("SELECT plan FROM chat_questions").is_err());
         let timeline = db

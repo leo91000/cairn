@@ -208,6 +208,7 @@ mod tests {
             })),
             imports: Arc::default(),
             control: Arc::default(),
+            environment: crate::background_jobs::controller::Control::default(),
         };
         (done, attempt)
     }

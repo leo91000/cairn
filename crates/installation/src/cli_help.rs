@@ -165,6 +165,20 @@ const COMMANDS: &[Command] = &[
         internal: true,
     },
     Command {
+        name: "environment-entry",
+        arguments: "",
+        description: "Run the admitted execution environment.",
+        details: "Started by a controller with a private control channel.",
+        internal: true,
+    },
+    Command {
+        name: "background-job-helper",
+        arguments: "",
+        description: "Supervise one managed background job.",
+        details: "Started inside an execution environment with a private control socket.",
+        internal: true,
+    },
+    Command {
         name: "runner-entry",
         arguments: "",
         description: "Start an execution from /run/cairn-plan.json.",

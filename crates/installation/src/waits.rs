@@ -18,25 +18,20 @@ use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
-pub const INSTRUCTIONS: &str = "When waiting before continuing the current task, use \
-    cairn_workspace.wait_for with a list of conditions. Its native conditions are delay (seconds) \
-    and at (an RFC 3339 date with an explicit timezone); they are used alone and take no \
-    timeoutSeconds. Use a supported external condition when available: an authorized Cairn run \
-    finishing or a condition a granted plugin lists, such as remote checks pinned to a commit. \
-    External conditions require timeoutSeconds. To wait for several external results in one \
-    wakeup, list them with mode all (resume once every one has a result, failures included) or \
-    any (resume at the first result); timeoutSeconds is the deadline of the whole group and \
-    leaves the awaited work running. \
+pub const INSTRUCTIONS: &str = "Use cairn_workspace.start_job({name, command}) for work that must continue after \
+    this agent turn ends, then cairn_workspace.wait_for with job_finished and its jobId. Use \
+    managed jobs instead of shell backgrounding or nohup. A job finishes only after its process \
+    tree stops; the result includes exit status, duration and a bounded log tail. \
+    wait_for accepts delay, at, job_finished, authorized run/task completion and granted plugin \
+    conditions. A single time condition takes no timeoutSeconds. Other waits require a timeout; \
+    combine a time condition with job_finished in mode any to resume at the first result. \
     If deferred=false, inspect the observation and continue this turn. If deferred=true, end \
-    this turn; Cairn saves the wakeup, releases execution resources and resumes this same \
-    conversation or mission after the time or result arrives, subject to capacity. Only promise to return \
-    after the tool confirms the wakeup. This is a scheduled continuation, not task completion \
-    or a request for user input; no outcome report is needed when ending a turn for this wait. \
-    For other remote results, use a delay then verify the result when resumed. Local background \
-    processes must use native waiting tools while their execution stays active. Queued follow-ups \
-    start after the continuation; a new user message replaces the wait. Pause holds it; stop or \
-    deletion cancels it. At wakeup, continue the original authorized task and verify external \
-    effects before repeating actions. In a mission, stopping its run cancels its wait; pausing its schedule only affects future runs.";
+    this turn; Cairn owns the wakeup. Useful managed jobs and containers keep their environment \
+    alive within its original duration budget. Without active work it can stop. Expiration, \
+    cancellation or lost supervision stops the environment and is reported; jobs are never \
+    restarted implicitly. This wait continues the original task, not a request for more \
+    authorization. New user input replaces the wait; pause holds it, stop or deletion cancels it. \
+    At wakeup verify observations and external effects before repeating actions.";
 
 /// Probe one observer-sized batch on registration; the durable observer checks the rest.
 const INITIAL_PLUGIN_CHECKS: usize = 4;
@@ -51,6 +46,13 @@ fn run_finished() -> Value {
         "required": ["type", "runId"],
         "additionalProperties": false,
     })
+}
+
+fn job_finished() -> Value {
+    json!({ "type": "object", "properties": {
+        "type": { "const": "job_finished" },
+        "jobId": { "type": "string", "format": "uuid" }
+    }, "required": ["type", "jobId"], "additionalProperties": false })
 }
 
 fn task_finished() -> Value {
@@ -107,7 +109,7 @@ fn date_millis(condition: &Value) -> Result<i64> {
 /// The single wait tool: native time/run conditions and conditions of granted plugins. Only a
 /// conversation that may delegate is offered the delegated-task condition.
 pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
-    let mut conditions = vec![delay(), at(), run_finished()];
+    let mut conditions = vec![delay(), at(), run_finished(), job_finished()];
     if delegates {
         conditions.push(task_finished());
     }
@@ -116,19 +118,17 @@ pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
         "name": "wait_for",
         "outputSchema": cairn_contracts::schema_for::<cairn_contracts::WaitForOutput>(cairn_contracts::Contract::Serialize),
         "description": "Wait durably for a duration (delay), a date (at), an authorized Cairn run \
-            to finish, a task this conversation delegated to finish (task_finished), or a condition \
+            to finish, a managed job to finish (job_finished), a task this conversation delegated to finish (task_finished), or a condition \
             provided by a plugin granted to this agent. List one condition, \
-            or several external ones with mode all (every result) or any (the first result). \
-            Time conditions are used alone and take no timeoutSeconds; external conditions require \
+            or several conditions with mode all (every result) or any (the first result). \
+            A time condition alone takes no timeoutSeconds. Groups may combine time and job conditions; external conditions and groups require \
             it (1 to 86400 seconds), as the deadline of the whole group. \
             If already complete, returns deferred=false and the observation: continue this turn. \
-            Otherwise saves a wakeup and returns deferred=true: end this turn so execution resources \
-            can be released. Cairn checks the conditions without waking the LLM and resumes this \
+            Otherwise saves a wakeup and returns deferred=true: end this agent turn. Managed jobs and useful containers keep the environment alive within its original deadline. Cairn checks the conditions without waking the LLM and resumes this \
             conversation or mission when the time or result arrives or the timeout expires, subject to capacity. \
             A time reached is completed, not timed_out. External completion includes failure and \
             cancellation; a group result lists each condition with its result, or null when it has none yet. Plugin-owned result fields are preserved in pluginResult. \
-            Inspect the results before acting. Never use this for local background \
-            processes that need this execution. Run dependencies require installation access; delegated \
+            Inspect the results before acting. Start local background work with start_job, then wait for its jobId; shell backgrounding is not supervised. Run dependencies require installation access; delegated \
             tasks require delegation; plugin \
             conditions use the agent's plugin grants. One wait is stored per conversation or mission run. Identical \
             repeated requests preserve the deadline; a different request replaces the previous wait. \
@@ -139,7 +139,7 @@ pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
             "properties": {
                 "conditions": {
                     "type": "array",
-                    "description": "One condition, or several different external conditions. No condition-count limit.",
+                    "description": "One condition, or several different conditions, including job_finished and time conditions. No condition-count limit.",
                     "items": { "oneOf": conditions },
                     "minItems": 1,
                 },
@@ -165,8 +165,10 @@ pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
                         },
                     },
                     "then": {
-                        "properties": { "conditions": { "maxItems": 1 } },
-                        "not": { "required": ["timeoutSeconds"] },
+                        "oneOf": [
+                            { "properties": { "conditions": { "maxItems": 1 } }, "not": { "required": ["timeoutSeconds"] } },
+                            { "properties": { "conditions": { "minItems": 2 }, "mode": { "const": "any" } }, "required": ["mode", "timeoutSeconds"] }
+                        ],
                     },
                     "else": { "required": ["timeoutSeconds"] },
                 },
@@ -236,12 +238,14 @@ async fn normalize_input(s: &Service, bearer: &str, input: &Value) -> Result<Val
     let mut members: Vec<Value> = Vec::with_capacity(conditions.len());
     let mut seen = HashSet::with_capacity(conditions.len());
     for condition in &conditions {
-        if temporal(condition) {
-            return Err(Error::bad(
-                "Time conditions cannot be grouped: timeoutSeconds is the deadline of the group.",
-            ));
-        }
-        let condition = external(s, agent_id, condition).await?;
+        let condition = if temporal(condition) {
+            if mode != "any" {
+                return Err(Error::bad("Time conditions in a group require mode any."));
+            }
+            time_condition(condition).ok_or_else(invalid)??
+        } else {
+            external(s, agent_id, condition).await?
+        };
         if !seen.insert(condition.clone()) {
             return Err(Error::bad("Each grouped condition must be different."));
         }
@@ -283,10 +287,14 @@ fn time_condition(condition: &Value) -> Option<Result<Value>> {
 
 /// A run dependency, or a condition of a plugin granted to the agent.
 async fn external(s: &Service, agent_id: &str, condition: &Value) -> Result<Value> {
-    if let Some(condition) = conditions::normalize(s, agent_id, condition).await? {
+    if condition["type"] != "job_finished"
+        && let Some(condition) = conditions::normalize(s, agent_id, condition).await?
+    {
         return Ok(condition);
     }
-    let (schema, key) = if condition["type"] == "task_finished" {
+    let (schema, key) = if condition["type"] == "job_finished" {
+        (job_finished(), "jobId")
+    } else if condition["type"] == "task_finished" {
         (task_finished(), "chatId")
     } else {
         (run_finished(), "runId")
@@ -545,7 +553,7 @@ fn registering(db: &Db<'_>, bearer: &str, request: &Request) -> Result<(Value, O
         }
         for member in sources(condition) {
             if is_native(member)
-                && native_result(db, member)?.is_none()
+                && native_result(db, &run, member, now())?.is_none()
                 && let Some(target) = dependency(db, member)?
             {
                 dependencies.push(target);
@@ -634,6 +642,15 @@ fn access_typed(db: &Db<'_>, run: &Value, condition: &WaitCondition) -> Result<(
         WaitCondition::TaskFinished { chat_id } => {
             crate::delegation::wait_access(db, run, chat_id)?;
         }
+        WaitCondition::JobFinished { job_id } => crate::worker::jobs::access(db, run, job_id)?,
+        WaitCondition::Delay { seconds } => {
+            if !(1..=86400).contains(seconds) {
+                return Err(Error::bad("Invalid delay."));
+            }
+        }
+        WaitCondition::At { date } => {
+            date_millis(&json!({"date":date}))?;
+        }
         WaitCondition::Plugin { .. } => conditions::access(db, run, &condition_wire(condition))?,
     }
     Ok(())
@@ -642,12 +659,30 @@ fn access_typed(db: &Db<'_>, run: &Value, condition: &WaitCondition) -> Result<(
 fn is_native(condition: &WaitCondition) -> bool {
     matches!(
         condition,
-        WaitCondition::RunFinished { .. } | WaitCondition::TaskFinished { .. }
+        WaitCondition::RunFinished { .. }
+            | WaitCondition::TaskFinished { .. }
+            | WaitCondition::JobFinished { .. }
+            | WaitCondition::Delay { .. }
+            | WaitCondition::At { .. }
     )
 }
 
-fn native_result(db: &Db<'_>, condition: &WaitCondition) -> Result<Option<WaitObservation>> {
+fn native_result(
+    db: &Db<'_>,
+    run: &Value,
+    condition: &WaitCondition,
+    created_at: i64,
+) -> Result<Option<WaitObservation>> {
     match condition {
+        WaitCondition::JobFinished { job_id } => crate::worker::jobs::result(db, run, job_id),
+        WaitCondition::Delay { seconds } => {
+            let deadline = created_at.saturating_add(seconds.saturating_mul(1000));
+            Ok((now() >= deadline).then(|| time_result(deadline)))
+        }
+        WaitCondition::At { date } => {
+            let deadline = date_millis(&json!({"date":date}))?;
+            Ok((now() >= deadline).then(|| time_result(deadline)))
+        }
         WaitCondition::TaskFinished { chat_id } => crate::delegation::wait_result(db, chat_id),
         WaitCondition::RunFinished { run_id } => {
             let target = db
@@ -679,6 +714,8 @@ fn native_result(db: &Db<'_>, condition: &WaitCondition) -> Result<Option<WaitOb
 
 pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
     let request = input(s, bearer, raw).await?;
+    let live_run = crate::project_workspaces::authorize(s, bearer).await?;
+    crate::worker::jobs::refresh(s, &live_run).await?;
     let token = bearer.to_owned();
     let prepared = Request {
         reason: request.reason.clone(),
@@ -755,7 +792,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         let condition_sources = request.condition.as_ref().map(sources).unwrap_or_default();
         for (member, checked) in condition_sources.into_iter().zip(&checked) {
             let result = if is_native(member) {
-                native_result(db, member)?
+                native_result(db, &run, member, now())?
             } else {
                 checked.as_ref().and_then(|check| check.result.as_ref()).map(observed_from_wire).transpose()?
             };
@@ -887,7 +924,7 @@ fn results(db: &Db<'_>, run: &Value, wakeup: &ChatWakeup) -> Vec<Option<WaitObse
             }
             if let Some(recorded) = recorded {
                 if matches!(condition, WaitCondition::TaskFinished { .. }) {
-                    match native_result(db, condition) {
+                    match native_result(db, run, condition, wakeup.created_at) {
                         Ok(Some(value)) if value.status.as_deref() == Some("deleted") => {
                             return Some(value);
                         }
@@ -898,7 +935,8 @@ fn results(db: &Db<'_>, run: &Value, wakeup: &ChatWakeup) -> Vec<Option<WaitObse
                 return Some(recorded.clone());
             }
             if is_native(condition) {
-                native_result(db, condition).unwrap_or_else(|e| Some(unavailable(e)))
+                native_result(db, run, condition, wakeup.created_at)
+                    .unwrap_or_else(|e| Some(unavailable(e)))
             } else {
                 None
             }
@@ -968,7 +1006,7 @@ fn current_observation(
         return Ok(Some(unavailable(error)));
     }
     if is_native(condition) {
-        match native_result(db, condition) {
+        match native_result(db, run, condition, wakeup.created_at) {
             Ok(Some(value)) => return Ok(Some(value)),
             Err(error) => return Ok(Some(unavailable(error))),
             _ => {}
@@ -1258,7 +1296,7 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                     &run_id,
                     crate::runs::RunChanges {
                         status: Some(RunStatus::Queued),
-                        recovery_pending: Some(true),
+                        recovery_pending: Some(checkpoint.held_environment.is_none()),
                         finished_at: Some(None),
                         summary: Some(String::new()),
                         error: Some(None),
@@ -1324,5 +1362,37 @@ mod tests {
             assert_eq!(extra.0["reason"], "Plugin-owned reason");
             assert_eq!(extra.0["immediate"], false);
         }
+    }
+}
+
+#[cfg(test)]
+mod background_wait_tests {
+    use super::*;
+
+    #[test]
+    fn tool_accepts_job_or_delay_and_rejects_grouped_time_all() {
+        let schema = tool(&[], false)["inputSchema"].clone();
+        let job = json!({"type":"job_finished","jobId":"77d595dc-97b7-4c13-923d-e163baf49ea8"});
+        let mut request = json!({"conditions":[job,{"type":"delay","seconds":10}],"mode":"any","timeoutSeconds":60,"reason":"Measurement completion"});
+        assert!(jsonschema::is_valid(&schema, &request));
+        request["mode"] = "all".into();
+        assert!(!jsonschema::is_valid(&schema, &request));
+    }
+
+    #[test]
+    fn elapsed_group_member_uses_persisted_registration_time() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        let db = Db(&connection);
+        let condition = WaitCondition::Delay { seconds: 10 };
+        let created = now() - 20_000;
+        let result = native_result(&db, &json!({}), &condition, created)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.wake_at, Some(created + 10_000));
+        assert!(
+            native_result(&db, &json!({}), &condition, now())
+                .unwrap()
+                .is_none()
+        );
     }
 }

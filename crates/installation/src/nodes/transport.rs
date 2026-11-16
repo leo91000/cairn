@@ -289,6 +289,12 @@ fn is_retry(call: &Call, sequence: u64) -> Result<bool> {
 
 /// How long a node may take to start answering, by operation.
 fn head_timeout(method: &str, path: &str, native: bool) -> Duration {
+    if (method == "POST" && path.ends_with("/environment"))
+        || (method == "GET" && path.contains("/turn/"))
+    {
+        return Duration::from_secs(65);
+    }
+
     if native && crate::nodes::is_project_import_request(method, path) {
         return crate::nodes::PROJECT_OPEN_HEAD_TIMEOUT;
     }

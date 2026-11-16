@@ -895,6 +895,53 @@ async fn cancelling_by_key_stops_the_turn_and_reports_its_end() {
 }
 
 #[tokio::test]
+async fn cancelling_by_key_stops_a_held_environment_after_the_turn_finished() {
+    let f = granted().await;
+    let canceller = rule_on(&f, OWNER, plugin(&f), start_or_cancel(), limits()).await;
+    emit(&f, "first", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    fixture::running_conversation(&f.s, &chat).await;
+    set_status(&f, &run, cairn_contracts::RunStatus::Succeeded).await;
+    f.s.store
+        .save_checkpoint_boundary(
+            &run,
+            json!({
+                "completed": true,
+                "launched": true,
+                "heldEnvironment": {
+                    "attempt": "held-attempt",
+                    "generation": "held-generation",
+                    "expiresAt": cairn_installation::config::now() + 60_000,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    f.s.worker
+        .active
+        .lock()
+        .await
+        .insert(run.clone(), cancellation.clone());
+
+    emit(&f, "stop", message("alice", "stop")).await;
+    engine::tick(&f.s).await.unwrap();
+
+    let stopped = &triggerings(&f, &canceller).await[0];
+    assert_eq!(
+        stopped["steps"][0]["result"]["cancelled"], true,
+        "{stopped}"
+    );
+    assert_eq!(stopped["steps"][0]["result"]["runId"], run, "{stopped}");
+    let state = f.s.store.run(&run).await.unwrap();
+    assert!(state["cancelRequestedAt"].is_number(), "{state}");
+    assert!(cancellation.is_cancelled());
+    f.s.worker.active.lock().await.remove(&run);
+}
+
+#[tokio::test]
 async fn cancelling_a_retry_keeps_the_cancelling_hooks_chain_depth() {
     use common::run_fixture::RunFixture;
 
@@ -1052,7 +1099,8 @@ fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
     drop(cairn_installation::store::Store::open(root.path()).unwrap());
     let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
     db.execute_batch(
-        "DROP TABLE hook_rule_conversations;
+        "DROP TABLE background_jobs;
+         DROP TABLE hook_rule_conversations;
          DROP TABLE hook_rule_conversation_values;
          DROP TABLE hook_rule_turn_origins;
          DROP TABLE hook_rule_chain_depths;
@@ -1070,7 +1118,7 @@ fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
         assert_eq!(
             db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            35
+            36
         );
         for table in [
             "hook_rule_conversations",

@@ -10,6 +10,7 @@ pub mod attachments;
 pub mod auth;
 pub(crate) mod authorization;
 pub(crate) mod backend_migration;
+pub mod background_jobs;
 pub(crate) mod capabilities;
 mod chat_inbox;
 pub(crate) mod chat_plan_settings;

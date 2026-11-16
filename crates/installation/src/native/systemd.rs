@@ -599,6 +599,12 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
             property(format!("ReadWritePaths=+{}", path_property(destination)?));
         }
     }
+    if launch.plan["environmentProtocol"] == 1 {
+        property(format!(
+            "BindReadOnlyPaths={}:/run/cairn-environment",
+            path_property(&launch.root.with_extension("e"))?
+        ));
+    }
     let original = crate::microvm::plan::Plan::new(launch.plan.clone());
     let empty = launch
         .data
@@ -647,6 +653,11 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
             .join(text(launch.plan, "runId"))
             .join("home")
             .join(crate::microvm::mcp::SOCKET);
+        let channel = if launch.plan["environmentProtocol"] == 1 {
+            launch.root.with_extension("r").join("mcp.sock")
+        } else {
+            channel
+        };
         if channel.exists() {
             property(format!(
                 "BindReadOnlyPaths={}:/run/cairn-mcp.sock",
@@ -776,7 +787,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     } else {
         args.extend([
             "--setenv=PATH=/run/cairn-entrypoint:/opt/cairn-native-tools/bin:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
-            "--", "/run/cairn-entrypoint/cairn", "runner-entry",
+            "--", "/run/cairn-entrypoint/cairn", if launch.plan["environmentProtocol"] == 1 { "environment-entry" } else { "runner-entry" },
         ].map(String::from));
     }
     Ok(args)

@@ -15,7 +15,7 @@ async fn previous(root: &std::path::Path) -> Connection {
     let mut db = Connection::open(root.join("manager.db")).unwrap();
     // Discard A16 tables before simulating a pre-A16 database.
     db.execute_batch(
-        "DROP TABLE skill_source_refs; DROP TABLE skill_sources;
+        "DROP TABLE background_jobs; DROP TABLE skill_source_refs; DROP TABLE skill_sources;
          DROP TABLE artifact_visibility; DROP TABLE artifact_versions; DROP TABLE artifacts;",
     )
     .unwrap();

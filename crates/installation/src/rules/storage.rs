@@ -322,7 +322,7 @@ mod tests {
         let database = root.path().join("manager.db");
         let connection = Connection::open(&database).unwrap();
         connection
-            .execute_batch("DROP TABLE hook_rule_uses; DROP TABLE hook_rule_versions; DROP TABLE hook_rules; PRAGMA user_version=30;")
+            .execute_batch("DROP TABLE background_jobs; DROP TABLE hook_rule_uses; DROP TABLE hook_rule_versions; DROP TABLE hook_rules; PRAGMA user_version=30;")
             .unwrap();
         assert!(tables(&connection).is_empty());
         drop(connection);

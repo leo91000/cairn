@@ -133,7 +133,7 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        35
+        36
     );
     let after = snapshot(&db);
     let after_schema = schema(&db);
@@ -147,6 +147,8 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
                 retained_schema, definition,
                 "Retained node schema must remain unchanged"
             );
+        } else if kind == "table" && name == "wait_conditions" {
+            assert_eq!(after[&name].1, before[&name].1, "retained wait rows");
         } else if kind != "table"
             || !matches!(
                 name.as_str(),
@@ -167,7 +169,9 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
         .unwrap();
     assert_eq!(vm_disk_nodes, 0, "old nodes need a fresh capability report");
     for (table, (signature, rows)) in before {
-        if table != "kv" {
+        if table == "wait_conditions" {
+            assert_eq!(after[&table].1, rows, "retained wait rows");
+        } else if table != "kv" {
             assert_eq!(after[&table], (signature, rows), "{table}");
         }
     }

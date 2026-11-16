@@ -10,7 +10,7 @@ mod cleanup;
 mod directory;
 pub(crate) mod disk;
 pub mod docker;
-mod home;
+pub(crate) mod home;
 mod identity;
 pub(crate) mod ingress;
 pub(crate) mod limits;

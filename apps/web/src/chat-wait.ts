@@ -188,6 +188,15 @@ export function waitTarget(wakeup: Pick<ChatWakeup, 'condition' | 'display' | 'w
     }
   }
 
+  if (condition?.type === 'job_finished') {
+    return {
+      kind: 'condition',
+      title: 'Waiting for background work to finish',
+      short: 'Background job',
+      details: [condition.jobId.slice(0, 8)],
+    }
+  }
+
   // A plugin condition reads as its plugin words it.
   if (condition) {
     const display = wakeup.display
@@ -331,6 +340,8 @@ export function observedTarget(observation: Observation) {
   const members = groupObservation(observation)
   if (members)
     return observation.mode === 'any' ? `First of ${members.length} results` : `${members.length} results`
+  if (observation.type === 'job_finished')
+    return 'Background job'
   if (observation.type === 'task_finished')
     return 'Delegated task'
   if (observation.type === 'run_finished')
@@ -364,6 +375,20 @@ export function waitOutcome(observation: Observation): WaitOutcome {
     return { tone: 'warning', title: 'Deadline reached without a result', detail: '' }
   if (state === 'unavailable')
     return { tone: 'warning', title: 'Result unavailable', detail: typeof observation.message === 'string' ? observation.message : '' }
+
+  if (observation.type === 'job_finished') {
+    const job = observation.jobResult as { receipt?: unknown } | undefined
+    const receipt = job?.receipt as {
+      exitCode?: number
+      signal?: number
+      stopped?: boolean
+      timedOut?: boolean
+      elapsedMs?: number
+      logTail?: string
+    } | undefined
+    const success = receipt?.exitCode === 0 && !receipt?.signal && !receipt?.stopped && !receipt?.timedOut
+    return { tone: success ? 'ok' : 'error', title: success ? 'Background job finished' : 'Background job stopped', detail: receipt ? `Exit ${receipt.exitCode ?? receipt.signal ?? 'unknown'} · ${((receipt.elapsedMs ?? 0) / 1000).toFixed(1)}s\n${receipt.logTail ?? ''}` : '' }
+  }
 
   if (observation.type === 'task_finished') {
     const status = String(observation.status ?? '')

@@ -19,6 +19,7 @@ impl Controller {
         value["status"] = if fresh { "ok" } else { "degraded" }.into();
         value["backend"] = "native".into();
         value["nodeProtocol"] = 2.into();
+        value["environmentProtocol"] = 1.into();
         value["diskRetirementProtocol"] = crate::storage::retirement::PROTOCOL.into();
         value["runtimeId"] = crate::nodes::component_runtime().into();
         value["dataRoot"] = json!(self.data);

@@ -45,6 +45,11 @@ pub(super) async fn execute(
         stop_heartbeat.clone(),
     ));
     let sensitive = History::default();
+    s.worker
+        .job_redactions
+        .lock()
+        .await
+        .insert(text(&run, "id").to_owned(), sensitive.clone());
     let result = launch::execute(
         s,
         &mut run,
@@ -140,6 +145,12 @@ async fn heartbeat(s: Arc<Service>, checkpoint: Arc<Checkpoint>, stop: Cancellat
             () = stop.cancelled() => break,
             _ = timer.tick() => {
                 let _ = checkpoint.refresh_pause(&s).await;
+                if checkpoint.read(|state| state.held_environment.is_some() && state.completed()).await
+                    || s.worker.held.lock().await.contains(&checkpoint.id) {
+                    // A queued continuation updates this same durable row. The
+                    // live owner adopts it before its next provider turn.
+                    continue;
+                }
                 if let Err(error) = checkpoint.persist().await {
                     tracing::warn!(run_id = checkpoint.id, error = %error, "Could not save the run checkpoint");
                 }

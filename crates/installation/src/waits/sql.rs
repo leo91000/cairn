@@ -36,7 +36,7 @@ CREATE UNIQUE INDEX durable_wakeups_mission ON durable_wakeups(mission_run_id) W
 CREATE TABLE wait_conditions(
     wakeup_key INTEGER NOT NULL REFERENCES durable_wakeups(key) ON DELETE CASCADE,
     position INTEGER NOT NULL CHECK(position>=0),
-    kind TEXT NOT NULL CHECK(kind IN ('run_finished','task_finished','plugin')),
+    kind TEXT NOT NULL CHECK(kind IN ('run_finished','task_finished','job_finished','delay','at','plugin')),
     target_run_id TEXT,
     target_chat_id TEXT,
     plugin_id TEXT,
@@ -49,6 +49,7 @@ CREATE TABLE wait_conditions(
     last_error TEXT,
     CHECK((kind='run_finished' AND target_run_id IS NOT NULL AND target_chat_id IS NULL AND plugin_id IS NULL AND condition_type IS NULL AND project_id IS NULL AND plugin_input IS NULL)
        OR (kind='task_finished' AND target_chat_id IS NOT NULL AND target_run_id IS NULL AND plugin_id IS NULL AND condition_type IS NULL AND project_id IS NULL AND plugin_input IS NULL)
+       OR (kind IN ('job_finished','delay','at') AND target_run_id IS NULL AND target_chat_id IS NULL AND plugin_id IS NULL AND condition_type IS NOT NULL AND project_id IS NULL AND plugin_input IS NULL)
        OR (kind='plugin' AND target_run_id IS NULL AND target_chat_id IS NULL AND plugin_id IS NOT NULL AND condition_type IS NOT NULL AND plugin_input IS NOT NULL)),
     PRIMARY KEY(wakeup_key,position)
 ) WITHOUT ROWID;
@@ -130,6 +131,24 @@ fn condition_row(
         },
         "task_finished" => WaitCondition::TaskFinished {
             chat_id: row.get(start + 2)?,
+        },
+        "job_finished" => WaitCondition::JobFinished {
+            job_id: row.get(start + 4)?,
+        },
+        "delay" => {
+            let seconds: String = row.get(start + 4)?;
+            WaitCondition::Delay {
+                seconds: seconds.parse().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        start + 4,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+            }
+        }
+        "at" => WaitCondition::At {
+            date: row.get(start + 4)?,
         },
         _ => WaitCondition::Plugin {
             plugin_id: row.get(start + 3)?,
@@ -332,6 +351,11 @@ impl Db<'_> {
         let wakeup_key = self.0.last_insert_rowid();
         let empty_progress = WaitMemberProgress::default();
         for (position, condition) in conditions.into_iter().enumerate() {
+            let temporal_value = match condition {
+                WaitCondition::Delay { seconds } => Some(seconds.to_string()),
+                WaitCondition::At { date } => Some(date.clone()),
+                _ => None,
+            };
             let (condition_kind, run, task, plugin, condition_type, project, input) =
                 match condition {
                     WaitCondition::RunFinished { run_id } => {
@@ -339,6 +363,21 @@ impl Db<'_> {
                     }
                     WaitCondition::TaskFinished { chat_id } => {
                         ("task_finished", None, Some(chat_id), None, None, None, None)
+                    }
+                    WaitCondition::JobFinished { job_id } => {
+                        ("job_finished", None, None, None, Some(job_id), None, None)
+                    }
+                    WaitCondition::Delay { .. } => (
+                        "delay",
+                        None,
+                        None,
+                        None,
+                        temporal_value.as_ref(),
+                        None,
+                        None,
+                    ),
+                    WaitCondition::At { .. } => {
+                        ("at", None, None, None, temporal_value.as_ref(), None, None)
                     }
                     WaitCondition::Plugin {
                         plugin_id,
@@ -418,4 +457,15 @@ impl Db<'_> {
         }
         Ok(())
     }
+}
+
+/// Preserve all existing condition positions and observations when adding
+/// environment-owned job conditions; no existing wakeup is reinterpreted.
+pub(crate) fn upgrade_jobs(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch("ALTER TABLE wait_conditions RENAME TO wait_conditions_before_jobs;")?;
+    let start = SCHEMA.find("CREATE TABLE wait_conditions(").unwrap();
+    let end = SCHEMA[start..].find(") WITHOUT ROWID;").unwrap() + start + ") WITHOUT ROWID;".len();
+    tx.execute_batch(&SCHEMA[start..end])?;
+    tx.execute_batch("INSERT INTO wait_conditions SELECT * FROM wait_conditions_before_jobs; DROP TABLE wait_conditions_before_jobs;")?;
+    Ok(())
 }

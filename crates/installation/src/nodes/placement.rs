@@ -1095,7 +1095,8 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
             let mut record = db
                 .attempt(&owned)?
                 .ok_or_else(|| Error::conflict("Attempt removed."))?;
-            if run["status"] != RunStatus::Running
+            if (run["status"] != RunStatus::Running
+                && !crate::worker::held::authorized(db, &run, &owned)?)
                 || !run["cancelRequestedAt"].is_null()
                 || record.released
                 || !super::agent_allows(&agent, LOCAL_NODE_ID)

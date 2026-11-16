@@ -1460,7 +1460,8 @@ fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>>
         let run = db.run(run_id)?.unwrap_or_default();
         let checkpoint = db_checkpoint(db, run_id)?;
         let agent = db.agent_snapshot(run_agent(&run))?.unwrap_or_default();
-        let owns_execution = run["status"] == RunStatus::Running
+        let owns_execution = (run["status"] == RunStatus::Running
+            || crate::worker::held::authorized(db, &run, &attempt.id)?)
             && run["cancelRequestedAt"].is_null()
             && checkpoint["runnerId"] == attempt.id
             && agent_allows(&agent, node_id);

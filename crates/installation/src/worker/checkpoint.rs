@@ -28,6 +28,8 @@ type Nullable<T> = Option<Option<T>>;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunCheckpoint {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_environment: Option<HeldEnvironment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub launched: Option<bool>,
     /// Small durable row, loaded separately from the retained workspace.
     #[serde(skip)]
@@ -118,6 +120,14 @@ pub struct RunCheckpoint {
     pub resources: Option<crate::nodes::Resources>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub administrative_pause_observation: Option<AdministrativePauseObservation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeldEnvironment {
+    pub attempt: String,
+    pub generation: String,
+    pub expires_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -367,7 +377,13 @@ impl RunCheckpoint {
                 "The filesystem could not be flushed. Working files were preserved; automatic replay was stopped.",
             ));
         }
-        if !self.managed() || !self.completed() || self.terminal_code() == Some(0) {
+        if !self.managed()
+            || !self.completed()
+            || self.terminal_code() == Some(0)
+            || self.held_environment.as_ref().is_some_and(|held| {
+                self.runner_id() == Some(held.attempt.as_str()) && self.terminal_code.is_none()
+            })
+        {
             return None;
         }
         Some(if self.last_error().is_empty() {
@@ -556,6 +572,9 @@ impl RunCheckpoint {
 
     /// Absolute deadline for a checkpoint resumed now.
     fn deadline(&self) -> Option<i64> {
+        if let Some(held) = &self.held_environment {
+            return Some(held.expires_at);
+        }
         match self.remaining_ms {
             Some(None) => None,
             Some(Some(remaining)) => Some(now() + remaining),
@@ -655,6 +674,17 @@ impl Checkpoint {
     /// partially failed fence; reload it before permitting another write.
     pub async fn fence(&self, service: &crate::service::Service, run: &Value) -> Result<()> {
         let mut state = self.state.lock().await;
+        // A continuation can be queued while the live owner closes an idle
+        // environment. Fence from that newest durable row, never overwrite it
+        // with the completed provider turn kept in memory.
+        if let Some(current) = RunCheckpoint::load(&self.store, &self.id).await? {
+            if !crate::recovery::same_execution(Some(&current), Some(&state)) {
+                return Err(crate::error::Error::conflict(
+                    "Execution changed before fencing.",
+                ));
+            }
+            *state = current;
+        }
         let result = crate::recovery::fence_attempt(service, run, Some(&state)).await;
         let saved = RunCheckpoint::load(&self.store, &self.id)
             .await?
@@ -915,6 +945,31 @@ impl Checkpoint {
         Ok(())
     }
 
+    /// Adopt a scheduler-authored continuation without replacing its original
+    /// environment deadline. The current generation must still own the row.
+    pub async fn adopt_continuation(&self) -> Result<()> {
+        let mut state = self.state.lock().await;
+        let saved = RunCheckpoint::load(&self.store, &self.id)
+            .await?
+            .ok_or_else(|| crate::error::Error::conflict("Continuation checkpoint disappeared."))?;
+        if saved.runner_id() != state.runner_id()
+            || saved
+                .held_environment
+                .as_ref()
+                .map(|held| (&held.attempt, &held.generation))
+                != state
+                    .held_environment
+                    .as_ref()
+                    .map(|held| (&held.attempt, &held.generation))
+        {
+            return Err(crate::error::Error::conflict(
+                "Continuation changed its environment.",
+            ));
+        }
+        *state = saved;
+        Ok(())
+    }
+
     pub async fn persist(&self) -> Result<()> {
         self.update(|_| {}).await
     }
@@ -1023,6 +1078,22 @@ mod tests {
         assert!(RunCheckpoint::from_value(json!({ "unknownDecision": true })).is_err());
         assert!(RunCheckpoint::from_value(json!({ "launched": "yes" })).is_err());
         assert!(RunCheckpoint::from_value(json!({ "remainingMs": 1.5 })).is_err());
+    }
+
+    #[test]
+    fn held_environment_preserves_its_original_absolute_deadline() {
+        let expiry = now() + 60_000;
+        let mut saved = RunCheckpoint::fresh(None);
+        saved.held_environment = Some(HeldEnvironment {
+            attempt: "attempt".into(),
+            generation: "generation".into(),
+            expires_at: expiry,
+        });
+        assert_eq!(saved.deadline(), Some(expiry));
+        saved.remaining_ms = Some(Some(900_000));
+        assert_eq!(saved.deadline(), Some(expiry));
+        let restored = RunCheckpoint::from_value(serde_json::to_value(&saved).unwrap()).unwrap();
+        assert_eq!(restored.deadline(), Some(expiry));
     }
 
     #[tokio::test]

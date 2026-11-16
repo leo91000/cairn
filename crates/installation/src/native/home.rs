@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 pub(super) const CLAUDE_AUTH_DIRECTORY: &str = "/run/cairn-claude-auth";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Binding {
     pub source: PathBuf,
     pub target: PathBuf,

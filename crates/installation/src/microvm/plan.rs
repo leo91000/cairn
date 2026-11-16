@@ -10,10 +10,30 @@ pub const CHAT_INBOX: &str = "/run/cairn-chat";
 /// Volatile runner code supplied by the current controller, outside the saved disk.
 pub const ENTRYPOINT: &str = "/run/cairn-entrypoint/cairn";
 
+/// Controller-compatible lifetime for a retained environment.
+pub(crate) const MAX_ENVIRONMENT_MS: i64 = 13 * 3_600_000;
+
+pub(crate) fn execution_deadline(deadline: Option<i64>, retained: bool, now: i64) -> Option<i64> {
+    if !retained {
+        return deadline;
+    }
+    Some(
+        deadline
+            .unwrap_or(i64::MAX)
+            .min(now.saturating_add(MAX_ENVIRONMENT_MS)),
+    )
+}
+
 /// Typed view of the plan document. The document itself is forwarded unchanged
 /// (except for storage credentials) to the guest entrypoint.
-#[derive(Clone, Debug)]
-pub struct Plan(Value);
+#[derive(Clone)]
+pub struct Plan(Value, Option<crate::background_jobs::controller::Control>);
+
+impl std::fmt::Debug for Plan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// A host directory copied into the guest.
 #[derive(Clone, Copy, Debug)]
@@ -25,7 +45,19 @@ pub struct Import<'a> {
 
 impl Plan {
     pub fn new(value: Value) -> Self {
-        Self(value)
+        Self(value, None)
+    }
+
+    pub fn with_environment(
+        mut self,
+        control: crate::background_jobs::controller::Control,
+    ) -> Self {
+        self.1 = Some(control);
+        self
+    }
+
+    pub fn environment(&self) -> Option<&crate::background_jobs::controller::Control> {
+        self.1.as_ref()
     }
 
     pub fn as_value(&self) -> &Value {

@@ -305,6 +305,10 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             crate::nodes::exclusive::renew(s, bearer, args).await,
             summary,
         ),
+        "start_job" => ToolResult::from_result(
+            crate::worker::held::start_job(s, bearer, args).await,
+            summary,
+        ),
         "wait_for" => {
             ToolResult::from_result(crate::waits::schedule(s, bearer, args).await, |result| {
                 if result["deferred"] == true {
@@ -439,6 +443,7 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::chats::questions::list_tool(),
         crate::chats::questions::cancel_tool(),
         crate::waits::tool(&conditions, delegates),
+        crate::worker::held::tool(),
         crate::nodes::exclusive::acquire_tool(),
         crate::nodes::exclusive::release_tool(),
         crate::nodes::exclusive::status_tool(),

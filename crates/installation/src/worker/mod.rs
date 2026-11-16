@@ -4,6 +4,8 @@ use cairn_contracts::EventKind;
 
 pub(crate) mod control;
 mod execution;
+pub(crate) mod held;
+pub(crate) mod jobs;
 mod launch;
 mod output;
 pub(crate) mod progress;
@@ -40,6 +42,8 @@ pub(crate) struct ResumeSelectionContext {
 #[derive(Default)]
 pub struct Worker {
     pub active: Mutex<HashMap<String, CancellationToken>>,
+    held: Mutex<std::collections::HashSet<String>>,
+    pub(crate) job_redactions: Mutex<HashMap<String, crate::accounts::output_redactions::History>>,
     tick_lock: Mutex<()>,
     preparation: Arc<Mutex<()>>,
     run_preparation_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
@@ -103,6 +107,7 @@ impl Worker {
         self.tasks.spawn(detach_environments(s.clone()));
         self.tasks.spawn(retire_environments(s.clone()));
         self.tasks.spawn(schedule_tasks(s.clone()));
+        self.tasks.spawn(observe_background_jobs(s.clone()));
         self.tasks.spawn(self.clone().run_forever(s));
         Ok(())
     }
@@ -215,6 +220,41 @@ fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
     crate::environment_expiration::finish_legacy_cleaning(db)?;
     crate::nodes::moves::abandon_legacy_moves(db)?;
     crate::backend_migration::abandon_legacy_conversions(db)?;
+    // A controller may still own jobs after manager loss. Invalidate their
+    // outcome explicitly and enqueue existing fencing, never replay commands.
+    let held = db.0.prepare("SELECT run_id,state FROM run_checkpoints WHERE json_type(state,'$.heldEnvironment')='object'")?
+        .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, state) in held {
+        let mut saved: checkpoint::RunCheckpoint = serde_json::from_str(&state)?;
+        if let Some(held) = saved.held_environment.take() {
+            jobs::unknown(
+                db,
+                &id,
+                &held.attempt,
+                "The manager restarted while background work was active; completion is unknown.",
+            )?;
+            saved.store_in(db, &id)?;
+            let current = db
+                .run_state(&id)?
+                .ok_or_else(|| Error::not_found("Run not found"))?;
+            let status = if matches!(current.status, RunStatus::Queued | RunStatus::Running) {
+                RunStatus::Queued
+            } else {
+                RunStatus::Waiting
+            };
+            db.event(&id, &EventKind::Status,
+                "Background work was interrupted by a manager restart; the old environment will be stopped before resuming.", None)?;
+            db.change_run(
+                &id,
+                crate::runs::RunChanges {
+                    status: Some(status),
+                    recovery_pending: Some(true),
+                    ..Default::default()
+                },
+            )?;
+        }
+    }
     for run in db.active_run_states()? {
         let id = &run.id;
         if run.status != RunStatus::Running {
@@ -336,10 +376,65 @@ async fn audit(store: &Store, action: &str, detail: Value) {
     }
 }
 
+/// Controller observations run independently from admission and heartbeat.
+async fn observe_background_jobs(s: Arc<Service>) {
+    let mut timer = tokio::time::interval(Duration::from_secs(1));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = s.shutdown.cancelled() => return,
+            _ = timer.tick() => {}
+        }
+        tokio::select! {
+            () = s.shutdown.cancelled() => return,
+            observed = jobs::refresh_all(&s) => {
+                if let Err(error) = observed {
+                    tracing::warn!(error = %error, "Background job observation failed");
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{mission_fixture::MissionFixture, validation::text};
+
+    #[tokio::test]
+    async fn restart_preserves_queued_turn_while_fencing_held_background_work() {
+        use crate::run_fixture::DbRunFixture;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({"id":"held", "taskId":"task", "status":"queued"}),
+                    None,
+                )?;
+                let mut saved = checkpoint::RunCheckpoint::fresh(None);
+                saved.runner_id = Some(Some("attempt".into()));
+                saved.completed = Some(false);
+                saved.turn_pending = Some(true);
+                saved.held_environment = Some(checkpoint::HeldEnvironment {
+                    attempt: "attempt".into(),
+                    generation: "generation".into(),
+                    expires_at: now() + 60_000,
+                });
+                saved.store_in(db, "held")?;
+                restore_after_restart(db)?;
+                let run = db.run_state("held")?.unwrap();
+                assert_eq!(run.status, RunStatus::Queued);
+                assert!(run.recovery_pending);
+                let saved = checkpoint::RunCheckpoint::load_in(db, "held")?.unwrap();
+                assert_eq!(saved.turn_pending, Some(true));
+                assert!(!saved.completed());
+                assert!(saved.held_environment.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn restart_releases_an_unclaimed_fresh_environment_reservation_but_keeps_execution_proofs()

@@ -274,6 +274,8 @@ async fn historical_rotation_fixture(aggregate: bool) {
             directory: root.path().into(),
             attempt_id: crate::config::id(),
             reservation: None,
+            retained: false,
+            turn: String::new(),
             output_probe: Some(probe.clone()),
         };
         let (mut stdout, stdout_reader) = tokio::io::duplex(8192);

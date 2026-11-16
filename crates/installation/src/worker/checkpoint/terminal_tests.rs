@@ -364,3 +364,30 @@ async fn native_output_limit_survives_guard_authenticated_wait_and_checkpoint_re
         Some(cairn_contracts::FailureOrigin::Runner)
     );
 }
+
+#[test]
+fn healthy_held_turn_is_not_a_missing_physical_finalization() {
+    for backend in ["native", "firecracker"] {
+        let mut saved = RunCheckpoint::fresh(None);
+        saved.prepared = Some(Some(json!({"backend":backend,"isolated":true})));
+        saved.runner_id = Some(Some("attempt".into()));
+        saved.completed = Some(true);
+        assert!(saved.finalization_error().is_some());
+        saved.held_environment = Some(HeldEnvironment {
+            attempt: "attempt".into(),
+            generation: "generation".into(),
+            expires_at: now() + 60_000,
+        });
+        assert!(saved.finalization_error().is_none());
+        saved.finalization_failure_attempt = Some("attempt".into());
+        assert!(saved.finalization_error().is_some());
+        saved.finalization_failure_attempt = None;
+        saved.terminal_code = Some(None);
+        assert!(saved.finalization_error().is_some());
+        saved.terminal_code = Some(Some(70));
+        assert!(saved.finalization_error().is_some());
+        saved.terminal_code = None;
+        saved.runner_id = Some(Some("replacement".into()));
+        assert!(saved.finalization_error().is_some());
+    }
+}

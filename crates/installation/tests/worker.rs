@@ -10,6 +10,9 @@ use common::run_fixture::*;
 
 mod common;
 
+#[path = "worker/background_jobs.rs"]
+mod background_jobs;
+
 use axum::{
     Json, Router,
     body::Body,

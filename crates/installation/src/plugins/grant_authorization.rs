@@ -34,6 +34,7 @@ pub(crate) struct Snapshot {
     bearer: Option<(String, bool)>,
     run_id: Option<(String, Value)>,
     wait_owner: Option<Arc<crate::waits::Owner>>,
+    environment_observation: Option<crate::worker::held::Observation>,
     package: Arc<Package>,
 }
 
@@ -103,6 +104,7 @@ impl Snapshot {
                     bearer,
                     run_id: None,
                     wait_owner: None,
+                    environment_observation: None,
                     package,
                 })
             })
@@ -137,6 +139,17 @@ impl Snapshot {
     ) -> Result<Self> {
         let mut snapshot = Self::for_run(s, run, package).await?;
         snapshot.wait_owner = Some(owner);
+        Ok(snapshot)
+    }
+
+    pub(crate) async fn for_environment_observation(
+        s: &Service,
+        run: &Value,
+        package: &Package,
+        observation: &crate::worker::held::Observation,
+    ) -> Result<Self> {
+        let mut snapshot = Self::for_run(s, run, package).await?;
+        snapshot.environment_observation = Some(observation.clone());
         Ok(snapshot)
     }
 
@@ -215,6 +228,8 @@ impl Snapshot {
                 {
                     return Err(denied());
                 }
+            } else if let Some(observation) = &self.environment_observation {
+                observation.authorize(db)?;
             } else if !crate::run_status::RunStatus::of(&run)
                 .is_some_and(crate::run_status::RunStatus::is_active)
                 || crate::waits::Owner::for_run(db, &run)?.run_id() != run_id

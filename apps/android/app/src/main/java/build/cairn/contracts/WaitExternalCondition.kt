@@ -26,8 +26,29 @@ sealed interface WaitExternalCondition {
 
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @Serializable
+    @SerialName("job_finished")
+    data class C(val jobId: String) : WaitExternalCondition {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("delay")
+    data class D(val seconds: Long) : WaitExternalCondition {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("at")
+    data class E(val date: String) : WaitExternalCondition {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
     @SerialName("plugin")
-    data class C(
+    data class F(
         val conditionType: String,
         val input: JsonObject,
         val pluginId: String,

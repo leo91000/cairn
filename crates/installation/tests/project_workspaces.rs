@@ -583,7 +583,8 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
             if method == "tools/list" {
                 // Plugin tools such as 1Password's appear only for agents granted an instance.
                 let tools = value["result"]["tools"].as_array().unwrap();
-                assert_eq!(tools.len(), 14);
+                assert_eq!(tools.len(), 15);
+                assert!(tools.iter().any(|tool| tool["name"] == "start_job"));
                 assert!(
                     !tools
                         .iter()
@@ -795,7 +796,8 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
     let run = s.store.run(text(&run, "id")).await.unwrap();
     let token = run_token(&s, &run).await;
     let listing = workspace_rpc(&s, &token, "tools/list", json!({})).await;
-    assert_eq!(tool_names(&listing).len(), 14);
+    assert_eq!(tool_names(&listing).len(), 15);
+    assert!(tool_names(&listing).contains(&"start_job".to_owned()));
 }
 
 #[tokio::test]

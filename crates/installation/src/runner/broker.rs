@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_PLAN_BYTES: usize = 8_000_000;
 /// Longest attempt deadline a plan may request.
-const MAX_ATTEMPT_MS: i64 = 13 * 3_600_000;
+const MAX_ATTEMPT_MS: i64 = crate::microvm::plan::MAX_ENVIRONMENT_MS;
 
 pub(super) struct Attempt {
     pub stop: CancellationToken,
@@ -47,6 +47,7 @@ pub(super) struct Attempt {
     pub plan: Plan,
     pub imports: Arc<Mutex<()>>,
     pub control: Arc<Mutex<()>>,
+    pub environment: crate::background_jobs::controller::Control,
 }
 
 #[derive(Clone)]
@@ -240,6 +241,8 @@ impl Broker {
         // Keep the active attempt locked until this run is registered.
         let socket = Arc::new(OnceCell::new());
         let control = Arc::new(Mutex::new(()));
+        let environment = crate::background_jobs::controller::Control::default();
+        let plan = plan.with_environment(environment.clone());
         let stop = self.stop.child_token();
         let (done, receiver) = watch::channel(false);
         let physical_teardown = reservation.subscribe_teardown();
@@ -265,6 +268,7 @@ impl Broker {
                 plan: plan.clone(),
                 imports: Arc::default(),
                 control: control.clone(),
+                environment,
             },
         );
         let execution = Execution {
@@ -374,7 +378,12 @@ impl Broker {
                     atomic_write(&exit, CONTROLLER_INTERRUPTED.to_string().as_bytes()).await?;
                 }
                 remove_if_present(&self.state_file(id, "active")).await?;
-                active.remove(id);
+                if let Some(attempt) = active.remove(id) {
+                    attempt
+                        .environment
+                        .fail("Execution environment retired.".into())
+                        .await;
+                }
             }
         }
         Ok(())
@@ -405,10 +414,18 @@ impl Execution {
             attempt_stop.clone(),
             lease_expired.clone(),
         ));
+        let environment = self.plan.environment().cloned();
         let result = reservation
             .execute_attempt(self.plan, self.socket, self.control, attempt_stop)
             .await;
         timer.abort();
+        if let Some(environment) = environment {
+            let message = result.as_ref().err().map_or_else(
+                || "Execution environment stopped.".to_owned(),
+                |error| error.message.clone(),
+            );
+            environment.fail(message).await;
+        }
         let broker = &self.broker;
         let id = &self.id;
         if let Err(error) = &result {
@@ -982,6 +999,7 @@ mod ownership_tests {
                 plan: Plan::new(json!({ "runId": run })),
                 imports: Arc::default(),
                 control: Arc::default(),
+                environment: crate::background_jobs::controller::Control::default(),
             },
         );
         id
@@ -1174,6 +1192,26 @@ mod tests {
         }
         plan.as_object_mut().unwrap().remove("expires");
         assert!(!valid(&plan));
+    }
+
+    #[test]
+    fn manager_environment_deadlines_obey_the_controller_contract() {
+        use crate::microvm::plan::execution_deadline;
+        let clock = now();
+        assert_eq!(execution_deadline(None, false, clock), None);
+        for retained in [false, true] {
+            for budget in [None, Some(clock + 60_000)] {
+                let deadline = execution_deadline(budget, retained, clock);
+                let expires = deadline.map_or(Value::Null, Value::from);
+                assert!(valid(&plan(&expires)));
+                if retained {
+                    assert!(deadline.unwrap() <= clock + MAX_ATTEMPT_MS);
+                } else {
+                    assert_eq!(deadline, budget);
+                }
+            }
+        }
+        assert!(!valid(&plan(&json!(clock + MAX_ATTEMPT_MS + 60_000))));
     }
 
     #[test]

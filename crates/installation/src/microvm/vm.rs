@@ -981,7 +981,7 @@ async fn import_workspace(socket: &Path, plan: &Plan) -> Result<()> {
 }
 
 /// Credentials and the volatile inbox are refreshed, never the saved workspaces.
-async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
+pub(crate) async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
     for import in plan.imports() {
         if import.target == CHAT_INBOX {
             host::import(socket, import.source, CHAT_INBOX).await?;
@@ -991,6 +991,7 @@ async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
         }
         if let Some(provider) = plan.chat_provider()?
             && provider.adapter().refresh_state_on_resume()
+            && plan.as_value()["environmentProtocol"] != 1
         {
             let adapter = provider.adapter();
             let source = import.source.join(adapter.state_directory());
@@ -1007,7 +1008,6 @@ async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
             .await
             .iter()
             .filter_map(|file| Path::new(file).parent().map(Path::to_path_buf))
-            // Files at the root of the home are refreshed with the whole home only.
             .filter(|directory| !directory.as_os_str().is_empty())
             .collect::<Vec<_>>();
         directories.push(".config/cairn".into());
@@ -1074,6 +1074,67 @@ async fn run(
                     std::os::unix::fs::chown(output, Some(1000), Some(1000))?;
                 }
                 return Ok(code as i32);
+            }
+            Event::Environment { event } => {
+                use crate::background_jobs::protocol::{
+                    Event as EnvironmentEvent, Request as EnvironmentRequest,
+                };
+                let control = plan
+                    .environment()
+                    .ok_or_else(|| Error::bad("Unexpected environment event."))?;
+                match event {
+                    EnvironmentEvent::Ready {
+                        attempt_id,
+                        generation,
+                    } => {
+                        if attempt_id != plan.id() {
+                            return Err(Error::bad("Guest environment attempt mismatch."));
+                        }
+                        control.canonical_plan(plan.as_value().clone()).await;
+                        control.attach_guest(socket.to_owned(), generation).await?;
+                        let turn = plan.as_value()["turnId"]
+                            .as_str()
+                            .ok_or_else(|| Error::bad("Missing turn identity."))?;
+                        let initial = control
+                            .request(EnvironmentRequest::ResumeTurn {
+                                request_id: format!("start-{turn}"),
+                                turn_id: turn.into(),
+                                plan: plan.for_guest(),
+                            })
+                            .await?;
+                        if let EnvironmentEvent::Refused { message, .. } = initial {
+                            return Err(Error::unavailable(message));
+                        }
+                    }
+                    EnvironmentEvent::Output { stderr, data, .. } => {
+                        let bytes = STANDARD
+                            .decode(&data)
+                            .map_err(|_| Error::bad("Invalid guest output."))?;
+                        total = total.saturating_add(bytes.len());
+                        if total > MAX_OUTPUT_BYTES {
+                            return Err(Error::bad("Guest output exceeded the run limit."));
+                        }
+                        wire::write(&mut logs, &Event::Output { stderr, data }).await?;
+                    }
+                    EnvironmentEvent::TurnStarted { turn_id } => {
+                        control
+                            .begin(&turn_id, logs.metadata().await?.len())
+                            .await?;
+                    }
+                    EnvironmentEvent::TurnFinished { turn_id, code } => {
+                        control
+                            .finished(plan.id(), &turn_id, code, logs.metadata().await?.len())
+                            .await?;
+                    }
+                    EnvironmentEvent::TurnFailed { message, .. } => {
+                        return Err(Error::unavailable(message));
+                    }
+                    EnvironmentEvent::JobChanged {
+                        outcome: crate::background_jobs::Outcome::Unknown { message },
+                        ..
+                    } => return Err(Error::unavailable(message)),
+                    _ => {}
+                }
             }
             Event::FinalizationFailed => {
                 finalization_failed.store(true, Ordering::SeqCst);
@@ -1169,6 +1230,31 @@ mod tests {
     use super::*;
     use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    async fn retained_turn_refresh_preserves_provider_session_directories() {
+        let root = tempfile::tempdir().unwrap();
+        for (provider, directory) in [
+            ("claude", ".claude"),
+            ("codex", ".codex"),
+            ("opencode", ".opencode"),
+        ] {
+            let home = root.path().join(provider).join("home");
+            tokio::fs::create_dir_all(home.join(directory))
+                .await
+                .unwrap();
+            let plan = Plan::new(json!({
+                "environmentProtocol": 1,
+                "chat": { "provider": provider },
+                "imports": [{ "source": home, "target": HOME }],
+            }));
+            // No transient plugin files or inbox need importing. Opening this
+            // nonexistent socket would reveal a destructive state-directory refresh.
+            refresh_imports(&root.path().join("no-guest.sock"), &plan)
+                .await
+                .unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn unassigned_vmm_is_stopped_when_capacity_observations_fail() {

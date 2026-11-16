@@ -52,6 +52,9 @@ pub enum GuestRequest {
     Run {
         plan: Value,
     },
+    Environment {
+        request: crate::background_jobs::protocol::Request,
+    },
 }
 
 /// Answer of the `status` operation.
@@ -132,6 +135,9 @@ pub enum Event {
     Exit {
         code: Option<i64>,
         result: String,
+    },
+    Environment {
+        event: crate::background_jobs::protocol::Event,
     },
     FinalizationFailed,
     Heartbeat,

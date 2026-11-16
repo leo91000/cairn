@@ -15,6 +15,9 @@ macro_rules! condition {
         pub enum $name {
             RunFinished {run_id:String},
             TaskFinished {chat_id:String},
+            JobFinished {job_id:String},
+            Delay {seconds:i64},
+            At {date:String},
             Plugin {plugin_id:String,condition_type:String,
                 #[serde(default,skip_serializing_if="Option::is_none")]
                 #[ts(optional)]
@@ -87,6 +90,12 @@ macro_rules! observation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub job_result: Option<PluginWaitData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub status: Option<String>,

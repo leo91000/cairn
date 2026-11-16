@@ -304,6 +304,13 @@ internal fun waitTarget(wakeup: ChatWakeup, now: Long = System.currentTimeMillis
                 "Tâche déléguée",
                 emptyList(),
             )
+        condition.string("type") == "job_finished" ->
+            WaitTarget(
+                WaitKind.CONDITION,
+                "Attente de la fin du travail de fond",
+                "Travail de fond",
+                listOf(condition.string("jobId").take(8)),
+            )
         // A plugin condition reads as its plugin words it.
         condition != null -> {
             val display = wakeup.displayJson
@@ -406,6 +413,20 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
                 "Résultat indisponible",
                 observation.string("message"),
             )
+    }
+    if (observation.string("type") == "job_finished") {
+        val receipt = observation["jobResult"].asObject()?.get("receipt").asObject()
+        val code = (receipt?.get("exitCode") as? JsonPrimitive)?.contentOrNull
+        val signal = (receipt?.get("signal") as? JsonPrimitive)?.contentOrNull
+        val elapsed = (receipt?.get("elapsedMs") as? JsonPrimitive)?.contentOrNull.orEmpty()
+        val stopped = (receipt?.get("stopped") as? JsonPrimitive)?.booleanOrNull == true
+        val timedOut = (receipt?.get("timedOut") as? JsonPrimitive)?.booleanOrNull == true
+        val success = code == "0" && (signal == null || signal == "null") && !stopped && !timedOut
+        return WaitOutcome(
+            if (success) WaitTone.OK else WaitTone.ERROR,
+            if (success) "Le travail de fond est terminé" else "Le travail de fond s’est arrêté",
+            "Code ${code ?: signal ?: "inconnu"} · $elapsed ms\n${receipt.string("logTail")}",
+        )
     }
     if (observation.string("type") == "task_finished") {
         val status = observation.string("status")
@@ -544,6 +565,7 @@ internal fun observedTarget(observation: JsonObject?): String =
                 if (observation.string("mode") == "any") "Premier de $it résultats"
                 else "$it résultats"
             }
+        observation.string("type") == "job_finished" -> "Travail de fond"
         observation.string("type") == "task_finished" -> "Tâche déléguée"
         observation.string("type") == "run_finished" -> "Autre exécution"
         observation.string("type") == "time" -> "Heure prévue"

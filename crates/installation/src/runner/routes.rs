@@ -108,6 +108,7 @@ async fn health(broker: &Broker) -> Result<Response> {
         "backend": Backend::Firecracker,
         "runtimeId": runtime_id,
         "nodeProtocol": NODE_PROTOCOL,
+        "environmentProtocol": 1,
         "diskRetirementProtocol": crate::storage::retirement::PROTOCOL,
         "sharedResources": broker.pool.budget().await.is_some(),
         "exclusiveReservations": true,
@@ -343,6 +344,51 @@ async fn run_route(broker: Broker, request: Request, segments: &[&str]) -> Resul
         ("POST", ["runs", id]) => {
             broker.start(id).await?;
             json_response(json!({}))
+        }
+        ("POST", ["runs", id, "environment"]) => {
+            let bytes = body(request, 2_000_000, "Invalid environment request.").await?;
+            let request = decode(&bytes, "Invalid environment request.")?;
+            let environment = broker
+                .active
+                .lock()
+                .await
+                .get(*id)
+                .map(|a| a.environment.clone())
+                .ok_or_else(|| Error::unavailable("Environment is not active."))?;
+            Ok(Json(environment.request(request).await?).into_response())
+        }
+        ("GET", ["runs", id, "turn", turn]) | ("GET", ["runs", id, "turn", turn, "start"]) => {
+            crate::validation::uuid(turn)?;
+            let environment = broker
+                .active
+                .lock()
+                .await
+                .get(*id)
+                .map(|a| a.environment.clone())
+                .ok_or_else(|| Error::unavailable("Environment is not active."))?;
+            if segments.last() == Some(&"start") {
+                match tokio::time::timeout(Duration::from_secs(20), environment.start_offset(turn))
+                    .await
+                {
+                    Ok(offset) => json_response(json!({ "offset": offset? })),
+                    Err(_) => Ok((
+                        axum::http::StatusCode::ACCEPTED,
+                        Json(json!({"pending":true})),
+                    )
+                        .into_response()),
+                }
+            } else {
+                let result =
+                    tokio::time::timeout(Duration::from_secs(20), environment.wait(turn)).await;
+                match result {
+                    Ok(receipt) => Ok(Json(receipt?).into_response()),
+                    Err(_) => Ok((
+                        axum::http::StatusCode::ACCEPTED,
+                        Json(json!({"pending":true})),
+                    )
+                        .into_response()),
+                }
+            }
         }
         ("POST", ["runs", id, "projects", project_id]) => {
             let bytes = body(request, 16384, "Invalid project request.").await?;

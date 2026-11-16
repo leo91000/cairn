@@ -1,5 +1,6 @@
 """Unprivileged regression for the disposable local-runtime entrypoint guard."""
 import os
+from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -8,6 +9,26 @@ from unittest.mock import Mock, patch
 import native_runtime_test as runtime
 
 class NativeRuntimeEntrypointTests(unittest.TestCase):
+    def test_namespace_pid_is_resolved_only_within_the_owned_cgroup(self):
+        with tempfile.TemporaryDirectory() as root:
+            proc = Path(root)
+            def task(pid, group, namespace_pid):
+                directory = proc / str(pid)
+                directory.mkdir()
+                (directory / 'cgroup').write_text('0::' + group + '\n')
+                (directory / 'status').write_text(f'NSpid:\t{pid}\t{namespace_pid}\n')
+            task(31, '/unrelated', 31)
+            task(101, '/attempt.service', 31)
+            task(102, '/attempt.service-neighbor', 31)
+            self.assertEqual(runtime.owned_namespace_pid('/attempt.service', 31, proc), 101)
+            (proc / '101/cgroup').write_text('0::/attempt.service/child\n')
+            self.assertEqual(runtime.owned_namespace_pid('/attempt.service', 31, proc), 101)
+            task(103, '/attempt.service/other', 31)
+            with self.assertRaisesRegex(AssertionError, 'Expected one owned process'):
+                runtime.owned_namespace_pid('/attempt.service', 31, proc)
+            with self.assertRaises(AssertionError):
+                runtime.owned_namespace_pid('/', 31, proc)
+
     def test_disposable_entrypoint_reaches_mocked_prerequisites_before_host_operations(self):
         class PrerequisitesReached(Exception):
             pass

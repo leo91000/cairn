@@ -1310,7 +1310,9 @@ mod tests {
 
         let dropped = TABLES.map(|name| format!("DROP TABLE {name};")).join("");
         connection
-            .execute_batch(&format!("{dropped} PRAGMA user_version=33;"))
+            .execute_batch(&format!(
+                "{dropped} DROP TABLE background_jobs; PRAGMA user_version=33;"
+            ))
             .unwrap();
         assert!(tables(&connection).is_empty());
         drop(connection);
