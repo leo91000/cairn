@@ -20,7 +20,13 @@ import {
   withRemoved,
   withReplaced,
 } from '../src/hook-rules'
-import { resolveRuleSchema, ruleLiteralDefault } from '../src/rule-schema'
+import {
+  resolveRuleSchema,
+  ruleLiteralConcreteDefault,
+  ruleLiteralDefault,
+  ruleSchemaAllowsNull,
+  ruleSchemaUsesJson,
+} from '../src/rule-schema'
 
 it('clears optional text values without dropping meaningful literal data', () => {
   expect(optionalRuleText({ type: 'template', text: '' })).toBeNull()
@@ -111,7 +117,8 @@ describe('visual rule editing', () => {
   })
   it('resolves input definitions and typed enum defaults for catalog-driven forms', () => {
     const root = { $defs: { options: { type: ['object', 'null'], properties: { notify: { type: 'boolean' } } } } }
-    expect(resolveRuleSchema({ $ref: '#/$defs/options' }, root)).toEqual({ type: 'object', properties: { notify: { type: 'boolean' } } })
+    expect(resolveRuleSchema({ $ref: '#/$defs/options' }, root)).toMatchObject({ type: 'object', properties: { notify: { type: 'boolean' } } })
+    expect(ruleSchemaAllowsNull({ $ref: '#/$defs/options' }, root)).toBe(true)
     expect(ruleLiteralDefault({ type: 'integer', enum: [5, 10] })).toBe(5)
     expect(ruleLiteralDefault({ type: 'array' })).toEqual([])
     expect(ruleLiteralDefault({ type: 'object', required: ['options'], properties: { options: { type: 'object', required: ['notify'], properties: { notify: { type: 'boolean' } } } } })).toEqual({ options: { notify: false } })
@@ -136,6 +143,19 @@ describe('visual rule editing', () => {
     expect(typedComparisonRight({ type: 'template', text: 'false' }, 'boolean')).toEqual({ type: 'literal', value: false })
     expect(typedComparisonRight({ type: 'template', text: '{{payload.count}}' }, 'number')).toEqual({ type: 'formula', expression: 'payload.count' })
   })
+})
+
+it('keeps nullable and multi-type schema intent after selecting a widget kind', () => {
+  const variants = { anyOf: [{ type: 'null' }, { type: 'boolean' }], default: null }
+  const normalized = resolveRuleSchema(variants)
+  expect(normalized.type).toBe('boolean')
+  expect(ruleSchemaAllowsNull(normalized)).toBe(true)
+  expect(ruleLiteralDefault(normalized)).toBeNull()
+  expect(ruleLiteralConcreteDefault(normalized)).toBe(false)
+  expect(ruleSchemaAllowsNull({ type: ['boolean', 'null'], enum: [true, false] })).toBe(false)
+  expect(ruleLiteralConcreteDefault({ type: 'null' })).toBeUndefined()
+  expect(ruleSchemaUsesJson(resolveRuleSchema({ type: ['object', 'string', 'null'] }))).toBe(true)
+  expect(ruleSchemaAllowsNull({ oneOf: [{ type: 'null' }, { type: 'null' }] })).toBe(false)
 })
 
 describe('rule definition recovery and condition depth', () => {

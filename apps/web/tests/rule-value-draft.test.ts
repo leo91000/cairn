@@ -5,8 +5,9 @@ import { expect, it } from 'vitest'
 import * as vue from 'vue'
 import { compileScript, parse } from 'vue/compiler-sfc'
 import * as jsonDrafts from '../src/rule-json-drafts'
+import * as schemas from '../src/rule-schema'
 
-function valueEditor(initial: any, expects: string) {
+function valueEditor(initial: any, expects: string, schema?: any) {
   const source = readFileSync(new URL('../src/components/RuleValueInput.vue', import.meta.url), 'utf8')
   const script = compileScript(parse(source).descriptor, { id: 'value-draft-test' }).content
   const code = ts.transpileModule(script, {
@@ -17,9 +18,14 @@ function valueEditor(initial: any, expects: string) {
   vm.runInNewContext(code, {
     exports,
     document: { addEventListener() {}, removeEventListener() {} },
-    require: (name: string) => name === 'vue' ? { ...vue, useModel: () => model, onBeforeUnmount() {} } : name === '../rule-json-drafts' ? jsonDrafts : {},
+    require: (name: string) => name === 'vue' ? { ...vue, useModel: () => model, onBeforeUnmount() {} } : name === '../rule-json-drafts' ? jsonDrafts : name === '../rule-schema' ? schemas : {},
   })
-  const props = vue.reactive({ label: 'Value', variables: [], expects })
+  const props = vue.reactive({
+    label: 'Value',
+    variables: [],
+    expects,
+    schema,
+  })
   const input = exports.default.setup(props, { expose() {} })
   return { input, model, props }
 }
@@ -34,6 +40,30 @@ it('keeps decimal keystrokes while emitting a numeric comparison value', () => {
   expect(model.value).toEqual({ type: 'literal', value: 150 })
   model.value = { type: 'literal', value: 8 }
   expect(input.text.value).toBe('8')
+})
+
+it('shows null distinctly for nullable text rather than as the string null', () => {
+  const editor = valueEditor({ type: 'literal', value: null }, 'text', { type: ['string', 'null'] })
+  expect(editor.input.literalTextSchema.value).toBe(false)
+  expect(editor.input.typeMismatch.value).toBe(false)
+  expect(editor.model.value).toEqual({ type: 'literal', value: null })
+})
+
+it('inserts into the selected JSON string of a mixed schema without replacing the value', () => {
+  const editor = valueEditor({ type: 'literal', value: 'Hello Alice!' }, 'number', { type: ['number', 'string'] })
+  editor.input.literalEditor.value = {
+    field: {
+      value: '"Hello Alice!"',
+      selectionStart: 7,
+      selectionEnd: 12,
+      focus() {},
+      setSelectionRange() {},
+      style: {},
+      scrollHeight: 0,
+    },
+  }
+  editor.input.insert({ expression: 'payload.author' })
+  expect(editor.model.value).toEqual({ type: 'template', text: 'Hello {{payload.author}}!' })
 })
 
 it('shows JSON string literals as strings and keeps their type while editing', () => {

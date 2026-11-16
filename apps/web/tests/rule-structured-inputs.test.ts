@@ -91,6 +91,7 @@ function literalEditor(schema: any, initial: any, depth: number) {
     drafts,
     controls: () => descendants(root).filter(held => ['input', 'textarea'].includes(held.tag)),
     buttons: () => descendants(root).filter(held => held.tag === 'button'),
+    texts: () => descendants(root).flatMap(held => held.text ? [held.text] : []),
   }
 }
 
@@ -130,7 +131,7 @@ it('keeps nested JSON errors with their list item when earlier items are removed
     editor.controls()[1].props.onInput({ target: { value: '{' } })
     await vue.nextTick()
     expect(editor.drafts.value).toEqual({ '/1/a~1b': { text: '{', message: 'Enter a valid JSON value.' } })
-    editor.buttons()[0].props.onClick()
+    editor.buttons().find(button => button.props['aria-label'] === 'Remove Nested list 1')!.props.onClick()
     await vue.nextTick()
     expect(editor.model.value).toEqual([{ 'a/b': '{' }])
     expect(editor.drafts.value).toEqual({ '/0/a~1b': { text: '{', message: 'Enter a valid JSON value.' } })
@@ -143,6 +144,53 @@ it('keeps nested JSON errors with their list item when earlier items are removed
   finally {
     editor.app.unmount()
   }
+})
+
+it('distinguishes an omitted property, null, and false without changing them while rendering', async () => {
+  const schema = {
+    type: 'object',
+    properties: {
+      notify: { type: ['boolean', 'null'], default: null, title: 'Notify' },
+      caption: { type: 'string', title: 'Caption' },
+    },
+  }
+  const editor = literalEditor(schema, { notify: null }, 0)
+  const click = (name: string) => editor.buttons().find(button => button.props['aria-label'] === name)!.props.onClick()
+  try {
+    expect(editor.model.value).toEqual({ notify: null })
+    expect(editor.texts()).toContain('No value (null)')
+    expect(editor.texts()).toContain('Not set.')
+    expect(editor.buttons().filter(button => Object.hasOwn(button.props, 'aria-pressed'))).toHaveLength(0)
+    click('Add field Caption')
+    await vue.nextTick()
+    editor.controls()[0].props.onInput({ target: { value: 'kept' } })
+    await vue.nextTick()
+    expect(editor.model.value).toEqual({ notify: null, caption: 'kept' })
+    click('Set a value for Nested list: Notify')
+    await vue.nextTick()
+    expect(editor.model.value).toEqual({ notify: false, caption: 'kept' })
+    click('Use no value for Nested list: Notify')
+    await vue.nextTick()
+    expect(editor.model.value).toEqual({ notify: null, caption: 'kept' })
+    click('Remove field Notify')
+    await vue.nextTick()
+    expect(editor.model.value).toEqual({ caption: 'kept' })
+    click('Add field Notify')
+    await vue.nextTick()
+    expect(editor.model.value).toEqual({ notify: null, caption: 'kept' })
+  }
+  finally { editor.app.unmount() }
+})
+
+it('keeps strings in a union as quoted JSON and preserves their type during edits', async () => {
+  const editor = literalEditor({ type: ['object', 'string'] }, 'initial', 0)
+  try {
+    expect(editor.controls()[0].props.value).toBe('"initial"')
+    editor.controls()[0].props.onInput({ target: { value: '"fixed"' } })
+    await vue.nextTick()
+    expect(editor.model.value).toBe('fixed')
+  }
+  finally { editor.app.unmount() }
 })
 
 it.each(['integer', 'boolean'])('initializes a comparison with a typed first field (%s)', (type) => {

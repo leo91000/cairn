@@ -738,50 +738,136 @@ internal fun JsonElement.asObject(): JsonObject = jsonObject
 
 internal fun JsonElement.asArray(): JsonArray = jsonArray
 
-fun resolveRuleSchema(schema: JsonObject, root: JsonObject = schema, depth: Int = 0): JsonObject {
-    if (depth > 8) return JsonObject(emptyMap())
+private const val RULE_SCHEMA_NULLABLE = "_cairnAllowsNull"
+private const val RULE_SCHEMA_JSON = "_cairnJsonWidget"
+
+fun resolveRuleSchema(schema: JsonObject, root: JsonObject = schema, depth: Int = 0): JsonObject =
+    resolveRuleSchemaBounded(schema, root, depth, intArrayOf(512))
+
+private fun resolveRuleSchemaBounded(
+    schema: JsonObject,
+    root: JsonObject,
+    depth: Int,
+    budget: IntArray,
+): JsonObject {
+    if (depth > 8 || budget[0]-- <= 0) return JsonObject(emptyMap())
     val reference = schema.text("\$ref")
     if (reference.startsWith("#/")) {
         var target: JsonElement? = root
         reference.removePrefix("#/").split('/').forEach { part ->
             target = (target as? JsonObject)?.get(part.replace("~1", "/").replace("~0", "~"))
         }
-        return resolveRuleSchema(
+        return resolveRuleSchemaBounded(
             JsonObject((target as? JsonObject).orEmpty() + schema.filterKeys { it != "\$ref" }),
             root,
             depth + 1,
+            budget,
         )
     }
     val alternatives = schema.list("oneOf").ifEmpty { schema.list("anyOf") }
-    if (schema["type"] == null && alternatives.isNotEmpty()) {
-        val chosen = alternatives.firstOrNull { it.text("type") != "null" } as? JsonObject
-        return resolveRuleSchema(
-            JsonObject(schema.filterKeys { it !in setOf("oneOf", "anyOf") } + chosen.orEmpty()),
+    val resolvedAlternatives = alternatives.map {
+        resolveRuleSchemaBounded(
+            it as? JsonObject ?: JsonObject(emptyMap()),
             root,
             depth + 1,
+            budget,
+        )
+    }
+    val jsonWidget =
+        schema[RULE_SCHEMA_JSON] == JsonPrimitive(true) ||
+            schema.list("type").count { it != JsonPrimitive("null") } > 1 ||
+            resolvedAlternatives.count { it.text("type") != "null" } > 1
+    val nullMatches = resolvedAlternatives.count { it[RULE_SCHEMA_NULLABLE] == JsonPrimitive(true) }
+    val declaredNull =
+        if (RULE_SCHEMA_NULLABLE in schema) schema[RULE_SCHEMA_NULLABLE] == JsonPrimitive(true)
+        else
+            schema["type"] == null ||
+                schema.text("type") == "null" ||
+                schema.list("type").any { it == JsonPrimitive("null") }
+    val nullable =
+        declaredNull &&
+            (alternatives.isEmpty() ||
+                if (schema["oneOf"] != null) nullMatches == 1 else nullMatches > 0) &&
+            schema.list("allOf").all {
+                resolveRuleSchemaBounded(
+                    it as? JsonObject ?: JsonObject(emptyMap()),
+                    root,
+                    depth + 1,
+                    budget,
+                )[RULE_SCHEMA_NULLABLE] == JsonPrimitive(true)
+            } &&
+            (schema["enum"] == null || JsonNull in schema.list("enum")) &&
+            (schema["const"] == null || schema["const"] == JsonNull)
+    if (schema["type"] == null && alternatives.isNotEmpty()) {
+        val chosen =
+            resolvedAlternatives.firstOrNull { it.text("type") != "null" }
+                ?: resolvedAlternatives.firstOrNull()
+        return resolveRuleSchemaBounded(
+            JsonObject(
+                schema.filterKeys { it !in setOf("oneOf", "anyOf") } +
+                    chosen.orEmpty() +
+                    (RULE_SCHEMA_NULLABLE to JsonPrimitive(nullable)) +
+                    (RULE_SCHEMA_JSON to JsonPrimitive(jsonWidget))
+            ),
+            root,
+            depth + 1,
+            budget,
         )
     }
     val resolved = schema.toMutableMap()
+    // Preserve null intent after choosing a concrete widget type from a nullable union.
+    resolved.remove(RULE_SCHEMA_NULLABLE)
+    if (nullable || schema[RULE_SCHEMA_NULLABLE] == JsonPrimitive(false))
+        resolved[RULE_SCHEMA_NULLABLE] = JsonPrimitive(nullable)
+    if (jsonWidget) resolved[RULE_SCHEMA_JSON] = JsonPrimitive(true)
     schema.obj("properties")?.let { fields ->
         resolved["properties"] =
             JsonObject(
                 fields.mapValues { (_, field) ->
-                    resolveRuleSchema(
+                    resolveRuleSchemaBounded(
                         field as? JsonObject ?: JsonObject(emptyMap()),
                         root,
                         depth + 1,
+                        budget,
                     )
                 }
             )
     }
-    schema.obj("items")?.let { resolved["items"] = resolveRuleSchema(it, root, depth + 1) }
-    (schema["type"] as? JsonArray)
-        ?.firstOrNull { (it as? JsonPrimitive)?.content != "null" }
-        ?.let { resolved["type"] = it }
+    schema.obj("items")?.let {
+        resolved["items"] = resolveRuleSchemaBounded(it, root, depth + 1, budget)
+    }
+    (schema["type"] as? JsonArray)?.let { types ->
+        resolved["type"] =
+            types.firstOrNull { (it as? JsonPrimitive)?.content != "null" } ?: JsonPrimitive("null")
+    }
     return JsonObject(resolved)
 }
 
+fun ruleSchemaAllowsNull(schema: JsonObject): Boolean =
+    resolveRuleSchema(schema)[RULE_SCHEMA_NULLABLE] == JsonPrimitive(true)
+
+fun ruleSchemaUsesJson(schema: JsonObject): Boolean =
+    resolveRuleSchema(schema)[RULE_SCHEMA_JSON] == JsonPrimitive(true)
+
+fun concreteRuleLiteralDefault(schema: JsonObject): JsonElement? {
+    val resolved = resolveRuleSchema(schema)
+    if (resolved.text("type") == "null") return null
+    resolved["const"]?.let {
+        return it.takeUnless { it == JsonNull }
+    }
+    if (resolved["enum"] != null) return resolved.list("enum").firstOrNull { it != JsonNull }
+    resolved["default"]
+        ?.takeUnless { it == JsonNull }
+        ?.let {
+            return it
+        }
+    return defaultRuleLiteral(JsonObject(resolved.filterKeys { it != "default" }))
+}
+
 fun defaultRuleLiteral(schema: JsonObject, depth: Int = 0): JsonElement {
+    schema["const"]?.let {
+        return it
+    }
     schema["default"]?.let {
         return it
     }
@@ -789,6 +875,7 @@ fun defaultRuleLiteral(schema: JsonObject, depth: Int = 0): JsonElement {
         return it
     }
     return when (schema.text("type")) {
+        "null" -> JsonNull
         "boolean" -> JsonPrimitive(false)
         "integer",
         "number" -> JsonPrimitive(0)
@@ -813,8 +900,9 @@ fun defaultRuleLiteral(schema: JsonObject, depth: Int = 0): JsonElement {
 
 fun defaultRuleInput(schema: JsonObject): JsonObject =
     if (
-        schema.text("type") in setOf("boolean", "integer", "number", "object", "array") ||
+        schema.text("type") in setOf("boolean", "integer", "number", "object", "array", "null") ||
             schema["default"] != null ||
+            schema["const"] != null ||
             schema["enum"] != null
     )
         literalRuleValue(defaultRuleLiteral(schema))

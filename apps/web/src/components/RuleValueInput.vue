@@ -20,7 +20,12 @@ import {
   parseRuleJsonInput,
   valueJsonDrafts,
 } from '../rule-json-drafts'
-import { resolveRuleSchema, ruleLiteralDefault } from '../rule-schema'
+import {
+  resolveRuleSchema,
+  ruleLiteralDefault,
+  ruleSchemaAllowsNull,
+  ruleSchemaUsesJson,
+} from '../rule-schema'
 import Icon from './Icon.vue'
 import RuleLiteralFields from './RuleLiteralFields.vue'
 import RuleResources from './RuleResources.vue'
@@ -62,8 +67,10 @@ const modes = computed(() => {
   ]
   if (['field', 'formula'].includes(props.expects))
     return all.filter(entry => entry.value === 'formula')
+  const generic = props.schema && ruleSchemaUsesJson(props.schema, props.schemaRoot ?? props.schema)
+  const concreteText = generic && (model.value.type === 'template' || (model.value.type === 'literal' && typeof model.value.value === 'string'))
   const schemaType = props.schema ? resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type : null
-  if (props.expects === 'number' || props.expects === 'boolean' || (schemaType && schemaType !== 'string'))
+  if ((!generic && (props.expects === 'number' || props.expects === 'boolean')) || (schemaType && schemaType !== 'string' && !concreteText))
     return all.filter(entry => entry.value !== 'template')
   return all
 })
@@ -74,7 +81,8 @@ const literalTextSchema = computed(() => {
   if (!props.schema)
     return false
   const schema = resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema)
-  return schema.type === 'string' && !schema.enum?.length
+  return schema.type === 'string' && !schema.enum?.length && !ruleSchemaUsesJson(schema)
+    && (model.value.type !== 'literal' || model.value.value !== null)
 })
 
 const literalEditor = ref<{ field?: HTMLInputElement | HTMLTextAreaElement }>()
@@ -133,7 +141,7 @@ function parseLiteral(raw: string): unknown {
 
   if (props.expects === 'json') {
     try {
-      return JSON.parse(raw)
+      return parseRuleJsonInput(raw)
     }
     catch {
       return raw
@@ -194,6 +202,8 @@ function switchMode(next: Mode) {
     }
 
     let value = props.expects === 'boolean' ? current.trim() !== 'false' : parseLiteral(current)
+    if (props.expects === 'number' && (typeof value !== 'number' || !Number.isFinite(value)))
+      value = 0
     if (props.schema) {
       const schema = resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema)
       const kind = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value
@@ -259,9 +269,10 @@ function insert(option: VariableOption) {
   const element = field.value ?? literalElement
   const current = text.value
   const schemaType = props.schema ? resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type : null
-  const typedSchema = schemaType != null && schemaType !== 'string'
+  const genericSchema = props.schema && ruleSchemaUsesJson(props.schema, props.schemaRoot ?? props.schema)
+  const typedSchema = !genericSchema && schemaType != null && schemaType !== 'string'
   const typedLiteral = model.value.type === 'literal' && typeof model.value.value !== 'string'
-  const typed = ['number', 'boolean'].includes(props.expects) || typedSchema || typedLiteral
+  const typed = (!genericSchema && ['number', 'boolean'].includes(props.expects)) || typedSchema || typedLiteral
   const replace = props.expects === 'field' || (typed && mode.value !== 'formula')
   const nextMode = ['field', 'formula'].includes(props.expects) || replace ? 'formula' : mode.value === 'literal' ? 'template' : mode.value
   const insertion = nextMode === 'template' ? `{{${option.expression}}}` : option.expression
@@ -291,8 +302,18 @@ function outside(event: PointerEvent) {
 document.addEventListener('pointerdown', outside)
 onBeforeUnmount(() => document.removeEventListener('pointerdown', outside))
 
-const expectedKind = computed(() => props.expects === 'text' ? 'string' : props.expects === 'number' || props.expects === 'boolean' ? props.expects : props.schema ? resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type : null)
+const expectedKind = computed(() => {
+  if (props.schema) {
+    if (ruleSchemaUsesJson(props.schema, props.schemaRoot ?? props.schema))
+      return null
+    return resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type ?? null
+  }
+
+  return props.expects === 'text' ? 'string' : props.expects === 'number' || props.expects === 'boolean' ? props.expects : null
+})
 const typeMismatch = computed(() => {
+  if (model.value.type === 'literal' && model.value.value === null && props.schema && ruleSchemaAllowsNull(props.schema, props.schemaRoot ?? props.schema))
+    return false
   const expected = expectedKind.value
   if (!expected || model.value.type === 'formula')
     return false
@@ -473,6 +494,15 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
         </div>
       </div>
     </div>
+    <button
+      v-if="mode === 'literal' && schema && literalTextSchema && ruleSchemaAllowsNull(schema, schemaRoot ?? schema)"
+      type="button"
+      class="justify-self-start text-xs text-muted underline decoration-dotted underline-offset-2"
+      :aria-label="`Use no value for ${label}`"
+      @click="model = literalWithJsonDrafts(null)"
+    >
+      Use no value (null)
+    </button>
     <small v-if="conversionNotice" class="text-xs text-muted" role="status">{{ conversionNotice }}</small>
     <small v-if="Object.hasOwn(valueJsonDrafts(model), '') && !schema" class="text-xs text-coral" role="alert">{{ valueJsonDrafts(model)['']?.message }}</small>
     <small v-if="typeMismatch" class="text-xs text-coral" role="alert">Use a fixed {{ expectedLabel }} or a formula returning one.</small>

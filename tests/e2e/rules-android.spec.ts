@@ -108,6 +108,17 @@ async function fill(label: string, value: string | (() => string)) {
   adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
 }
 
+async function finishStep() {
+  const document = screen()
+  if (document.includes('content-desc="Close sheet"')) {
+    await scrollTo('Terminer cette étape')
+    return
+  }
+
+  // Back may already dismiss the sheet when the keyboard was not visible.
+  expect(document).toContain('text="Enregistrer"')
+}
+
 async function capture(file: string) {
   await writeFile(file, execFileSync(binary, ['-s', serial!, 'exec-out', 'screencap', '-p'], { timeout: 15000 }))
 }
@@ -236,14 +247,14 @@ test('native rules persist edits, integer waits and every creator control agains
   await scrollTo('Modifier')
   await scrollTo('Syntaxe JSON')
   await fill('Valeur à mémoriser', '{"count":')
-  await scrollTo('Terminer cette étape')
+  await finishStep()
   await expect.poll(() => (screen().match(/<node\b[^>]+>/g) ?? []).some(node => node.includes('text="Enregistrer"') && node.includes('enabled="false"'))).toBe(true)
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(2)
   await scrollTo('Syntaxe JSON')
   // The exact invalid text must survive dismissing/reopening its native sheet.
   await expect.poll(() => screen().includes('{&quot;count&quot;:')).toBe(true)
   await fill('Valeur à mémoriser', '{"count":2}')
-  await scrollTo('Terminer cette étape')
+  await finishStep()
   await tap('Enregistrer')
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(3)
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).definition.steps[1].action.value).toEqual({ type: 'literal', value: { count: 2 } })
@@ -339,13 +350,13 @@ test('a native member selects people and a channel through the execution agent',
     await expect.poll(() => screen().includes('Bob'), { timeout: 15000 }).toBe(true)
     await capture(info.outputPath('android-member-people.png'))
     await tap('Bob')
-    await scrollTo('Terminer cette étape')
+    await finishStep()
     await scrollTo('Member channel')
     await scrollTo('Choisir une ressource')
     await expect.poll(() => screen().includes('#general'), { timeout: 15000 }).toBe(true)
     await capture(info.outputPath('android-member-channels.png'))
     await tap('#general')
-    await scrollTo('Terminer cette étape')
+    await finishStep()
     await tap('Enregistrer')
     await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
     const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
@@ -360,7 +371,7 @@ test('a native member selects people and a channel through the execution agent',
     await scrollTo('Auteur externe (facultatif)')
     await fill('Auteur externe (facultatif)', 'payload.author')
     await capture(info.outputPath('android-member-start-author-field.png'))
-    await scrollTo('Terminer cette étape')
+    await finishStep()
     await tap('Enregistrer')
     await expect.poll(async () => (await workspace.api(`/api/hook-rules/${authorRule.id}`)).version).toBe(2)
     const authored = await workspace.api(`/api/hook-rules/${authorRule.id}`)

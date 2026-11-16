@@ -25,7 +25,11 @@ export function untypedTextRulesFixture(workspace: Workspace) {
   return installRulesFixture(workspace, undefined, false, true)
 }
 
-async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' | 'boolean', referencedTool = false, freeMessage = false) {
+export function nullableOptionsRulesFixture(workspace: Workspace) {
+  return installRulesFixture(workspace, undefined, false, false, true)
+}
+
+async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' | 'boolean', referencedTool = false, freeMessage = false, nullableOptions = false) {
   const prepare = async (path: string, body: unknown): Promise<any> => {
     const started = await workspace.api(path, 'POST', body)
     if (!started.operation)
@@ -97,7 +101,7 @@ async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' 
       for _, item in choices do if item.id == input.id then return item end end
       return {}
     end,
-    tool = function(input) return {ok=true,messageId="local-message",text=input.input.text,channel=input.input.channel} end
+    tool = function(input) return {ok=true,messageId="local-message",text=input.input.text,channel=input.input.channel${nullableOptions ? ',notificationPolicy=if input.input.options and input.input.options.notify == false then "disabled" else "inherit"' : ''}} end
   }`
   const activeManifest = scalarType
     ? {
@@ -131,7 +135,26 @@ async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' 
               inputSchema: { ...manifest.tools[0].inputSchema, properties: { ...manifest.tools[0].inputSchema.properties, text: { title: 'Message' } } },
             }],
           }
-        : manifest
+        : nullableOptions
+          ? {
+              ...manifest,
+              id: 'rules-nullable',
+              tools: [{
+                ...manifest.tools[0],
+                name: 'rules_nullable_post_message',
+                inputSchema: {
+                  ...manifest.tools[0].inputSchema,
+                  properties: {
+                    ...manifest.tools[0].inputSchema.properties,
+                    options: {
+                      ...manifest.tools[0].inputSchema.properties.options,
+                      properties: { ...manifest.tools[0].inputSchema.properties.options.properties, notify: { type: ['boolean', 'null'], default: null, title: 'Notify the channel' } },
+                    },
+                  },
+                },
+              }],
+            }
+          : manifest
   const installed = await prepare('/api/plugins/packages', {
     manifest: activeManifest,
     manifestFormat: 'json',

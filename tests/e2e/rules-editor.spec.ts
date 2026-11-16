@@ -6,11 +6,56 @@ import {
   workspacePath,
 } from './fixtures'
 import {
+  nullableOptionsRulesFixture,
   referencedToolRulesFixture,
   rulesFixture,
   scalarRulesFixture,
   untypedTextRulesFixture,
 } from './rules-fixture'
+
+test('nullable nested options preserve null, omitted and false states through execution', async ({ page, workspace }) => {
+  const fixture = await nullableOptionsRulesFixture(workspace)
+  const call = fixture.definition.steps[0].then[0]
+  const rule = await workspace.api('/api/hook-rules', 'POST', {
+    definition: { ...fixture.definition, steps: [{ ...call, action: { ...call.action, input: { ...call.action.input, options: { type: 'literal', value: { notify: null } } } } }] },
+    enabled: true,
+  })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  const open = async () => page.getByRole('button', { name: 'Edit Acknowledge the message', exact: true }).click()
+  let previousTriggering: string | undefined
+  const save = async (version: number, options: any, policy: string) => {
+    await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+    await page.getByRole('button', { name: 'Save version', exact: true }).click()
+    await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(version)
+    expect((await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0].action.input.options).toEqual({ type: 'literal', value: options })
+    workspace.service.emitHook(fixture.instanceId, 'message', { author: 'alice', channel: 'support', content: 'State check' }, `option-state-${version}`)
+    let triggering: any
+    await expect.poll(async () => {
+      triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+      return triggering?.id !== previousTriggering ? triggering?.status : 'previous'
+    }).toBe('completed')
+    const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+    previousTriggering = triggering.id
+    expect(JSON.stringify(history.steps[0].result)).toContain(policy)
+    await page.getByRole('button', { name: 'Edit', exact: true }).click()
+    await open()
+  }
+
+  await open()
+  await expect(page.getByText('No value (null)', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'No', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Add field Style', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Options: Style', exact: true }).selectOption('emphasis')
+  await save(2, { notify: null, style: 'emphasis' }, 'inherit')
+  await page.getByRole('button', { name: 'Set a value for Options: Notify the channel', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'No', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await save(3, { notify: false, style: 'emphasis' }, 'disabled')
+  await page.getByRole('button', { name: 'Remove field Notify the channel', exact: true }).click()
+  await save(4, { style: 'emphasis' }, 'inherit')
+  await page.getByRole('button', { name: 'Add field Notify the channel', exact: true }).click()
+  await expect(page.getByText('No value (null)', { exact: true })).toBeVisible()
+})
 
 for (const kind of ['boolean', 'text'] as const) {
   test(`a constant mode round trip keeps its saved ${kind} value`, async ({ page, workspace }) => {

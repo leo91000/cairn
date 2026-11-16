@@ -10,7 +10,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.text.TextRange
-import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleProblem
@@ -414,7 +413,15 @@ abstract class RulesEditorCases {
     fun aFreeSchemaStringReplacesTheSelectedTextWhenInsertingAVariable() =
         insertSchemaStringVariable(false, true)
 
-    private fun insertSchemaStringVariable(nullable: Boolean, untyped: Boolean = false) {
+    @Test
+    fun aMixedSchemaStringReplacesTheSelectedTextWhenInsertingAVariable() =
+        insertSchemaStringVariable(false, generic = true)
+
+    private fun insertSchemaStringVariable(
+        nullable: Boolean,
+        untyped: Boolean = false,
+        generic: Boolean = false,
+    ) {
         var value by mutableStateOf(literalRuleValue(JsonPrimitive("Hello Alice!")))
         compose.setContent {
             CairnTheme {
@@ -428,7 +435,11 @@ abstract class RulesEditorCases {
                         else
                             ruleObject(
                                 "type" to
-                                    if (nullable)
+                                    if (generic)
+                                        JsonArray(
+                                            listOf(JsonPrimitive("number"), JsonPrimitive("string"))
+                                        )
+                                    else if (nullable)
                                         JsonArray(
                                             listOf(JsonPrimitive("string"), JsonPrimitive("null"))
                                         )
@@ -441,7 +452,9 @@ abstract class RulesEditorCases {
         compose
             .onNode(hasSetTextAction())
             .performClick()
-            .performTextInputSelection(if (untyped) TextRange(7, 12) else TextRange(6, 11))
+            .performTextInputSelection(
+                if (untyped || generic) TextRange(7, 12) else TextRange(6, 11)
+            )
         compose.onNodeWithText("+ Insérer une variable").performClick()
         compose.onNodeWithText("Utiliser Auteur").performClick()
         compose.runOnIdle { assertEquals(templateValue("Hello {{payload.author}}!"), value) }
@@ -459,6 +472,71 @@ abstract class RulesEditorCases {
         input.assertTextContains("\"fixed\"")
         input.performTextReplacement("\"kept\"")
         compose.runOnIdle { assertEquals(formulaRuleValue("\"kept\""), value) }
+    }
+
+    @Test
+    fun nestedPropertiesDistinguishMissingNullAndFalseAndKeepUnrelatedEdits() {
+        val schema =
+            resolveRuleSchema(
+                wireJson
+                    .parseToJsonElement(
+                        """{"type":"object","properties":{"notify":{"title":"Notify","type":["boolean","null"],"default":null},"caption":{"title":"Caption","type":"string"}}}"""
+                    )
+                    .jsonObject
+            )
+        var value by mutableStateOf<JsonElement>(ruleObject("notify" to JsonNull))
+        compose.setContent {
+            CairnTheme {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    RuleLiteralEditor(schema, value, { value = it })
+                }
+            }
+        }
+        compose.onNodeWithText("Valeur nulle").assertIsDisplayed()
+        compose.onNodeWithText("Non renseigné.").assertIsDisplayed()
+        compose.onAllNodes(isToggleable()).assertCountEquals(0)
+        compose.runOnIdle { assertEquals(ruleObject("notify" to JsonNull), value) }
+        compose.onNodeWithText("+ Caption").performScrollTo().performClick()
+        compose.onNode(hasSetTextAction()).performScrollTo().performTextReplacement("kept")
+        compose.runOnIdle {
+            assertEquals(
+                ruleObject("notify" to JsonNull, "caption" to JsonPrimitive("kept")),
+                value,
+            )
+        }
+        compose.onNodeWithText("Définir une valeur").performScrollTo().performClick()
+        compose.onNode(isToggleable()).assertIsOff()
+        compose.runOnIdle { assertEquals(JsonPrimitive(false), value.jsonObject["notify"]) }
+        compose.onNodeWithText("Utiliser une valeur nulle").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(JsonNull, value.jsonObject["notify"]) }
+        compose.onNodeWithText("Retirer le champ Notify").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(ruleObject("caption" to JsonPrimitive("kept")), value) }
+        compose.onNodeWithText("+ Notify").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals(
+                ruleObject("notify" to JsonNull, "caption" to JsonPrimitive("kept")),
+                value,
+            )
+        }
+    }
+
+    @Test
+    fun nullableTextShowsNullWithoutPresentingTheStringNull() {
+        var value by mutableStateOf(literalRuleValue(JsonNull))
+        val schema =
+            wireJson.parseToJsonElement("""{"type":["string","null"],"default":null}""").jsonObject
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor("Caption", value, emptyList(), { value = it }, schema = schema)
+            }
+        }
+        compose.onNodeWithText("Valeur nulle").assertIsDisplayed()
+        compose.onAllNodes(hasSetTextAction()).assertCountEquals(0)
+        compose.onNodeWithText("Définir une valeur").performClick()
+        compose.runOnIdle { assertEquals(literalRuleValue(JsonPrimitive("")), value) }
+        compose.onNode(hasSetTextAction()).performTextReplacement("kept")
+        compose.onNodeWithText("Utiliser une valeur nulle").performClick()
+        compose.runOnIdle { assertEquals(literalRuleValue(JsonNull), value) }
     }
 
     @Test fun malformedJsonKeepsItsDraftUntilFixed() = recoverInvalidValue(false)
@@ -555,9 +633,9 @@ abstract class RulesEditorCases {
                 },
                 beaconOrigin = "",
             )
-        val models = ViewModelStore().apply { put("fixture", vm) }
+        val ui = FixtureUi(compose)
         try {
-            compose.setContent {
+            ui.setContent(vm) {
                 CairnTheme {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
                         RuleConditionEditor(condition, emptyList(), { condition = it }, vm, null)
@@ -582,7 +660,7 @@ abstract class RulesEditorCases {
                 assertEquals(literalRuleValue(JsonPrimitive(3)), condition["right"])
             }
         } finally {
-            compose.runOnIdle { models.clear() }
+            ui.close()
         }
     }
 

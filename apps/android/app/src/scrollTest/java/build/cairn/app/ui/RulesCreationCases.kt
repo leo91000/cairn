@@ -115,9 +115,9 @@ abstract class RulesCreationCases {
                 },
                 beaconOrigin = "",
             )
-        val models = ViewModelStore().apply { put("fixture", vm) }
+        val ui = FixtureUi(compose)
         try {
-            compose.setContent {
+            ui.setContent(vm) {
                 CairnTheme {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
                         RuleStepPanel(
@@ -156,7 +156,7 @@ abstract class RulesCreationCases {
             }
             compose.onNodeWithText("Retirer le champ inconnu legacy").assertDoesNotExist()
         } finally {
-            compose.runOnIdle { models.clear() }
+            ui.close()
         }
     }
 
@@ -210,9 +210,9 @@ abstract class RulesCreationCases {
                     },
                     beaconOrigin = "",
                 )
-            val models = ViewModelStore().apply { put("fixture", vm) }
+            val ui = FixtureUi(compose)
             try {
-                compose.setContent {
+                ui.setContent(vm) {
                     LaunchedEffect(Unit) {
                         vm.state.first { it.ready }
                         vm.connect(origin)
@@ -237,7 +237,7 @@ abstract class RulesCreationCases {
                 }
                 assertTrue(requests.contains(""))
             } finally {
-                compose.runOnIdle { models.clear() }
+                ui.close()
             }
         }
     }
@@ -296,7 +296,7 @@ abstract class RulesCreationCases {
                     },
                     beaconOrigin = "",
                 )
-            val models = ViewModelStore().apply { put("fixture", vm) }
+            val ui = FixtureUi(compose)
             var condition by
                 mutableStateOf(
                     ruleObject(
@@ -306,7 +306,7 @@ abstract class RulesCreationCases {
                     )
                 )
             try {
-                compose.setContent {
+                ui.setContent(vm) {
                     LaunchedEffect(Unit) {
                         vm.state.first { it.ready }
                         vm.connect(origin)
@@ -336,7 +336,7 @@ abstract class RulesCreationCases {
                     .performScrollTo()
                     .assertIsDisplayed()
             } finally {
-                compose.runOnIdle { models.clear() }
+                ui.close()
             }
         }
     }
@@ -364,9 +364,9 @@ abstract class RulesCreationCases {
                 },
                 beaconOrigin = "",
             )
-        val models = ViewModelStore().apply { put("fixture", vm) }
+        val ui = FixtureUi(compose)
         try {
-            compose.setContent {
+            ui.setContent(vm) {
                 CairnTheme {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
                         RuleStepPanel(
@@ -388,7 +388,7 @@ abstract class RulesCreationCases {
             items.performTextReplacement("[1,3]")
             compose.runOnIdle { assertEquals(formulaRuleValue("[1,3]"), node.obj("items")) }
         } finally {
-            compose.runOnIdle { models.clear() }
+            ui.close()
         }
     }
 
@@ -420,9 +420,9 @@ abstract class RulesCreationCases {
                 },
                 beaconOrigin = "",
             )
-        val models = ViewModelStore().apply { put("fixture", vm) }
+        val ui = FixtureUi(compose)
         try {
-            compose.setContent {
+            ui.setContent(vm) {
                 CairnTheme {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
                         RuleStepPanel(
@@ -463,7 +463,7 @@ abstract class RulesCreationCases {
                 .performTextReplacement("")
             compose.runOnIdle { assertNull(node.obj("action").obj("author")) }
         } finally {
-            compose.runOnIdle { models.clear() }
+            ui.close()
         }
     }
 
@@ -486,9 +486,9 @@ abstract class RulesCreationCases {
                 },
                 beaconOrigin = "",
             )
-        val models = ViewModelStore().apply { put("fixture", vm) }
+        val ui = FixtureUi(compose)
         try {
-            compose.setContent {
+            ui.setContent(vm) {
                 CairnTheme {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
                         RuleConditionEditor(
@@ -528,7 +528,7 @@ abstract class RulesCreationCases {
                 )
             }
         } finally {
-            compose.runOnIdle { models.clear() }
+            ui.close()
         }
     }
 
@@ -573,9 +573,9 @@ abstract class RulesCreationCases {
                 },
                 beaconOrigin = "",
             )
-        val models = ViewModelStore().apply { put("fixture", vm) }
+        val ui = FixtureUi(compose)
         try {
-            compose.setContent {
+            ui.setContent(vm) {
                 CairnTheme {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
                         RuleConditionEditor(value, emptyList(), { value = it }, vm, null)
@@ -594,7 +594,7 @@ abstract class RulesCreationCases {
                 compose.onNodeWithText("Groupe OU").assertDoesNotExist()
             }
         } finally {
-            compose.runOnIdle { models.clear() }
+            ui.close()
         }
     }
 
@@ -696,8 +696,10 @@ abstract class RulesCreationCases {
                     beaconOrigin = "",
                 )
             val models = ViewModelStore().apply { put("fixture", vm) }
+            var mounted by mutableStateOf(true)
             val restoration = StateRestorationTester(compose)
             restoration.setContent {
+                if (!mounted) return@setContent
                 LaunchedEffect(Unit) {
                     vm.state.first { it.ready }
                     vm.connect(origin)
@@ -826,7 +828,9 @@ abstract class RulesCreationCases {
                 assertEquals("Latest draft", update.obj("definition").text("name"))
                 assertEquals(2, stored.get()!!["version"]!!.jsonPrimitive.int)
             } finally {
-                compose.runOnIdle { models.clear() }
+                compose.runOnUiThread { mounted = false }
+                compose.waitForIdle()
+                compose.runOnUiThread { models.clear() }
             }
         }
     }
