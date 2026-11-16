@@ -445,6 +445,20 @@ abstract class RulesEditorCases {
     }
 
     @Test
+    fun editingALiteralStringInAFieldKeepsItsQuotes() {
+        var value by mutableStateOf(literalRuleValue(JsonPrimitive("fixed")))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor("Champ", value, emptyList(), { value = it }, expects = "field")
+            }
+        }
+        val input = compose.onNode(hasSetTextAction())
+        input.assertTextContains("\"fixed\"")
+        input.performTextReplacement("\"kept\"")
+        compose.runOnIdle { assertEquals(formulaRuleValue("\"kept\""), value) }
+    }
+
+    @Test
     fun jsonStringEditingKeepsItsTypeAndTextModeHasNoEncodingQuotes() {
         var value by mutableStateOf(literalRuleValue(JsonPrimitive("5")))
         compose.setContent {

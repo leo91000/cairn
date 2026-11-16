@@ -46,7 +46,7 @@ const model = defineModel<RuleValue>({ required: true })
 
 type Mode = 'template' | 'literal' | 'formula'
 
-const mode = computed<Mode>(() => model.value.type)
+const mode = computed<Mode>(() => model.value.type === 'literal' && ['field', 'formula'].includes(props.expects) ? 'formula' : model.value.type)
 const modes = computed(() => {
   const all: Array<{ value: Mode, label: string, title: string }> = [
     { value: 'template', label: 'Text', title: 'Text, with variables inserted' },
@@ -75,6 +75,8 @@ const literalDraft = ref<{ value: RuleValue, text: string, expects: string } | n
 const text = computed({
   get: () => {
     const value = model.value
+    if (value.type === 'literal' && mode.value === 'formula')
+      return JSON.stringify(value.value ?? null)
     if (value.type === 'template')
       return value.text
     if (value.type === 'formula')
@@ -84,11 +86,11 @@ const text = computed({
     return typeof value.value === 'string' && props.expects !== 'json' ? value.value : JSON.stringify(value.value ?? null)
   },
   set: (next: string) => {
-    if (model.value.type === 'template') {
-      model.value = { type: 'template', text: next }
-    }
-    else if (model.value.type === 'formula') {
+    if (mode.value === 'formula') {
       model.value = { type: 'formula', expression: next }
+    }
+    else if (model.value.type === 'template') {
+      model.value = { type: 'template', text: next }
     }
     else {
       const value: RuleValue = { type: 'literal', value: parseLiteral(next) }

@@ -49,14 +49,19 @@ internal fun RuleValueEditor(
     resourceLabel: String = "Choisir une ressource",
 ) {
     val held = value as? JsonObject ?: templateValue()
-    val mode = held.text("type").ifBlank { "template" }
+    val storedMode = held.text("type").ifBlank { "template" }
+    val mode =
+        if (storedMode == "literal" && expects in setOf("field", "formula")) "formula"
+        else storedMode
     var literalSelection by
         remember(mode, schema, expects) { mutableStateOf<TextFieldValue?>(null) }
     var picking by remember { mutableStateOf(false) }
     var browsing by remember { mutableStateOf(false) }
     val text =
         when (mode) {
-            "formula" -> held.text("expression")
+            "formula" ->
+                if (storedMode == "literal") (held["value"] ?: JsonNull).toString()
+                else held.text("expression")
             "literal" ->
                 if (expects == "json") held["value"].toString()
                 else (held["value"] as? JsonPrimitive)?.contentOrNull ?: held["value"].toString()

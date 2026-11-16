@@ -88,6 +88,51 @@ for (const free of [false, true]) {
   })
 }
 
+test('editing a literal list loop keeps list semantics through execution', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const rule = await workspace.api('/api/hook-rules', 'POST', {
+    definition: {
+      ...fixture.definition,
+      name: 'Constant list',
+      steps: [{
+        type: 'forEach',
+        id: 'numbers',
+        items: { type: 'literal', value: [1, 2] },
+        itemName: 'entry',
+        body: [{
+          type: 'action',
+          id: 'last',
+          action: {
+            type: 'storeValue',
+            scope: 'rule',
+            name: 'latest',
+            value: { type: 'formula', expression: 'entry' },
+          },
+        }],
+      }],
+    },
+    enabled: true,
+  })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit numbers', exact: true }).click()
+  const items = page.getByRole('textbox', { name: 'List to go through', exact: true })
+  await expect(items).toHaveValue('[1,2]')
+  await items.fill('[1,3]')
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  expect((await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0].items).toEqual({ type: 'formula', expression: '[1,3]' })
+  workspace.service.emitHook(fixture.instanceId, 'message', { author: 'alice', channel: 'support', content: 'Iterate this list' }, 'constant-list')
+  let triggering: any
+  await expect.poll(async () => {
+    triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+    return triggering?.status
+  }).toBe('completed')
+  const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+  expect(history.steps.filter((step: any) => step.nodeId === 'last').map((step: any) => step.result)).toEqual([1, 3])
+})
+
 test('a tool with a referenced root schema exposes its fields and executes the saved values', async ({ page, workspace }) => {
   const fixture = await referencedToolRulesFixture(workspace)
   const rule = await workspace.api('/api/hook-rules', 'POST', {

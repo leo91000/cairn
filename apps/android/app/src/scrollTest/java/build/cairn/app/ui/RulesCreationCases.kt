@@ -327,6 +327,57 @@ abstract class RulesCreationCases {
     }
 
     @Test
+    fun editingAnExistingLiteralListKeepsAListExpression() {
+        var node by
+            mutableStateOf(
+                ruleObject(
+                    "type" to JsonPrimitive("forEach"),
+                    "id" to JsonPrimitive("numbers"),
+                    "items" to
+                        literalRuleValue(JsonArray(listOf(JsonPrimitive(1), JsonPrimitive(2)))),
+                    "itemName" to JsonPrimitive("entry"),
+                    "body" to JsonArray(emptyList()),
+                )
+            )
+        val vm =
+            CairnViewModel(
+                ApplicationProvider.getApplicationContext<Application>(),
+                object : SessionVault {
+                    override fun read(origin: String): String? = null
+
+                    override fun write(origin: String, cookie: String?) {}
+                },
+                beaconOrigin = "",
+            )
+        val models = ViewModelStore().apply { put("fixture", vm) }
+        try {
+            compose.setContent {
+                CairnTheme {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        RuleStepPanel(
+                            vm,
+                            Workspace(),
+                            node,
+                            rootSchemaCatalog(),
+                            MAIN_AGENT_ID,
+                            emptyList(),
+                            null,
+                        ) {
+                            node = it
+                        }
+                    }
+                }
+            }
+            val items = compose.onNodeWithContentDescription("Liste à parcourir")
+            items.assertTextContains("[1,2]")
+            items.performTextReplacement("[1,3]")
+            compose.runOnIdle { assertEquals(formulaRuleValue("[1,3]"), node.obj("items")) }
+        } finally {
+            compose.runOnIdle { models.clear() }
+        }
+    }
+
+    @Test
     fun startingAnAgentEditsAndClearsItsExternalAuthor() {
         val catalog =
             rootSchemaCatalog()

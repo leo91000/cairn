@@ -953,6 +953,8 @@ executor slots between rules after each action. There is no platform difference.
 
 Rule editor recovery on Android retains at most 32 encrypted snapshots for seven days, swept on store creation and editor scope changes. Snapshot keys and authenticated encryption bind the account, installation and editor session. Web recovery uses the current editor session draft.
 
+Existing literal values in field/formula inputs display as constant expressions and become formulas when edited, preserving list types in imported loops and quotes in constant strings.
+
 Schema string inputs preserve their text selection when inserting a variable on both platforms, including nullable strings and strings entered as JSON under a free schema. Contact resource fields named sender offer the person picker on both apps.
 
 Rule literal inputs whose object schema declares no fields use a JSON object editor on both platforms; invalid JSON remains visible and is reported. List membership retains numeric/boolean element types, and author defaults prefer a declared person identifier.
