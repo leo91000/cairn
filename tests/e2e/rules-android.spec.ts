@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process'
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -8,6 +7,7 @@ import {
   test,
   workspacePath,
 } from './fixtures'
+import { createNativeAndroidDevice } from './native-android-device'
 import { nativeInputFocused, nativeNodes, nativePositionIn as positionIn } from './native-android-ui'
 import { rulesFixture } from './rules-fixture'
 
@@ -17,30 +17,26 @@ import { rulesFixture } from './rules-fixture'
 // CAIRN_RULES_ANDROID_RESET=1 clears only this emulator's Cairn app before sign-in.
 const serial = process.env.ANDROID_SERIAL
 const binary = path.join(process.env.ANDROID_HOME ?? '', 'platform-tools/adb')
+const device = createNativeAndroidDevice(binary, serial)
+const adb = device.command
 
-function adb(...args: string[]) {
-  if (!serial?.startsWith('emulator-'))
-    throw new Error('This journey needs ANDROID_SERIAL selecting a disposable emulator.')
-  return execFileSync(binary, ['-s', serial, ...args], { encoding: 'utf8', timeout: 15000 })
+async function screen() {
+  await adb('shell', 'uiautomator', 'dump', '/sdcard/cairn-rules-journey.xml')
+  return await adb('exec-out', 'cat', '/sdcard/cairn-rules-journey.xml')
 }
 
-function screen() {
-  adb('shell', 'uiautomator', 'dump', '/sdcard/cairn-rules-journey.xml')
-  return adb('exec-out', 'cat', '/sdcard/cairn-rules-journey.xml')
-}
-
-function tapPosition(position: number[]) {
-  adb('shell', 'input', 'tap', String(position[0]), String(position[1]))
+async function tapPosition(position: number[]) {
+  await adb('shell', 'input', 'tap', String(position[0]), String(position[1]))
 }
 
 async function tap(text: string, preferEditable = false) {
   let previous = ''
-  await expect.poll(() => {
-    const current = screen()
+  await expect.poll(async () => {
+    const current = await screen()
     if (text !== 'Plus tard' && current.includes('Mise à jour disponible')) {
       const postpone = positionIn(current, 'Plus tard')
       if (postpone)
-        tapPosition(postpone)
+        await tapPosition(postpone)
       previous = ''
       return false
     }
@@ -52,14 +48,14 @@ async function tap(text: string, preferEditable = false) {
       return false
     }
 
-    tapPosition(position)
+    await tapPosition(position)
     return true
   }, { timeout: 25000, intervals: [500] }).toBe(true)
 }
 
 async function scrollTo(text: string, preferEditable = false) {
   for (let attempt = 0; attempt < 7; attempt++) {
-    const current = screen()
+    const current = await screen()
     if (positionIn(current, text, false, preferEditable)) {
       await tap(text, preferEditable)
       return
@@ -67,9 +63,9 @@ async function scrollTo(text: string, preferEditable = false) {
 
     const clipped = positionIn(current, text, true, preferEditable)
     if (clipped && clipped[1] < 400)
-      adb('shell', 'input', 'swipe', '360', '500', '360', '700', '350')
+      await adb('shell', 'input', 'swipe', '360', '500', '360', '700', '350')
     else
-      adb('shell', 'input', 'swipe', '360', '900', '360', '450', '450')
+      await adb('shell', 'input', 'swipe', '360', '900', '360', '450', '450')
   }
 
   throw new Error(`The native screen did not expose ${text}.`)
@@ -77,19 +73,19 @@ async function scrollTo(text: string, preferEditable = false) {
 
 async function fill(label: string, value: string | (() => string)) {
   await scrollTo(label, true)
-  await expect.poll(() => nativeInputFocused(screen(), label), { timeout: 7000 }).toBe(true)
+  await expect.poll(async () => nativeInputFocused(await screen(), label), { timeout: 7000 }).toBe(true)
   const text = typeof value === 'function' ? value() : value
-  adb('shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A')
-  adb('shell', 'input', 'keyevent', 'KEYCODE_DEL')
-  await expect.poll(() => nativeNodes(screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.focused === 'true' && node.attributes.text === ''), { timeout: 7000 }).toBe(true)
+  await adb('shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A')
+  await adb('shell', 'input', 'keyevent', 'KEYCODE_DEL')
+  await expect.poll(async () => nativeNodes(await screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.focused === 'true' && node.attributes.text === ''), { timeout: 7000 }).toBe(true)
   const shellText = text.replaceAll(' ', '%s').replaceAll('\'', '\'\\\'\'')
-  adb('shell', 'input', 'text', `'${shellText}'`)
-  await expect.poll(() => nativeNodes(screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.focused === 'true' && node.attributes.text === text), { timeout: 7000 }).toBe(true)
-  adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+  await adb('shell', 'input', 'text', `'${shellText}'`)
+  await expect.poll(async () => nativeNodes(await screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.focused === 'true' && node.attributes.text === text), { timeout: 7000 }).toBe(true)
+  await adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
 }
 
 async function finishStep() {
-  const document = screen()
+  const document = await screen()
   if (document.includes('content-desc="Close sheet"')) {
     await scrollTo('Terminer cette étape')
     return
@@ -100,16 +96,15 @@ async function finishStep() {
 }
 
 async function capture(file: string) {
-  await writeFile(file, execFileSync(binary, ['-s', serial!, 'exec-out', 'screencap', '-p'], { timeout: 15000 }))
+  await writeFile(file, await device.screenshot())
 }
 
 test('native rules persist edits, integer waits and every creator control against the real service', async ({ page, workspace }, info) => {
   // Includes the real email cooldown and each verified native edit/control/history step.
   // Individual assertions retain their own bounds.
   test.setTimeout(480000)
-  expect(adb('shell', 'getprop', 'ro.kernel.qemu').trim()).toBe('1')
-  expect(adb('shell', 'wm', 'size')).toContain('720x1280')
-  const started = Date.now()
+  expect((await adb('shell', 'getprop', 'ro.kernel.qemu')).trim()).toBe('1')
+  expect(await adb('shell', 'wm', 'size')).toContain('720x1280')
   await page.setViewportSize({ width: 1440, height: 1100 })
   const fixture = await rulesFixture(workspace)
   const rule = await workspace.api('/api/hook-rules', 'POST', {
@@ -120,6 +115,7 @@ test('native rules persist edits, integer waits and every creator control agains
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]?.status).toBe('completed')
   await page.goto(workspacePath(`/rules?rule=${rule.id}`))
   await signIn(page)
+  const emailSentAt = Date.now()
   await page.goto(workspacePath('/rules'))
   await expect(page.getByRole('region', { name: 'Rule list', exact: true }).getByText('Support messages', { exact: true })).toBeVisible()
   await page.screenshot({ path: info.outputPath('web-list.png'), animations: 'disabled' })
@@ -139,31 +135,31 @@ test('native rules persist edits, integer waits and every creator control agains
   await page.getByRole('textbox', { name: 'Rule name', exact: true }).scrollIntoViewIfNeeded()
   await page.screenshot({ path: info.outputPath('web-editor.png'), animations: 'disabled', fullPage: true })
   const port = new URL(workspace.url).port
-  adb('reverse', `tcp:${port}`, `tcp:${port}`)
-  adb('shell', 'am', 'force-stop', 'build.cairn.app')
+  await adb('reverse', `tcp:${port}`, `tcp:${port}`)
+  await adb('shell', 'am', 'force-stop', 'build.cairn.app')
   if (process.env.CAIRN_RULES_ANDROID_RESET === '1')
-    adb('shell', 'pm', 'clear', 'build.cairn.app')
-  adb('shell', 'am', 'start', '-n', 'build.cairn.app/.MainActivity')
+    await adb('shell', 'pm', 'clear', 'build.cairn.app')
+  await adb('shell', 'am', 'start', '-n', 'build.cairn.app/.MainActivity')
   await fill('Adresse e-mail', workspace.emailProof().email)
   // Keep Beacon's actual per-address email delivery cooldown.
-  await expect.poll(() => Date.now() - started, { timeout: 70000, intervals: [2000] }).toBeGreaterThan(62000)
+  await expect.poll(() => Date.now() - emailSentAt, { timeout: 70000, intervals: [2000] }).toBeGreaterThan(62000)
   await tap('Recevoir un code')
   await fill('Code reçu par e-mail', () => workspace.emailProof().code)
   await tap('Se connecter')
   await tap('Atelier')
   await tap('Règles')
-  await expect.poll(() => screen().includes('Support messages')).toBe(true)
+  await expect.poll(async () => (await screen()).includes('Support messages')).toBe(true)
   await capture(info.outputPath('android-list.png'))
   await tap('Support messages')
-  await expect.poll(() => Boolean(positionIn(screen(), 'Modifier'))).toBe(true)
+  await expect.poll(async () => Boolean(positionIn(await screen(), 'Modifier'))).toBe(true)
   await capture(info.outputPath('android-detail.png'))
   await tap('Modifier')
   await fill('Nom de la règle', 'Support messages mobile')
-  await expect.poll(() => Boolean(positionIn(screen(), 'Enregistrer'))).toBe(true)
+  await expect.poll(async () => Boolean(positionIn(await screen(), 'Enregistrer'))).toBe(true)
   await capture(info.outputPath('android-editor.png'))
-  adb('shell', 'input', 'swipe', '360', '1000', '360', '300', '600')
+  await adb('shell', 'input', 'swipe', '360', '1000', '360', '300', '600')
   await capture(info.outputPath('android-flow.png'))
-  adb('shell', 'input', 'swipe', '360', '1000', '360', '300', '600')
+  await adb('shell', 'input', 'swipe', '360', '1000', '360', '300', '600')
   await capture(info.outputPath('android-flow-lower.png'))
   await workspace.api(`/api/hook-rules/${rule.id}/enabled`, 'POST', { ruleId: rule.id, enabled: false })
   await workspace.api(`/api/hook-rules/${rule.id}/enabled`, 'POST', { ruleId: rule.id, enabled: true })
@@ -182,7 +178,7 @@ test('native rules persist edits, integer waits and every creator control agains
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).blocks.map((block: any) => block.kind), { timeout: 20000 }).toContain('budgetExhausted')
   const exhaustedRevision = (await workspace.api(`/api/hook-rules/${rule.id}`)).revision
   // Reopen the detail at its start after the asynchronous budget change.
-  adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+  await adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
   await tap('Support messages mobile')
   await scrollTo('Relancer le budget')
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).revision).not.toBe(exhaustedRevision)
@@ -191,7 +187,7 @@ test('native rules persist edits, integer waits and every creator control agains
   await expect.poll(async () => (await workspace.api('/api/hook-rules')).rules.length).toBe(2)
   const copy = (await workspace.api('/api/hook-rules')).rules.find((item: any) => item.id !== rule.id)
   expect(copy.blocks.map((block: any) => block.kind)).toContain('disabled')
-  await expect.poll(() => screen().includes(copy.name)).toBe(true)
+  await expect.poll(async () => (await screen()).includes(copy.name)).toBe(true)
   await scrollTo('Supprimer')
   await tap('Supprimer')
   await expect.poll(async () => (await workspace.api('/api/hook-rules')).rules.map((item: any) => item.id)).toEqual([rule.id])
@@ -221,8 +217,8 @@ test('native rules persist edits, integer waits and every creator control agains
   await scrollTo('Attendre 10 min')
   await scrollTo('600')
   await fill('600', '900')
-  for (let step = 0; step < 2 && !screen().includes('Enregistrer'); step++)
-    adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+  for (let step = 0; step < 2 && !(await screen()).includes('Enregistrer'); step++)
+    await adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
   await tap('Enregistrer')
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(2)
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).definition.steps[0].action.seconds).toEqual({ type: 'literal', value: 900 })
@@ -230,30 +226,29 @@ test('native rules persist edits, integer waits and every creator control agains
   await scrollTo('Syntaxe JSON')
   await fill('Valeur à mémoriser', '{"count":')
   await finishStep()
-  await expect.poll(() => nativeNodes(screen()).some(node => node.attributes.text === 'Enregistrer' && !node.enabled)).toBe(true)
+  await expect.poll(async () => nativeNodes(await screen()).some(node => node.attributes.text === 'Enregistrer' && !node.enabled)).toBe(true)
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(2)
   await scrollTo('Syntaxe JSON')
   // The exact invalid text must survive dismissing/reopening its native sheet.
-  await expect.poll(() => nativeNodes(screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.text === '{"count":')).toBe(true)
+  await expect.poll(async () => nativeNodes(await screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.text === '{"count":')).toBe(true)
   await fill('Valeur à mémoriser', '{"count":2}')
   await finishStep()
   await tap('Enregistrer')
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(3)
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).definition.steps[1].action.value).toEqual({ type: 'literal', value: { count: 2 } })
-  adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+  await adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
   await tap('Support messages mobile')
   await scrollTo('Historique')
   await scrollTo('Terminé · 1 actions')
   await scrollTo('Résultat ⌄')
-  adb('shell', 'input', 'swipe', '360', '1000', '360', '500', '450')
-  await expect.poll(() => screen().includes('Received: A real local rule execution')).toBe(true)
+  await adb('shell', 'input', 'swipe', '360', '1000', '360', '500', '450')
+  await expect.poll(async () => (await screen()).includes('Received: A real local rule execution')).toBe(true)
   await capture(info.outputPath('android-history.png'))
 })
-
 test('a native member selects people and a channel through the execution agent', async ({ page, browser, workspace }, info) => {
   test.setTimeout(300000)
-  expect(adb('shell', 'getprop', 'ro.kernel.qemu').trim()).toBe('1')
-  expect(adb('shell', 'wm', 'size')).toContain('720x1280')
+  expect((await adb('shell', 'getprop', 'ro.kernel.qemu')).trim()).toBe('1')
+  expect(await adb('shell', 'wm', 'size')).toContain('720x1280')
   const fixture = await rulesFixture(workspace)
   await page.goto(workspacePath('/rules'))
   await signIn(page)
@@ -312,12 +307,12 @@ test('a native member selects people and a channel through the execution agent',
     expect(createdAuthor.ok(), authorRule.error).toBe(true)
     expect(authorRule.creatorAccountId).toBe(accountId)
     const port = new URL(workspace.url).port
-    adb('reverse', `tcp:${port}`, `tcp:${port}`)
-    adb('shell', 'am', 'force-stop', 'build.cairn.app')
+    await adb('reverse', `tcp:${port}`, `tcp:${port}`)
+    await adb('shell', 'am', 'force-stop', 'build.cairn.app')
     if (process.env.CAIRN_RULES_ANDROID_RESET !== '1')
       throw new Error('The member journey requires CAIRN_RULES_ANDROID_RESET=1 on its disposable emulator.')
-    adb('shell', 'pm', 'clear', 'build.cairn.app')
-    adb('shell', 'am', 'start', '-n', 'build.cairn.app/.MainActivity')
+    await adb('shell', 'pm', 'clear', 'build.cairn.app')
+    await adb('shell', 'am', 'start', '-n', 'build.cairn.app/.MainActivity')
     await fill('Adresse e-mail', email)
     await expect.poll(() => Date.now() - emailSentAt, { timeout: 70000, intervals: [2000] }).toBeGreaterThan(62000)
     await tap('Recevoir un code')
@@ -330,13 +325,13 @@ test('a native member selects people and a channel through the execution agent',
     await scrollTo('Modifier')
     await scrollTo('Si / sinon')
     await scrollTo('Choisir une personne…')
-    await expect.poll(() => screen().includes('Bob'), { timeout: 15000 }).toBe(true)
+    await expect.poll(async () => (await screen()).includes('Bob'), { timeout: 15000 }).toBe(true)
     await capture(info.outputPath('android-member-people.png'))
     await tap('Bob')
     await finishStep()
     await scrollTo('Member channel')
     await scrollTo('Choisir une ressource')
-    await expect.poll(() => screen().includes('#general'), { timeout: 15000 }).toBe(true)
+    await expect.poll(async () => (await screen()).includes('#general'), { timeout: 15000 }).toBe(true)
     await capture(info.outputPath('android-member-channels.png'))
     await tap('#general')
     await finishStep()
@@ -347,7 +342,7 @@ test('a native member selects people and a channel through the execution agent',
     expect(saved.definition.steps[0].condition.people).toContainEqual({ resourceType: 'person', id: 'bob' })
     expect(saved.definition.steps[0].then[0].action.input.channel).toEqual({ type: 'literal', value: 'general' })
     await capture(info.outputPath('android-member-saved.png'))
-    adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+    await adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
     await scrollTo('Member conversation author')
     await scrollTo('Modifier')
     await scrollTo('Member author')
