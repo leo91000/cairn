@@ -242,6 +242,8 @@ class AndroidTestFailureSummary : TestListener {
             var messagesTruncated = false
             val resumeSourceLines = sortedSetOf<Int>()
             var resumeSourceLinesTruncated = false
+            val headerSourceLines = sortedSetOf<Int>()
+            var headerSourceLinesTruncated = false
             var sdkFetch = false
             var io = false
             var timeout = false
@@ -277,6 +279,16 @@ class AndroidTestFailureSummary : TestListener {
                         if (resumeSourceLines.size < 3) resumeSourceLines.add(frame.lineNumber)
                         else resumeSourceLinesTruncated = true
                     }
+                    // The inset helper and first header journey, excluding fixture setup and
+                    // installation switching. Keep only line numbers, never assertion content.
+                    if (
+                        frame.fileName == "UnifiedHeaderCases.kt" &&
+                            frame.lineNumber in 205..301 &&
+                            frame.lineNumber !in headerSourceLines
+                    ) {
+                        if (headerSourceLines.size < 3) headerSourceLines.add(frame.lineNumber)
+                        else headerSourceLinesTruncated = true
+                    }
                 }
                 sdkFetch =
                     sdkFetch ||
@@ -307,7 +319,9 @@ class AndroidTestFailureSummary : TestListener {
                 "causesTruncated=$causesTruncated framesTruncated=$framesTruncated " +
                 "messagesTruncated=$messagesTruncated " +
                 "resumeSourceLines=${resumeSourceLines.joinToString(",")} " +
-                "resumeSourceLinesTruncated=$resumeSourceLinesTruncated"
+                "resumeSourceLinesTruncated=$resumeSourceLinesTruncated " +
+                "headerSourceLines=${headerSourceLines.joinToString(",")} " +
+                "headerSourceLinesTruncated=$headerSourceLinesTruncated"
         }
 
         fun verify() {
@@ -328,13 +342,13 @@ class AndroidTestFailureSummary : TestListener {
             val wrapped = ExecutionException(AssertionError(fetch))
             check(
                 summarize(listOf(wrapped)) ==
-                    "CAIRN_ANDROID_TEST_FAILURE sdkFetch=true io=true timeout=false unknownHost=false tlsHandshake=true connection=false httpStatuses=503 causesTruncated=false framesTruncated=false messagesTruncated=false resumeSourceLines= resumeSourceLinesTruncated=false"
+                    "CAIRN_ANDROID_TEST_FAILURE sdkFetch=true io=true timeout=false unknownHost=false tlsHandshake=true connection=false httpStatuses=503 causesTruncated=false framesTruncated=false messagesTruncated=false resumeSourceLines= resumeSourceLinesTruncated=false headerSourceLines= headerSourceLinesTruncated=false"
             ) {
                 "Nested SDK failure summary did not match the fixed-field contract"
             }
             check(
                 summarize(listOf(AssertionError("private fixture 429"))) ==
-                    "CAIRN_ANDROID_TEST_FAILURE sdkFetch=false io=false timeout=false unknownHost=false tlsHandshake=false connection=false httpStatuses= causesTruncated=false framesTruncated=false messagesTruncated=false resumeSourceLines= resumeSourceLinesTruncated=false"
+                    "CAIRN_ANDROID_TEST_FAILURE sdkFetch=false io=false timeout=false unknownHost=false tlsHandshake=false connection=false httpStatuses= causesTruncated=false framesTruncated=false messagesTruncated=false resumeSourceLines= resumeSourceLinesTruncated=false headerSourceLines= headerSourceLinesTruncated=false"
             ) {
                 "Unstructured messages must not become diagnostics"
             }
@@ -510,6 +524,49 @@ class AndroidTestFailureSummary : TestListener {
                     .contains("resumeSourceLines= resumeSourceLinesTruncated=false")
             ) {
                 "Other files and out-of-range test lines must be omitted"
+            }
+            fun headerFrame(file: String, line: Int) =
+                StackTraceElement("fixture.PrivateHeaderTest", "privateHeaderMethod", file, line)
+
+            val headerFailure = AssertionError("private header assertion text")
+            headerFailure.stackTrace =
+                listOf(269, 210, 210, 232, 208, 267)
+                    .map { headerFrame("UnifiedHeaderCases.kt", it) }
+                    .toTypedArray()
+            val headerSummary = summarize(listOf(ExecutionException(headerFailure)))
+            check(
+                headerSummary.contains(
+                    "headerSourceLines=210,232,269 headerSourceLinesTruncated=true"
+                )
+            ) {
+                "Only three sorted distinct header scenario lines may be retained through causes"
+            }
+            check(
+                listOf(
+                        "fixture.PrivateHeaderTest",
+                        "privateHeaderMethod",
+                        "UnifiedHeaderCases.kt",
+                        "private header assertion text",
+                    )
+                    .none { headerSummary.contains(it) }
+            ) {
+                "Header diagnostics must keep the line-only privacy contract"
+            }
+            val headerBoundaries = AssertionError("private header assertion text")
+            headerBoundaries.stackTrace =
+                arrayOf(
+                    headerFrame("UnifiedHeaderCases.kt", 204),
+                    headerFrame("UnifiedHeaderCases.kt", 205),
+                    headerFrame("UnifiedHeaderCases.kt", 301),
+                    headerFrame("UnifiedHeaderCases.kt", 205),
+                    headerFrame("UnifiedHeaderCases.kt", 302),
+                    headerFrame("OtherFixture.kt", 269),
+                )
+            check(
+                summarize(listOf(headerBoundaries))
+                    .contains("headerSourceLines=205,301 headerSourceLinesTruncated=false")
+            ) {
+                "Other files, adjacent header code and duplicate frames must not widen diagnostics"
             }
             val statusBoundaries =
                 IOException(
