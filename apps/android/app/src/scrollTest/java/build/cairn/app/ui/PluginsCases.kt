@@ -24,6 +24,7 @@ import org.junit.Test
 /** Plugin management journeys, run under Robolectric and on a device with screenshots. */
 abstract class PluginsCases {
     @get:Rule val compose = createComposeRule()
+    private lateinit var fixtureUi: FixtureUi
 
     protected open fun capture(name: String) {}
 
@@ -388,7 +389,7 @@ abstract class PluginsCases {
 
     @Test
     fun theCatalogueOpens1PasswordAsAPlugin() {
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher = dispatcher { _, _ -> null }
             server.start()
             var opened = ""
@@ -405,7 +406,7 @@ abstract class PluginsCases {
 
     @Test
     fun discordBotsAreGenericDelegatingInstances() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val actions = CopyOnWriteArrayList<Pair<String, String>>()
             server.dispatcher = dispatcher { path, body ->
                 if (path.contains("/connections/00000000-0000-4000-8000-000000000102/")) {
@@ -456,7 +457,7 @@ abstract class PluginsCases {
 
     @Test
     fun genericInstanceIsCreatedWithItsSettingsAndDelegation() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
                 if (path.endsWith("/plugins/notes/connections")) {
@@ -585,7 +586,7 @@ abstract class PluginsCases {
                         )
                 )
                 .let { it.copy(setup = it.manifest!!.setup) }
-        MockWebServer().use { server ->
+        withServer { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher =
@@ -734,7 +735,7 @@ abstract class PluginsCases {
                                 },
                     ),
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher =
                 dispatcher(includeGet = true) { path, body ->
@@ -799,7 +800,7 @@ abstract class PluginsCases {
 
     @Test
     fun discordBotIsSetUpThroughItsPackageForm() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
@@ -1039,7 +1040,7 @@ abstract class PluginsCases {
                                     },
                         ),
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             val starts = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<JsonObject>()
             val flow =
@@ -1121,7 +1122,7 @@ abstract class PluginsCases {
 
     @Test
     fun anAccountSignsInWithADeviceCodeAndSavesTheSignInNotAToken() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<String>()
             val requests = CopyOnWriteArrayList<String>()
@@ -1279,7 +1280,7 @@ abstract class PluginsCases {
 
     @Test
     fun packageUploadUsesTheNativeFolderPickerAndCancellationIsInert() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val requests = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher(requests = requests) { _, _ -> null }
             server.start()
@@ -1333,7 +1334,7 @@ abstract class PluginsCases {
 
     @Test
     fun programReleasesCanBeCheckedInstalledAndRestored() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val initial =
                 InstalledProgram(
                     release =
@@ -1478,7 +1479,7 @@ abstract class PluginsCases {
 
     @Test
     fun onePasswordIsAGenericPluginWithItsPanelAndAgentUsage() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val actions = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
                 if (path.endsWith("/connections/00000000-0000-4000-8000-000000000101/actions")) {
@@ -1518,7 +1519,7 @@ abstract class PluginsCases {
 
     @Test
     fun serviceAccountsSendTheirTokenOnceAndAreGrantedToTheAgentsChosen() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
                 if (path.endsWith("/plugins/onepassword/connections")) {
@@ -1612,7 +1613,7 @@ abstract class PluginsCases {
                 usage = PluginUsage(),
                 enabled = true,
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
             server.dispatcher =
                 dispatcher(packages = listOf(github), connections = listOf(work)) { path, body ->
@@ -1801,7 +1802,7 @@ abstract class PluginsCases {
                 usage = PluginUsage(),
                 enabled = true,
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
             val starts = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<JsonObject>()
@@ -1985,7 +1986,7 @@ abstract class PluginsCases {
     fun aGrantRevokedWhileEditingIsNotRestored() = editExistingAccount(revokedMeanwhile = true)
 
     private fun editExistingAccount(revokedMeanwhile: Boolean = false) {
-        MockWebServer().use { server ->
+        withServer { server ->
             val saved = CopyOnWriteArrayList<String>()
             val editing = java.util.concurrent.atomic.AtomicBoolean(false)
             server.dispatcher =
@@ -2270,6 +2271,16 @@ abstract class PluginsCases {
             }
         }
 
+    /** Releases the mounted UI and its jobs while the server can still answer them. */
+    private fun withServer(body: (MockWebServer) -> Unit) {
+        MockWebServer().use { server ->
+            FixtureUi(compose).use { ui ->
+                fixtureUi = ui
+                body(server)
+            }
+        }
+    }
+
     /** Signs in to the fixture, then shows [content] once the workspace has loaded. */
     private fun show(
         server: MockWebServer,
@@ -2281,7 +2292,7 @@ abstract class PluginsCases {
                 PluginVault(),
                 beaconOrigin = "",
             )
-        compose.setContent {
+        fixtureUi.setContent(vm) {
             val state by vm.state.collectAsStateWithLifecycle()
             // Once loaded, the screen stays composed even if a refresh briefly empties the agents.
             var loaded by remember { mutableStateOf(false) }

@@ -1671,53 +1671,52 @@ abstract class BackgroundWaitCases {
                     }
                 }
             server.start()
-            val vm =
-                CairnViewModel(
-                    ApplicationProvider.getApplicationContext<Application>(),
-                    BackgroundWaitVault(),
-                    beaconOrigin = "",
-                )
-            compose.setContent {
-                val state by vm.state.collectAsStateWithLifecycle()
-                LaunchedEffect(Unit) {
-                    vm.state.first { it.ready && !it.busy }
-                    vm.connect(server.url("/").toString())
-                }
-                CairnTheme(preference = if (quota) "dark" else "system") {
-                    if (state.session.authenticated)
-                        Surface(
-                            Modifier.fillMaxSize(),
-                            color = MaterialTheme.colorScheme.background,
-                        ) {
-                            Box(Modifier.safeDrawingPadding()) {
-                                ChatScreen(
-                                    vm,
-                                    if (readOnly) state.copy(usableAgents = emptyList()) else state,
-                                    "6cc6efab-10af-54c7-a91b-dcff664166a1",
-                                    openChat = {},
-                                    openRun = {},
-                                    back = {},
-                                )
+            FixtureUi(compose).use { ui ->
+                val vm =
+                    CairnViewModel(
+                        ApplicationProvider.getApplicationContext<Application>(),
+                        BackgroundWaitVault(),
+                        beaconOrigin = "",
+                    )
+                ui.setContent(vm) {
+                    val state by vm.state.collectAsStateWithLifecycle()
+                    LaunchedEffect(Unit) {
+                        vm.state.first { it.ready && !it.busy }
+                        vm.connect(server.url("/").toString())
+                    }
+                    CairnTheme(preference = if (quota) "dark" else "system") {
+                        if (state.session.authenticated)
+                            Surface(
+                                Modifier.fillMaxSize(),
+                                color = MaterialTheme.colorScheme.background,
+                            ) {
+                                Box(Modifier.safeDrawingPadding()) {
+                                    ChatScreen(
+                                        vm,
+                                        if (readOnly) state.copy(usableAgents = emptyList())
+                                        else state,
+                                        "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                                        openChat = {},
+                                        openRun = {},
+                                        back = {},
+                                    )
+                                }
                             }
-                        }
+                    }
                 }
-            }
-            compose.waitUntil(20000) {
-                compose
-                    .onAllNodesWithText("Conversation de test")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty() &&
-                    (status != "running" ||
-                        quota ||
-                        compose
-                            .onAllNodesWithTag("agent-waiting")
-                            .fetchSemanticsNodes()
-                            .isNotEmpty())
-            }
-            try {
+                compose.waitUntil(20000) {
+                    compose
+                        .onAllNodesWithText("Conversation de test")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() &&
+                        (status != "running" ||
+                            quota ||
+                            compose
+                                .onAllNodesWithTag("agent-waiting")
+                                .fetchSemanticsNodes()
+                                .isNotEmpty())
+                }
                 check(server, vm)
-            } finally {
-                vm.api.closeStreams()
             }
         }
     }
