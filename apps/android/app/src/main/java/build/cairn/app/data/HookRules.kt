@@ -1207,6 +1207,8 @@ fun typedComparisonRight(
             }
         }
     }
+    if (held.text("type") == "literal" && held["value"] == JsonNull && !listOnly) return held
+
     val raw =
         if (held.text("type") == "literal") held["value"] else JsonPrimitive(held.text("text"))
     val text = (raw as? JsonPrimitive)?.contentOrNull.orEmpty()

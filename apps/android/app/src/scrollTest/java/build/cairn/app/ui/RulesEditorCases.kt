@@ -26,6 +26,64 @@ abstract class RulesEditorCases {
     @get:Rule val compose = createComposeRule()
 
     @Test
+    fun scalarNullComparisonsSurviveOperatorAndFieldEdits() {
+        val fields =
+            schemaFields(
+                wireJson
+                    .parseToJsonElement(
+                        """{"properties":{"count":{"type":["integer","null"]},"approved":{"type":["boolean","null"]},"channel":{"type":["string","null"]}}}"""
+                    )
+                    .jsonObject,
+                "payload",
+            )
+        var condition by mutableStateOf(ruleObject())
+        val vm =
+            CairnViewModel(
+                ApplicationProvider.getApplicationContext<Application>(),
+                object : SessionVault {
+                    override fun read(origin: String): String? = null
+
+                    override fun write(origin: String, cookie: String?) {}
+                },
+                beaconOrigin = "",
+            )
+        val ui = FixtureUi(compose)
+        try {
+            ui.setContent(vm) {
+                CairnTheme {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        RuleConditionEditor(condition, fields, { condition = it }, vm, null)
+                    }
+                }
+            }
+            for (name in listOf("count", "approved", "channel")) {
+                compose.runOnIdle {
+                    condition =
+                        ruleObject(
+                            "type" to JsonPrimitive("compare"),
+                            "left" to formulaRuleValue("payload.$name"),
+                            "operator" to JsonPrimitive("equals"),
+                            "right" to literalRuleValue(JsonNull),
+                        )
+                }
+                compose
+                    .onNodeWithText(ruleOperatorTitles.getValue("equals"))
+                    .performScrollTo()
+                    .performClick()
+                compose.onNodeWithText(ruleOperatorTitles.getValue("notEquals")).performClick()
+                compose.runOnIdle { assertEquals(literalRuleValue(JsonNull), condition["right"]) }
+                compose
+                    .onNode(hasSetTextAction() and hasContentDescription("Champ à vérifier"))
+                    .performScrollTo()
+                    .performTextReplacement("payload.$name ")
+                compose.runOnIdle { assertEquals(literalRuleValue(JsonNull), condition["right"]) }
+            }
+        } finally {
+            ui.close()
+        }
+    }
+
+    @Test
     fun aLateResourcePageCannotReplaceANewSearch() {
         val requests = CopyOnWriteArrayList<String>()
         val late = CompletableDeferred<JsonObject>()

@@ -770,6 +770,9 @@ export function typedComparisonRight(value: RuleValue | null | undefined, expect
       return { type: 'formula', expression: expression.trim() }
   }
 
+  if (value?.type === 'literal' && value.value === null && !listOnly)
+    return value
+
   const raw = value?.type === 'literal' ? value.value : value?.text ?? ''
   if (expects === 'number')
     return { type: 'literal', value: Number.isFinite(Number(raw)) ? Number(raw) : 0 }

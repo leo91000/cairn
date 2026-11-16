@@ -252,3 +252,19 @@ it('preserves right templates while editing an equality field or its operator', 
     }
   }
 })
+
+it('preserves null equality operands when scalar fields or operators change', () => {
+  const fields = schemaFields({
+    properties: {
+      count: { type: ['integer', 'null'] },
+      approved: { type: ['boolean', 'null'] },
+      channel: { type: ['string', 'null'] },
+    },
+  }, 'payload')
+  for (const name of ['count', 'approved', 'channel']) {
+    for (const operator of ['equals', 'notEquals'] as const) {
+      const expects = comparisonExpects({ type: 'formula', expression: `payload.${name}` }, operator, fields)
+      expect(typedComparisonRight({ type: 'literal', value: null }, expects, false)).toEqual({ type: 'literal', value: null })
+    }
+  }
+})
