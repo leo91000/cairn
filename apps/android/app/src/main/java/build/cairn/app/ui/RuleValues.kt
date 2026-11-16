@@ -75,12 +75,12 @@ internal fun RuleValueEditor(
     var editorInput by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
     var emittedInput by remember { mutableStateOf<JsonObject?>(null) }
     var emittedExpects by remember { mutableStateOf(expects) }
-    LaunchedEffect(held, expects) {
-        if (held != emittedInput || expects != emittedExpects) {
-            if (editorInput.text != text) editorInput = TextFieldValue(text, TextRange(text.length))
-            emittedInput = held
-            emittedExpects = expects
-        }
+    // Reconcile in this composition: a deferred effect can apply an older prop
+    // after the next keystroke and reset the text, selection and IME composition.
+    if (held != emittedInput || expects != emittedExpects) {
+        if (editorInput.text != text) editorInput = TextFieldValue(text, TextRange(text.length))
+        emittedInput = held
+        emittedExpects = expects
     }
     val declaredSchemaKind = schema?.takeIf { it["type"] != null }?.let { schemaKind(it, JsonNull) }
     val genericSchema = schema != null && ruleSchemaUsesJson(schema)
@@ -640,14 +640,12 @@ internal fun RuleLiteralEditor(
                 if (jsonDrafts.containsKey("")) jsonDrafts.obj("").text("text") else display(value)
             var draft by remember(kind) { mutableStateOf(TextFieldValue(initialText)) }
             var emitted by remember(kind) { mutableStateOf(value) }
-            LaunchedEffect(value, jsonDrafts) {
-                if (
-                    value != emitted ||
-                        jsonDrafts.containsKey("") && draft.text != jsonDrafts.obj("").text("text")
-                ) {
-                    draft = TextFieldValue(initialText)
-                    emitted = value
-                }
+            if (
+                value != emitted ||
+                    jsonDrafts.containsKey("") && draft.text != jsonDrafts.obj("").text("text")
+            ) {
+                draft = TextFieldValue(initialText)
+                emitted = value
             }
             OutlinedTextField(
                 draft,
@@ -753,11 +751,9 @@ private fun RuleNumericField(
             mutableStateOf((value as? JsonPrimitive)?.contentOrNull.orEmpty())
         }
     var emitted by remember(label, integer) { mutableStateOf(value) }
-    LaunchedEffect(value) {
-        if (value != emitted) {
-            draft = (value as? JsonPrimitive)?.contentOrNull.orEmpty()
-            emitted = value
-        }
+    if (value != emitted) {
+        draft = (value as? JsonPrimitive)?.contentOrNull.orEmpty()
+        emitted = value
     }
     OutlinedTextField(
         draft,

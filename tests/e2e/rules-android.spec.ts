@@ -8,7 +8,12 @@ import {
   workspacePath,
 } from './fixtures'
 import { createNativeAndroidDevice } from './native-android-device'
-import { nativeInputFocused, nativeNodes, nativePositionIn as positionIn } from './native-android-ui'
+import {
+  createNativeTargetTracker,
+  nativeInputFocused,
+  nativeNodes,
+  nativePositionIn as positionIn,
+} from './native-android-ui'
 import { rulesFixture } from './rules-fixture'
 
 // Opt-in journey against the real installation and Beacon. Use a disposable emulator:
@@ -19,10 +24,50 @@ const serial = process.env.ANDROID_SERIAL
 const binary = path.join(process.env.ANDROID_HOME ?? '', 'platform-tools/adb')
 const device = createNativeAndroidDevice(binary, serial)
 const adb = device.command
+let diagnosticTap = 0
+const originalAnimations = new Map<string, string>()
+const animationSettings = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale']
 
-async function screen() {
+test.beforeAll(async () => {
+  if (process.env.CAIRN_RULES_ANDROID !== '1')
+    return
+  expect((await adb('shell', 'getprop', 'ro.kernel.qemu')).trim()).toBe('1')
+  for (const setting of animationSettings)
+    originalAnimations.set(setting, (await adb('shell', 'settings', 'get', 'global', setting)).trim())
+  for (const setting of animationSettings)
+    await adb('shell', 'settings', 'put', 'global', setting, '0')
+})
+
+test.afterAll(async () => {
+  for (const [setting, value] of originalAnimations) {
+    if (value === 'null')
+      await adb('shell', 'settings', 'delete', 'global', setting)
+    else
+      await adb('shell', 'settings', 'put', 'global', setting, value)
+  }
+
+  originalAnimations.clear()
+})
+
+async function rawScreen() {
   await adb('shell', 'uiautomator', 'dump', '/sdcard/cairn-rules-journey.xml')
   return await adb('exec-out', 'cat', '/sdcard/cairn-rules-journey.xml')
+}
+
+async function screen() {
+  let document = await rawScreen()
+  if (document.includes('Mise à jour disponible')) {
+    const postpone = positionIn(document, 'Plus tard')
+    if (!postpone)
+      throw new Error('The update prompt did not expose its postpone button.')
+    await tapPosition(postpone)
+    await expect.poll(async () => {
+      document = await rawScreen()
+      return !document.includes('Mise à jour disponible')
+    }, { timeout: 10000 }).toBe(true)
+  }
+
+  return document
 }
 
 async function tapPosition(position: number[]) {
@@ -30,25 +75,22 @@ async function tapPosition(position: number[]) {
 }
 
 async function tap(text: string, preferEditable = false) {
-  let previous = ''
+  const ready = createNativeTargetTracker()
   await expect.poll(async () => {
     const current = await screen()
-    if (text !== 'Plus tard' && current.includes('Mise à jour disponible')) {
-      const postpone = positionIn(current, 'Plus tard')
-      if (postpone)
-        await tapPosition(postpone)
-      previous = ''
+    const position = ready(current, text, preferEditable)
+    if (!position)
       return false
-    }
 
-    const position = positionIn(current, text, false, preferEditable)
-    const signature = position?.join(',') ?? ''
-    if (!position || signature !== previous) {
-      previous = signature
-      return false
+    const diagnostic = ['Modifier', 'Terminé · 1 actions'].includes(text) ? ++diagnosticTap : 0
+    if (diagnostic) {
+      await writeFile(test.info().outputPath(`tap-${diagnostic}-before.xml`), current)
+      await writeFile(test.info().outputPath(`tap-${diagnostic}.json`), JSON.stringify({ text, position }))
     }
 
     await tapPosition(position)
+    if (diagnostic)
+      await writeFile(test.info().outputPath(`tap-${diagnostic}-after.xml`), await screen())
     return true
   }, { timeout: 25000, intervals: [500] }).toBe(true)
 }
@@ -350,7 +392,7 @@ test('a native member selects people and a channel through the execution agent',
     await expect.poll(async () => (await screen()).includes('content-desc="Close sheet"'), { timeout: 25000 }).toBe(false)
     await scrollTo('Member conversation author')
     await scrollTo('Modifier')
-    await expect.poll(async () => !!positionIn(await screen(), 'Enregistrer'), { timeout: 25000 }).toBe(true)
+    await expect.poll(async () => nativeNodes(await screen()).some(node => node.attributes.text === 'Enregistrer'), { timeout: 25000 }).toBe(true)
     await scrollTo('Member author')
     await scrollTo('Auteur externe (facultatif)')
     await fill('Auteur externe (facultatif)', 'payload.author')

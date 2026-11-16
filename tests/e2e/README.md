@@ -38,6 +38,8 @@ adb -s emulator-5580 install -r apps/android/app/build/outputs/apk/debug/app-deb
 ANDROID_SERIAL=emulator-5580 CAIRN_RULES_ANDROID=1 CAIRN_RULES_ANDROID_RESET=1 pnpm test:e2e --project=rules-android --workers=1
 ```
 
+The native journey pauses animations on that emulator for stable input and restores their original settings when its worker exits. Update prompts are postponed; no update is downloaded or installed. Native tap XML and coordinates are retained with the test artifacts.
+
 Use a disposable emulator: `CAIRN_RULES_ANDROID_RESET=1` clears its Cairn app data
 before this journey. Keep `ANDROID_HOME` set to the SDK. The default browser port
 base is 4322, making the Beacon origin `http://localhost:4422`; an overridden port

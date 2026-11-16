@@ -59,7 +59,7 @@ export function nativeInputFocused(document: string, label: string): boolean {
   return matchingNodes(document, label, true).some(node => node.enabled && node.attributes.focused === 'true')
 }
 
-export function nativePositionIn(document: string, text: string, includeClipped = false, preferEditable = false): number[] | null {
+function targetIn(document: string, text: string, includeClipped = false, preferEditable = false): { position: number[], signature: string } | null {
   for (const node of matchingNodes(document, text, preferEditable)) {
     if (!node.enabled)
       continue
@@ -67,9 +67,32 @@ export function nativePositionIn(document: string, text: string, includeClipped 
     if (!bounds || bounds[2] - bounds[0] < 20 || bounds[3] - bounds[1] < (includeClipped ? 1 : 30))
       continue
     const center = [Math.floor((bounds[0] + bounds[2]) / 2), Math.floor((bounds[1] + bounds[3]) / 2)]
-    if (center[1] >= 64 && center[1] <= 1160)
-      return center
+    if (center[1] >= 64 && center[1] <= 1160) {
+      const geometry: string[] = []
+      let ancestor: NativeNode | undefined = node
+      while (ancestor) {
+        geometry.push(ancestor.attributes.bounds ?? '')
+        ancestor = ancestor.parent
+      }
+
+      return { position: center, signature: geometry.join('|') }
+    }
   }
 
   return null
+}
+
+export function nativePositionIn(document: string, text: string, includeClipped = false, preferEditable = false): number[] | null {
+  return targetIn(document, text, includeClipped, preferEditable)?.position ?? null
+}
+
+export function createNativeTargetTracker() {
+  let previous = ''
+  return (document: string, text: string, preferEditable = false): number[] | null => {
+    const target = targetIn(document, text, false, preferEditable)
+    const signature = target?.signature ?? ''
+    const stable = !!target && signature === previous
+    previous = signature
+    return stable ? target.position : null
+  }
 }
