@@ -199,7 +199,7 @@ test('native rules persist edits, integer waits and every creator control agains
   await fill('Nom de la règle', 'Support messages mobile')
   await expect.poll(async () => Boolean(positionIn(await screen(), 'Enregistrer'))).toBe(true)
   await capture(info.outputPath('android-editor.png'))
-  await adb('shell', 'input', 'swipe', '360', '1000', '360', '300', '600')
+  await adb('shell', 'input', 'swipe', '360', '1000', '360', '600', '600')
   await capture(info.outputPath('android-flow.png'))
   await adb('shell', 'input', 'swipe', '360', '1000', '360', '300', '600')
   await capture(info.outputPath('android-flow-lower.png'))

@@ -126,6 +126,27 @@ test('the visual editor inserts branches and edits structured conditions without
   await page.goto(workspacePath(`/rules/new?agent=${fixture.agent.id}&instance=${fixture.instanceId}`))
   await signIn(page)
   await page.getByRole('textbox', { name: 'Rule name' }).fill('A visual support rule')
+  const graph = page.locator('.rule-graph')
+
+  async function expectUnscaledMenu() {
+    const menu = page.getByRole('menu', { name: 'Add a step', exact: true })
+    const popup = menu.locator('..')
+    await expect.poll(async () => (await popup.boundingBox())?.width).toBe(320)
+    const box = (await popup.boundingBox())!
+    const position = await popup.evaluate(element => ({ left: Number.parseFloat((element as HTMLElement).style.left), top: Number.parseFloat((element as HTMLElement).style.top) }))
+    expect(Math.abs(box.x - position.left)).toBeLessThan(1)
+    expect(Math.abs(box.y - position.top)).toBeLessThan(1)
+    expect(box.x).toBeGreaterThanOrEqual(8)
+    expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize()!.width - 7)
+    expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()!.height - 7)
+  }
+
+  for (let index = 0; index < 3; index++)
+    await graph.getByRole('button', { name: 'Zoom out', exact: true }).click()
+  await page.getByRole('button', { name: 'Add the first step', exact: true }).click()
+  await expectUnscaledMenu()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Add the first step', exact: true })).toBeFocused()
   await page.getByRole('button', { name: 'Add the first step', exact: true }).click()
   await expect.poll(() => page.getByRole('menu').evaluate(element => (element.closest('[popover]') ?? element).getBoundingClientRect().bottom)).toBeLessThanOrEqual((page.viewportSize()?.height ?? 0) + 1)
   await page.getByRole('menuitem', { name: /If \/ otherwise/ }).click()
@@ -138,7 +159,10 @@ test('the visual editor inserts branches and edits structured conditions without
   await expect(page.getByRole('textbox', { name: 'Rule name' })).toHaveValue('A visual support rule')
   await expect(page.locator('textarea[aria-label*="JSON"]')).toHaveCount(0)
   await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  for (let index = 0; index < 7; index++)
+    await graph.getByRole('button', { name: 'Zoom in', exact: true }).click()
   await page.getByRole('region', { name: 'When it holds', exact: true }).getByRole('button', { name: 'Add the first step', exact: true }).click()
+  await expectUnscaledMenu()
   await page.getByRole('menuitem', { name: /Remember a value/ }).click()
   await page.getByRole('textbox', { name: 'Name', exact: true }).fill('lastAuthor')
   await page.getByRole('textbox', { name: 'Value', exact: true }).fill('Saved {{payload.author}}')

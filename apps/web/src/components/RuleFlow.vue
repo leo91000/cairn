@@ -136,6 +136,7 @@ const ranTone: Record<string, string> = {
         </li>
         <li v-if="editable" class="flow-gap insertion-gap relative flex items-center justify-center py-1.5">
           <MenuButton
+            teleport
             :label="nodes.length ? 'Add a step here' : 'Add the first step'"
             menu-label="Add a step"
             :width="320"
@@ -323,6 +324,7 @@ const ranTone: Record<string, string> = {
           </li>
           <li v-if="editable" class="flow-gap insertion-gap relative flex items-center justify-center py-1.5">
             <MenuButton
+              teleport
               label="Add a step here"
               menu-label="Add a step"
               :width="320"
