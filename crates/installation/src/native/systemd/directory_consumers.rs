@@ -1,0 +1,815 @@
+//! Directory consumers are attributed by a pinned tree and its filesystem root,
+//! never by the shared device number used by every conversation on this node.
+use crate::error::{Error, Result};
+use crate::native::workspace::mount_path as unescape;
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::fs::{MetadataExt, OpenOptionsExt},
+    },
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+struct Source {
+    path: PathBuf,
+    directory: File,
+    device: String,
+    filesystem_root: PathBuf,
+    project: Option<u32>,
+}
+
+fn vanished(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH))
+}
+
+fn directory(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+fn descriptor(file: &File) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}
+
+fn read(path: &Path) -> io::Result<String> {
+    let mut value = String::new();
+    File::open(path)?
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_string(&mut value)?;
+    if value.len() > 16 * 1024 * 1024 {
+        return Err(io::Error::other("Consumer inventory exceeded its bound"));
+    }
+    Ok(value)
+}
+
+fn origin(path: &Path, device: &str, mounts: &str) -> io::Result<PathBuf> {
+    let mut selected: Option<(PathBuf, PathBuf)> = None;
+    for line in mounts.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() < 6 || fields[2] != device {
+            continue;
+        }
+        let mount = unescape(fields[4])?;
+        if path.starts_with(&mount)
+            && selected
+                .as_ref()
+                .is_none_or(|(old, _)| mount.components().count() > old.components().count())
+        {
+            selected = Some((mount, unescape(fields[3])?));
+        }
+    }
+    let (mount, root) = selected
+        .ok_or_else(|| io::Error::other("Native directory filesystem origin is unknown"))?;
+    Ok(root.join(path.strip_prefix(mount).map_err(io::Error::other)?))
+}
+
+impl Source {
+    fn open(path: &Path) -> Result<Self> {
+        Self::open_tree(path, true)
+    }
+
+    fn open_tree(path: &Path, quota: bool) -> Result<Self> {
+        crate::native::workspace::require_no_mounts(path)?;
+        let directory = directory(path)?;
+        let metadata = directory.metadata()?;
+        let device = format!(
+            "{}:{}",
+            libc::major(metadata.dev()),
+            libc::minor(metadata.dev())
+        );
+        let filesystem_root = origin(path, &device, &read(Path::new("/proc/self/mountinfo"))?)?;
+        let project = if quota {
+            Some(crate::native::quota::owned_project(path, &directory)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            path: path.to_owned(),
+            directory,
+            device,
+            filesystem_root,
+            project,
+        })
+    }
+
+    fn revalidate(&self) -> Result<()> {
+        let current = fs::symlink_metadata(&self.path)?;
+        let owned = self.directory.metadata()?;
+        if !current.is_dir() || current.dev() != owned.dev() || current.ino() != owned.ino() {
+            return Err(Error::conflict(
+                "Native consumer inventory belongs to a replaced directory.",
+            ));
+        }
+        if let Some(project) = self.project
+            && crate::native::quota::owned_project(&self.path, &self.directory)? != project
+        {
+            return Err(Error::conflict("Native consumer quota identity changed."));
+        }
+        Ok(())
+    }
+
+    fn owns_mount(&self, device: &str, root: &Path) -> bool {
+        device == self.device && root.starts_with(&self.filesystem_root)
+    }
+
+    fn docker_bind(&self, mounts: &str, id: &str) -> io::Result<bool> {
+        for line in mounts.lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() < 5 {
+                return Err(io::Error::other("Invalid consumer mount inventory"));
+            }
+            let root = unescape(fields[3])?;
+            if self.owns_mount(fields[2], &root)
+                && ["hostname", "hosts", "resolv.conf"]
+                    .iter()
+                    .any(|name| root.ends_with(Path::new("containers").join(id).join(name)))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+fn container(cgroup: &str) -> Option<&str> {
+    let id = cgroup
+        .trim()
+        .strip_prefix("0::/system.slice/docker-")?
+        .strip_suffix(".scope")?;
+    (id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(id)
+}
+
+struct Scope {
+    name: String,
+    file: File,
+}
+
+impl Scope {
+    fn attribute(
+        root: &Path,
+        name: String,
+        proof: impl FnOnce() -> io::Result<bool>,
+    ) -> io::Result<Option<Self>> {
+        // Open BEFORE collecting positive attribution. A rescan followed by a
+        // separate pathname open can instead pin a newly reused foreign scope.
+        let file = directory(&root.join(&name))?;
+        if !proof()? {
+            return Ok(None);
+        }
+        let original = file.metadata()?;
+        let current = fs::metadata(root.join(&name))?;
+        if (original.dev(), original.ino()) != (current.dev(), current.ino()) {
+            return Err(io::Error::other(
+                "Native Docker scope changed during attribution",
+            ));
+        }
+        Ok(Some(Self { name, file }))
+    }
+}
+
+fn owned_scopes(source: &Source) -> io::Result<BTreeMap<String, Scope>> {
+    let mut scopes: BTreeMap<String, Scope> = BTreeMap::new();
+    for process in fs::read_dir("/proc")? {
+        let process = process?;
+        if !process
+            .file_name()
+            .as_encoded_bytes()
+            .iter()
+            .all(u8::is_ascii_digit)
+        {
+            continue;
+        }
+        let inspect = || -> io::Result<Option<Scope>> {
+            // Pin procfs before reading identity, so PID reuse cannot redirect
+            // a later read to the replacement process's mount namespace.
+            let process_file = directory(&process.path())?;
+            let process = descriptor(&process_file);
+            let group = read(&process.join("cgroup"))?;
+            let Some(id) = container(&group) else {
+                return Ok(None);
+            };
+            Scope::attribute(
+                Path::new("/sys/fs/cgroup/system.slice"),
+                format!("docker-{id}.scope"),
+                || {
+                    let mounts = read(&process.join("mountinfo"))?;
+                    Ok(read(&process.join("cgroup"))? == group
+                        && source.docker_bind(&mounts, id)?)
+                },
+            )
+        };
+        match inspect() {
+            Ok(Some(scope)) => {
+                if let Some(previous) = scopes.get(&scope.name) {
+                    let old = previous.file.metadata()?;
+                    let current = scope.file.metadata()?;
+                    if (old.dev(), old.ino()) != (current.dev(), current.ino()) {
+                        return Err(io::Error::other(
+                            "Native Docker scope was replaced during inventory",
+                        ));
+                    }
+                } else {
+                    scopes.insert(scope.name.clone(), scope);
+                }
+            }
+            Ok(None) => {}
+            Err(error) if vanished(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(scopes)
+}
+
+fn populated(group: &File) -> io::Result<bool> {
+    match read(&descriptor(group).join("cgroup.events")) {
+        Ok(events) => Ok(events.lines().any(|line| line == "populated 1")),
+        Err(error) if vanished(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn terminate(group: &File, scope: &str) -> io::Result<()> {
+    for pid in read(&descriptor(group).join("cgroup.procs"))?.lines() {
+        let pid = pid.parse::<libc::pid_t>().map_err(io::Error::other)?;
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if pidfd < 0 {
+            let error = io::Error::last_os_error();
+            if vanished(&error) {
+                continue;
+            }
+            return Err(error);
+        }
+        let pidfd = unsafe { File::from_raw_fd(pidfd as i32) };
+        let membership = match read(&PathBuf::from(format!("/proc/{pid}/cgroup"))) {
+            Ok(group) => group,
+            Err(error) if vanished(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        if !membership
+            .lines()
+            .any(|line| line == format!("0::/system.slice/{scope}"))
+        {
+            continue;
+        }
+        let original = group.metadata()?;
+        let current = match fs::metadata(Path::new("/sys/fs/cgroup/system.slice").join(scope)) {
+            Ok(metadata) => metadata,
+            Err(error) if vanished(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        if (original.dev(), original.ino()) != (current.dev(), current.ino()) {
+            return Err(io::Error::other(
+                "Native Docker cgroup was replaced before signalling",
+            ));
+        }
+        if unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                pidfd.as_raw_fd(),
+                libc::SIGTERM,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            if !vanished(&error) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn inspect_namespace(namespace: File, device: String, root: PathBuf) -> io::Result<bool> {
+    let host_proc = directory(Path::new("/proc"))?;
+    // The target may mount a procfs in a different PID namespace. Open its
+    // mountinfo through pinned host procfs after setns, not through target /proc.
+    std::thread::spawn(move || -> io::Result<bool> {
+        if unsafe { libc::unshare(libc::CLONE_FS) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut pending = vec![namespace];
+        let mut visited = std::collections::HashSet::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while let Some(namespace) = pending.pop() {
+            if std::time::Instant::now() >= deadline || visited.len() > 1024 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Namespace graph inspection exceeded its bound",
+                ));
+            }
+            if !visited.insert((namespace.metadata()?.dev(), namespace.metadata()?.ino())) {
+                continue;
+            }
+            if unsafe { libc::ioctl(namespace.as_raw_fd(), 0xb703) } != libc::CLONE_NEWNS {
+                return Err(io::Error::other(
+                    "Retained namespace is not a mount namespace",
+                ));
+            }
+            if unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let fd = unsafe {
+                libc::openat(
+                    host_proc.as_raw_fd(),
+                    c"thread-self/mountinfo".as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut mounts = String::new();
+            unsafe { File::from_raw_fd(fd) }
+                .take(16 * 1024 * 1024 + 1)
+                .read_to_string(&mut mounts)?;
+            if mounts.len() > 16 * 1024 * 1024 {
+                return Err(io::Error::other(
+                    "Namespace mount inventory exceeded its bound",
+                ));
+            }
+            for line in mounts.lines() {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                if fields.len() < 5 {
+                    return Err(io::Error::other("Invalid mount inventory"));
+                }
+                if fields[2] == device && unescape(fields[3])?.starts_with(&root) {
+                    return Ok(true);
+                }
+            }
+            for reference in crate::native::block::holders::namespace_mounts(&mounts)? {
+                pending.push(reference.open()?);
+            }
+        }
+        Ok(false)
+    })
+    .join()
+    .map_err(|_| io::Error::other("Native namespace inventory thread failed"))?
+}
+
+// Each task may have a separate descriptor table after unshare(CLONE_FILES).
+// Keep its proc directory pinned until every returned path has been inspected.
+fn task_descriptors(task: &File) -> io::Result<Vec<(PathBuf, bool)>> {
+    let task = descriptor(task);
+    let mut descriptors = fs::read_dir(task.join("fd"))?
+        .map(|entry| entry.map(|entry| (entry.path(), false)))
+        .collect::<io::Result<Vec<_>>>()?;
+    descriptors.extend([
+        (task.join("cwd"), true),
+        (task.join("root"), true),
+        (task.join("exe"), true),
+    ]);
+    Ok(descriptors)
+}
+
+fn remaining(source: &Source) -> io::Result<usize> {
+    let mut namespaces = std::collections::BTreeMap::new();
+    let mut remaining = 0;
+    let current = std::process::id().to_string();
+    for reference in
+        crate::native::block::holders::namespace_mounts(&read(Path::new("/proc/self/mountinfo"))?)?
+    {
+        let namespace = reference.open()?;
+        let metadata = namespace.metadata()?;
+        namespaces.insert((metadata.dev(), metadata.ino()), namespace);
+    }
+    for process in fs::read_dir("/proc")? {
+        let process = process?;
+        let name = process.file_name();
+        if !name.as_encoded_bytes().iter().all(u8::is_ascii_digit) {
+            continue;
+        }
+        let inspect = || -> io::Result<(Vec<File>, bool)> {
+            let process_file = directory(&process.path())?;
+            let path = descriptor(&process_file);
+            let mut held = Vec::new();
+            let mut descriptors = Vec::new();
+            let mut pinned_tasks = Vec::new();
+            for task in fs::read_dir(path.join("task"))? {
+                let task = task?;
+                let task = match directory(&task.path()) {
+                    Ok(task) => task,
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                match task_descriptors(&task) {
+                    Ok(paths) => descriptors.extend(paths),
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error),
+                }
+                match File::open(descriptor(&task).join("ns/mnt")) {
+                    Ok(namespace) => held.push(namespace),
+                    Err(error) if vanished(&error) => {}
+                    Err(error) => return Err(error),
+                }
+                pinned_tasks.push(task);
+            }
+            // Include task-less namespaces pinned only by an FD, even those
+            // held by the controller. Snapshot names before opening duplicates.
+            descriptors.extend(
+                fs::read_dir(path.join("map_files"))?
+                    .map(|entry| entry.map(|entry| (entry.path(), true)))
+                    .collect::<io::Result<Vec<_>>>()?,
+            );
+            let mut files = false;
+            let mounts = if source.project.is_none() {
+                read(&path.join("mountinfo"))?
+            } else {
+                String::new()
+            };
+            for (path, filesystem_reference) in descriptors {
+                let target = match fs::read_link(&path) {
+                    Ok(target) => target,
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                if target.as_os_str().as_encoded_bytes().starts_with(b"mnt:[") {
+                    match File::open(&path) {
+                        Ok(namespace) => held.push(namespace),
+                        Err(error) if vanished(&error) => {}
+                        Err(error) => return Err(error),
+                    }
+                    continue;
+                }
+                if name == current.as_str() && !filesystem_reference || source.project == Some(0) {
+                    continue;
+                }
+                let metadata = match fs::metadata(&path) {
+                    Ok(value) => value,
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                if metadata.dev() != source.directory.metadata()?.dev()
+                    || !(metadata.is_file() || metadata.is_dir())
+                {
+                    continue;
+                }
+                let file = match OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(path)
+                {
+                    Ok(file) => file,
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                let owned = match source.project {
+                    Some(project) => crate::native::quota::project_io(&file)? == project,
+                    None => source
+                        .owns_mount(&source.device, &origin(&target, &source.device, &mounts)?),
+                };
+                files |= owned;
+            }
+            Ok((held, files))
+        };
+        match inspect() {
+            Ok((held, files)) => {
+                remaining += usize::from(files);
+                for namespace in held {
+                    let metadata = namespace.metadata()?;
+                    namespaces
+                        .entry((metadata.dev(), metadata.ino()))
+                        .or_insert(namespace);
+                }
+            }
+            Err(error) if vanished(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    for namespace in namespaces.into_values() {
+        remaining += usize::from(inspect_namespace(
+            namespace,
+            source.device.clone(),
+            source.filesystem_root.clone(),
+        )?);
+    }
+    Ok(remaining)
+}
+
+async fn scopes(source: &Arc<Source>) -> Result<BTreeMap<String, Scope>> {
+    let source = source.clone();
+    tokio::task::spawn_blocking(move || owned_scopes(&source))
+        .await
+        .map_err(Error::internal)?
+        .map_err(Into::into)
+}
+
+/// Legacy managed temporary files live on the control filesystem, without a
+/// project quota. After execution fencing, prove their exact pinned subtree is
+/// unused. This inventory never signals processes or shared-filesystem peers.
+pub(in crate::native) async fn require_unused_legacy_temporary(path: &Path) -> Result<()> {
+    let source = Arc::new(Source::open_tree(path, false)?);
+    source.revalidate()?;
+    let observing = source.clone();
+    let remaining = tokio::task::spawn_blocking(move || remaining(&observing))
+        .await
+        .map_err(Error::internal)??;
+    source.revalidate()?;
+    if remaining != 0 {
+        return Err(Error::conflict(
+            "Legacy native temporary files still have consumers; cleanup will retry.",
+        ));
+    }
+    Ok(())
+}
+
+/// Workload and daemon fencing precede this call. Only a positively attributed
+/// Docker scope can be signalled; unknown consumers keep ownership and an error.
+pub(in crate::native) async fn stop(path: &Path) -> Result<()> {
+    let source = Arc::new(Source::open(path)?);
+    source.revalidate()?;
+    let owned = scopes(&source).await?;
+    for scope in owned.into_values() {
+        source.revalidate()?;
+        let group = scope.file;
+        match terminate(&group, &scope.name) {
+            Ok(()) => {}
+            Err(error) if vanished(&error) => continue,
+            Err(error) => return Err(error.into()),
+        }
+        let graceful = tokio::time::Instant::now() + Duration::from_secs(10);
+        let deadline = graceful + Duration::from_secs(10);
+        let mut forced = false;
+        while populated(&group)? {
+            source.revalidate()?;
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(Error::unavailable(
+                    "Attributed native Docker consumers did not stop; directory ownership is retained.",
+                ));
+            }
+            if now >= graceful && !forced {
+                // Open relative to the pinned original cgroup. A replacement
+                // scope with the same pathname can never receive this kill.
+                let kill = descriptor(&group).join("cgroup.kill");
+                OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(kill)?
+                    .write_all(b"1")?;
+                forced = true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tracing::info!(target: "cairn_performance", parent: None, operation = "native_directory_consumers", forced, "Stopped a directory-attributed Docker scope");
+    }
+    source.revalidate()?;
+    let observing = source.clone();
+    let remaining = tokio::task::spawn_blocking(move || remaining(&observing))
+        .await
+        .map_err(Error::internal)??;
+    source.revalidate()?;
+    if remaining != 0 {
+        tracing::warn!(target: "cairn_performance", parent: None, operation = "native_directory_consumers", remaining, "Directory close waits for unattributed external consumers");
+        return Err(Error::conflict(
+            "Native directory has external mount or file consumers; ownership is retained and cleanup will retry.",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires CAP_SYS_ADMIN in a disposable mount namespace"]
+    fn persistent_mount_namespace_keeps_directory_ownership_without_tasks() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = tempfile::tempdir().unwrap();
+        let source_path = root.path().join("retained");
+        let bind_path = root.path().join("held");
+        let pin = root.path().join("namespace");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&bind_path).unwrap();
+        fs::write(source_path.join("work"), b"retained work").unwrap();
+        File::create(&pin).unwrap();
+        let source = Source::open_tree(&source_path, false).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let (release, finish) = std::sync::mpsc::channel();
+        let from = source_path.clone();
+        let target = bind_path.clone();
+        let task = std::thread::spawn(move || {
+            assert_eq!(
+                unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_FS) },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        std::ptr::null(),
+                        c"/".as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_REC | libc::MS_PRIVATE,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            let from = std::ffi::CString::new(from.as_os_str().as_bytes()).unwrap();
+            let target = std::ffi::CString::new(target.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        from.as_ptr(),
+                        target.as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_BIND,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            send.send(unsafe { libc::syscall(libc::SYS_gettid) })
+                .unwrap();
+            finish.recv().unwrap();
+        });
+        let tid = receive.recv().unwrap();
+        let namespace = std::ffi::CString::new(format!("/proc/{tid}/ns/mnt")).unwrap();
+        let pin_name = std::ffi::CString::new(pin.as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe {
+                libc::mount(
+                    namespace.as_ptr(),
+                    pin_name.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND,
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        release.send(()).unwrap();
+        task.join().unwrap();
+        assert!(!Path::new(&format!("/proc/self/task/{tid}")).exists());
+        // There is no surviving member task or namespace FD. Only the nsfs
+        // mount pins the private bind; the ownership fence must still find it.
+        let result = remaining(&source);
+        assert_eq!(unsafe { libc::umount2(pin_name.as_ptr(), 0) }, 0);
+        assert!(result.unwrap() > 0);
+        assert_eq!(
+            fs::read(source_path.join("work")).unwrap(),
+            b"retained work"
+        );
+    }
+
+    #[test]
+    fn independent_thread_descriptor_table_is_inventoried() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = root.path().join("payload");
+        fs::write(&payload, b"retained").unwrap();
+        let target = payload.clone();
+        let (ready, observed) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            assert_eq!(unsafe { libc::unshare(libc::CLONE_FILES) }, 0);
+            let _file = File::open(target).unwrap();
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+            ready.send(tid).unwrap();
+            released.recv().unwrap();
+        });
+        let tid = observed.recv().unwrap();
+        let task = directory(&PathBuf::from(format!("/proc/self/task/{tid}"))).unwrap();
+        let listed = task_descriptors(&task).unwrap();
+        let found = listed
+            .iter()
+            .any(|(path, _)| fs::read_link(path).ok().as_ref() == Some(&payload));
+        let leader = directory(
+            Path::new("/proc/self/task")
+                .join(std::process::id().to_string())
+                .as_path(),
+        )
+        .unwrap();
+        let leader_has_payload = task_descriptors(&leader)
+            .unwrap()
+            .iter()
+            .any(|(path, _)| fs::read_link(path).ok().as_ref() == Some(&payload));
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        assert!(found, "thread-only descriptor was omitted");
+        assert!(
+            !leader_has_payload,
+            "fixture did not separate descriptor tables"
+        );
+    }
+
+    #[test]
+    fn cgroup_attribution_never_returns_a_replacement_opened_after_its_proof() {
+        let root = tempfile::tempdir().unwrap();
+        let name = format!("docker-{}.scope", "a".repeat(64));
+        let original = root.path().join(&name);
+        fs::create_dir(&original).unwrap();
+        let pinned = Scope::attribute(root.path(), name.clone(), || Ok(true))
+            .unwrap()
+            .unwrap();
+        let original_inode = pinned.file.metadata().unwrap().ino();
+        drop(pinned);
+        let result = Scope::attribute(root.path(), name.clone(), || {
+            fs::rename(&original, root.path().join("retired")).unwrap();
+            fs::create_dir(&original).unwrap();
+            // This is the stale positive process/mount evidence that used to
+            // precede opening the replacement cgroup by its recycled pathname.
+            Ok(true)
+        });
+        assert!(result.is_err());
+        assert_ne!(fs::metadata(&original).unwrap().ino(), original_inode);
+        assert_eq!(
+            fs::metadata(root.path().join("retired")).unwrap().ino(),
+            original_inode
+        );
+    }
+
+    #[test]
+    fn shared_device_and_inherited_mounts_do_not_attribute_another_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Source {
+            path: root.path().to_owned(),
+            directory: directory(root.path()).unwrap(),
+            device: "8:1".into(),
+            filesystem_root: "/native/ours/workload".into(),
+            project: Some(1),
+        };
+        let id = "a".repeat(64);
+        let line = |path: &str| format!("1 0 8:1 {path} /etc/hosts rw - ext4 /dev/test rw\n");
+        assert!(
+            source
+                .docker_bind(
+                    &line(&format!(
+                        "/native/ours/workload/data/docker/containers/{id}/hosts"
+                    )),
+                    &id
+                )
+                .unwrap()
+        );
+        for path in [
+            "/".to_owned(),
+            format!("/native/other/workload/data/docker/containers/{id}/hosts"),
+            "/native/ours/workload-other".to_owned(),
+            "/native/ours/workload/user-file".to_owned(),
+        ] {
+            assert!(!source.docker_bind(&line(&path), &id).unwrap());
+        }
+        assert_eq!(
+            origin(
+                Path::new("/state/native/ours/workload"),
+                "8:1",
+                "1 0 8:1 /subtree /state rw - ext4 /dev/test rw\n"
+            )
+            .unwrap(),
+            Path::new("/subtree/native/ours/workload")
+        );
+    }
+
+    #[test]
+    fn legacy_temporary_identity_uses_its_exact_filesystem_subtree_without_a_project() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("tmp");
+        fs::create_dir(&path).unwrap();
+        let source = Source::open_tree(&path, false).unwrap();
+        assert!(source.project.is_none());
+        source.revalidate().unwrap();
+        let mounts = format!(
+            "1 0 {} {} /tmp rw - ext4 /dev/test rw\n",
+            source.device,
+            source.filesystem_root.display()
+        );
+        assert!(source.owns_mount(
+            &source.device,
+            &origin(Path::new("/tmp/work"), &source.device, &mounts).unwrap()
+        ));
+        let peer = source
+            .filesystem_root
+            .parent()
+            .unwrap()
+            .join("other/tmp/work");
+        assert!(!source.owns_mount(&source.device, &peer));
+        fs::rename(&path, root.path().join("retired")).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(source.revalidate().is_err());
+    }
+
+    #[test]
+    fn replaced_directory_invalidates_a_saved_consumer_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("workload");
+        fs::create_dir(&path).unwrap();
+        let source = Source {
+            path: path.clone(),
+            directory: directory(&path).unwrap(),
+            device: "8:1".into(),
+            filesystem_root: "/workload".into(),
+            project: Some(1),
+        };
+        fs::rename(&path, root.path().join("old")).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(source.revalidate().is_err());
+    }
+}

@@ -11,6 +11,61 @@ tokio::task_local! {
 use super::{Worker, checkpoint::RunCheckpoint};
 use crate::{config::now, store::Db, validation::text};
 
+/// Read-only credential observation for one retained environment. This grants
+/// no tool access and cannot survive replacement, expiry or revocation.
+#[derive(Clone)]
+pub(crate) struct Observation {
+    run: String,
+    execution: serde_json::Value,
+    attempt: String,
+    generation: String,
+}
+
+impl Observation {
+    pub(crate) fn capture(run: &serde_json::Value, saved: &RunCheckpoint) -> Option<Self> {
+        let held = saved.held_environment.as_ref()?;
+        Some(Self {
+            run: text(run, "id").into(),
+            execution: crate::waits::execution_id(run).clone(),
+            attempt: held.attempt.clone(),
+            generation: held.generation.clone(),
+        })
+    }
+
+    pub(crate) fn authorize(&self, db: &Db<'_>) -> crate::error::Result<()> {
+        use crate::error::{Error, required};
+        let run = required(db.run(&self.run)?, "Run not found")?;
+        let saved = required(
+            RunCheckpoint::load_in(db, &self.run)?,
+            "Environment missing",
+        )?;
+        let current = required(
+            db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
+            "Agent not found",
+        )?;
+        if crate::waits::execution_id(&run) != &self.execution
+            || !authorized(db, &run, &self.attempt)?
+            || saved
+                .held_environment
+                .as_ref()
+                .is_none_or(|held| held.generation != self.generation)
+            || crate::waits::Owner::for_run(db, &run)?.run_id() != self.run
+            || !crate::service::covers(&current, &run["snapshot"]["agent"])
+        {
+            return Err(Error::forbidden(
+                "The observed environment ended or changed.",
+            ));
+        }
+        crate::delegation::authorize_run(db, &run)
+    }
+
+    pub(crate) fn authority(&self) -> crate::capabilities::plugin_packages::Authority {
+        let observation = self.clone();
+        crate::capabilities::plugin_packages::Authority::default()
+            .with_guard(move |db| observation.authorize(db))
+    }
+}
+
 /// Holding an environment is explicit and bounded; an ordinary completed run
 /// must never renew a lease merely because its old checkpoint still exists.
 pub(crate) fn authorized(
@@ -299,6 +354,49 @@ pub(crate) async fn turn_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn observation_requires_the_same_live_environment_after_provider_completion() {
+        use crate::{run_fixture::DbRunFixture, run_status::RunStatus};
+        use serde_json::json;
+        let root = tempfile::tempdir().unwrap();
+        let config = serde_json::from_value(json!({
+            "dataDir":root.path().join("data"),"home":root.path().join("home"),
+            "workspaceRoots":[root.path()],"publicUrl":"http://localhost:4310",
+            "host":"127.0.0.1","port":4310,"codexBin":"codex","concurrency":1,
+            "logger":false,"workerEnabled":false,"runnerUrl":"http://runner.invalid"
+        }))
+        .unwrap();
+        let service = crate::service::Service::new(config).await.unwrap();
+        let agent = service
+            .agent_snapshot(crate::config::MAIN_AGENT_ID)
+            .await
+            .unwrap();
+        service.store.transaction(move |db| {
+            let record = db.add_run_fixture(&json!({"id":"observed","taskId":"observed","status":"succeeded","snapshot":{"agent":agent,"projects":[]}}),None)?;
+            let mut saved = RunCheckpoint::fresh(None);
+            saved.runner_id = Some(Some("attempt".into()));
+            saved.completed = Some(true);
+            saved.held_environment = Some(super::super::checkpoint::HeldEnvironment { attempt:"attempt".into(),generation:"generation".into(),expires_at:now()+60_000 });
+            saved.store_in(db,"observed")?;
+            let observation = Observation::capture(&record,&saved).unwrap();
+            observation.authorize(db)?;
+            let mut replaced = saved.clone();
+            replaced.held_environment.as_mut().unwrap().generation = "replacement".into();
+            replaced.store_in(db,"observed")?;
+            assert!(observation.authorize(db).is_err());
+            saved.store_in(db,"observed")?;
+            db.change_run("observed",crate::runs::RunChanges { cancel_requested_at:Some(Some(now())), ..Default::default() })?;
+            assert!(observation.authorize(db).is_err());
+            db.change_run("observed",crate::runs::RunChanges { cancel_requested_at:Some(None),status:Some(RunStatus::Failed), ..Default::default() })?;
+            assert!(observation.authorize(db).is_err());
+            db.change_run("observed",crate::runs::RunChanges { status:Some(RunStatus::Succeeded), ..Default::default() })?;
+            saved.held_environment.as_mut().unwrap().expires_at = now()-1;
+            saved.store_in(db,"observed")?;
+            assert!(observation.authorize(db).is_err());
+            Ok(())
+        }).await.unwrap();
+    }
 
     #[test]
     fn a_job_request_cannot_follow_a_replacement_environment() {

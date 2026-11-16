@@ -435,6 +435,7 @@ async fn granted_agents_see_github_conditions_and_others_do_not() {
             json!("delay"),
             json!("at"),
             json!("run_finished"),
+            json!("job_finished"),
             json!("github_workflow"),
             json!("github_pr_checks")
         ]
@@ -447,7 +448,12 @@ async fn granted_agents_see_github_conditions_and_others_do_not() {
         .unwrap();
     assert_eq!(
         types(&listing),
-        [json!("delay"), json!("at"), json!("run_finished")]
+        [
+            json!("delay"),
+            json!("at"),
+            json!("run_finished"),
+            json!("job_finished")
+        ]
     );
 }
 

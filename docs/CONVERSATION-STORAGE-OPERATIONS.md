@@ -7,76 +7,108 @@ Losing or revoking a node loses the working files of its environments. Push comm
 and export files that must survive that loss; machine backups are the operator's
 responsibility.
 
-## Local journal and consolidation
+## Retained native directories and VM images
 
-Both VM and native environments use a durable segmented journal and immutable
-local base blocks under `lazy/cache/<hash>`. Despite the directory name, these
-blocks are the disk itself: Cairn never evicts them to make room. A missing block
-prevents mounting the disk; a corrupt block fails authentication when read. No
-remote download replaces missing or damaged data.
+[ADR-0088](adr/0088-native-directories-and-direct-vm-images.md) defines the current
+formats. Native working files, home, private Docker data and managed temporary
+files live in ordinary directories under `state/native-data/<run>/`. This is one
+dedicated ext4 filesystem with project quotas, separate from controller metadata
+in `state/native/<run>/`. Each environment receives a non-reused project identity,
+a block limit and an inode limit based on the pool's actual geometry. No native
+block device, per-environment filesystem mount or application journal is created.
+The OS page cache is governed by the execution's memory cgroup. `memoryCacheMiB`
+remains a compatibility setting for legacy journals; it does not add a cache layer
+to the new directory/image paths.
 
-Completed turns seal a durable generation after filesystem synchronization. The
-node consolidates it in the background, outside guest I/O and turn completion.
-While the environment is mounted, a five-second check also seals a crash-consistent
-prefix once the journal reaches 1 GiB, or a quarter of the task allowance when
-smaller. Journal space or task-allowance pressure also triggers this work.
-Two background consolidations can run on a
-node at once. Space failures retry after a minute; they never discard the journal.
-Prepared environments remain journal-backed until assigned to a conversation.
+VMs receive `data.ext4` directly through Firecracker's block interface. The image
+size bounds its filesystem capacity. The VMM uses asynchronous file IO and discard;
+there is no ublk or application journal between the VMM and the file. While a VMM
+can write, its full image capacity is reserved against the node budget and
+physical free-space admission. Sparse holes and guest discards reduce actual
+allocation but cannot make that writable capacity available to a second VMM.
+Status reports actual allocated bytes separately from those admission promises.
+This conservative reservation can refuse an oversized sparse image even when
+its current data would fit. Closing the confirmed VMM releases the unused promise,
+while retained image bytes continue to count. Retained live VMMs keep their promise.
 
-Consolidation reconstructs changed 4 MiB blocks while newer writes continue in a
-new generation. Each new block file is synchronized, followed by its directory,
-before a SQLite transaction replaces the base and removes the old segment
-references. Segment files and obsolete block files are removed afterwards. A
-process crash before the transaction retains the previous base and journal; after
-it, recovery removes orphan segments, and a later consolidation retires obsolete
-block files. Newer writes remain owned throughout. This establishes process-crash
-recovery, not a physical power-loss qualification.
+CPU, memory, process count and IO throughput use cgroup controls; cgroups do not
+limit occupied storage bytes. Native execution has per-attempt read/write caps of
+64 MiB/s and a shared 256 MiB/s cap against the data pool's backing device. Project
+quotas enforce native allocated bytes and inodes for ordinary protected workloads.
+An unrestricted administrator can change or bypass kernel limits; in particular
+`CAP_SYS_RESOURCE` bypasses ext4 project hard limits. Controller pressure accounting
+and cancellation remain cooperative in that mode. Controller receipts stay
+writable if the separate data filesystem exhausts its inodes.
 
-The journal's `dirtyBytes` measures unconsolidated writes, not remote backup lag.
-It returns to zero when all writes have been consolidated. Completed-turn demand
-is drained after volume release, including overlapping seals and retries; status
-observation never interrupts that work. Stopping a retained VM
-releases RAM while preserving its disk, irrespective of this counter. Disk deletion
-after expiration or explicit conversation deletion likewise needs no publication.
-Once the VMM and its block backend have stopped, any acknowledged shutdown writes
-receive a final seal and background consolidation without advancing the completed
-turn's boundary. Anonymous prepared disks stay journal-backed.
+## Stop, failure and cleanup
 
-## Capacity and integrity
+Run completion fences the actual consumers before flushing. This includes private
+rootful Docker containers in external systemd scopes when their private metadata
+binds prove environment ownership. Shared device numbers or historical PIDs are
+insufficient evidence. Unknown consumers, replaced cgroups and incomplete waits
+remain explicit failures with ownership retained for recovery. The main systemd
+unit becoming empty alone does not establish closure.
 
-The node budget and physical free-space reserve cover the complete local
-environment, including journal, base blocks, internal consolidation copies and
-managed temporary files. VM and native task allowances count retained base blocks,
-journal and managed `/tmp`. Native automatic growth stays bounded by that
-allowance. Old sealed generations are consolidated before growth changes the disk geometry.
-Consolidation needs temporary room for replacement blocks before retiring old
-segments. Guest writes and consolidation both preserve the full configured node
-reserve and respect the node budget. No other environment is evicted for admission
-or growth.
+Native stop removes execution temporary files, containers and ephemeral Docker
+runtime state. It preserves the workspace, provider session files and private
+Docker images, build cache and volumes needed by a retained environment.
+A completed VM turn can retain its paused environment VMM and guest RAM under the
+existing slot, memory and idle-retention limits, accelerating the next turn.
+This is an owned, bounded environment resource; execution CPU remains paused.
+Explicit cancellation, VMM eviction and environment retirement close the VMM;
+retirement waits for that closure before removing its image. Same-node
+resume reuses that work; it does not reseed an initialized environment from the
+original checkout. Missing retained trees or images are refused explicitly.
 
-Only the internal replacement copy is outside the task allowance. Its logical
-size is bounded by the existing disk, and failed retries remove the previous
-candidate before creating another. This grants no additional working-file or
-`/tmp` capacity. At the base swap, the new base counts as retained data; the
-temporary credit covers only the still-present files it replaces until they are
-reclaimed. The copy remains fully charged to the shared node budget, including
-its actual filesystem allocation. Each new block admission uses the current full
-node reserve. If node headroom is insufficient, consolidation waits for space.
+After confirmed fencing, an ext4 EIO/read-only flush failure reports finalization
+failure and preserves the acknowledged crash prefix. Unflushed pages are not
+promised. VM shutdown waits for the exact child and its image flush; uncertain
+teardown retains its leases and retries observably. A controller restart may
+reconcile reservations only after the old execution namespace has been fenced.
 
-A full node waits for space. Consolidating overwritten journal history, expiring
-environments and deleting conversations are the ways Cairn releases disk backing.
-Disabling automatic expiration means an operator must arrange explicit cleanup.
-Integrity and space protection continue to stop unsafe I/O. Remote synchronization
-and backup-lag states no longer describe local disks.
+Expiration/deletion removes the environment's directories, images, private Docker
+data, temporary paths, old owned attachments and technical execution records.
+Quota retirement persists its intent outside the data pool, waits for open-unlinked
+bytes/inodes to disappear, then clears its kernel limits. A stale ownership record
+cannot retire a replacement directory. Immutable retirement receipts and small
+lock/ownership namespaces intentionally survive to reject delayed deletion requests
+after a new environment starts. Shared runtime/base caches and the native-data
+filesystem remain node resources under their existing cache/capacity rules.
+Prepared-directory initialization holds one durable environment-qualified cache
+pin until verified data and its format marker are durable. The pin also records
+its cache key and attempt identity; startup cleanup of temporary attempt pins
+cannot release this source. Interrupted copying restarts its private partial tree;
+interrupted publication verifies the already-renamed data without overwriting it.
+The pin is removed after publication or environment deletion. A committed marker
+wins over a leftover pin, preserving later user edits during cleanup.
 
-After every native workload process is fenced, admitted access and filesystem
-flushing can still need journal headroom. Close consolidates history under the same
-budgets. If the task allowance still cannot admit the pending writes, or that
-consolidation cannot proceed, finalization reports a flush failure and preserves
-the acknowledged crash prefix while releasing physical ownership. Unflushed kernel
-pages are not promised in that case. Neither `/tmp` nor filesystem finalization
-gets an extra allowance or a node-reserve exception.
+## Local format conversion
+
+Existing journal-backed environments use a compatibility reader during conversion.
+Their source remains intact until verified replacement data and a format marker
+are durable. Native conversion records a versioned proof of the replacement's
+filesystem/inode, contents, links, ownership/modes/timestamps and extended
+attributes. Replays validate that proof and quota ownership before publishing the
+format or deleting any surviving journal; missing or changed output keeps the
+journal intact. Obsolete unversioned verification markers fail explicitly without
+erasing either source. Native conversion copies files with ownership, links and xattrs,
+verifies them with a checksum pass and respects the destination quota. VM conversion
+exports the stopped logical disk, compares every byte and checks ext4 before
+publishing its direct image. Interrupted phases resume; a committed replacement
+wins over partly removed legacy files, whose cleanup is retried.
+
+Unknown formats, missing source data and mismatched ownership fail without making
+a new blank environment. Allow room for both the retained source and its temporary
+replacement. If space is insufficient, increase available capacity or expire the
+environment explicitly under its existing policy. No remote fetch is attempted.
+A recognized interrupted legacy resize restores its authoritative `resize-source`
+journal under ownership locks before conversion. Its partially resized raw image
+is never treated as retained data. Unknown or ambiguous resize states remain
+untouched and fail explicitly. Obsolete resize markers and source data are removed
+only after the new format is durably committed.
+
+A rollback to the old format needs an operator backup. This implementation's
+qualification does not authorize a production migration or deployment.
 
 ## Expiration, deletion and upgrades
 

@@ -38,6 +38,63 @@ pub struct Launch {
 
 type Preparation = Pin<Box<dyn Future<Output = Result<Launch>> + Send>>;
 
+/// Pin the managed credential directory before a provider can change paths.
+/// The environment, which outlives that provider, removes its access snapshot
+/// before publishing completion, including when the provider was killed.
+struct TurnCredentials(Option<(std::fs::File, PathBuf)>);
+
+impl TurnCredentials {
+    fn capture(plan: &Value, launch: &Launch) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if plan["chat"]["claudeManagedAuth"] != true {
+            return Ok(Self(None));
+        }
+        let path = plan["chat"]["claudeCredentialsDirectory"]
+            .as_str()
+            .or_else(|| {
+                launch
+                    .environment
+                    .get("CLAUDE_CONFIG_DIR")
+                    .map(String::as_str)
+            })
+            .ok_or_else(|| Error::bad("Missing managed credential directory."))?;
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        Ok(Self(Some((directory, path.into()))))
+    }
+
+    fn clear(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let Some((directory, path)) = &self.0 else {
+            return Ok(());
+        };
+        let result =
+            unsafe { libc::unlinkat(directory.as_raw_fd(), c".credentials.json".as_ptr(), 0) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error.into());
+            }
+        }
+        let pinned = directory.metadata()?;
+        let current = std::fs::symlink_metadata(path)?;
+        if !current.is_dir() || current.dev() != pinned.dev() || current.ino() != pinned.ino() {
+            return Err(Error::conflict(
+                "Managed credential directory changed; environment fencing is required.",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TurnCredentials {
+    fn drop(&mut self) {
+        let _ = self.clear();
+    }
+}
+
 /// Must be called inside the admitted execution namespaces and workload UID.
 /// The private controller socket outlives any individual provider process.
 pub async fn serve(
@@ -185,11 +242,12 @@ pub async fn serve(
                                     Err(error) => Event::Refused { request_id, message: error.message },
                                     Ok(command) => {
                                         if poisoned.is_cancelled() { return Err(Error::unavailable("Workload ownership is unknown; environment fencing is required.")); }
+                                        let credentials = TurnCredentials::capture(&plan, &command)?;
                                         // Publish the boundary before spawning: the controller must
                                         // record the log cursor before any provider output arrives.
                                         wire::write(&mut write, &Event::TurnStarted { turn_id: turn_id.clone() }).await?;
                                         turn_stop = lifetime.child_token();
-                                        turn = Some(spawn_turn(command, &executable, deadline, turn_id.clone(), events.clone(), turn_stop.clone(), poisoned.clone())?);
+                                        turn = Some(spawn_turn((command, credentials), &executable, deadline, turn_id.clone(), events.clone(), turn_stop.clone(), poisoned.clone())?);
                                         job_admission = plan["chat"]["planning"] != true && plan["chat"]["sandbox"] != "read-only";
                                         turns.insert(turn_id, plan);
                                         Event::Accepted { request_id }
@@ -245,7 +303,7 @@ fn immutable_policy(plan: &Value) -> Value {
 }
 
 fn spawn_turn(
-    launch: Launch,
+    prepared: (Launch, TurnCredentials),
     executable: &std::path::Path,
     deadline_boot_ms: u64,
     turn_id: String,
@@ -253,6 +311,7 @@ fn spawn_turn(
     stop: CancellationToken,
     poisoned: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<Result<()>>> {
+    let (launch, credentials) = prepared;
     let args = [vec![launch.program], launch.args].concat();
     let (parent, child_control) = std::os::unix::net::UnixStream::pair()?;
     parent.set_nonblocking(true)?;
@@ -362,7 +421,9 @@ fn spawn_turn(
             err.await.map_err(Error::internal)??;
             Ok::<_, Error>(())
         };
+        let credential_error = credentials.clear().err();
         let closed = confirmed
+            && credential_error.is_none()
             && matches!(
                 tokio::time::timeout(Duration::from_secs(2), readers).await,
                 Ok(Ok(()))
@@ -374,7 +435,11 @@ fn spawn_turn(
             true => Event::TurnFinished { turn_id, code },
             _ => Event::TurnFailed {
                 turn_id,
-                message: "Provider output did not finish before its deadline.".into(),
+                message: if credential_error.is_some() {
+                    "Managed provider credentials could not be cleared; environment fencing is required.".into()
+                } else {
+                    "Provider output did not finish before its deadline.".into()
+                },
             },
         };
         let delivered = matches!(
@@ -415,5 +480,46 @@ async fn forward(
             .send(event)
             .await
             .map_err(|_| Error::unavailable("Provider output channel closed."))?;
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn managed_credentials_clear_the_pinned_directory_and_preserve_unmanaged_files() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("credentials");
+        std::fs::create_dir(&directory).unwrap();
+        let launch = Launch {
+            program: String::new(),
+            args: vec![],
+            cwd: root.path().into(),
+            environment: crate::process::Environment::new(),
+            prompt: String::new(),
+        };
+        let mut plan = serde_json::json!({"chat":{"claudeManagedAuth":true,"claudeCredentialsDirectory":directory}});
+        let guard = TurnCredentials::capture(&plan, &launch).unwrap();
+        std::fs::write(directory.join(".credentials.json"), "managed").unwrap();
+        let moved = root.path().join("moved");
+        std::fs::rename(&directory, &moved).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join(".credentials.json"), "replacement").unwrap();
+        assert!(guard.clear().is_err());
+        assert!(!moved.join(".credentials.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(directory.join(".credentials.json")).unwrap(),
+            "replacement"
+        );
+        plan["chat"]["claudeManagedAuth"] = false.into();
+        TurnCredentials::capture(&plan, &launch)
+            .unwrap()
+            .clear()
+            .unwrap();
+        assert!(directory.join(".credentials.json").exists());
+        std::fs::write(moved.join(".credentials.json"), "managed-again").unwrap();
+        drop(guard);
+        assert!(!moved.join(".credentials.json").exists());
     }
 }

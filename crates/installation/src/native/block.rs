@@ -1,6 +1,6 @@
 //! Host-mounted ext4 over the same local journal and base blocks as VMs.
 mod closing;
-mod holders;
+pub(super) mod holders;
 
 use super::{atomic_write, workspace};
 use crate::{
@@ -246,17 +246,6 @@ fn verify_host_mount(state: &Path, mounted: &HostMount) -> Result<()> {
 struct RecoveryLeases {
     _workspace: crate::file_lock::Guard,
     disk: environment::Lease,
-}
-
-pub(super) fn recovery_mounts(state: &Path) -> Result<Vec<(PathBuf, String)>> {
-    let mounts = host_mounts(state, &std::fs::read_to_string("/proc/self/mountinfo")?)?;
-    for mounted in &mounts {
-        verify_host_mount(state, mounted)?;
-    }
-    Ok(mounts
-        .into_iter()
-        .map(|mounted| (mounted.path, mounted.device))
-        .collect())
 }
 
 pub(super) async fn recover_host_mounts(state: &Path, selected_run: &str) -> Result<()> {
@@ -653,54 +642,6 @@ async fn quiesce_holders(device: u64, attempt: &str, private_copies: bool) -> Re
     unreachable!()
 }
 
-/// Keep the volume available to local consolidation even while a
-/// filesystem flush holds its lifecycle lock waiting for journal headroom.
-pub struct Handle {
-    abort_started: std::sync::atomic::AtomicBool,
-    pub volume: Arc<Volume>,
-    pub filesystem: Arc<AtomicU64>,
-    pub mount: tokio::sync::Mutex<Mounted>,
-}
-
-impl Handle {
-    pub fn new(mount: Mounted) -> Self {
-        Self {
-            abort_started: std::sync::atomic::AtomicBool::new(false),
-            volume: mount.volume.clone(),
-            filesystem: mount.filesystem.clone(),
-            mount: tokio::sync::Mutex::new(mount),
-        }
-    }
-
-    pub async fn abort_io(self: &Arc<Self>) -> Result<()> {
-        self.volume.stop.cancel();
-        if self.abort_started.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        let handle = self.clone();
-        let spawned = std::thread::Builder::new()
-            .name("native-disk-abort".into())
-            .spawn(move || {
-                let result = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(Error::internal)
-                    .and_then(|runtime| {
-                        runtime.block_on(async { handle.mount.lock().await.abort_io().await })
-                    });
-                if let Err(error) = result {
-                    handle.abort_started.store(false, Ordering::Release);
-                    tracing::error!(%error, "Isolated native I/O abort failed; ownership retained");
-                }
-            });
-        if let Err(error) = spawned {
-            self.abort_started.store(false, Ordering::Release);
-            return Err(Error::internal(error));
-        }
-        Ok(())
-    }
-}
-
 pub struct Mounted {
     pub volume: Arc<Volume>,
     filesystem: Arc<AtomicU64>,
@@ -890,61 +831,6 @@ pub(super) async fn mount(
 }
 
 impl Mounted {
-    /// Journal -> kernel geometry -> ext4. A crash after either geometry change
-    /// leaves the journal geometry as intent for the next owned mount.
-    pub(crate) async fn grow(&mut self, bytes: u64) -> Result<bool> {
-        if self.closing.aborted || !self.closing.mounted || !storage::ublk::supports_growth() {
-            return Err(Error::unavailable(
-                "Online native disk growth is unavailable.",
-            ));
-        }
-        if bytes < self.volume.disk.size() {
-            return Err(Error::conflict(
-                "Native disk allowance cannot shrink retained geometry.",
-            ));
-        }
-        let filesystem = self.filesystem_bytes().await?;
-        if filesystem > bytes {
-            return Err(Error::conflict(
-                "Native filesystem exceeds its journal geometry.",
-            ));
-        }
-        if bytes == self.volume.disk.size() && filesystem == bytes {
-            return Ok(true);
-        }
-        if bytes > self.volume.disk.size() {
-            // Keep the mount and its leases alive through an uncancellable
-            // metadata commit; the caller owns the native lifecycle lock.
-            let disk = self.volume.disk.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                // Fold sealed generations into the base first: none may later
-                // reinstall the previous geometry. A concurrent consolidation
-                // leaves them pending, and growth retries on the next tick.
-                if disk.sealed_pending() {
-                    disk.consolidate()?;
-                }
-                disk.grow(bytes)
-            })
-            .await
-            .map_err(Error::internal)?;
-            match result {
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
-                result => result?,
-            }
-        }
-        let device = self.device.clone();
-        tokio::task::spawn_blocking(move || {
-            device
-                .lock()
-                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
-                .grow(bytes)
-        })
-        .await
-        .map_err(Error::internal)??;
-        self.finish_growth().await?;
-        Ok(true)
-    }
-
     async fn filesystem_bytes(&self) -> Result<u64> {
         let disk = self.volume.disk.clone();
         tokio::task::spawn_blocking(move || {
@@ -976,29 +862,6 @@ impl Mounted {
             return Err(Error::unavailable(
                 "Native filesystem growth is incomplete; it will retry.",
             ));
-        }
-        Ok(())
-    }
-
-    /// Keep this object owned on every error: an uncertain flush/unmount cannot
-    /// release its physical lease or terminate a backend still serving a mount.
-    pub async fn abort_io(&mut self) -> Result<()> {
-        // Abort after cancellation during preparation, a failed systemd fence,
-        // or a fenced filesystem's terminal read-only flush failure. A later
-        // non-lazy unmount remains mandatory. The journal is a crash prefix.
-        self.closing.aborted = true;
-        self.volume.stop.cancel();
-
-        {
-            let device = self.device.clone();
-            tokio::task::spawn_blocking(move || {
-                device
-                    .lock()
-                    .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
-                    .abort_io()
-            })
-            .await
-            .map_err(Error::internal)??;
         }
         Ok(())
     }
@@ -1118,7 +981,7 @@ pub async fn sync(path: &Path) -> Result<()> {
     sync_io(path).await.map_err(Into::into)
 }
 
-async fn sync_io(path: &Path) -> std::io::Result<()> {
+pub(super) async fn sync_io(path: &Path) -> std::io::Result<()> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
@@ -1150,9 +1013,30 @@ fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> Result<()> {
+    initialize_admitted(
+        state,
+        run,
+        plan,
+        budget,
+        std::sync::Arc::new(std::sync::Mutex::new(|_| Ok(()))),
+    )
+    .await
+}
+
+pub(super) async fn initialize_admitted<F>(
+    state: &Path,
+    run: &str,
+    plan: &Value,
+    budget: u64,
+    admit: std::sync::Arc<std::sync::Mutex<F>>,
+) -> Result<()>
+where
+    F: FnMut(u64) -> Result<()> + Send + 'static,
+{
     let root = workspace::directory(state, run)?;
-    let data = root.join("data");
+    let data = view(state, run).await?.filesystems[0].clone();
     if root.join("block-initialized").exists() {
         return Ok(());
     }
@@ -1164,21 +1048,29 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
             tokio::fs::remove_dir_all(&staged).await?;
         }
         {
+            admit.lock().map_err(Error::internal)?(5120)?;
             private_dir(&staged).await?;
             let seed = crate::microvm::plan::Plan::new(plan.clone());
             let source = seed
                 .imports()
                 .find(|import| import.target == text(plan, "projectRoot"))
                 .ok_or_else(|| Error::bad("Missing native workspace seed."))?;
-            if !crate::project_archives::initialize(
+            if !crate::project_archives::initialize_admitted(
                 plan,
                 source.source,
                 &staged.join("workspaces"),
                 budget,
+                admit.clone(),
             )
             .await?
             {
-                workspace::copy(source.source, &staged.join("workspaces"), budget).await?;
+                workspace::copy_admitted(
+                    source.source,
+                    &staged.join("workspaces"),
+                    budget,
+                    &mut |bytes| admit.lock().map_err(Error::internal)?(bytes),
+                )
+                .await?;
             }
         }
         for name in ["home", "workspaces", "output"] {
@@ -1189,10 +1081,12 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
                 }
                 tokio::fs::rename(staged.join(name), &target).await?;
             } else {
+                admit.lock().map_err(Error::internal)?(5120)?;
                 private_dir(&target).await?;
             }
         }
         workspace::sync_directories(&data).await?;
+        admit.lock().map_err(Error::internal)?(5120)?;
         atomic_write(&data.join(".cairn-seed-complete"), run.as_bytes()).await?;
         sync(&data).await?;
         tokio::fs::remove_dir_all(staged).await?;
@@ -1312,10 +1206,7 @@ async fn remove(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>> {
-    super::cleanup::check(state, run)?;
-    let lease = environment::lock(state, run, DISK_BUSY).await?;
-    let directory = &lease.directory;
+pub(super) async fn action_locked(directory: &Path, delete: bool) -> Result<Vec<String>> {
     let replacement = storage::runtime::replacement(directory).await?;
     let mut grants = Vec::new();
     let mut entries = tokio::fs::read_dir(directory).await?;
@@ -1460,6 +1351,11 @@ mod tests {
     async fn native_volume_admission_consolidates_overwrites_before_the_task_allowance_is_exhausted()
      {
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
         let directory = root.path().join("disks/native");
         let block = 4 * 1024 * 1024u64;
         let policy = json!({ "reserveMiB": 64, "reservePercent": 1 });

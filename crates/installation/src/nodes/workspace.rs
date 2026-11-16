@@ -331,6 +331,17 @@ pub async fn seed(
     let parent = target
         .parent()
         .ok_or_else(|| Error::bad("Invalid seed directory."))?;
+    let mut admission = if crate::native::enabled() {
+        let mut admission = crate::native::ingress::Admission::staging(
+            &super::node_data_dir(),
+            &crate::native::state_dir(),
+            parent,
+        )?;
+        admission.admit(2 * 5120)?;
+        Some(admission)
+    } else {
+        None
+    };
     crate::skills::private_dir(parent).await?;
     let temp = tempfile::TempDir::new_in(parent)?;
     let mut transport_interrupted = false;
@@ -368,7 +379,7 @@ pub async fn seed(
                 .collect::<Vec<_>>();
             let data = super::node_data_dir();
             let multiplier = if selection["kind"] == "inbox" { 2 } else { 1 };
-            super::files::receive_with_reclaim(
+            super::files::receive_admitted(
                 &mut reader,
                 temp.path(),
                 budget,
@@ -384,6 +395,12 @@ pub async fn seed(
                         .await?
                             / multiplier)
                     }
+                },
+                &mut |bytes| {
+                    admission
+                        .as_mut()
+                        .expect("native staging admission")
+                        .admit(bytes)
                 },
             )
             .await?;

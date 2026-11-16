@@ -18,22 +18,51 @@ pub struct Binding {
 
 /// Recovery pins persisted inodes. Finish it before refreshing any mount target
 /// in the durable home, including an otherwise disposable empty credential file.
+#[cfg(test)]
 pub(super) async fn prepare_for_identity(
     source: &Path,
     data: &Path,
     identity: &super::identity::Identity,
     observation: &super::bootstrap::Trace,
 ) -> Result<Vec<Binding>> {
+    prepare_for_identity_admitted(source, data, identity, observation, &mut |_| Ok(())).await
+}
+
+pub(super) async fn prepare_for_identity_admitted(
+    source: &Path,
+    data: &Path,
+    identity: &super::identity::Identity,
+    observation: &super::bootstrap::Trace,
+    admit: &mut (impl FnMut(u64) -> Result<()> + Send),
+) -> Result<Vec<Binding>> {
     observation.phase(super::bootstrap::Phase::IdentityReconcile);
     super::identity::reconcile(data, identity, observation).await?;
     observation.phase(super::bootstrap::Phase::HomeRefresh);
-    let bindings = prepare(source, &data.join("home"), identity.uid(), identity.gid()).await?;
+    let bindings = prepare_admitted(
+        source,
+        &data.join("home"),
+        identity.uid(),
+        identity.gid(),
+        admit,
+    )
+    .await?;
     observation.phase(super::bootstrap::Phase::StagingOwnership);
     super::workspace::own_tree(source, identity.uid(), identity.gid()).await?;
     Ok(bindings)
 }
 
+#[cfg(test)]
 pub async fn prepare(source: &Path, home: &Path, uid: u32, gid: u32) -> Result<Vec<Binding>> {
+    prepare_admitted(source, home, uid, gid, &mut |_| Ok(())).await
+}
+
+async fn prepare_admitted(
+    source: &Path,
+    home: &Path,
+    uid: u32,
+    gid: u32,
+    admit: &mut (impl FnMut(u64) -> Result<()> + Send),
+) -> Result<Vec<Binding>> {
     // Validate ancestors before creating generated directories: staging is input,
     // and chmod/create_dir_all must never follow a redirected source.
     for directory in [
@@ -74,6 +103,7 @@ pub async fn prepare(source: &Path, home: &Path, uid: u32, gid: u32) -> Result<V
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    admit(5120)?;
                     private_dir(&destination).await?;
                 }
                 Err(error) => return Err(error.into()),
@@ -110,6 +140,7 @@ pub async fn prepare(source: &Path, home: &Path, uid: u32, gid: u32) -> Result<V
             }
             // Only an empty mount target reaches the persistent filesystem.
             // Config bytes, credentials and frozen skills remain in staging.
+            admit(5120)?;
             tokio::fs::File::create(&destination).await?;
             std::os::unix::fs::lchown(&destination, Some(uid), Some(gid))?;
             bindings.push(Binding {

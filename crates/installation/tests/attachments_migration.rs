@@ -137,6 +137,8 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
                 assert_eq!(row.pop(), Some(SqlValue::Integer(0)));
             }
             assert_eq!(previous, old.1, "previous rows {name}");
+        } else if name == "wait_conditions" {
+            assert_eq!(after[name].1, old.1, "retained wait conditions");
         } else if name != "kv" {
             assert_eq!(after.get(name), Some(old), "unrelated table {name}");
         }
@@ -172,7 +174,7 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        34
+        35
     );
     let s = Service::new(common::config(root.path())).await.unwrap();
     let proof = s.store.kv("d2-fixture-proof").await.unwrap().unwrap();

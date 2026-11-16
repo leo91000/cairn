@@ -207,11 +207,24 @@ pub(super) fn extract_with_stop(
     budget: u64,
     stop: &tokio_util::sync::CancellationToken,
 ) -> Result<u64> {
+    extract_checked(file, target, budget, stop, 4096, &mut |_| Ok(()))
+}
+
+pub(super) fn extract_checked(
+    file: impl Read + Seek,
+    target: &Path,
+    budget: u64,
+    stop: &tokio_util::sync::CancellationToken,
+    allocation_unit: u64,
+    admit: &mut impl FnMut(u64) -> Result<()>,
+) -> Result<u64> {
     let mut archive =
         ZipArchive::new(Stoppable { input: file, stop }).map_err(extraction_archive_error)?;
     if archive.len() > MAX_ENTRIES {
         return Err(Error::too_large("Too many project archive entries."));
     }
+    let entry_allocation = allocation_unit.max(4096).saturating_add(1024);
+    admit(entry_allocation)?;
     std::fs::create_dir(target)?;
     let mut used = 0u64;
     let mut seen = HashSet::new();
@@ -246,6 +259,7 @@ pub(super) fn extract_with_stop(
             .ok_or_else(|| Error::too_large("Project archive exceeds disk budget."))?;
         let destination = target.join(path);
         let mode = entry.unix_mode().unwrap_or(0o600);
+        admit(entry_allocation)?;
         if entry.is_dir() {
             std::fs::create_dir(&destination)?;
             directories.push((destination, mode & 0o777));
@@ -271,7 +285,18 @@ pub(super) fn extract_with_stop(
                 .open(destination)?;
             let input = entry.take(expected + 1);
             let mut input = Stoppable { input, stop };
-            if std::io::copy(&mut input, &mut file).map_err(extraction_io_error)? != expected {
+            let mut copied = 0u64;
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                let count = input.read(&mut buffer).map_err(extraction_io_error)?;
+                if count == 0 {
+                    break;
+                }
+                admit(count as u64)?;
+                file.write_all(&buffer[..count])?;
+                copied += count as u64;
+            }
+            if copied != expected {
                 return Err(Error::bad("Project archive size changed."));
             }
             file.flush()?;
@@ -287,6 +312,45 @@ pub(super) fn extract_with_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extraction_admission_stops_before_the_next_payload_write() {
+        let root = tempfile::tempdir().unwrap();
+        let file = tempfile::tempfile().unwrap();
+        let mut writer = ZipWriter::new(file.try_clone().unwrap());
+        writer
+            .start_file(
+                "payload",
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(&vec![42; 192 * 1024]).unwrap();
+        writer.finish().unwrap();
+        let target = root.path().join("target");
+        let mut chunks = 0;
+        let error = extract_checked(
+            file,
+            &target,
+            192 * 1024,
+            &tokio_util::sync::CancellationToken::new(),
+            4096,
+            &mut |bytes| {
+                if bytes == 64 * 1024 {
+                    chunks += 1;
+                    if chunks == 2 {
+                        return Err(Error::new(507, "Current reserve exhausted"));
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 507);
+        assert_eq!(
+            std::fs::metadata(target.join("payload")).unwrap().len(),
+            64 * 1024
+        );
+    }
 
     #[test]
     fn cancelled_archive_preflight_is_retryable_and_corruption_remains_invalid() {

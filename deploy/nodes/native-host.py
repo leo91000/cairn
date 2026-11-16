@@ -44,11 +44,13 @@ PREREQUISITES = {
     'accounts': 'Native Docker requires iptables, iproute2 and account tools (useradd/groupadd/usermod/getent); install distribution packages before enrollment.',
     'subids': 'Native Docker requires root-managed /etc/subuid and /etc/subgid databases.',
     'tun': 'Native Docker requires the existing /dev/net/tun character device.',
-    'kernel': 'Native Docker bind isolation requires Linux 5.12 or newer.',
+    'kernel': 'Native storage requires Linux 6.11 or newer for legacy device retirement and directory consumer fencing.',
     'apparmor': 'Restricted user namespaces require AppArmor tooling and a writable root-managed profile for the managed RootlessKit binary.',
-    'e2fsprogs': 'Native ublk storage requires e2fsprogs (mkfs.ext4/e2fsck/resize2fs).',
+    'e2fsprogs': 'Native storage migration requires e2fsprogs (mkfs.ext4/e2fsck/resize2fs).',
+    'rsync': 'Native directory seeding and verified migration require rsync.',
+    'quota': 'Mount a dedicated ext4 filesystem with prjquota at /var/lib/cairn-native/state/native-data, on a different filesystem from controller state. See docs/NATIVE-NODES.md.',
     'ublk': 'Native storage requires the ublk_drv kernel module and /dev/ublk-control character device; install the matching kernel modules before enrolling.',
-    'cgroup': 'Native execution requires cgroup v2 with CPU, memory and PID controllers.',
+    'cgroup': 'Native execution requires cgroup v2 with CPU, memory, PID and IO controllers.',
 }
 
 
@@ -330,7 +332,7 @@ def validate_release(value):
     for field in ('sha256', 'toolsSha256'):
         if not re.fullmatch('[0-9a-f]{64}', value.get(field, '')):
             raise ValueError('Invalid native release digest.')
-    if value.get('os') != 'linux' or value.get('arch') != 'x86_64' or value.get('nodeProtocol') != 2:
+    if value.get('os') != 'linux' or value.get('arch') != 'x86_64' or value.get('nativeHostProtocol') != 2 or value.get('executionProtocol') != 2:
         raise ValueError('Native release platform/protocol is incompatible.')
     if value.get('binaryPath') != '/internal/nodes/native-binary' or value.get('toolsPath') != '/internal/nodes/native-tools':
         raise ValueError('Unexpected native artifact endpoint.')
@@ -516,10 +518,48 @@ def environment(directory):
             'CAIRN_NATIVE_DOCKER_TOOLS': str(INSTALL / 'docker-tools/v2')}
 
 
+def require_storage_kernel():
+    try:
+        kernel = tuple(int(part) for part in os.uname().release.split('.')[:2])
+    except ValueError as error:
+        raise PrerequisiteError('kernel') from error
+    if len(kernel) != 2 or kernel < (6, 11):
+        raise PrerequisiteError('kernel')
+
+
+def require_data_pool():
+    pool = ROOT / 'state/native-data'
+    try:
+        metadata = pool.stat()
+        controller = pool.parent.stat()
+        result = subprocess.run(['findmnt', '--json', '--target', str(pool), '--output', 'TARGET,FSTYPE,OPTIONS'],
+                                check=True, capture_output=True, text=True, timeout=10)
+        mounts = json.loads(result.stdout).get('filesystems', [])
+        supported = len(mounts) == 1 and mounts[0].get('target') == str(pool) and mounts[0].get('fstype') == 'ext4' \
+            and 'prjquota' in mounts[0].get('options', '').split(',')
+        if not supported or not stat.S_ISDIR(metadata.st_mode) or metadata.st_dev == controller.st_dev \
+                or metadata.st_uid != 0 or metadata.st_mode & 0o022 or pool.resolve() != pool:
+            raise PrerequisiteError('quota')
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError) as error:
+        raise PrerequisiteError('quota') from error
+
+
+def legacy_storage_present():
+    return any((ROOT / 'state/ublk-devices').glob('*.json')) or any((ROOT / 'state/native-block').glob('*/root/disk.blk')) \
+        or any(any((ROOT / 'state' / base).glob(f'*/{source}/journal-v2.sqlite'))
+               for base in ('disks', 'environments') for source in ('lazy', 'resize-source'))
+
+
 def require_storage():
+    require_storage_kernel()
+    require_data_pool()
+    if shutil.which('rsync') is None:
+        raise PrerequisiteError('rsync')
     for binary in ('mkfs.ext4', 'e2fsck', 'resize2fs'):
         if shutil.which(binary) is None:
             raise PrerequisiteError('e2fsprogs')
+    if not legacy_storage_present():
+        return
     if not Path('/sys/module/ublk_drv').is_dir():
         try:
             subprocess.run(['modprobe', 'ublk_drv'], check=True, capture_output=True, timeout=10)
@@ -542,7 +582,7 @@ def install(manager):
         controllers = set((CGROUP_ROOT / 'cgroup.controllers').read_text().split())
     except OSError as error:
         raise PrerequisiteError('cgroup') from error
-    if not {'cpu', 'memory', 'pids'} <= controllers:
+    if not {'cpu', 'memory', 'pids', 'io'} <= controllers:
         raise PrerequisiteError('cgroup')
     require_storage()
     require_docker_host()
@@ -675,6 +715,7 @@ def run():
                 installed = json.loads((current / 'release.json').read_text())
                 same = release['sha256'] == installed['sha256'] and release['toolsSha256'] == installed['toolsSha256']
                 if not same:
+                    require_storage()
                     candidate = prepare(manager, release, token=token)
                     require_docker_host()
                     configure_docker_apparmor(prepare_docker_tools())

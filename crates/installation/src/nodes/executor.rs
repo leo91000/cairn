@@ -546,7 +546,27 @@ mod tests {
     async fn native_archive_resume_child() {
         let data = crate::nodes::node_data_dir();
         let state = crate::native::state_dir();
+        crate::skills::private_dir(&data).await.unwrap();
         crate::skills::private_dir(&state).await.unwrap();
+        tokio::fs::write(
+            state.join("storage-policy.json"),
+            serde_json::to_vec(&json!({
+                "reserveMiB": 64, "reservePercent": 1,
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            state.join(crate::microvm::budget::FILE),
+            serde_json::to_vec(&json!({
+                "nativeModeProtocol": 1, "slots": 1,
+                "limits": {"cpu": 1, "memoryMiB": 1024, "diskMiB": 1024},
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
         let budget = Router::new().route(
             "/staging-budget",
             axum::routing::get(|| async { Json(json!({ "availableBytes": 1_000_000 })) }),

@@ -377,7 +377,13 @@ impl RunCheckpoint {
                 "The filesystem could not be flushed. Working files were preserved; automatic replay was stopped.",
             ));
         }
-        if !self.managed() || !self.completed() || self.terminal_code() == Some(0) {
+        if !self.managed()
+            || !self.completed()
+            || self.terminal_code() == Some(0)
+            || self.held_environment.as_ref().is_some_and(|held| {
+                self.runner_id() == Some(held.attempt.as_str()) && self.terminal_code.is_none()
+            })
+        {
             return None;
         }
         Some(if self.last_error().is_empty() {

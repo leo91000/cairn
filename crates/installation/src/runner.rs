@@ -214,6 +214,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_image_status_preserves_storage_pause_reason_and_clear_null() {
+        use crate::microvm::suspension::{self, Reason};
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        let disk = broker.state.join("disks").join(&run);
+        private_dir(&disk).await.unwrap();
+        atomic_write(
+            &disk.join("image.json"),
+            &serde_json::to_vec(&json!({
+                "format": "local-ext4-v1", "size": 64 * 1024 * 1024, "context": { "owner": run }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        std::fs::write(disk.join("data.ext4"), b"status fixture").unwrap();
+        let (_done, active) = starting_attempt(&run);
+        broker.active.lock().await.insert(attempt.clone(), active);
+        let app = router(broker.clone());
+        for enabled in [true, false] {
+            suspension::set_reason(&broker.state, &attempt, &Reason::Storage, enabled)
+                .await
+                .unwrap();
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/disks/{run}/storage-status"))
+                        .header("authorization", format!("Bearer {SECRET}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let value: Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 65536)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(value["paused"], enabled);
+            assert_eq!(
+                value.get("waitingFor"),
+                Some(&if enabled {
+                    json!("disk-space")
+                } else {
+                    Value::Null
+                })
+            );
+        }
+        broker.active.lock().await.remove(&attempt);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/disks/{run}/storage-status"))
+                    .header("authorization", format!("Bearer {SECRET}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value.get("waitingFor"), Some(&Value::Null));
+    }
+
+    #[tokio::test]
     async fn vm_stop_cancels_workload_when_stop_marker_cannot_be_written() {
         let root = tempfile::tempdir().unwrap();
         let broker = fixture_broker(root.path()).await;
@@ -934,6 +1010,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let broker = fixture_broker(root.path()).await;
         let state = broker.state.clone();
+        std::fs::write(
+            state.join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
         let app = router(broker);
         for missing_base in [false, true] {
             let run = crate::config::id();

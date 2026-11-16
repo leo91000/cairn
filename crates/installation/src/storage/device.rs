@@ -109,6 +109,15 @@ impl Disk for LocalDisk {
 /// Materialize a consistent view without replacing a retained image. Failed
 /// exports are removed; success includes persistence of the containing directory.
 pub fn export(disk: &dyn Disk, target: &Path) -> io::Result<()> {
+    export_checked(disk, target, |_| Ok(()))
+}
+
+pub(super) fn export_checked<E: From<io::Error>>(
+    disk: &dyn Disk,
+    target: &Path,
+    mut check: impl FnMut(u64) -> Result<(), E>,
+) -> Result<(), E> {
+    check(0)?;
     let parent = target
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing export directory"))?;
@@ -121,18 +130,24 @@ pub fn export(disk: &dyn Disk, target: &Path) -> io::Result<()> {
         let mut buffer = vec![0; 4 * 1024 * 1024];
         let mut offset = 0;
         while offset < disk.size() {
+            check(0)?;
             let length = (disk.size() - offset).min(buffer.len() as u64) as usize;
             disk.read_at(offset, &mut buffer[..length])?;
             if buffer[..length].iter().any(|byte| *byte != 0) {
+                check(length as u64)?;
                 file.write_all_at(&buffer[..length], offset)?;
             }
             offset += length as u64;
         }
         file.sync_all()?;
-        File::open(parent)?.sync_all()
+        check(0)?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
     })();
+    drop(file);
     if result.is_err() {
         let _ = std::fs::remove_file(target);
+        let _ = File::open(parent).and_then(|directory| directory.sync_all());
     }
     result
 }
@@ -140,6 +155,31 @@ pub fn export(disk: &dyn Disk, target: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{Disk, LocalDisk, export};
+
+    #[test]
+    fn checked_export_settles_and_removes_a_partial_without_mutating_source() {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("original");
+        std::fs::write(&original, vec![1; 8 * 1024 * 1024]).unwrap();
+        let disk = LocalDisk::open(&original, false).unwrap();
+        let target = root.path().join("partial");
+        let mut writes = 0;
+        let result = super::export_checked::<std::io::Error>(&disk, &target, |length| {
+            if length > 0 {
+                writes += 1;
+            }
+            if writes > 1 {
+                return Err(std::io::Error::from_raw_os_error(libc::ENOSPC));
+            }
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::ENOSPC));
+        assert!(!target.exists());
+        assert_eq!(std::fs::metadata(original).unwrap().len(), 8 * 1024 * 1024);
+        let mut byte = [0];
+        disk.read_at(0, &mut byte).unwrap();
+        assert_eq!(byte, [1]);
+    }
 
     #[test]
     fn local_disk_keeps_writes_and_exports_without_replacing_existing_data() {

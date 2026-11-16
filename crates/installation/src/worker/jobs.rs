@@ -187,15 +187,23 @@ pub(crate) async fn refresh_redacted(s: &Service, run: &Value, history: &[String
         .await
         .contains_key(text(run, "id"))
     {
-        secrets.extend(
-            crate::plugins::run_credentials::for_execution(
-                s,
-                run,
-                &crate::service::run_projects(run),
-            )
-            .await?
-            .secrets,
-        );
+        let projects = crate::service::run_projects(run);
+        let credentials = match current
+            .as_ref()
+            .and_then(|saved| super::held::Observation::capture(run, saved))
+        {
+            Some(observation) => {
+                crate::plugins::run_credentials::for_environment_observation(
+                    s,
+                    run,
+                    &projects,
+                    observation,
+                )
+                .await?
+            }
+            None => crate::plugins::run_credentials::for_execution(s, run, &projects).await?,
+        };
+        secrets.extend(credentials.secrets);
     } else {
         // A restarted manager no longer has the full rotating credential
         // history. It must not publish raw retained output as a safe summary.

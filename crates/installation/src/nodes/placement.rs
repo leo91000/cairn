@@ -115,7 +115,6 @@ impl<'a> Request<'a> {
         if !crate::native::policy::supports(&self.run["snapshot"]["agent"], backend)
             || !matches!(self.access["backend"].as_str(), Some("auto") | None)
                 && self.access["backend"] != backend
-            || native && node["capabilities"]["ublk"] != true
         {
             return false;
         }
@@ -644,9 +643,7 @@ fn claim_reservation(
         ));
     }
     let native = crate::native::policy::native(&request.run["snapshot"]["agent"]);
-    if native != crate::native::policy::node_native(record)
-        || native && record["capabilities"]["ublk"] != true
-    {
+    if native != crate::native::policy::node_native(record) {
         return Err(Error::conflict("Destination execution backend changed."));
     }
     if record["maintenance"].is_string() {

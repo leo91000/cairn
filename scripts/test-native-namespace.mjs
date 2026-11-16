@@ -29,6 +29,7 @@ const testNames = [
   'native::block::holders::tests::private_mount_outside_a_chroot_is_not_lost',
   'native::block::holders::tests::covered_namespace_root_requires_independent_superblock_inventory',
   'native::block::holders::tests::covered_network_namespace_does_not_block_filesystem_inventory',
+  'native::systemd::directory_consumers::tests::persistent_mount_namespace_keeps_directory_ownership_without_tasks',
 ]
 // A user namespace cannot create a block node on the host-backed temp directory.
 if (privileged) {

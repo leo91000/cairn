@@ -412,14 +412,44 @@ async fn extract(
     timing: &mut Operation,
 ) -> Result<()> {
     timing.next("prepare_target");
-    if import.replace && target.exists() {
+    let home = target.starts_with(super::plan::HOME);
+    let pinned = if home {
+        Some(pin_home_import(target)?)
+    } else {
+        None
+    };
+    if let Some(directory) = &pinned {
+        if import.replace {
+            let names = std::fs::read_dir(format!(
+                "/proc/self/fd/{}",
+                std::os::fd::AsRawFd::as_raw_fd(directory)
+            ))?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+            if !names.is_empty() {
+                let mut remove = Command::new("rm");
+                remove.args(["-rf", "--"]).args(names);
+                import_command(&mut remove, directory)?;
+                if !remove.status().await?.success() {
+                    return Err(Error::bad("Guest home replacement failed."));
+                }
+            }
+        }
+    } else if import.replace && target.exists() {
         tokio::fs::remove_dir_all(target).await?;
     }
-    tokio::fs::create_dir_all(target).await?;
+    if !home {
+        tokio::fs::create_dir_all(target).await?;
+    }
     timing.next("spawn_tar");
-    let mut child = Command::new("tar")
-        .args(["--no-same-owner", "-xf", "-", "-C"])
-        .arg(target)
+    let mut command = Command::new("tar");
+    command.args(["--no-same-owner", "-xf", "-"]);
+    if let Some(directory) = &pinned {
+        import_command(&mut command, directory)?;
+    } else {
+        command.arg("-C").arg(target);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -435,6 +465,9 @@ async fn extract(
     timing.next("wait_tar");
     if !child.wait().await?.success() {
         return Err(Error::bad("Guest import failed."));
+    }
+    if home {
+        return Ok(());
     }
     timing.next("chown");
     let chat = target == Path::new(CHAT_INBOX);
@@ -454,6 +487,69 @@ async fn extract(
             .status()
             .await?;
     }
+    Ok(())
+}
+
+/// Home imports can race live jobs. Resolve every directory through its open
+/// parent, without symlinks, and keep extraction at the workload's privilege.
+fn pin_home_import(target: &Path) -> Result<std::fs::File> {
+    pin_import_beneath(Path::new(super::plan::HOME), target)
+}
+
+fn pin_import_beneath(home: &Path, target: &Path) -> Result<std::fs::File> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+    };
+    let relative = target.strip_prefix(home).map_err(Error::internal)?;
+    let mut directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(home)?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(Error::bad("Invalid home import path."));
+        };
+        let name = std::ffi::CString::new(name.as_bytes()).map_err(Error::internal)?;
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let mut fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+            let created =
+                unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o700) } == 0;
+            if !created
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+            if fd >= 0 && created && unsafe { libc::fchown(fd, AGENT_ID, AGENT_ID) } != 0 {
+                let error = std::io::Error::last_os_error();
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(error.into());
+            }
+        }
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok(directory)
+}
+
+fn import_command(command: &mut Command, directory: &std::fs::File) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let directory = directory.try_clone()?;
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(directory.as_raw_fd()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    unprivileged(command);
     Ok(())
 }
 
@@ -718,14 +814,24 @@ async fn stream_environment(
         let mut output_open = true;
         loop {
             let event = tokio::select! {
-                () = stop.cancelled() => return Ok(()),
-                status = child.wait() => return Err(Error::unavailable(format!("Guest environment exited: {:?}", status?.code()))),
+                () = stop.cancelled() => return Err(Error::unavailable("Guest environment was stopped before finalization.")),
+                status = child.wait() => break Ok(status?.code().unwrap_or(1)),
                 event = output.recv(), if output_open => {
                     if let Some(event) = event { wire::write(write, &event).await?; }
                     else { output_open = false; }
                     continue;
                 }
-                event = events.recv() => event.ok_or_else(|| Error::unavailable("Guest environment channel closed."))?,
+                event = events.recv() => match event {
+                    Some(event) => event,
+                    None => {
+                        // The private channel closes before the clean helper's
+                        // process exit can become observable. Await that same
+                        // child, never confuse EOF with disk finalization.
+                        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+                            .await.map_err(|_| Error::unavailable("Guest environment did not stop."))??;
+                        break Ok(status.code().unwrap_or(1));
+                    }
+                },
             };
             let failed = matches!(event, EnvironmentEvent::TurnFailed { .. });
             wire::write(write, &Event::Environment { event }).await?;
@@ -733,8 +839,16 @@ async fn stream_environment(
         }
     }.await;
     *environment.lock().await = None;
-    let _ = child.kill().await;
-    result
+    let code = match result {
+        Ok(code) => code,
+        Err(error) => {
+            let _ = child.kill().await;
+            return Err(error);
+        }
+    };
+    // The provider/job tree has been reaped. Flush guest dirty pages before
+    // permitting the host to stop the VMM and synchronize its image file.
+    finish_agent(write, plan, code, "/usr/bin/sync").await
 }
 
 async fn stream_agent(
@@ -748,6 +862,15 @@ async fn stream_agent(
         .await?
         .code()
         .unwrap_or(1);
+    finish_agent(write, plan, code, "/usr/bin/sync").await
+}
+
+async fn finish_agent(
+    write: &mut (impl AsyncWrite + Unpin),
+    plan: &Plan,
+    code: i32,
+    sync_program: &str,
+) -> Result<()> {
     let mut timing = Operation::new("guest_finalize", plan.run_id(), "read_result");
     let result = read_result(plan).await?;
     timing.next("codex_state_metadata");
@@ -766,7 +889,7 @@ async fn stream_agent(
         complete = usage.complete,
     );
     timing.next("sync_disk");
-    if !finalize_disk(write, "/usr/bin/sync").await? {
+    if !finalize_disk(write, sync_program).await? {
         return Ok(());
     }
     timing.next("send_exit");
@@ -936,6 +1059,47 @@ mod tests {
         let event = wire::read(&mut host).await.unwrap().unwrap();
         let event: Event = serde_json::from_value(event).unwrap();
         assert!(matches!(event, Event::FinalizationFailed));
+    }
+
+    #[test]
+    fn live_home_import_refuses_symlink_ancestors_and_pins_the_original_directory() {
+        use std::os::fd::AsRawFd;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(home.join(".config/tool")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let target = home.join(".config/tool");
+        let pinned = pin_import_beneath(&home, &target).unwrap();
+        std::fs::rename(&target, home.join(".config/original")).unwrap();
+        std::os::unix::fs::symlink(&outside, &target).unwrap();
+        assert!(pin_import_beneath(&home, &target.join("etc")).is_err());
+        std::fs::write(
+            format!("/proc/self/fd/{}/receipt", pinned.as_raw_fd()),
+            "safe",
+        )
+        .unwrap();
+        assert!(!outside.join("receipt").exists());
+        assert!(home.join(".config/original/receipt").exists());
+    }
+
+    #[tokio::test]
+    async fn environment_finalization_reports_flush_before_its_terminal_exit() {
+        for (program, succeeds) in [("true", true), ("false", false)] {
+            let (mut guest, host) = tokio::io::duplex(4096);
+            let plan = Plan::new(serde_json::json!({"id":"attempt","runId":"run"}));
+            finish_agent(&mut guest, &plan, 0, program).await.unwrap();
+            drop(guest);
+            let mut host = tokio::io::BufReader::new(host);
+            let event: Event =
+                serde_json::from_value(wire::read(&mut host).await.unwrap().unwrap()).unwrap();
+            if succeeds {
+                assert!(matches!(event, Event::Exit { code: Some(0), .. }));
+            } else {
+                assert!(matches!(event, Event::FinalizationFailed));
+            }
+            assert!(wire::read(&mut host).await.unwrap().is_none());
+        }
     }
 
     #[tokio::test]

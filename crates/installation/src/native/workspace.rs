@@ -12,7 +12,119 @@ use tokio::io::BufReader;
 
 pub fn directory(state: &Path, run: &str) -> Result<PathBuf> {
     crate::validation::uuid(run)?;
-    Ok(state.join("native").join(run))
+    let path = state.join("native").join(run);
+    require_real_directory(&path)?;
+    Ok(path)
+}
+
+pub(super) fn data_root(state: &Path) -> PathBuf {
+    state.join("native-data")
+}
+
+pub(super) fn workload(state: &Path, run: &str) -> Result<PathBuf> {
+    crate::validation::uuid(run)?;
+    let path = data_root(state).join(run);
+    require_real_directory(&path)?;
+    Ok(path)
+}
+
+fn require_real_directory(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(Error::conflict(
+            "Native environment directory cannot be an alias.",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn control_for_workload(workload: &Path) -> Result<PathBuf> {
+    let pool = workload
+        .parent()
+        .ok_or_else(|| Error::bad("Missing native data pool."))?;
+    if pool.file_name().is_none_or(|name| name != "native-data") {
+        return Err(Error::bad("Native workload is outside its data pool."));
+    }
+    let state = pool
+        .parent()
+        .ok_or_else(|| Error::bad("Missing native state."))?;
+    directory(
+        state,
+        workload
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    )
+}
+
+pub(super) fn workload_for_control(control: &Path) -> Result<PathBuf> {
+    let native = control
+        .parent()
+        .ok_or_else(|| Error::bad("Missing native control namespace."))?;
+    if native.file_name().is_none_or(|name| name != "native") {
+        return Err(Error::bad("Invalid native control namespace."));
+    }
+    workload(
+        native
+            .parent()
+            .ok_or_else(|| Error::bad("Missing native state."))?,
+        control
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    )
+}
+
+pub(super) fn mount_path(path: &str) -> std::io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut bytes = Vec::new();
+    let input = path.as_bytes();
+    let mut offset = 0;
+    while offset < input.len() {
+        if input[offset] != b'\\' {
+            bytes.push(input[offset]);
+            offset += 1;
+            continue;
+        }
+        let code = input
+            .get(offset + 1..offset + 4)
+            .ok_or_else(|| std::io::Error::other("Invalid mount path"))?;
+        let byte = match code {
+            b"040" => b' ',
+            b"011" => b'\t',
+            b"012" => b'\n',
+            b"134" => b'\\',
+            _ => return Err(std::io::Error::other("Invalid mount escape")),
+        };
+        bytes.push(byte);
+        offset += 4;
+    }
+    Ok(std::ffi::OsString::from_vec(bytes).into())
+}
+
+fn has_mount(root: &Path, mounts: &str) -> std::io::Result<bool> {
+    for line in mounts.lines() {
+        let path = line
+            .split_whitespace()
+            .nth(4)
+            .ok_or_else(|| std::io::Error::other("Invalid mount inventory"))?;
+        if mount_path(path)?.starts_with(root) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// An ordinary retained tree must contain no controller-visible submounts.
+/// Never recursively erase data supplied by an unrecognized bind or filesystem.
+pub(super) fn require_no_mounts(root: &Path) -> Result<()> {
+    if has_mount(root, &std::fs::read_to_string("/proc/self/mountinfo")?)? {
+        return Err(Error::conflict(
+            "Native directory contains an unrecognized mount; ownership is retained without removing its contents.",
+        ));
+    }
+    Ok(())
 }
 
 /// A new execution invalidates restore idempotence after acquiring exclusive
@@ -33,13 +145,33 @@ pub async fn execution_ownership(state: &Path, run: &str) -> Result<crate::file_
     Ok(owner)
 }
 
+#[cfg(test)]
 pub async fn copy(source: &Path, target: &Path, budget: u64) -> Result<()> {
+    copy_admitted(source, target, budget, &mut |_| Ok(())).await
+}
+
+pub(super) async fn copy_admitted(
+    source: &Path,
+    target: &Path,
+    budget: u64,
+    admit: &mut (impl FnMut(u64) -> Result<()> + Send),
+) -> Result<()> {
     let (mut writer, reader) = tokio::io::duplex(131072);
     let source = source.to_owned();
     let send = tokio::spawn(async move { files::send(&source, &mut writer).await });
-    let result = files::receive(&mut BufReader::new(reader), target, budget).await;
+    let result = files::receive_admitted(
+        &mut BufReader::new(reader),
+        target,
+        budget,
+        budget,
+        |_| std::future::ready(Ok(0)),
+        admit,
+    )
+    .await;
     if result.is_err() {
         send.abort();
+        let _ = send.await;
+        return result;
     }
     result?;
     send.await.map_err(Error::internal)??;
@@ -255,6 +387,16 @@ pub(crate) fn filesystem(path: &Path) -> Result<libc::statvfs> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_refuses_submounts_without_confusing_sibling_paths() {
+        let line = |path: &str| format!("1 0 8:1 / {path} rw - ext4 /dev/test rw\n");
+        let root = Path::new("/native/our work");
+        assert!(has_mount(root, &line("/native/our\\040work/data/foreign")).unwrap());
+        assert!(has_mount(root, &line("/native/our\\040work")).unwrap());
+        assert!(!has_mount(root, &line("/native/our\\040work-other/data")).unwrap());
+        assert!(!has_mount(root, &line("/native")).unwrap());
+    }
 
     #[test]
     fn missing_temporary_directory_has_no_reservation_credit() {

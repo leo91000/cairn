@@ -15,7 +15,7 @@ use cairn_installation::{
     error::{Error, Result},
     http, nodes,
     service::Service,
-    storage::{self, Disk, LazyDisk},
+    storage::{self},
 };
 use serde_json::{Value, json};
 use std::{
@@ -28,8 +28,12 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+#[cfg(test)]
+use cairn_installation::storage::{Disk, LazyDisk};
+
 const TRUSTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 
+#[cfg(test)]
 async fn inspect_stopped_journal<T: Send + 'static>(
     directory: PathBuf,
     inspect: impl FnOnce(Arc<LazyDisk>) -> Result<T> + Send + 'static,
@@ -52,6 +56,54 @@ async fn inspect_stopped_journal<T: Send + 'static>(
     })
     .await
     .map_err(Error::internal)?
+}
+
+fn inspect_directory(directory: &std::path::Path) -> Result<Value> {
+    use std::{collections::HashSet, io::Read, os::unix::fs::MetadataExt};
+    let mut pending = vec![directory.to_owned()];
+    let mut seen = HashSet::new();
+    let (mut logical, mut allocated, mut files) = (0_u64, 0_u64, 0_u64);
+    let secret = b"synthetic-generated-secret-never-persist";
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !seen.insert((metadata.dev(), metadata.ino())) {
+            continue;
+        }
+        allocated += metadata.blocks() * 512;
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(&path)? {
+                pending.push(entry?.path());
+            }
+        } else if metadata.is_file() {
+            files += 1;
+            logical += metadata.len();
+            // Preserve overlap so the canary is checked across read boundaries.
+            let mut input = std::fs::File::open(&path)?;
+            let mut buffer = vec![0; 65536 + secret.len()];
+            let mut carry = 0;
+            loop {
+                let count = input.read(&mut buffer[carry..])?;
+                if count == 0 {
+                    break;
+                }
+                let end = carry + count;
+                if buffer[..end]
+                    .windows(secret.len())
+                    .any(|value| value == secret)
+                {
+                    return Err(Error::bad(
+                        "Generated secret reached retained native files.",
+                    ));
+                }
+                carry = end.min(secret.len() - 1);
+                buffer.copy_within(end - carry..end, 0);
+            }
+        }
+    }
+    Ok(
+        json!({ "logicalBytes": logical, "allocatedBytes": allocated, "files": files,
+        "storage": "local-directory-v1" }),
+    )
 }
 
 async fn authority(s: &Service) -> Result<()> {
@@ -96,42 +148,26 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             })).await?;
             Ok(json!({ "ok": true }))
         }
-        "consolidate" => {
+        "inspect" => {
             let root = s.config.data_dir.parent().unwrap();
-            let directory = storage::environment::directory(&root.join("state"), run_id)?;
-            // The caller has already observed the controller's full physical
-            // close. Its detached background consolidation may still own the
-            // journal briefly; never bypass that exclusive file lock.
-            let owned = directory.clone();
-            inspect_stopped_journal(directory, move |disk| {
-                let generation = disk.seal_completed()?;
-                disk.consolidate()?;
-                let secret = b"synthetic-generated-secret-never-persist";
-                let mut offset = 0;
-                let mut bytes = vec![0; nodes::snapshots::BLOCK as usize];
-                while offset < disk.size() {
-                    let length = (disk.size() - offset).min(bytes.len() as u64) as usize;
-                    disk.read_at(offset, &mut bytes[..length])?;
-                    if bytes[..length]
-                        .windows(secret.len())
-                        .any(|window| window == secret)
-                    {
-                        return Err(Error::bad("Generated secret reached a local disk block."));
-                    }
-                    offset += length as u64;
-                }
-                let mut status = disk.accounting()?;
-                status["completedGeneration"] = disk
-                    .completed()?
-                    .map_or(Value::Null, |value| value["generation"].clone());
-                Ok(json!({
-                    "generation": generation,
-                    "logicalBytes": disk.size(),
-                    "status": status,
-                    "allocatedBytes": cairn_installation::microvm::budget::allocated(&owned)?
-                }))
-            })
-            .await
+            let state = root.join("state");
+            // The controller wait protocol has settled consumers. Take the
+            // same logical/physical lease as the controller before inspecting
+            // retained bytes; this operation never starts a storage monitor.
+            let lease =
+                storage::environment::lock(&state, run_id, "Inspection disk is busy.").await?;
+            let format: Value = serde_json::from_slice(
+                &tokio::fs::read(lease.directory.join("directory.json")).await?,
+            )?;
+            if format["storage"] != "local-directory-v1" {
+                return Err(Error::bad("Expected a retained native directory."));
+            }
+            let directory = state.join("native-data").join(run_id);
+            let result = tokio::task::spawn_blocking(move || inspect_directory(&directory))
+                .await
+                .map_err(Error::internal)??;
+            drop(lease);
+            Ok(result)
         }
         "restore" => Err(Error::conflict(
             "Conversation disks are local; remote restore is no longer supported.",
@@ -302,6 +338,34 @@ mod run_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_inspection_counts_hard_links_once_and_does_not_follow_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("saved"), b"retained work").unwrap();
+        std::fs::hard_link(root.path().join("saved"), root.path().join("alias")).unwrap();
+        std::fs::write(
+            external.path().join("credential"),
+            b"synthetic-generated-secret-never-persist",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(external.path(), root.path().join("outside")).unwrap();
+        let result = inspect_directory(root.path()).unwrap();
+        assert_eq!(result["files"], 1);
+        assert_eq!(result["logicalBytes"], 13);
+        assert!(result["allocatedBytes"].as_u64().unwrap() >= 4096);
+    }
+
+    #[test]
+    fn directory_inspection_rejects_a_secret_split_across_read_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let secret = b"synthetic-generated-secret-never-persist";
+        let mut bytes = vec![0; 65536 + secret.len() - 3];
+        bytes.extend_from_slice(secret);
+        std::fs::write(root.path().join("credential"), bytes).unwrap();
+        assert!(inspect_directory(root.path()).is_err());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stopped_inspection_keeps_its_generation_across_a_monitor_period() {

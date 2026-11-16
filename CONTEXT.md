@@ -10,7 +10,6 @@ du tour de conversation qui l’a démarrée. Sa fin comprend son résultat et l
 de ses processus ; elle ne signifie pas que l’environnement est arrêté.
 _Avoid_ : tâche (qui désigne le travail planifié ou délégué)
 
-
 **Placement automatique** :
 Le choix d’une node autorisée et disponible pour un nouvel environnement de travail, qu’elle exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf migration explicite de son mode d’exécution. Il ne change jamais la node d’un environnement existant : seul un changement de node confirmé fait repartir ailleurs une conversation dont l’environnement existe encore.
 

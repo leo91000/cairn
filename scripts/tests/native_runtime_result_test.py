@@ -1,10 +1,15 @@
 """Unprivileged checks of native exit records and retained health observations."""
 import ast
+import http.client
+import http.server
+from contextlib import redirect_stderr
 import importlib.util
+import io
+import subprocess
 from pathlib import Path
 import sys
-import subprocess
 import tempfile
+import threading
 import types
 import unittest
 from unittest.mock import Mock, call, patch
@@ -14,6 +19,134 @@ path = Path(__file__).with_name('native_runtime_test.py')
 spec = importlib.util.spec_from_file_location('native_runtime_test', path)
 runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
+
+
+class InstalledNodeMasterTest(unittest.TestCase):
+    def test_offline_master_observes_heartbeat_without_applying_configuration(self):
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), runtime.OfflineFixtureMaster)
+        server.heartbeat_seen = threading.Event()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for path in ['/internal/nodes/project-catalog', '/internal/nodes/heartbeat']:
+                connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                try:
+                    connection.request('POST', path, body=b'{}')
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 503)
+                    self.assertEqual(response.read(), b'')
+                    self.assertEqual(server.heartbeat_seen.is_set(), path.endswith('/heartbeat'))
+                finally:
+                    connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+
+
+class RootfulDockerDiagnosticTest(unittest.TestCase):
+    def setUp(self):
+        source = Path(__file__).with_name('native_rootful_consumer.py')
+        function = next(node for node in ast.parse(source.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == 'docker')
+        self.process = Mock()
+        scope = dict(binary=Path('/private/docker-bin'), socket='unix:///private/docker.sock',
+                     environment={}, subprocess=types.SimpleNamespace(run=self.process), sys=sys)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), scope)
+        self.docker = scope['docker']
+
+    def test_info_keeps_the_readiness_loop_exception_contract(self):
+        self.process.return_value = subprocess.CompletedProcess(['docker', 'info'], 1, b'', b'not ready')
+        error = io.StringIO()
+        with redirect_stderr(error), self.assertRaises(subprocess.CalledProcessError):
+            self.docker('info')
+        self.assertEqual(error.getvalue(), '')
+
+    def test_failed_run_exposes_bounded_real_error_without_masking_cli_status(self):
+        self.process.return_value = subprocess.CompletedProcess(['docker', 'run'], 127, b'', b'x' * 20000 + b'OCI fixture error')
+        error = io.StringIO()
+        with redirect_stderr(error), self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.docker('run', 'fixture')
+        self.assertEqual(caught.exception.returncode, 127)
+        self.assertIn('OCI fixture error', error.getvalue())
+        self.assertLess(len(error.getvalue()), 8400)
+        self.process.return_value = subprocess.CompletedProcess(['docker', 'inspect'], 0, b'identity\n', b'')
+        self.assertEqual(self.docker('inspect'), 'identity')
+
+    def test_private_daemons_use_retained_paths_owned_config_and_a_private_containerd(self):
+        source = Path(__file__).with_name('native_rootful_consumer.py')
+        calls = []
+
+        class SetupComplete(Exception):
+            pass
+
+        class OwnedProcess:
+            def __init__(self):
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = 0
+
+            def kill(self):
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        def launch(arguments, **kwargs):
+            process = OwnedProcess()
+            calls.append((arguments, process))
+            return process
+
+        def invoke(arguments, **kwargs):
+            if 'import' in arguments:
+                raise SetupComplete()
+            self.assertIn('info', arguments)
+            return subprocess.CompletedProcess(arguments, 0, b'{}', b'')
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / 'bin'
+            binary.mkdir()
+            probe = root / 'probe'
+            probe.write_bytes(b'fixture binary')
+            retained = root / 'retained/workspaces'
+            retained.mkdir(parents=True)
+            logical = root / 'logical/workspace'
+            logical.mkdir(parents=True)
+            runtime_path = root / 'runtime'
+            arguments = [str(source), str(binary), str(probe), str(retained), str(runtime_path)]
+            with patch.object(sys, 'argv', arguments), patch.dict('os.environ', {'CAIRN_NATIVE_DISPOSABLE_HOST': '1'}, clear=True), \
+                    patch('os.geteuid', return_value=0), patch.object(Path, 'cwd', return_value=logical), \
+                    patch.object(Path, 'is_socket', return_value=True), patch('subprocess.Popen', side_effect=launch), \
+                    patch('subprocess.run', side_effect=invoke), self.assertRaises(SetupComplete):
+                exec(compile(source.read_text(), str(source), 'exec'), {'__name__': 'rootful_fixture_test'})
+            self.assertEqual(len(calls), 2)
+            containerd, daemon = (item[0] for item in calls)
+            self.assertIn('--root=' + str(retained / 'administrator-docker/containerd/daemon'), containerd)
+            self.assertIn('--address=' + str(runtime_path / 'containerd.sock'), containerd)
+            self.assertIn('--containerd=' + str(runtime_path / 'containerd.sock'), daemon)
+            self.assertIn('--data-root=' + str(retained / 'administrator-docker'), daemon)
+            self.assertIn('--config-file=' + str(runtime_path / 'daemon.json'), daemon)
+            self.assertFalse((logical / 'administrator-docker').exists())
+            self.assertTrue(all(process.returncode == 0 for _, process in calls))
+
+
+
+class RetainedWorkspaceTest(unittest.TestCase):
+    def test_prepared_peer_canary_uses_its_project_directory_after_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            project = 'prepared-project'
+            prepared = state / 'native-data/peer/data/workspaces' / project
+            prepared.mkdir(parents=True)
+            (prepared / 'persisted').write_bytes(b'peer work')
+            self.assertEqual((runtime.retained_workspace(state, 'peer', project) / 'persisted').read_bytes(), b'peer work')
+            self.assertEqual(runtime.retained_workspace(state, 'ordinary'), state / 'native-data/ordinary/data/workspaces')
+            self.assertFalse((prepared.parent / 'persisted').exists())
 
 
 class FixtureDiskReservationsTest(unittest.TestCase):
@@ -46,7 +179,7 @@ class FixtureDiskReservationsTest(unittest.TestCase):
         self.assertEqual(reservations.reserve('run', 256), 2048)
 
 
-class LegacyDockerHolderTest(unittest.TestCase):
+class DockerProbeBindingTest(unittest.TestCase):
     def test_probe_executable_binding_is_not_shadowed_before_holder_launch(self):
         module = ast.parse(path.read_text())
         main = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
@@ -54,31 +187,6 @@ class LegacyDockerHolderTest(unittest.TestCase):
                        and isinstance(node.ctx, ast.Store) and node.id == 'probe']
         self.assertEqual(len(assignments), 1, 'The executable path must retain its single binding.')
 
-    def test_holder_uses_canonical_source_and_reports_daemon_failure(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / 'workspace'
-            source.mkdir()
-            alias = root / 'controller-root'
-            alias.symlink_to(source, target_is_directory=True)
-            observed = []
-
-            def command(*args, **options):
-                observed.append(args)
-                if 'run' in args:
-                    raise subprocess.CalledProcessError(
-                        125, args, stderr='mount rejected ' + runtime.SECRET)
-                return types.SimpleNamespace(stdout='')
-
-            with patch.object(runtime, 'command', side_effect=command), \
-                    patch.object(runtime, 'eventually'):
-                with self.assertRaisesRegex(AssertionError, r'mount rejected \[fixture-secret\]'):
-                    with runtime.escaped_docker_holder(root, root / 'tools', alias):
-                        self.fail('A failed container must not be reported ready.')
-
-            launch = next(args for args in observed if 'run' in args)
-            self.assertEqual(launch[launch.index('-v') + 1], str(source) + ':/held')
-            self.assertEqual(observed[-1][:2], ('systemctl', 'stop'))
 
 
 class ControllerResultTest(unittest.TestCase):
@@ -208,29 +316,27 @@ class RetainedHealthTest(unittest.TestCase):
 
 
 class CompletedLocalDiskTest(unittest.TestCase):
-    def receipt(self):
-        return dict(status=dict(dirtyBytes=0, published=dict(local=True), completedGeneration=1))
+    def status(self):
+        return dict(storage='local-directory-v1', availability='available', paused=False)
 
-    def test_completed_local_disk_requires_a_durable_local_receipt(self):
+    def receipt(self):
+        return dict(storage='local-directory-v1', logicalBytes=4096, allocatedBytes=8192, files=1)
+
+    def test_stopped_directory_requires_retained_data_and_inspection_under_lease(self):
         receipt = self.receipt()
         manager = Mock(return_value=receipt)
-        api = Mock(return_value=receipt['status'])
+        api = Mock(return_value=self.status())
         self.assertIs(runtime.completed_local_disk(api, manager, 'run'), receipt)
         api.assert_called_once_with('/disks/run/storage-status')
-        manager.assert_called_once_with('consolidate', run='run')
+        manager.assert_called_once_with('inspect', run='run')
 
-    def test_remote_dirty_and_missing_completion_receipts_are_rejected(self):
-        for wrong in ('remote', 'dirty', 'completion'):
-            with self.subTest(wrong=wrong):
-                receipt = self.receipt()
-                if wrong == 'remote':
-                    receipt['status']['published'] = dict(backupId='old-remote-point')
-                elif wrong == 'dirty':
-                    receipt['status']['dirtyBytes'] = 4096
-                else:
-                    receipt['status']['completedGeneration'] = 0
-                with self.assertRaises((AssertionError, KeyError)):
-                    runtime.completed_local_disk(Mock(return_value=self.receipt()['status']), Mock(return_value=receipt), 'run')
+    def test_legacy_missing_paused_or_unallocated_data_is_not_a_clean_close(self):
+        for change in (dict(storage='journal'), dict(availability='unavailable'), dict(paused=True)):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                runtime.completed_local_disk(Mock(return_value=self.status() | change), Mock(return_value=self.receipt()), 'run')
+        for change in (dict(storage='journal'), dict(allocatedBytes=0)):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                runtime.completed_local_disk(Mock(return_value=self.status()), Mock(return_value=self.receipt() | change), 'run')
 
 
 if __name__ == '__main__':

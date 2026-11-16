@@ -85,7 +85,6 @@ impl BackendNamespace {
         Self(Arc::new(File::open("/dev/null").unwrap()))
     }
 
-    #[cfg(test)]
     pub(crate) fn create(state: &Path) -> io::Result<Self> {
         Self::create_recovering(state, &[])
     }

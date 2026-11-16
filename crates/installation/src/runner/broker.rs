@@ -556,6 +556,19 @@ async fn enforce_limits(
                 return;
             }
         };
+        if directory
+            .as_deref()
+            .is_some_and(crate::storage::image::exists)
+            && socket.get().is_some()
+            && broker.state.join(format!("{attempt}.vm.json")).exists()
+            && let Ok(_guard) = control.try_lock()
+            && let Err(error) =
+                crate::storage::image::enforce_limits(&broker.state, &attempt, expiry).await
+        {
+            tracing::error!(%attempt, message = %error.message, "VM storage protection failed; stopping execution");
+            attempt_stop.cancel();
+            return;
+        }
         if let Some(volume) = directory.as_deref().and_then(crate::storage::runtime::live)
             && let Ok(_guard) = control.try_lock()
         {

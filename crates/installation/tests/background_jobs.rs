@@ -157,7 +157,9 @@ async fn a_job_survives_two_provider_turns_in_the_same_environment() {
         protocol::{Event, Request},
     };
     let directory = tempfile::tempdir().unwrap();
-    let plan = serde_json::json!({"id": "attempt", "runId": "run", "cwd": directory.path()});
+    let credentials = directory.path().join("credentials");
+    std::fs::create_dir(&credentials).unwrap();
+    let plan = serde_json::json!({"id": "attempt", "runId": "run", "cwd": directory.path(),"chat":{"claudeManagedAuth":true,"claudeCredentialsDirectory":credentials}});
     let jobs = Registry::new(
         Path::new(env!("CARGO_BIN_EXE_cairn")),
         directory.path(),
@@ -174,7 +176,7 @@ async fn a_job_survives_two_provider_turns_in_the_same_environment() {
             Box::pin(async move {
                 Ok(environment::Launch {
                     program: "/bin/sh".into(),
-                    args: vec!["-c".into(), "setsid sh -c 'echo $$ > provider-child; exec sleep 30' >/dev/null 2>&1 & sleep 0.1; test -z \"${HOME+x}\" || exit 91; printf provider-output".into()],
+                    args: vec!["-c".into(), "printf synthetic-token > credentials/.credentials.json; setsid sh -c 'echo $$ > provider-child; exec sleep 30' >/dev/null 2>&1 & sleep 0.1; test -z \"${HOME+x}\" || exit 91; printf provider-output".into()],
                     cwd: cwd.into(), environment: Environment::new(), prompt: String::new(),
                 })
             })
@@ -250,6 +252,10 @@ async fn a_job_survives_two_provider_turns_in_the_same_environment() {
             }
         }
         assert_eq!(output, b"provider-output");
+        assert!(
+            !credentials.join(".credentials.json").exists(),
+            "provider credentials must be cleared before completion"
+        );
         let child = std::fs::read_to_string(directory.path().join("provider-child")).unwrap();
         assert!(!Path::new(&format!("/proc/{}", child.trim())).exists());
         assert!(matches!(

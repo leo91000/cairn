@@ -8,6 +8,7 @@ const { values } = parseArgs({
   options: {
     'repo': { type: 'string', default: process.cwd() },
     'native-runtime': { type: 'string' },
+    'legacy-runtime': { type: 'string' },
     'qualifier': { type: 'string' },
     'reference': { type: 'boolean', default: false },
   },
@@ -37,7 +38,11 @@ if (values.reference) {
   process.env.AWS_SHARED_CREDENTIALS_FILE = '/dev/null'
 }
 
-const result = spawnSync('python3', [path.join(repo, 'scripts/tests/native_runtime_test.py'), binary, qualifier], {
+if (!values.reference && !values['legacy-runtime'])
+  throw new Error('Candidate qualification requires --legacy-runtime for a real retained-environment migration.')
+const args = [path.join(repo, 'scripts/tests/native_runtime_test.py'), binary, qualifier]
+args.push(values.reference ? binary : path.resolve(values['legacy-runtime']))
+const result = spawnSync('python3', args, {
   cwd: repo,
   stdio: 'inherit',
 })

@@ -30,7 +30,7 @@ export async function udpSmoke({
     cwd: workspace,
     command: ['sudo', 'python3', '-u', `${workspace}/udp-policy.py`, publicPeer],
     resources: { cpu: 1, memoryMiB: 1024, diskMiB: 1024 },
-    storage,
+    storage: { ...storage, owner: runId },
     imports: [{ source: workspace, target: workspace }],
   }
   await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))

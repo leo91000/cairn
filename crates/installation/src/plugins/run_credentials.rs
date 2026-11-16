@@ -286,7 +286,7 @@ async fn instances(s: &Service) -> Result<Vec<(Package, Vec<Connection>)>> {
 /// Run credentials only from the explicitly retained supplying instance, plus
 /// the host's fetch credentials for each authorized project.
 pub async fn for_run(s: &Service, agent_id: &str, projects: &[Value]) -> Result<RunCredentials> {
-    for_run_with(s, agent_id, projects, None, None).await
+    for_run_with(s, agent_id, projects, None, None, None).await
 }
 
 /// Prepare credentials under the current run's revocable execution authority.
@@ -296,6 +296,7 @@ pub async fn for_execution(s: &Service, run: &Value, projects: &[Value]) -> Resu
         text(&run["snapshot"]["agent"], "id"),
         projects,
         Some(run),
+        None,
         None,
     )
     .await
@@ -313,6 +314,25 @@ pub(crate) async fn for_execution_authorized(
         projects,
         Some(run),
         Some(authority),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn for_environment_observation(
+    s: &Service,
+    run: &Value,
+    projects: &[Value],
+    observation: crate::worker::held::Observation,
+) -> Result<RunCredentials> {
+    let authority = observation.authority();
+    for_run_with(
+        s,
+        text(&run["snapshot"]["agent"], "id"),
+        projects,
+        Some(run),
+        Some(authority),
+        Some(observation),
     )
     .await
 }
@@ -323,6 +343,7 @@ async fn for_run_with(
     projects: &[Value],
     run: Option<&Value>,
     caller: Option<crate::capabilities::plugin_packages::Authority>,
+    observation: Option<crate::worker::held::Observation>,
 ) -> Result<RunCredentials> {
     let mut credentials = RunCredentials::default();
     let mut fetch_order = Vec::new();
@@ -379,7 +400,17 @@ async fn for_run_with(
             let profile = required(s.store.agent(agent_id).await?, "Agent not found")?;
             let snapshot = match run {
                 Some(run) => {
-                    super::grant_authorization::Snapshot::for_run(s, run, &package).await?
+                    if let Some(observation) = &observation {
+                        super::grant_authorization::Snapshot::for_environment_observation(
+                            s,
+                            run,
+                            &package,
+                            observation,
+                        )
+                        .await?
+                    } else {
+                        super::grant_authorization::Snapshot::for_run(s, run, &package).await?
+                    }
                 }
                 None => {
                     super::grant_authorization::Snapshot::capture(s, agent_id, None, &package)

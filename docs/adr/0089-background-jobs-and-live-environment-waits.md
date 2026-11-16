@@ -28,8 +28,8 @@ persisted registration time.
 Loss of supervision invalidates running job outcomes. Recovery fences the old
 environment before releasing ownership and reports the interruption; it does
 not replay jobs. Existing runs use the legacy single-turn path until a freshly
-admitted environment negotiates this protocol. Existing disks and journal data
-keep their format. Database version 35 adds job references and extends wait
+admitted environment negotiates this protocol. Retained directories and VM images keep the storage lifecycle of ADR-0088;
+legacy journal conversion remains subject to that decision. Database version 35 adds job references and extends wait
 conditions while preserving prior wakeups and observations; rollback requires
 a reader that understands that database version.
 
@@ -41,8 +41,17 @@ attempt and never send a job to its replacement. A missing start acknowledgement
 is reconciled by its original request identity rather than by issuing a command.
 
 Native continuation refreshes existing transient bind inodes through controller-
-owned handles. Newly granted credential paths require a fresh environment;
-continuing cannot add mount authority. Provider/account exhaustion stops this
+owned handles. Managed provider credentials are removed inside the retained environment after
+the provider tree is reaped and before its completion is acknowledged. A changed
+credential directory or failed removal requires the outer fence. Observation of
+job results has separate, revocable authority pinned to the retained attempt and
+generation; it does not restore a provider tool credential.
+
+New native credential paths require a fresh environment; continuing cannot add
+mount authority. VM turns refresh credentials within their already imported home
+after rechecking current grants; this does not add a guest mount. Home imports
+resolve directory components without symlinks, pin the destination inode and
+extract as the workload UID while retained jobs are alive. Provider/account exhaustion stops this
 environment explicitly. Retained runtime configuration is refreshed only after
 the previous provider tree is reaped. VM continuation preserves the guest
 workspace while refreshing transient credentials and inbox imports. Both routes

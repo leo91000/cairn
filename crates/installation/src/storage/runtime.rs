@@ -98,6 +98,7 @@ impl AttemptStop {
         }
     }
 
+    #[cfg(test)]
     pub fn bind(&self, volume: &Volume) -> Result<()> {
         self.volume
             .set(volume.stop.clone())
@@ -169,6 +170,7 @@ pub fn live(directory: &Path) -> Option<Arc<Volume>> {
 
 /// Task accounting excludes only the bounded internal replacement copy.
 /// Node accounting continues to use every physically allocated file.
+#[cfg(test)]
 pub(crate) fn retained_backing_bytes(directory: &Path) -> io::Result<u64> {
     let entry = registry()
         .lock()
@@ -600,38 +602,6 @@ pub(crate) async fn create_prepared(
 /// Prepare a private clone in a disposable environment before publishing it
 /// atomically into the conventional native disk. Startup removes abandoned
 /// temporary environments; no new authoritative pending format is introduced.
-pub(crate) async fn clone_native_base(source: &Path, target: &Path, context: &Value) -> Result<()> {
-    let physical = target
-        .parent()
-        .ok_or_else(|| Error::bad("Missing clone environment."))?;
-    if target.file_name().is_none_or(|name| name != "lazy")
-        || physical
-            .parent()
-            .and_then(Path::file_name)
-            .is_none_or(|name| name != "environments")
-        || physical.join("owner").exists()
-    {
-        return Err(Error::conflict(
-            "Native bases require a new unclaimed environment.",
-        ));
-    }
-    crate::validation::uuid(
-        physical
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(""),
-    )?;
-    let (source, target, context) = (source.to_owned(), target.to_owned(), context.clone());
-    blocking(move || {
-        // Validate current authority; immutable cached bases never carry it.
-        Assignment::new(&context)?;
-        LazyDisk::clone_sealed(&source, &target)?;
-        LazyDisk::bind_cloned_context(&target, &context)?;
-        Ok(())
-    })
-    .await
-}
-
 async fn create_source(
     directory: &Path,
     manifest: &Value,
@@ -737,6 +707,7 @@ impl Volume {
 
     /// The VMM and block backend have stopped. Fold their final acknowledged
     /// metadata writes without moving the last completed-turn boundary.
+    #[cfg(test)]
     pub(crate) async fn seal_stopped(self: &Arc<Self>) -> Result<()> {
         if !self.consolidates() {
             return Ok(());
@@ -1684,6 +1655,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (volume, attempt, _) = controller_fixture(root.path()).await;
         let path = root.path().join("storage-policy.json");
+        std::fs::remove_file(&path).unwrap();
         let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         // Any policy-file read blocks indefinitely. CPU safety must rely on the
@@ -1703,6 +1675,11 @@ mod tests {
         let directory = root.join("disks/conversation");
         let context = json!({"master":"http://127.0.0.1:1/","grant":"fixture",
             "policy":{"reserveMiB":64,"reservePercent":1}});
+        std::fs::write(
+            root.join("storage-policy.json"),
+            serde_json::to_vec(&context["policy"]).unwrap(),
+        )
+        .unwrap();
         drop(
             create(
                 &directory.join("lazy"),
@@ -2031,6 +2008,11 @@ mod tests {
     #[tokio::test]
     async fn consolidation_scratch_is_excluded_for_vm_and_native_but_work_and_tmp_stay_capped() {
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
         let directory = root.path().join("disks/conversation");
         let block = 4 * 1024 * 1024u64;
         let manifest = json!({
@@ -2174,6 +2156,11 @@ mod tests {
     async fn task_backing_pressure_counts_journal_history_and_consolidates_before_resuming_writes()
     {
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
         let directory = root.path().join("disks/conversation");
         let block = 4 * 1024 * 1024u64;
         let manifest = json!({

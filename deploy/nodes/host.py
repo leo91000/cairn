@@ -139,7 +139,14 @@ def gateway_arguments(master):
             '-e', f'CAIRN_NODE_GATEWAY_SOCKET={GATEWAY_SOCKETS}/gateway.sock']
 
 
-def block_device_arguments():
+def block_device_arguments(state=None):
+    # Fresh direct-image nodes need no ublk driver or device permissions. Only
+    # historical kernel registrations require the compatibility transport.
+    if state is not None:
+        if Path('/proc/sys/kernel/io_uring_disabled').read_text().strip() != '0':
+            raise RuntimeError('Direct VM image IO requires io_uring on this node')
+        if not any((state / 'ublk-devices').glob('*.json')):
+            return []
     # Package upgrades can remove the running kernel's module files while the
     # driver is still loaded. Its live devices remain usable until reboot.
     if not Path('/sys/module/ublk_drv').is_dir():
@@ -189,7 +196,7 @@ def launch(image):
     config_path = ROOT / 'config.json'
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
     vm_options = vm_arguments(config)
-    devices = block_device_arguments()
+    devices = block_device_arguments(ROOT / 'state')
     remove()
     command(['docker', 'run', '-d', '--name', NAME, '--init', '--user', '0:0', '--read-only',
              '--health-cmd', '/usr/local/bin/node -e ' + shlex.quote(HEALTH_CHECK),

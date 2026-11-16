@@ -118,19 +118,17 @@ pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
         "name": "wait_for",
         "outputSchema": cairn_contracts::schema_for::<cairn_contracts::WaitForOutput>(cairn_contracts::Contract::Serialize),
         "description": "Wait durably for a duration (delay), a date (at), an authorized Cairn run \
-            to finish, a task this conversation delegated to finish (task_finished), or a condition \
+            to finish, a managed job to finish (job_finished), a task this conversation delegated to finish (task_finished), or a condition \
             provided by a plugin granted to this agent. List one condition, \
-            or several external ones with mode all (every result) or any (the first result). \
-            Time conditions are used alone and take no timeoutSeconds; external conditions require \
+            or several conditions with mode all (every result) or any (the first result). \
+            A time condition alone takes no timeoutSeconds. Groups may combine time and job conditions; external conditions and groups require \
             it (1 to 86400 seconds), as the deadline of the whole group. \
             If already complete, returns deferred=false and the observation: continue this turn. \
-            Otherwise saves a wakeup and returns deferred=true: end this turn so execution resources \
-            can be released. Cairn checks the conditions without waking the LLM and resumes this \
+            Otherwise saves a wakeup and returns deferred=true: end this agent turn. Managed jobs and useful containers keep the environment alive within its original deadline. Cairn checks the conditions without waking the LLM and resumes this \
             conversation or mission when the time or result arrives or the timeout expires, subject to capacity. \
             A time reached is completed, not timed_out. External completion includes failure and \
             cancellation; a group result lists each condition with its result, or null when it has none yet. Plugin-owned result fields are preserved in pluginResult. \
-            Inspect the results before acting. Never use this for local background \
-            processes that need this execution. Run dependencies require installation access; delegated \
+            Inspect the results before acting. Start local background work with start_job, then wait for its jobId; shell backgrounding is not supervised. Run dependencies require installation access; delegated \
             tasks require delegation; plugin \
             conditions use the agent's plugin grants. One wait is stored per conversation or mission run. Identical \
             repeated requests preserve the deadline; a different request replaces the previous wait. \
@@ -141,7 +139,7 @@ pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
             "properties": {
                 "conditions": {
                     "type": "array",
-                    "description": "One condition, or several different external conditions. No condition-count limit.",
+                    "description": "One condition, or several different conditions, including job_finished and time conditions. No condition-count limit.",
                     "items": { "oneOf": conditions },
                     "minItems": 1,
                 },
@@ -289,7 +287,9 @@ fn time_condition(condition: &Value) -> Option<Result<Value>> {
 
 /// A run dependency, or a condition of a plugin granted to the agent.
 async fn external(s: &Service, agent_id: &str, condition: &Value) -> Result<Value> {
-    if let Some(condition) = conditions::normalize(s, agent_id, condition).await? {
+    if condition["type"] != "job_finished"
+        && let Some(condition) = conditions::normalize(s, agent_id, condition).await?
+    {
         return Ok(condition);
     }
     let (schema, key) = if condition["type"] == "job_finished" {

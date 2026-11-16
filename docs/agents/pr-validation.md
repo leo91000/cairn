@@ -58,17 +58,52 @@ affected code and the full qualification workflows for specialist coverage:
 - Native storage, process ownership, installation and update changes require
   the `node-checks` and `native-runtime` qualifications in that workflow, plus
   [storage measurements](../JOURNAL-RECOVERY.md#qualification) when applicable.
+  The native candidate fixture starts the installed `node-daemon` entry point
+  against an offline loopback master and observes its heartbeat; the immutable
+  reference keeps its original controller entry point. This exercises pre-runtime
+  legacy IO initialization during conversion without a production connection.
 - Firecracker changes require `scripts/test-firecracker-discard.sh` where
   relevant. Container/release changes require the corresponding image smoke
   tests. Use disposable infrastructure with the required KVM/ublk capabilities.
 
 If the local host cannot execute a required qualification, run the appropriate
-GitHub workflow manually on the branch and wait for its result. A manual run can
+GitHub workflow manually on the branch and wait for its result.
+For a full validation-only run, `native-reference=<full SHA>` explicitly selects
+the immutable native comparison. Without it a manual run compares its first
+parent, which may already use the candidate's storage format. Legacy-conversion
+qualification must name a known journal-format reference; record both exact SHAs.
+The reference selector validates a nonzero full SHA and archives that revision's
+fixture, without modifying its lifecycle assertions. A manual run can
 provide test evidence for the PR; it cannot supply reusable release provenance.
 For `validation-only` runs on a multi-commit branch, set `native-reference` to
 the full reviewed PR base SHA when its first parent contains an intermediate
 failure. The default remains the event base or first parent. The override is
 ignored by publication runs and still passes the immutable-SHA selector checks.
+
+For direct-storage development, `ci-diagnostic=storage`, `validation-only=true`
+and `backend-only=false` run the dedicated project-quota lifecycle test and image
+persistence/admission tests on a disposable runner. The native kernel selection
+also verifies migration-copy headroom reduction and owned-copy process cleanup;
+all five original exact cases and the privileged-parent writer quota case must execute, without accepting an empty or ignored match. This does not replace the
+full native/node/VM qualifications. The original quota cases drop `CAP_SYS_RESOURCE` because Linux allows that
+capability to bypass project hard limits. The additional writer case deliberately
+retains it in the parent and requires the production ingress writer to enforce
+byte and inode quotas itself; dropping it for that whole test would mask a defect.
+
+To qualify VM storage in a full non-publishing run, also set
+`vm-storage-qualification=true`. The runner image is built into its local Docker
+store and runs the real KVM smoke and retention suites. This opt-in requires
+`validation-only=true`; publishing, promotion and deployment remain disabled.
+The growth scenario crosses 32 GiB with a 33 GiB image reservation. The retention
+memory and ordinary CPU/RAM exclusivity scenarios use 1 GiB images. The nested
+Android exclusivity victim retains its 32 GiB image. Writable direct images reserve their
+full capacity against node/free-space admission. Missing physical capacity is a
+qualification failure, not a reason to skip the case. Before smoke tests, this
+opt-in requires 48 GiB free on the VM fixture filesystem. If needed, it prunes
+only the builder created by this disposable job and verifies that the loaded
+candidate image ID is unchanged. It refuses local/self-hosted/publishing paths
+and fails if reclaimed capacity is still insufficient; it removes no workspaces,
+credentials or running images.
 
 Full qualifications run the resolved OpenCode and Claude Code native adapters,
 plus the Plan boundary checks for the resolved Claude Code and Codex releases,

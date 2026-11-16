@@ -9,12 +9,15 @@ never crash a driver. Review code before testing on a personal workstation.
 ## Requirements and enrollment
 
 Use Linux x86-64 with systemd 255+, cgroup v2, Python 3, curl, useradd/usermod,
-e2fsprogs, io_uring and a working `ublk_drv` kernel driver. Host libraries must be
+e2fsprogs, rsync and a dedicated ext4 project-quota data pool (see below).
+Legacy journal conversion also needs io_uring and a working `ublk_drv` driver.
+Host libraries must be
 compatible with the published coding engines. The installed GPU
 driver, render/video device permissions and application libraries must already
 work. Cairn does not install GPU drivers, detach a GPU or close a graphical session.
-Enrollment loads the existing ublk storage module and checks its control device;
-unsupported kernels must be provisioned before native execution can start.
+Enrollment verifies the quota pool before starting or draining the controller.
+It loads/checks ublk only when legacy journals or attachment records require it;
+new directory environments do not require that driver.
 The installation manager must be configured; conversation disks require no S3 storage.
 
 As the installation owner, open Nodes, add a machine and choose Native process.
@@ -153,48 +156,31 @@ explicitly declare permanent conversation deletion. A manager-owned run namespac
 is never erased as native node staging, and its marker is excluded from remote
 seeds.
 
-The native controller mounts ext4 directly on ublk using the same durable local
-journal and immutable local base blocks as a VM. There is no guest kernel and no
-remote disk source. Same-node resume reopens that disk; it does not replace it
-with the original project checkout. Transfer staging still carries the original
-checkout, but an initialized disk does not consume that seed.
-
-Completed turns fence their processes and flush/unmount the filesystem before
-sealing the journal. Local background consolidation reconstructs durable base
-blocks and retires sealed segments. While mounted, journal pressure triggers
-crash-consistent seals without freezing the filesystem. A controller or machine
-crash can lose unflushed kernel pages; acknowledged journal writes remain local.
-Missing base blocks prevent mount and corrupt blocks fail authentication on read.
-
-Cairn never reclaims inactive environment blocks for cache pressure or idle age.
-The complete disk stays on its node until expiration or deletion. Loss or
-revocation of that node loses the working files. History, attachments and published
-artifacts remain on the manager. See [local disk operations](CONVERSATION-STORAGE-OPERATIONS.md).
+Native environments keep ordinary retained directories on the dedicated ext4
+project-quota pool at `state/native-data/<run>/`. Controller receipts and locks are
+on the separate host filesystem at `state/native/<run>/`. Stopping execution fences
+its consumers, flushes work and removes managed temporary files; retained workspace,
+home, Docker images and volumes stay in place for resume. Expiration removes that
+environment's directories and kernel quota limits after confirming all consumers
+are gone. See [local disk operations](CONVERSATION-STORAGE-OPERATIONS.md) for
+capacity, crash-prefix handling, format migration and intentionally retained metadata.
 
 Root-private data is under `/var/lib/cairn-native`. Transfer staging is in `data/`;
-journals and local base blocks are in `state/disks/<run>/lazy/`. The mounted conversation
-filesystem is `state/native/<run>/data/` under the root-private state directory,
-in the system manager's mount namespace. The unprivileged workload gets only its
-selected directory binds; the ublk backend has a separate private namespace that
-never contains its consumer filesystem. Stopped execution leaves an empty
-mountpoint. Restart fences workloads and verifies/unmounts retained owned mounts
-before device cleanup and journal recovery.
-Temporary files in `state/native/<run>/tmp/` are outside the durable filesystem.
-The root-private controller socket is `state/controller.sock`. Do not mount the
-disk elsewhere or delete ownership/active markers to force a second writer.
+new retained files are in `state/native-data/<run>/data/`, with managed temporary
+files in `state/native-data/<run>/tmp/`. The controller socket is
+`state/controller.sock`. Only legacy conversion temporarily opens the old journal
+and its ublk filesystem. Do not remove ownership/active markers to force a writer.
+Missing retained data fails explicitly rather than recreating the original seed.
 
-The conversation filesystem size enforces its workspace capacity. The shared node
-budget charges retained journals, local base blocks, staging, logs and
-artifacts; the mounted view is not charged a second time. Temporary files and
-other host-side copies remain monitored limits rather than hard host filesystem
-quotas. Physical free-space reserves and journal admission still apply. Exceptional
-filesystem growth can need extra temporary capacity. Ordinary remounts reopen the
-local journal and base blocks.
+CPU/RAM/process limits and read/write IO rates use per-execution and shared cgroups.
+Project quotas count allocated storage, including managed tmp and Docker data, and
+bound zero-length files with inode limits. Node capacity observations preserve the
+physical free-space reserve. Administrator limits remain cooperative.
 
 Generated runtime configuration, account credentials and frozen skills are bound
 from per-attempt staging instead of being copied into persisted blocks. Provider
-session files, user tools and workspace/output files stay on the journal-backed
-filesystem. This does not detect secrets deliberately written into arbitrary user
+session files, user tools and workspace/output files stay in the retained
+directory. This does not detect secrets deliberately written into arbitrary user
 files. Native conversations keep a distinct identity and subordinate ID range on
 their node. Changing nodes or backends starts an empty environment; existing
 container stores are not converted or transferred.
@@ -204,7 +190,9 @@ container stores are not converted or transferred.
 Revoke the node in Cairn first, then stop/disable `cairn-native-node.service` on its
 host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries and
 all retained local work; push commits and export files to keep before confirming revocation.
-First confirm with `findmnt` that no conversation disk is still mounted below
+After confirmed consumer shutdown, unmount the operator-provisioned native-data
+pool before removing its mountpoint. First confirm with `findmnt` that no other
+conversation disk is still mounted below
 `/var/lib/cairn-native` after a failed stop. If one remains, start
 `sudo systemctl start cairn-native-node` so its recovery releases the disks it owns,
 then retry. Removal must never walk into a live filesystem. Delete the directories
@@ -217,7 +205,7 @@ node remains on the machine, it also removes the node gateway. The
 installer leaves GPU drivers and the personal desktop session untouched.
 
 Claude's broker and CLI use a separate writable transient secure store for
-credentials. The full Claude user directory remains journal-backed, including
+credentials. The full Claude user directory remains retained, including
 root-level instructions/settings, arbitrary tool state, projects, sessions and
 installed plugins. Cairn-generated account metadata and configuration are bound
 from staging; generated Codex configuration and frozen Cairn skills retain read-only
@@ -235,7 +223,55 @@ not clean/restore the machine, undo changes or establish a new trust boundary.
 Root can read local credentials and defeat its own supervisor and cooperative
 limits. See [privilege admission, APIs, recovery and limitations](NATIVE-ADMINISTRATOR.md).
 
-VM nodes use the same mandatory ublk backend and a single flat ext4 filesystem.
-Neither backend advertises or requires a host FUSE capability. VM suspension and
+VM nodes provide a local image file directly to the VMM's block interface and
+use a single flat ext4 filesystem. Neither new backend needs ublk or FUSE. VM suspension and
 live memory reclamation preserve the running VMM; memory snapshots and the paired
 filesystem layout are no longer supported.
+
+
+## Pool de répertoires locaux (ADR-0088)
+
+Les nouveaux environnements utilisent des répertoires ordinaires dans
+`/var/lib/cairn-native/state/native-data/<conversation UUID>/`. Ce pool doit être
+un système de fichiers ext4 dédié, monté avec `prjquota`, appartenant à root sans
+écriture pour les autres comptes. Son périphérique doit différer de celui du
+répertoire `state` : les quotas de données ne réservent pas les inodes du système
+de fichiers, et un pool plein doit encore pouvoir écrire ses reçus de nettoyage.
+Les historiques et artefacts conservés par le manager ne sont pas déplacés dans
+ce pool. Les cgroups bornent CPU/RAM/processus et les débits IO, pas les octets
+occupés. Le contrôleur vérifie aussi que les quotas sont effectivement actifs.
+
+Le propriétaire prépare et monte ce volume avant l’enrôlement ou la mise à jour
+du superviseur. Cairn ne reformate, ne repartitionne et ne remonte pas un système
+de fichiers de production. Pour un volume **vide et jetable**, la qualification
+utilise `mkfs.ext4 -O project,quota -E quotatype=prjquota`, puis un montage avec
+`-o prjquota`. Ces commandes détruisent le contenu de leur cible ; elles ne sont
+pas une procédure de conversion d’un disque existant. L’exploitant choisit la
+capacité et la persistance du montage. Les fichiers locaux retenus et leurs
+métadonnées restent à leur emplacement jusqu’à leur conversion vérifiée.
+
+Le protocole de distribution `nativeHostProtocol: 2` exige un rafraîchissement
+explicite du superviseur après préparation du pool. Un ancien superviseur refuse
+la distribution avant de sélectionner le candidat ; le protocole d’exécution
+reste 2. Aucun déploiement de cette migration n’est réalisé par la PR.
+
+Une reprise rouvre l’arbre existant. Une source manquante ou inconnue est refusée,
+sans recréation silencieuse. La compatibilité ublk n’est chargée que pour des
+journaux ou périphériques historiques ; un environnement neuf ne l’utilise pas.
+Après vérification et bascule durable, le nettoyage efface ces anciennes ressources.
+Le retour à l’ancien format exige une sauvegarde antérieure à la conversion.
+
+La fin d’un tour clôt ses producteurs et son temporaire géré, mais retient ses
+fichiers de travail et données Docker privées. L’expiration selon la politique
+configurée, ou la suppression explicite, efface cet environnement. Les reçus
+permanents d’idempotence et les inodes de verrou restent nécessaires contre les
+retries tardifs ; le compteur de projets ne réutilise pas d’identifiant. Le pool
+partagé, les caches bornés et un pilote déjà chargé pour d’autres ressources ne
+sont pas des ressources privées d’une conversation et ne sont pas démontés par
+son expiration.
+
+La qualification système s’exécute uniquement sur infrastructure jetable. Le
+contrôle ciblé `ci.yaml` avec `ci-diagnostic=storage`, `validation-only=true` et
+`backend-only=false` donne un retour de développement sur les quotas et images.
+Il ne remplace pas les qualifications complètes `node-checks`, `native-runtime`,
+VM/Firecracker, ni la validation du head final avant merge.

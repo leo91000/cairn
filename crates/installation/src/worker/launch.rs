@@ -56,9 +56,11 @@ pub(super) async fn execute(
     sensitive: &History,
 ) -> Result<()> {
     let span = tracing::info_span!(target: "cairn_performance", "agent_execution", run_id = text(run, "id"));
-    execute_inner(s, run, admission, cancel, checkpoint, existing, sensitive)
-        .instrument(span)
-        .await
+    Box::pin(execute_inner(
+        s, run, admission, cancel, checkpoint, existing, sensitive,
+    ))
+    .instrument(span)
+    .await
 }
 
 async fn execute_inner(
@@ -114,13 +116,12 @@ async fn execute_inner(
         timing.finish();
         let mut log_total = 0;
         loop {
-            match execution
-                .attempt(&mut workspace, resume.as_deref(), &mut log_total)
+            match Box::pin(execution.attempt(&mut workspace, resume.as_deref(), &mut log_total))
                 .await?
             {
                 Attempt::Finished => return Ok(()),
                 Attempt::Held => {
-                    if !execution.wait_for_next_turn(&mut workspace).await? {
+                    if !Box::pin(execution.wait_for_next_turn(&mut workspace)).await? {
                         return Ok(());
                     }
                     resume = execution.resume_session(&workspace).await?;
@@ -431,7 +432,12 @@ impl Execution<'_> {
                 "Agent access was reduced after this run was queued. Run the task again with the current policy.",
             ));
         }
-        crate::delegation::authorize_async(s, self.run).await?;
+        let saved = self.checkpoint.snapshot().await;
+        if let Some(observation) = super::held::Observation::capture(self.run, &saved) {
+            crate::delegation::authorize_async_with(s, self.run, observation.authority()).await?;
+        } else {
+            crate::delegation::authorize_async(s, self.run).await?;
+        }
         // A held owner runs beside the scheduler. Never write its stale
         // snapshot over a newly queued message, model or grant selection.
         let nodes = policy(&current)["nodes"].clone();
@@ -856,7 +862,7 @@ impl Execution<'_> {
                         .await?;
                 }
             }
-            let mut exit = self.supervise(workspace, launch, log_total).await?;
+            let mut exit = Box::pin(self.supervise(workspace, launch, log_total)).await?;
             let receipt =
                 if workspace.env.contains_key("CAIRN_PROVIDER_TURN") && exit.code == Some(0) {
                     let receipt = super::held::turn_receipt(s, self.run, &self.turn).await?;
@@ -1049,6 +1055,23 @@ impl Execution<'_> {
                 if run.status == RunStatus::Queued || saved.turn_pending == Some(true) {
                     return Ok(false);
                 }
+                let record = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                let owner = crate::waits::Owner::for_run(db, &record)?;
+                let owner_id = if record["trigger"] == "chat" {
+                    db.conversation_for_run(&id)?.map(|chat| chat.id)
+                } else {
+                    Some(id.clone())
+                };
+                if owner.resumable(&record)
+                    && let Some(owner_id) = owner_id
+                    && crate::waits::observation(db, &owner_id, &record, now())?.is_some()
+                {
+                    // Completion can become visible before the scheduler queues
+                    // its continuation. Keep its original environment for that handoff.
+                    return Ok(false);
+                }
                 saved.held_environment = None;
                 Ok(true)
             })
@@ -1084,8 +1107,24 @@ impl Execution<'_> {
                 let run_id = self.id.clone();
                 s.store.read(move |db| crate::conversation_lifecycle::require_active_run(db, &run_id)).await?;
                 *self.run = current;
-                self.refresh_access().await?;
-                super::jobs::refresh_redacted(s, self.run, &self.sensitive.snapshot()).await?;
+                let expected_execution = crate::waits::execution_id(self.run).clone();
+                let refreshed = async {
+                    self.refresh_access().await?;
+                    super::jobs::refresh_redacted(s, self.run, &self.sensitive.snapshot()).await
+                }.await;
+                if let Err(error) = refreshed {
+                    let current = s.store.run(&self.id).await?;
+                    if crate::waits::execution_id(&current) != &expected_execution
+                        && current["status"] == RunStatus::Queued
+                        && current["cancelRequestedAt"].is_null()
+                    {
+                        // A scheduler handoff invalidates the previous turn's
+                        // observation authority. Recheck the new selection on
+                        // the next tick instead of stopping its environment.
+                        continue;
+                    }
+                    return Err(error);
+                }
                 if self.run["status"] == RunStatus::Queued {
                     // The scheduler has queued a fresh turn. Keep the existing
                     // owner and lease; acquiring another placement would deadlock
@@ -1138,6 +1177,7 @@ impl Execution<'_> {
                         if !pending && !jobs && !containers {
                             let may_close = self.close_idle_environment().await?;
                             if may_close { return Ok(false); }
+                            s.worker.notify();
                         }
                     }
                     crate::background_jobs::protocol::Event::Refused { message, .. } => return Err(Error::unavailable(message)),
@@ -1699,16 +1739,15 @@ impl Execution<'_> {
             return Err(error);
         }
         let span = tracing::info_span!(target: "cairn_performance", "agent_attempt", run_id = self.id, attempt_id = self.attempt_id);
-        let result = self
-            .wait(
-                &mut child,
-                &mut events,
-                log_total,
-                previously_launched,
-                observed.then_some(reports),
-            )
-            .instrument(span)
-            .await;
+        let result = Box::pin(self.wait(
+            &mut child,
+            &mut events,
+            log_total,
+            previously_launched,
+            observed.then_some(reports),
+        ))
+        .instrument(span)
+        .await;
         if result.is_err() {
             self.revoke_output_scope();
             child.stop().await;
@@ -1908,6 +1947,17 @@ impl Execution<'_> {
     async fn wait_for_account(&mut self, model: &str) -> Result<()> {
         let s = self.s;
         while self.account.is_none() && !self.stopping() && !self.checkpoint.expired() {
+            if self
+                .checkpoint
+                .snapshot()
+                .await
+                .held_environment
+                .is_some_and(|held| now() >= held.expires_at)
+            {
+                return Err(Error::conflict(
+                    "Environment background work reached its time limit.",
+                ));
+            }
             let speed = text(&self.run["snapshot"]["agent"], "speed");
             match s
                 .accounts
@@ -2231,6 +2281,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ready_job_wakeup_prevents_idle_close_before_scheduler_adoption() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let id = text(&run, "id").to_owned();
+        service.store.transaction({
+            let id = id.clone();
+            move |db| {
+                db.change_run(&id, crate::runs::RunChanges { status: Some(RunStatus::Waiting), ..Default::default() })?;
+                db.save_wakeup(false, &id, Some(&serde_json::from_value(json!({
+                    "id":"wake","messageId":null,"reason":"job","seconds":60,
+                    "createdAt":now(),"wakeAt":now()+60_000,
+                    "condition":{"type":"job_finished","jobId":"77d595dc-97b7-4c13-923d-e163baf49ea8"}
+                }))?))?;
+                db.0.execute("INSERT INTO background_jobs VALUES('request',?,'attempt','77d595dc-97b7-4c13-923d-e163baf49ea8','hash',?)",
+                    rusqlite::params![id, serde_json::to_string(&crate::background_jobs::Outcome::Finished { receipt: crate::background_jobs::Receipt { exit_code:Some(0),signal:None,elapsed_ms:1,stopped:false,timed_out:false,log_tail:"done".into(),log_truncated:false } })?])?;
+                Ok(())
+            }
+        }).await.unwrap();
+        run = service.store.run(&id).await.unwrap();
+        let mut saved = RunCheckpoint::fresh(None);
+        saved.runner_id = Some(Some("attempt".into()));
+        saved.completed = Some(true);
+        saved.held_environment = Some(super::super::checkpoint::HeldEnvironment {
+            attempt: "attempt".into(),
+            generation: "generation".into(),
+            expires_at: now() + 60_000,
+        });
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+        checkpoint.persist().await.unwrap();
+        let mut account = None;
+        let cancel = CancellationToken::new();
+        let sensitive = History::default();
+        let execution = Execution {
+            s: &service,
+            id: id.clone(),
+            admission_revision: run["environmentAdmissionRevision"].clone(),
+            run: &mut run,
+            account: &mut account,
+            preparation: None,
+            cancel: &cancel,
+            checkpoint: &checkpoint,
+            sensitive: &sensitive,
+            observation: None,
+            provider: Provider::Codex,
+            directory: root.path().join("run"),
+            attempt_id: String::new(),
+            reservation: None,
+            retained: false,
+            turn: String::new(),
+            output_probe: None,
+        };
+        assert!(!execution.close_idle_environment().await.unwrap());
+        assert!(checkpoint.snapshot().await.held_environment.is_some());
+        service
+            .store
+            .write(move |db| db.save_wakeup(false, &id, None))
+            .await
+            .unwrap();
+        assert!(execution.close_idle_environment().await.unwrap());
+    }
+
+    #[tokio::test]
     async fn unmanaged_account_selection_completes_without_a_lease() {
         let root = tempfile::tempdir().unwrap();
         let (service, mut run) = preparation_fixture(root.path()).await;
@@ -2266,6 +2378,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(execution.account.is_none());
+        // The environment cap applies even when the provider budget is unlimited.
+        assert!(!checkpoint.expired());
+        checkpoint
+            .update(|saved| {
+                saved.held_environment = Some(super::super::checkpoint::HeldEnvironment {
+                    attempt: "attempt".into(),
+                    generation: "generation".into(),
+                    expires_at: now() - 1,
+                });
+            })
+            .await
+            .unwrap();
+        let error = execution.wait_for_account("").await.unwrap_err();
+        assert!(error.message.contains("time limit"));
     }
 
     #[tokio::test]

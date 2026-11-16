@@ -35,14 +35,7 @@ impl super::super::cleanup::Work for CloseWork {
         if self.mounted.is_none() {
             self.mounted = self.mounts.lock().await.get(&self.run).cloned();
         }
-        if let Some(mounted) = &self.mounted {
-            mounted
-                .volume
-                .finish_fenced(self.storage_close.drain())
-                .await?;
-        } else {
-            self.storage_close.drain().await?;
-        }
+        self.storage_close.drain().await?;
         if !self.exported {
             let root = workspace::directory(&self.state, &self.run)?;
             let output = block::view(&self.state, &self.run)
@@ -68,7 +61,8 @@ impl super::super::cleanup::Work for CloseWork {
         if self.completion.is_none() {
             self.completion = Some(if let Some(mounted) = &self.mounted {
                 self.storage_close
-                    .finish_budgeted(&mounted.volume, async {
+                    .finish(async {
+                        let _ingress = mounted.ingress.lock().await;
                         mounted.mount.lock().await.close().await
                     })
                     .await?
@@ -266,7 +260,7 @@ impl super::super::cleanup::Work for RecoveryWork {
             if !stopped {
                 // A dead backend may leave consumers in D-state. Its owned
                 // recovery path aborts I/O before requiring their final fence.
-                block::recover_host_mounts(&self.state, &self.run).await?;
+                super::super::block::recover_host_mounts(&self.state, &self.run).await?;
                 self.unmounted = true;
                 systemd::stop(&self.attempt).await?;
                 for (attempt, _) in &attempts {
@@ -279,7 +273,7 @@ impl super::super::cleanup::Work for RecoveryWork {
         // exceeds its observation budget and the workload fence is confirmed.
         self.progress.lock().await.attempts = self.fenced.clone();
         if !self.unmounted {
-            block::recover_host_mounts(&self.state, &self.run).await?;
+            super::super::block::recover_host_mounts(&self.state, &self.run).await?;
             systemd::stop(&self.attempt).await?;
             self.unmounted = true;
         }
