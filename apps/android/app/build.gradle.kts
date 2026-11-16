@@ -283,7 +283,7 @@ class AndroidTestFailureSummary : TestListener {
                     // installation switching. Keep only line numbers, never assertion content.
                     if (
                         frame.fileName == "UnifiedHeaderCases.kt" &&
-                            frame.lineNumber in 205..301 &&
+                            frame.lineNumber in 227..323 &&
                             frame.lineNumber !in headerSourceLines
                     ) {
                         if (headerSourceLines.size < 3) headerSourceLines.add(frame.lineNumber)
@@ -530,13 +530,13 @@ class AndroidTestFailureSummary : TestListener {
 
             val headerFailure = AssertionError("private header assertion text")
             headerFailure.stackTrace =
-                listOf(269, 210, 210, 232, 208, 267)
+                listOf(291, 232, 232, 254, 230, 289)
                     .map { headerFrame("UnifiedHeaderCases.kt", it) }
                     .toTypedArray()
             val headerSummary = summarize(listOf(ExecutionException(headerFailure)))
             check(
                 headerSummary.contains(
-                    "headerSourceLines=210,232,269 headerSourceLinesTruncated=true"
+                    "headerSourceLines=232,254,291 headerSourceLinesTruncated=true"
                 )
             ) {
                 "Only three sorted distinct header scenario lines may be retained through causes"
@@ -555,16 +555,16 @@ class AndroidTestFailureSummary : TestListener {
             val headerBoundaries = AssertionError("private header assertion text")
             headerBoundaries.stackTrace =
                 arrayOf(
-                    headerFrame("UnifiedHeaderCases.kt", 204),
-                    headerFrame("UnifiedHeaderCases.kt", 205),
-                    headerFrame("UnifiedHeaderCases.kt", 301),
-                    headerFrame("UnifiedHeaderCases.kt", 205),
-                    headerFrame("UnifiedHeaderCases.kt", 302),
-                    headerFrame("OtherFixture.kt", 269),
+                    headerFrame("UnifiedHeaderCases.kt", 226),
+                    headerFrame("UnifiedHeaderCases.kt", 227),
+                    headerFrame("UnifiedHeaderCases.kt", 323),
+                    headerFrame("UnifiedHeaderCases.kt", 227),
+                    headerFrame("UnifiedHeaderCases.kt", 324),
+                    headerFrame("OtherFixture.kt", 291),
                 )
             check(
                 summarize(listOf(headerBoundaries))
-                    .contains("headerSourceLines=205,301 headerSourceLinesTruncated=false")
+                    .contains("headerSourceLines=227,323 headerSourceLinesTruncated=false")
             ) {
                 "Other files, adjacent header code and duplicate frames must not widen diagnostics"
             }

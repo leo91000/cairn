@@ -17,8 +17,10 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import okhttp3.mockwebserver.*
 import org.junit.Assert.assertTrue
@@ -73,7 +75,10 @@ abstract class UnifiedHeaderCases {
             .throttleBody(frame.toByteArray().size.toLong(), 1, TimeUnit.SECONDS)
     }
 
-    private fun fixture(server: MockWebServer): CairnViewModel {
+    private fun fixture(
+        server: MockWebServer,
+        beforeTasksResponse: () -> Unit = {},
+    ): CairnViewModel {
         server.dispatcher =
             object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
@@ -97,6 +102,8 @@ abstract class UnifiedHeaderCases {
                                 )
                             )
                     }
+                    if (path == "/api/installations/fixture/api/tasks") beforeTasksResponse()
+
                     val body =
                         when (path) {
                             "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
@@ -163,9 +170,15 @@ abstract class UnifiedHeaderCases {
     /**
      * Connects from composition: blocking the test thread would stall Robolectric's main looper.
      */
-    private fun setApp(vm: CairnViewModel, server: MockWebServer, dark: Boolean = true) {
+    private fun setApp(
+        vm: CairnViewModel,
+        server: MockWebServer,
+        dark: Boolean = true,
+        whileConnecting: () -> Unit = {},
+    ) {
         // Starting the server is network I/O, which Android forbids on the main thread.
         val origin = server.url("/").toString()
+        val connected = CompletableDeferred<Unit>()
         compose.setContent {
             val local = LocalDensity.current
             val inset =
@@ -179,8 +192,17 @@ abstract class UnifiedHeaderCases {
             LaunchedEffect(Unit) {
                 vm.state.first { it.ready }
                 vm.connect(origin)
+                connected.complete(Unit)
             }
             CairnTheme(if (dark) "dark" else "light") { CairnApp(vm = vm) }
+        }
+
+        // Online header semantics can arrive while the initial HTTP refresh still shows the
+        // global progress bar. Qualify completion before asserting the stable screen geometry.
+        compose.waitUntil(30000) {
+            compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+            if (!connected.isCompleted) whileConnecting()
+            connected.isCompleted
         }
     }
 
@@ -325,6 +347,49 @@ abstract class UnifiedHeaderCases {
                 }
             } finally {
                 // Keeps the original failure when no installation was opened yet.
+                runCatching { vm.api.closeStreams() }
+            }
+        }
+    }
+
+    @Test
+    fun headerGeometryWaitsForInitialRefresh() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        MockWebServer().use { server ->
+            val vm =
+                fixture(server) {
+                    entered.countDown()
+                    check(release.await(30, TimeUnit.SECONDS)) {
+                        "The initial refresh response was not released"
+                    }
+                }
+
+            try {
+                setApp(
+                    vm,
+                    server,
+                    whileConnecting = {
+                        // Release only when setup is waiting for the connection that owns this
+                        // refresh; merely finding the header must not qualify its stable geometry.
+                        if (entered.count == 0L) release.countDown()
+                    },
+                )
+                assertTrue("The initial refresh response was exercised", entered.count == 0L)
+
+                waitText("Tout")
+                compose.onNodeWithText("Tout").performClick()
+                waitText(chat.title)
+                compose.waitUntil(30000) {
+                    compose
+                        .onAllNodes(installationHeader("Maison", "En ligne · Relais"))
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertTopsUnderSystemInsets(compose.onNodeWithTag("installation-header"))
+                assertTrue("The initial refresh has completed", !vm.state.value.busy)
+            } finally {
+                release.countDown()
                 runCatching { vm.api.closeStreams() }
             }
         }
