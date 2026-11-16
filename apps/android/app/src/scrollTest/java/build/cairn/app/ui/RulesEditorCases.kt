@@ -400,6 +400,45 @@ abstract class RulesEditorCases {
     }
 
     @Test
+    fun aSchemaStringReplacesTheSelectedTextWhenInsertingAVariable() =
+        insertSchemaStringVariable(false)
+
+    @Test
+    fun aNullableSchemaStringReplacesTheSelectedTextWhenInsertingAVariable() =
+        insertSchemaStringVariable(true)
+
+    private fun insertSchemaStringVariable(nullable: Boolean) {
+        var value by mutableStateOf(literalRuleValue(JsonPrimitive("Hello Alice!")))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor(
+                    "Message",
+                    value,
+                    listOf(RuleVariable("Événement", "payload.author", "Auteur", "string", "")),
+                    { value = it },
+                    schema =
+                        ruleObject(
+                            "type" to
+                                if (nullable)
+                                    JsonArray(
+                                        listOf(JsonPrimitive("string"), JsonPrimitive("null"))
+                                    )
+                                else JsonPrimitive("string"),
+                            "maxLength" to JsonPrimitive(300),
+                        ),
+                )
+            }
+        }
+        compose
+            .onNode(hasSetTextAction())
+            .performClick()
+            .performTextInputSelection(TextRange(6, 11))
+        compose.onNodeWithText("+ Insérer une variable").performClick()
+        compose.onNodeWithText("Utiliser Auteur").performClick()
+        compose.runOnIdle { assertEquals(templateValue("Hello {{payload.author}}!"), value) }
+    }
+
+    @Test
     fun jsonStringEditingKeepsItsTypeAndTextModeHasNoEncodingQuotes() {
         var value by mutableStateOf(literalRuleValue(JsonPrimitive("5")))
         compose.setContent {

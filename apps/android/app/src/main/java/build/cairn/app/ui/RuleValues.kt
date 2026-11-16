@@ -115,7 +115,8 @@ internal fun RuleValueEditor(
                 )
             }
         }
-        if (mode == "literal" && schema != null)
+        val literalTextSchema = declaredSchemaKind == "string" && schema.list("enum").isEmpty()
+        if (mode == "literal" && schema != null && !literalTextSchema)
             RuleLiteralEditor(
                 schema,
                 held["value"] ?: JsonNull,

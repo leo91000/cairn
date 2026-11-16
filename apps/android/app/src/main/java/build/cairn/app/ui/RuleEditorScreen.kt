@@ -20,12 +20,30 @@ import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleCatalog
 import build.cairn.contracts.HookRuleProblem
+import build.cairn.contracts.RuleCatalogHook
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
+
+internal fun rulePeopleSource(hook: RuleCatalogHook?, definition: JsonObject): RuleResourceSource? {
+    val pluginId = hook?.pluginId ?: return null
+    val field =
+        hook.resourceFields.firstOrNull {
+            it.resourceType.contains("person", true) ||
+                it.resourceType.contains("user", true) ||
+                it.path.contains("author", true) ||
+                it.path.contains("sender", true)
+        } ?: return null
+    return RuleResourceSource(
+        pluginId,
+        definition.obj("trigger").text("instanceId"),
+        field.resourceType,
+        definition.text("executionAgentId"),
+    )
+}
 
 private fun emptyRuleDefinition(
     catalog: HookRuleCatalog,
@@ -569,21 +587,7 @@ fun RuleEditorScreen(
                     onDismissRequest = { selected = "" },
                     sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
                 ) {
-                    val peopleField =
-                        hook?.resourceFields?.firstOrNull {
-                            it.resourceType.contains("person", true) ||
-                                it.resourceType.contains("user", true) ||
-                                it.path.contains("author", true)
-                        }
-                    val source =
-                        if (hook?.pluginId != null && peopleField != null)
-                            RuleResourceSource(
-                                hook.pluginId!!,
-                                definition.obj("trigger").text("instanceId"),
-                                peopleField.resourceType,
-                                definition.text("executionAgentId"),
-                            )
-                        else null
+                    val source = rulePeopleSource(hook, definition)
                     Column(
                         Modifier.fillMaxWidth()
                             .fillMaxHeight(0.92f)

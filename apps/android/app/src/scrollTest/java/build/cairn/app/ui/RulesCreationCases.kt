@@ -184,6 +184,7 @@ abstract class RulesCreationCases {
                         )
                     }
                 }
+            val origin = server.url("/").toString()
             val vm =
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
@@ -199,7 +200,7 @@ abstract class RulesCreationCases {
                 compose.setContent {
                     LaunchedEffect(Unit) {
                         vm.state.first { it.ready }
-                        vm.connect(server.url("/").toString())
+                        vm.connect(origin)
                     }
                     val state by vm.state.collectAsState()
                     CairnTheme {
@@ -220,6 +221,105 @@ abstract class RulesCreationCases {
                     compose.onAllNodesWithText("Autre règle").fetchSemanticsNodes().isNotEmpty()
                 }
                 assertTrue(requests.contains(""))
+            } finally {
+                compose.runOnIdle { models.clear() }
+            }
+        }
+    }
+
+    @Test
+    fun aSenderContactHookOffersPeopleByNameWithTheExecutionAgent() {
+        val hook =
+            wireJson.decodeFromString<build.cairn.contracts.RuleCatalogHook>(
+                """{"trigger":{"type":"plugin","instanceId":"00000000-0000-4000-8000-000000000015","hook":"message"},"pluginId":"contacts","title":"Message","description":"","payloadSchema":{"type":"object","properties":{"sender":{"type":"string"}}},"resourceFields":[{"path":"/sender","resourceType":"contact"}],"agentIds":["$MAIN_AGENT_ID"]}"""
+            )
+        val catalog = rootSchemaCatalog().copy(hooks = listOf(hook))
+        val definition =
+            ruleObject(
+                "trigger" to wireJson.encodeToJsonElement(hook.trigger),
+                "executionAgentId" to JsonPrimitive(MAIN_AGENT_ID),
+                "steps" to JsonArray(emptyList()),
+            )
+        val source = rulePeopleSource(hook, definition)
+        assertEquals(
+            RuleResourceSource(
+                "contacts",
+                "00000000-0000-4000-8000-000000000015",
+                "contact",
+                MAIN_AGENT_ID,
+            ),
+            source,
+        )
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.requestUrl!!.encodedPath
+                        val body =
+                            when {
+                                path == "/api/account/session" -> beaconAccountFixture()
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path.endsWith("/api/projects") -> """{"projects":[]}"""
+                                path.endsWith("/api/agents") -> """{"agents":[]}"""
+                                path.endsWith("/api/tasks") -> """{"tasks":[]}"""
+                                path.endsWith("/api/mcps") -> """{"mcps":[]}"""
+                                else -> "[]"
+                            }
+                        return MockResponse()
+                            .setHeader("Content-Type", "application/json")
+                            .setBody(body)
+                    }
+                }
+            val origin = server.url("/").toString()
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    object : SessionVault {
+                        override fun read(origin: String): String? = null
+
+                        override fun write(origin: String, cookie: String?) {}
+                    },
+                    beaconOrigin = "",
+                )
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            var condition by
+                mutableStateOf(
+                    ruleObject(
+                        "type" to JsonPrimitive("authorIn"),
+                        "author" to formulaRuleValue("payload.sender"),
+                        "people" to JsonArray(emptyList()),
+                    )
+                )
+            try {
+                compose.setContent {
+                    LaunchedEffect(Unit) {
+                        vm.state.first { it.ready }
+                        vm.connect(origin)
+                    }
+                    val state by vm.state.collectAsState()
+                    CairnTheme {
+                        if (state.installation != null)
+                            Column(Modifier.verticalScroll(rememberScrollState())) {
+                                RuleConditionEditor(
+                                    condition,
+                                    ruleVariablesAt(definition, "/steps/0", catalog),
+                                    { condition = it },
+                                    vm,
+                                    source,
+                                )
+                            }
+                    }
+                }
+                compose.waitUntil(20000) {
+                    compose
+                        .onAllNodesWithText("Choisir une personne…")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose
+                    .onNodeWithText("Choisir une personne…")
+                    .performScrollTo()
+                    .assertIsDisplayed()
             } finally {
                 compose.runOnIdle { models.clear() }
             }

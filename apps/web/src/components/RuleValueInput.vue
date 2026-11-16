@@ -61,6 +61,15 @@ const modes = computed(() => {
   return all
 })
 
+// Plain schema strings use the same text field as templates so variable insertion
+// can replace its current selection before switching from a fixed value to text.
+const literalTextSchema = computed(() => {
+  if (!props.schema)
+    return false
+  const schema = resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema)
+  return schema.type === 'string' && !schema.enum?.length
+})
+
 const literalDraft = ref<{ value: RuleValue, text: string, expects: string } | null>(null)
 const text = computed({
   get: () => {
@@ -293,7 +302,7 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
     </div>
     <div ref="pickerRoot" class="relative">
       <div
-        v-if="mode === 'literal' && schema"
+        v-if="mode === 'literal' && schema && !literalTextSchema"
         class="grid gap-2"
       >
         <RuleLiteralFields
@@ -365,7 +374,7 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
         </button>
       </div>
       <button
-        v-if="mode === 'literal' && (schema || expects === 'boolean') && variables.length"
+        v-if="mode === 'literal' && ((schema && !literalTextSchema) || expects === 'boolean') && variables.length"
         type="button"
         class="mt-2 text-xs font-semibold text-accent"
         :aria-label="`Insert a variable into ${label}`"
