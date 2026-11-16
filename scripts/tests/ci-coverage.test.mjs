@@ -646,7 +646,7 @@ describe('parallel CI coverage', () => {
     expect(consumer.run).not.toMatch(/(?:--filter|--ignore|\s-k\s)/)
     expect(steps.filter(step => step.run?.includes('node scripts/ci-diagnostic-native-build.mjs'))).toHaveLength(1)
     const memoryTests = readFileSync(new URL('./test_native_local_runtime.py', import.meta.url), 'utf8')
-    expect(memoryTests.match(/^\s+def test_/gm)).toHaveLength(1)
+    expect(memoryTests.match(/^\s+def test_/gm)).toHaveLength(2)
   })
 
   it('isolates each diagnostic job even when legacy independent inputs are populated', () => {
