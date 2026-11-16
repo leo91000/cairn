@@ -34,6 +34,78 @@ test('rules show the actual saved tree, creator controls and real triggering his
   await expectSingleScroll(page)
 })
 
+test('agent scopes preserve server key relationships and clearing reloads the list', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const target = workspace.service.agent({ name: 'Conversation target' })
+  const rule = await workspace.api('/api/hook-rules', 'POST', { definition: { ...fixture.definition, name: 'Key-directed conversation' }, enabled: false })
+  const other = await workspace.api('/api/hook-rules', 'POST', { definition: { ...fixture.definition, name: 'Unrelated rule' }, enabled: false })
+  const summaries = (await workspace.api('/api/hook-rules')).rules
+  const requests: string[] = []
+  await useRelayForHttpMocks(page)
+  // The server can include a rule whose creator has a key bound to this agent,
+  // even though the execution and started-agent IDs do not mention it.
+  await page.route('**/hook-rules?*', async (route) => {
+    const query = new URL(route.request().url()).searchParams
+    requests.push(query.toString())
+    await route.fulfill({ json: { rules: summaries.filter((entry: any) => entry.id === rule.id) } })
+  })
+  await page.goto(workspacePath(`/rules?agent=${target.id}`))
+  await signIn(page)
+  await expect(page.getByRole('region', { name: 'Rule list' }).getByText(rule.definition.name, { exact: true })).toBeVisible()
+  expect(requests).toContain(`agentId=${target.id}`)
+  await expect(page.getByRole('region', { name: 'Rule list' }).getByText(other.definition.name, { exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Show all rules', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Rule list' }).getByText(other.definition.name, { exact: true })).toBeVisible()
+})
+
+test('polling responses begun before a confirmed pause cannot restore the old state', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const rule = await workspace.api('/api/hook-rules', 'POST', { definition: { ...fixture.definition, name: 'Ordered pause' }, enabled: true })
+  await useRelayForHttpMocks(page)
+  await page.clock.install()
+  await page.goto(workspacePath(`/rules?rule=${rule.id}`))
+  await signIn(page)
+  await expect(page.getByRole('button', { name: 'Emergency pause', exact: true })).toBeVisible()
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let detailHeld = false
+  let listHeld = false
+  let completed = 0
+  await page.route('**/hook-rules**', async (route) => {
+    const url = new URL(route.request().url())
+    const detail = url.pathname.endsWith(`/hook-rules/${rule.id}`)
+    const list = url.pathname.endsWith('/hook-rules')
+    if (route.request().method() !== 'GET' || (!detail && !list) || (detail ? detailHeld : listHeld)) {
+      await route.continue()
+      return
+    }
+
+    const response = await route.fetch()
+    if (detail)
+      detailHeld = true
+    else
+      listHeld = true
+    await held
+    await route.fulfill({ response })
+    completed++
+  })
+  try {
+    await page.clock.fastForward(10001)
+    await expect.poll(() => detailHeld && listHeld).toBe(true)
+    await page.getByRole('button', { name: 'Emergency pause', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
+    release()
+    await expect.poll(() => completed).toBe(2)
+    await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
+    await expect(page.getByRole('region', { name: 'Rule list' }).getByText('Paused by the owner', { exact: true })).toBeVisible()
+  }
+  finally {
+    release()
+  }
+})
+
 test('the visual editor inserts branches and edits structured conditions without JSON', async ({ page, workspace }) => {
   test.setTimeout(60000)
   const fixture = await rulesFixture(workspace)

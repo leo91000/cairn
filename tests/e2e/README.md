@@ -20,7 +20,8 @@ Set `CAIRN_BEACON_TEST_DATABASE_URL` to a disposable Postgres database.
 creator controls and member visibility against the real services on Chromium and
 WebKit. The `journeys-rules`, `layout-webkit-rules`, `journeys-rule-editor` and
 `layout-webkit-rule-editor` projects each own their installation and its production
-rate limiter. Splitting the journeys keeps fixture traffic within that limiter;
+rate limiter. Splitting the list and editor journeys, and running typed-operand editor cases in a
+fresh Playwright process, keeps each fixture account within that limiter;
 the production limits are unchanged. The opt-in
 `rules-android` project drives the installed native app on a disposable Android 16
 emulator at 720 × 1280, density 320. It signs in through the actual email-code flow,

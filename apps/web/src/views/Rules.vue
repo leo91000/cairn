@@ -42,10 +42,15 @@ const wide = ref(wideQuery.matches)
 const onWide = () => wide.value = wideQuery.matches
 let timer: ReturnType<typeof setInterval>
 let disposed = false
+let listRequest = 0
+let detailRequest = 0
 
-const scoped = computed(() => rules.value.filter(rule =>
-  (typeof route.query.agent !== 'string' || rule.executionAgentId === route.query.agent || rule.startedAgentIds.includes(route.query.agent))
-  && (typeof route.query.instance !== 'string' || (rule.trigger.type === 'plugin' && rule.trigger.instanceId === route.query.instance) || rule.toolInstanceIds.includes(route.query.instance))))
+const listInput = computed(() => ({
+  ...(typeof route.query.agent === 'string' ? { agentId: route.query.agent } : {}),
+  ...(typeof route.query.instance === 'string' ? { instanceId: route.query.instance } : {}),
+}))
+const listScope = computed(() => JSON.stringify([state.installationId, state.accountId, listInput.value]))
+const scoped = computed(() => rules.value)
 const filters = computed(() => [
   { value: 'all' as const, label: 'All', count: scoped.value.length },
   { value: 'mine' as const, label: 'Mine', count: scoped.value.filter(rule => rule.creatorAccountId === state.accountId).length },
@@ -72,23 +77,31 @@ const summary = computed(() => {
 const agentName = (id: string) => state.agents.find(agent => agent.id === id)?.name ?? catalog.value?.agents.find(agent => agent.agentId === id)?.name ?? 'Agent'
 
 async function load() {
+  const request = ++listRequest
+  const scope = listScope.value
+  const current = () => !disposed && request === listRequest && scope === listScope.value
   try {
-    const output = await listHookRules(api, {})
-    if (disposed)
+    const output = await listHookRules(api, listInput.value)
+    if (!current())
       return
     rules.value = output.rules
     error.value = ''
   }
   catch (e) {
-    error.value = (e as Error).message
+    if (current())
+      error.value = (e as Error).message
   }
   finally {
-    loading.value = false
+    if (current())
+      loading.value = false
   }
 }
 
 async function loadShown() {
+  const request = ++detailRequest
+  const scope = listScope.value
   const id = shownId.value
+  const current = () => !disposed && request === detailRequest && scope === listScope.value && shownId.value === id
   if (!id) {
     shownRule.value = null
     return
@@ -96,11 +109,12 @@ async function loadShown() {
 
   try {
     const rule = await getHookRule(api, { ruleId: id })
-    if (!disposed && shownId.value === id)
+    if (current())
       shownRule.value = rule
   }
   catch (e) {
-    error.value = (e as Error).message
+    if (current())
+      error.value = (e as Error).message
   }
 }
 
@@ -114,14 +128,42 @@ function closeSheet() {
 }
 
 async function changed(rule: HookRule | null) {
-  if (!rule)
+  // Responses started before a confirmed mutation must never restore its old state.
+  listRequest++
+  detailRequest++
+  if (!rule) {
+    rules.value = rules.value.filter(entry => entry.id !== shownId.value)
+    shownRule.value = null
     closeSheet()
-  else
+  }
+  else {
     shownRule.value = rule
+    rules.value = rules.value.map(entry => entry.id === rule.id
+      ? {
+          ...entry,
+          revision: rule.revision,
+          version: rule.version,
+          blocks: rule.blocks,
+          allowed: rule.allowed,
+          updatedAt: rule.updatedAt,
+        }
+      : entry)
+  }
+
   await load()
 }
 
-watch(shownId, () => {
+watch(listScope, () => {
+  listRequest++
+  detailRequest++
+  rules.value = []
+  shownRule.value = null
+  error.value = ''
+  loading.value = true
+  void load()
+}, { immediate: true, flush: 'sync' })
+
+watch([shownId, listScope], () => {
   shownRule.value = null
   void loadShown()
 }, { immediate: true })
@@ -146,7 +188,6 @@ async function loadCatalog() {
 
 onMounted(() => {
   wideQuery.addEventListener('change', onWide)
-  void load()
   const accountScope = `${state.installationId}:${state.accountId}`
   if (state.installationRole === 'owner') {
     void fetch(`/api/installations/${encodeURIComponent(state.installationId)}/sharing`, { headers: { 'X-CSRF-Token': state.csrf } })

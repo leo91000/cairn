@@ -214,15 +214,27 @@ internal fun RuleStepPanel(
                         )
                         RuleValueEditor(
                             "Auteur externe (facultatif)",
-                            action["author"],
+                            action["author"]
+                                ?: ruleObject(
+                                    "type" to JsonPrimitive("formula"),
+                                    "expression" to JsonPrimitive(""),
+                                ),
                             variables,
-                            { patchAction("author" to optionalRuleText(it)) },
-                            resourceSource = peopleSource,
-                            vm = vm,
-                            resourceLabel = "Choisir une personne",
+                            {
+                                patchAction(
+                                    "author" to
+                                        if (
+                                            it.text("type") == "formula" &&
+                                                it.text("expression").isEmpty()
+                                        )
+                                            null
+                                        else optionalRuleText(it)
+                                )
+                            },
+                            expects = "field",
                         )
                         Text(
-                            "La personne du service connecté à l’origine de cette conversation.",
+                            "Choisissez le champ de l’événement qui identifie la personne à l’origine de cette conversation.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         RuleValueEditor(

@@ -146,7 +146,10 @@ jobs:
         run: pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --workers=1 --fail-on-flaky-tests
       - name: Run rule editor and history journeys
         timeout-minutes: 5
-        run: pnpm test:e2e --project=journeys-rules --project=layout-webkit-rules --project=journeys-rule-editor --project=layout-webkit-rule-editor --workers=1 --retries=0 --fail-on-flaky-tests
+        run: |
+          pnpm test:e2e --project=journeys-rules --project=layout-webkit-rules --workers=1 --retries=0 --fail-on-flaky-tests --output=test-results/rules-pages
+          pnpm test:e2e --project=journeys-rule-editor --project=layout-webkit-rule-editor --grep-invert 'a newly added comparison|formula equality and editing nested|editing a comparison field preserves templates|reopening a JSON string comparison' --workers=1 --retries=0 --fail-on-flaky-tests --output=test-results/rules-editor
+          pnpm test:e2e --project=journeys-rule-editor --project=layout-webkit-rule-editor --grep 'a newly added comparison|formula equality and editing nested|editing a comparison field preserves templates|reopening a JSON string comparison' --workers=1 --retries=0 --fail-on-flaky-tests --output=test-results/rules-editor-types
       - name: Run deliverable preview and sharing journeys
         timeout-minutes: 10
         run: pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on

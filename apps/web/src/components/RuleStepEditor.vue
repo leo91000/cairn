@@ -334,14 +334,13 @@ const agentName = (id: string) => props.catalog?.agents.find(agent => agent.agen
         @update:model-value="prompt => patch({ prompt })"
       />
       <RuleValueInput
-        :model-value="action.author ?? emptyValue()"
+        :model-value="action.author ?? { type: 'formula', expression: '' }"
         label="External author (optional)"
+        expects="field"
         :variables="variables"
         :problems="problemsAt('/action/author')"
-        :resource-source="peopleSource"
-        resource-label="Choose a person…"
-        hint="The person from the connected service who started this conversation."
-        @update:model-value="author => patch({ author: optionalRuleText(author) })"
+        hint="Choose the event field holding the person who started this conversation."
+        @update:model-value="author => patch({ author: author.type === 'formula' && !author.expression ? null : optionalRuleText(author) })"
       />
       <RuleValueInput
         :model-value="action.key ?? emptyValue()"

@@ -7,7 +7,7 @@ import {
 } from './fixtures'
 import { referencedToolRulesFixture, rulesFixture, scalarRulesFixture } from './rules-fixture'
 
-test('starting an agent associates a selected external author and clears optional values', async ({ page, workspace }) => {
+test('starting an agent associates the event author and clears optional values', async ({ page, workspace }) => {
   const fixture = await rulesFixture(workspace)
   const rule = await workspace.api('/api/hook-rules', 'POST', {
     definition: {
@@ -30,16 +30,15 @@ test('starting an agent associates a selected external author and clears optiona
   await page.goto(workspacePath(`/rules/${rule.id}/edit`))
   await signIn(page)
   await page.getByRole('button', { name: 'Edit Start a conversation', exact: true }).click()
-  await page.getByRole('button', { name: 'Choose a person…', exact: true }).click()
-  await page.getByRole('button', { name: 'Alice', exact: true }).click()
+  await page.getByRole('textbox', { name: 'External author (optional)', exact: true }).fill('payload.author')
   await page.getByRole('button', { name: 'Close the step', exact: true }).click()
   await page.getByRole('button', { name: 'Save version', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
   const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
-  expect(saved.definition.steps[0].action.author).toEqual({ type: 'literal', value: 'alice' })
+  expect(saved.definition.steps[0].action.author).toEqual({ type: 'formula', expression: 'payload.author' })
   await page.goto(workspacePath(`/rules/${rule.id}/edit`))
   await page.getByRole('button', { name: 'Edit Start a conversation', exact: true }).click()
-  await page.getByRole('button', { name: 'Remove Alice', exact: true }).click()
+  await page.getByRole('textbox', { name: 'External author (optional)', exact: true }).fill('')
   await page.getByRole('textbox', { name: 'Conversation key (optional)', exact: true }).fill('')
   await page.getByRole('button', { name: 'Close the step', exact: true }).click()
   await page.getByRole('button', { name: 'Save version', exact: true }).click()

@@ -52,7 +52,6 @@ fun RulesScreen(
     openConversation: (String) -> Unit = {},
     edit: (String) -> Unit,
 ) {
-    var rules by remember(vm.api.cacheScope) { mutableStateOf<List<JsonObject>>(emptyList()) }
     var catalog by remember(vm.api.cacheScope) { mutableStateOf<HookRuleCatalog?>(null) }
     var catalogError by remember(vm.api.cacheScope) { mutableStateOf("") }
     var catalogAttempt by remember { mutableIntStateOf(0) }
@@ -66,14 +65,28 @@ fun RulesScreen(
         }
     }
     var selected by rememberSaveable(vm.api.cacheScope, initialRule) { mutableStateOf(initialRule) }
-    var detail by remember { mutableStateOf<JsonObject?>(null) }
+    var detail by remember(vm.api.cacheScope) { mutableStateOf<JsonObject?>(null) }
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("all") }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf("") }
     var refresh by remember { mutableIntStateOf(0) }
     var scopeCleared by
         rememberSaveable(vm.api.cacheScope, agentFilter, instanceFilter) { mutableStateOf(false) }
+    val listPath = buildString {
+        append("/hook-rules")
+        if (!scopeCleared) {
+            val parameters = buildList {
+                if (agentFilter.isNotBlank()) add("agentId=${segment(agentFilter)}")
+                if (instanceFilter.isNotBlank()) add("instanceId=${segment(instanceFilter)}")
+            }
+            if (parameters.isNotEmpty()) append("?${parameters.joinToString("&")}")
+        }
+    }
+    var rules by
+        remember(vm.api.cacheScope, listPath) {
+            mutableStateOf<List<JsonObject>>(emptyList())
+        }
+    var loading by remember(vm.api.cacheScope, listPath) { mutableStateOf(true) }
+    var error by remember(vm.api.cacheScope, listPath) { mutableStateOf("") }
     var creatorNames by
         remember(vm.api.cacheScope) { mutableStateOf<Map<String, String>>(emptyMap()) }
     LaunchedEffect(vm.api.cacheScope, state.isOwner) {
@@ -87,21 +100,23 @@ fun RulesScreen(
     val creatorName: (String) -> String = {
         if (it == state.session.account?.id) "vous" else creatorNames[it] ?: "une autre personne"
     }
-    Poll("rules:${vm.api.cacheScope}:$refresh", 10000) {
+    Poll("rules:${vm.api.cacheScope}:$listPath:$refresh", 10000) {
+        val requestedRefresh = refresh
         try {
-            val output: JsonObject = vm.api.get("/hook-rules")
+            val output: JsonObject = vm.api.get(listPath)
+            if (refresh != requestedRefresh) return@Poll
             rules = output.list("rules").map { it.jsonObject }
             val requested = selected
             if (requested.isNotBlank()) {
                 val loaded: JsonObject = vm.api.get("/hook-rules/${segment(requested)}")
-                if (selected == requested) detail = loaded
+                if (selected == requested && refresh == requestedRefresh) detail = loaded
             }
-            error = ""
+            if (refresh == requestedRefresh) error = ""
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            error = e.message.orEmpty()
+            if (refresh == requestedRefresh) error = e.message.orEmpty()
         } finally {
-            loading = false
+            if (refresh == requestedRefresh) loading = false
         }
     }
     LaunchedEffect(selected, refresh, vm.api.cacheScope) {
@@ -114,16 +129,25 @@ fun RulesScreen(
                 error = e.message.orEmpty()
             }
     }
+    fun changed(saved: JsonObject?) {
+        refresh++
+        rules =
+            if (saved == null) rules.filter { it.text("id") != selected }
+            else
+                rules.map { entry ->
+                    if (entry.text("id") != saved.text("id")) entry
+                    else
+                        entry.patch(
+                            *listOf("revision", "version", "blocks", "allowed", "updatedAt")
+                                .map { it to saved[it] }
+                                .toTypedArray()
+                        )
+                }
+        detail = saved
+        selected = saved.text("id")
+    }
     val visible = rules.filter { rule ->
-        (scopeCleared ||
-            agentFilter.isBlank() ||
-            rule.text("executionAgentId") == agentFilter ||
-            rule.list("startedAgentIds").any { it.jsonPrimitive.content == agentFilter }) &&
-            (scopeCleared ||
-                instanceFilter.isBlank() ||
-                rule.obj("trigger").text("instanceId") == instanceFilter ||
-                rule.list("toolInstanceIds").any { it.jsonPrimitive.content == instanceFilter }) &&
-            (filter != "mine" || rule.text("creatorAccountId") == state.session.account?.id) &&
+        (filter != "mine" || rule.text("creatorAccountId") == state.session.account?.id) &&
             (filter != "blocked" || rule.list("blocks").isNotEmpty()) &&
             "${rule.text("name")} ${rule.text("description")}".contains(query.trim(), true)
     }
@@ -273,10 +297,7 @@ fun RulesScreen(
                             state,
                             it,
                             catalog,
-                            {
-                                selected = it
-                                refresh++
-                            },
+                            ::changed,
                             edit,
                             openConversation,
                             creatorName(it.text("creatorAccountId")),
@@ -302,10 +323,7 @@ fun RulesScreen(
                         state,
                         detail!!,
                         catalog,
-                        {
-                            selected = it
-                            refresh++
-                        },
+                        ::changed,
                         edit,
                         openConversation,
                         creatorName(detail!!.text("creatorAccountId")),
@@ -322,7 +340,7 @@ internal fun RuleDetailPanel(
     state: Workspace,
     rule: JsonObject,
     catalog: HookRuleCatalog?,
-    changed: (String) -> Unit,
+    changed: (JsonObject?) -> Unit,
     edit: (String) -> Unit,
     openConversation: (String) -> Unit,
     creator: String,
@@ -349,7 +367,7 @@ internal fun RuleDetailPanel(
                         body.patch("ruleId" to JsonPrimitive(id)),
                     )
                 if (path == "duplicate") duplicateId = java.util.UUID.randomUUID().toString()
-                changed(saved.text("id"))
+                changed(saved)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 error = e.message.orEmpty()
@@ -522,7 +540,7 @@ internal fun RuleDetailPanel(
                         scope.launch {
                             try {
                                 vm.api.request("DELETE", "/hook-rules/${segment(id)}")
-                                changed("")
+                                changed(null)
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e
                                 error = e.message.orEmpty()

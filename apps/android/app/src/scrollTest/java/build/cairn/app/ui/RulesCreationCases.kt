@@ -146,6 +146,87 @@ abstract class RulesCreationCases {
     }
 
     @Test
+    fun agentScopeUsesServerRelationshipsAndClearingReloadsAllRules() {
+        val target = "00000000-0000-4000-8000-000000000099"
+        val requests = CopyOnWriteArrayList<String>()
+        fun response(body: String) =
+            MockResponse().setHeader("Content-Type", "application/json").setBody(body)
+        val directed =
+            """{"id":"directed","name":"Conversation par clé","executionAgentId":"$MAIN_AGENT_ID","startedAgentIds":[],"toolInstanceIds":[],"creatorAccountId":"owner","version":1,"blocks":[],"trigger":{"type":"cairn","hook":"replyReady"}}"""
+        val unrelated =
+            directed.replace("directed", "unrelated").replace("Conversation par clé", "Autre règle")
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val url = request.requestUrl!!
+                        if (url.encodedPath.endsWith("/hook-rules")) {
+                            requests += url.encodedQuery.orEmpty()
+                            return response(
+                                if (url.queryParameter("agentId") == target)
+                                    """{"rules":[$directed]}"""
+                                else """{"rules":[$directed,$unrelated]}"""
+                            )
+                        }
+                        if (url.encodedPath.endsWith("/hook-rules/catalog"))
+                            return response(wireJson.encodeToString(rootSchemaCatalog()))
+                        return response(
+                            when {
+                                url.encodedPath == "/api/account/session" -> beaconAccountFixture()
+                                url.encodedPath == "/api/installations" ->
+                                    beaconInstallationsFixture()
+                                url.encodedPath.endsWith("/api/projects") -> """{"projects":[]}"""
+                                url.encodedPath.endsWith("/api/agents") -> """{"agents":[]}"""
+                                url.encodedPath.endsWith("/api/tasks") -> """{"tasks":[]}"""
+                                url.encodedPath.endsWith("/api/mcps") -> """{"mcps":[]}"""
+                                else -> "[]"
+                            }
+                        )
+                    }
+                }
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    object : SessionVault {
+                        override fun read(origin: String): String? = null
+
+                        override fun write(origin: String, cookie: String?) {}
+                    },
+                    beaconOrigin = "",
+                )
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.setContent {
+                    LaunchedEffect(Unit) {
+                        vm.state.first { it.ready }
+                        vm.connect(server.url("/").toString())
+                    }
+                    val state by vm.state.collectAsState()
+                    CairnTheme {
+                        if (state.installation != null)
+                            RulesScreen(vm, state, agentFilter = target, edit = {})
+                    }
+                }
+                compose.waitUntil(20000) {
+                    compose
+                        .onAllNodesWithText("Conversation par clé")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertTrue(requests.contains("agentId=$target"))
+                compose.onNodeWithText("Autre règle").assertDoesNotExist()
+                compose.onNodeWithText("Afficher toutes les règles").performClick()
+                compose.waitUntil(20000) {
+                    compose.onAllNodesWithText("Autre règle").fetchSemanticsNodes().isNotEmpty()
+                }
+                assertTrue(requests.contains(""))
+            } finally {
+                compose.runOnIdle { models.clear() }
+            }
+        }
+    }
+
+    @Test
     fun startingAnAgentEditsAndClearsItsExternalAuthor() {
         val catalog =
             rootSchemaCatalog()
@@ -192,17 +273,22 @@ abstract class RulesCreationCases {
                     }
                 }
             }
-            compose.onNodeWithText("Choisir une personne").performScrollTo().assertIsDisplayed()
             compose
                 .onNodeWithContentDescription("Auteur externe (facultatif)")
                 .performScrollTo()
-                .performTextReplacement("alice")
+                .performTextReplacement("payload.author")
             compose.runOnIdle {
-                assertEquals(templateValue("alice"), node.obj("action").obj("author"))
+                assertEquals(
+                    ruleObject(
+                        "type" to JsonPrimitive("formula"),
+                        "expression" to JsonPrimitive("payload.author"),
+                    ),
+                    node.obj("action").obj("author"),
+                )
                 assertTrue(
                     describeAction(node["action"], catalog) { "Assistant" }
                         .second
-                        .contains("auteur alice")
+                        .contains("auteur ƒ payload.author")
                 )
             }
             compose
