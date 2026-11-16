@@ -57,15 +57,15 @@ async function tap(text: string, preferEditable = false) {
   }, { timeout: 25000, intervals: [500] }).toBe(true)
 }
 
-async function scrollTo(text: string) {
+async function scrollTo(text: string, preferEditable = false) {
   for (let attempt = 0; attempt < 7; attempt++) {
     const current = screen()
-    if (positionIn(current, text)) {
-      await tap(text)
+    if (positionIn(current, text, false, preferEditable)) {
+      await tap(text, preferEditable)
       return
     }
 
-    const clipped = positionIn(current, text, true)
+    const clipped = positionIn(current, text, true, preferEditable)
     if (clipped && clipped[1] < 400)
       adb('shell', 'input', 'swipe', '360', '500', '360', '700', '350')
     else
@@ -76,7 +76,7 @@ async function scrollTo(text: string) {
 }
 
 async function fill(label: string, value: string | (() => string)) {
-  await tap(label, true)
+  await scrollTo(label, true)
   await expect.poll(() => nativeInputFocused(screen(), label), { timeout: 7000 }).toBe(true)
   const text = typeof value === 'function' ? value() : value
   adb('shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A')
@@ -242,7 +242,8 @@ test('native rules persist edits, integer waits and every creator control agains
   await tap('Support messages mobile')
   await scrollTo('Historique')
   await scrollTo('Terminé · 1 actions')
-  await scrollTo('Résultat')
+  await scrollTo('Résultat ⌄')
+  adb('shell', 'input', 'swipe', '360', '1000', '360', '500', '450')
   await expect.poll(() => screen().includes('Received: A real local rule execution')).toBe(true)
   await capture(info.outputPath('android-history.png'))
 })
