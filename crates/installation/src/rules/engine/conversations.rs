@@ -775,10 +775,15 @@ fn cancel(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
     let active = chat
         .run_id
         .as_deref()
-        .map(|run| db.run_state(run))
+        .map(|run| -> Result<bool> {
+            let state = db.run_state(run)?;
+            let held = acting.executing.contains(run)
+                && crate::worker::checkpoint::RunCheckpoint::load_in(db, run)?
+                    .is_some_and(|saved| saved.held_environment.is_some());
+            Ok(state.is_some_and(|state| state.status.is_active()) || held)
+        })
         .transpose()?
-        .flatten()
-        .is_some_and(|run| run.status.is_active());
+        .unwrap_or(false);
     let Some(run) = chat.run_id.as_deref().filter(|_| active) else {
         // The worker may have stopped before an environment retirement or
         // engine switch resumes it. Cancel those retained continuations too;

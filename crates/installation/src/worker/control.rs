@@ -288,7 +288,10 @@ pub(crate) fn stop_chat_in(
         crate::environment_expiration::cancel_continuation_in(db, run_id)?;
         crate::chats::continuation::cancel_for_run(db, run_id)?;
         let run = required(db.run_state(run_id)?, "Run not found")?;
-        if run.status.is_active() {
+        let held = executing.contains(run_id)
+            && RunCheckpoint::load_in(db, run_id)?
+                .is_some_and(|saved| saved.held_environment.is_some());
+        if run.status.is_active() || held {
             request_cancel(db, run_id, executing.contains(run_id))?;
         }
     }
