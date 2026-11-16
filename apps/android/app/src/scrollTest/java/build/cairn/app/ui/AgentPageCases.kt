@@ -9,7 +9,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
-import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
@@ -769,45 +768,44 @@ abstract class AgentPageCases {
     ) {
         val fixture = fixture().also(prepare)
         fixture.server.use {
-            val vm =
-                CairnViewModel(
-                    ApplicationProvider.getApplicationContext<Application>(),
-                    object : SessionVault {
-                        override fun read(origin: String): String? = null
+            FixtureUi(compose).use { ui ->
+                val vm =
+                    CairnViewModel(
+                        ApplicationProvider.getApplicationContext<Application>(),
+                        object : SessionVault {
+                            override fun read(origin: String): String? = null
 
-                        override fun write(origin: String, cookie: String?) {}
-                    },
-                    beaconOrigin = "",
-                )
-            fixture.refreshWorkspace.set { vm.perform { refresh() } }
-            val models = ViewModelStore().apply { put("fixture", vm) }
-            var mounted by mutableStateOf(true)
-            compose.setContent {
-                val state by vm.state.collectAsStateWithLifecycle()
-                backDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
-                var loaded by remember { mutableStateOf(false) }
-                if (state.agents.isNotEmpty()) loaded = true
-                LaunchedEffect(Unit) {
-                    vm.state.first { it.ready }
-                    vm.connect(fixture.server.url("/").toString())
-                }
-                CairnTheme {
-                    Surface(Modifier.fillMaxSize()) {
-                        Box(Modifier.systemBarsPadding()) {
-                            if (mounted && loaded)
-                                AgentScreen(
-                                    vm,
-                                    state,
-                                    agentId,
-                                    back = { left.set(true) },
-                                    chat = {},
-                                    navigate = {},
-                                )
+                            override fun write(origin: String, cookie: String?) {}
+                        },
+                        beaconOrigin = "",
+                    )
+                fixture.refreshWorkspace.set { vm.perform { refresh() } }
+                ui.setContent(vm) {
+                    val state by vm.state.collectAsStateWithLifecycle()
+                    backDispatcher =
+                        LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+                    var loaded by remember { mutableStateOf(false) }
+                    if (state.agents.isNotEmpty()) loaded = true
+                    LaunchedEffect(Unit) {
+                        vm.state.first { it.ready }
+                        vm.connect(fixture.server.url("/").toString())
+                    }
+                    CairnTheme {
+                        Surface(Modifier.fillMaxSize()) {
+                            Box(Modifier.systemBarsPadding()) {
+                                if (loaded)
+                                    AgentScreen(
+                                        vm,
+                                        state,
+                                        agentId,
+                                        back = { left.set(true) },
+                                        chat = {},
+                                        navigate = {},
+                                    )
+                            }
                         }
                     }
                 }
-            }
-            try {
                 compose.waitUntil(30000) {
                     compose
                         .onAllNodesWithTag("agent-section-Nodes")
@@ -815,11 +813,6 @@ abstract class AgentPageCases {
                         .isNotEmpty()
                 }
                 body(fixture)
-            } finally {
-                compose.runOnUiThread {
-                    mounted = false
-                    models.clear()
-                }
             }
         }
     }
