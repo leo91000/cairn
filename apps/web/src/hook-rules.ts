@@ -23,6 +23,7 @@ import {
   Split,
   Wrench,
 } from './icons'
+import { valueJsonDrafts } from './rule-json-drafts'
 import { resolveRuleSchema, ruleLiteralDefault } from './rule-schema'
 
 // Hook rules (ADR-0075): presentation and editing helpers shared by the list, the detail
@@ -758,6 +759,9 @@ export function sameRuleDefinition(left: HookRuleDefinition, right: HookRuleDefi
 }
 
 export function typedComparisonRight(value: RuleValue | null | undefined, expects: ReturnType<typeof comparisonExpects>, listOnly = true): RuleValue {
+  if (value?.type === 'literal' && Object.keys(valueJsonDrafts(value)).length)
+    return value
+
   if (value?.type === 'formula' || (value?.type === 'template' && expects === 'json' && !listOnly))
     return value
   if (value?.type === 'template') {

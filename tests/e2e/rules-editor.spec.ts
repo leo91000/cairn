@@ -63,7 +63,7 @@ for (const kind of ['stored JSON', 'schema JSON', 'number'] as const) {
             condition: {
               type: 'compare',
               left: { type: 'formula', expression: 'payload.first' },
-              operator: 'equals',
+              operator: 'greaterThan',
               right: { type: 'literal', value: 1 },
             },
             then: [],
@@ -88,6 +88,12 @@ for (const kind of ['stored JSON', 'schema JSON', 'number'] as const) {
     const field = page.getByRole('textbox', { name: kind === 'schema JSON' ? 'Message (JSON)' : 'Value', exact: true })
     const raw = numeric ? '1.5e' : '{"count":'
     await field.fill(raw)
+    if (numeric) {
+      await page.getByRole('combobox', { name: 'Test', exact: true }).selectOption('lessThan')
+      await page.getByRole('textbox', { name: 'Field', exact: true }).fill('payload.first + 0')
+      await expect(field).toHaveValue(raw)
+    }
+
     await expect(page.getByRole('button', { name: 'Save version', exact: true })).toBeDisabled()
     await page.getByRole('button', { name: 'Close the step', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Save version', exact: true })).toBeDisabled()

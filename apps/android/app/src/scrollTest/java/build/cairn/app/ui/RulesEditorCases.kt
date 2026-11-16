@@ -1,5 +1,6 @@
 package build.cairn.app.ui
 
+import android.app.Application
 import android.net.Uri
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.rememberScrollState
@@ -9,6 +10,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.text.TextRange
+import androidx.lifecycle.ViewModelStore
+import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleProblem
 import java.util.concurrent.CopyOnWriteArrayList
@@ -533,24 +536,53 @@ abstract class RulesEditorCases {
 
     @Test
     fun malformedNumericComparisonKeepsItsDraftAndBlocksValidation() {
-        var value by mutableStateOf(literalRuleValue(JsonPrimitive(1)))
-        compose.setContent {
-            CairnTheme {
-                RuleValueEditor(
-                    "Comparer avec",
-                    value,
-                    emptyList(),
-                    { value = it },
-                    expects = "number",
+        var condition by
+            mutableStateOf(
+                ruleObject(
+                    "type" to JsonPrimitive("compare"),
+                    "left" to formulaRuleValue("payload.count"),
+                    "operator" to JsonPrimitive("greaterThan"),
+                    "right" to literalRuleValue(JsonPrimitive(1)),
                 )
+            )
+        val vm =
+            CairnViewModel(
+                ApplicationProvider.getApplicationContext<Application>(),
+                object : SessionVault {
+                    override fun read(origin: String): String? = null
+
+                    override fun write(origin: String, cookie: String?) {}
+                },
+                beaconOrigin = "",
+            )
+        val models = ViewModelStore().apply { put("fixture", vm) }
+        try {
+            compose.setContent {
+                CairnTheme {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        RuleConditionEditor(condition, emptyList(), { condition = it }, vm, null)
+                    }
+                }
             }
-        }
-        compose.onNode(hasSetTextAction()).performTextReplacement("oops")
-        compose.runOnIdle { assertEquals(1, ruleJsonDraftProblems(value).size) }
-        compose.onNode(hasSetTextAction()).performTextReplacement("3")
-        compose.runOnIdle {
-            assertTrue(ruleJsonDraftProblems(value).isEmpty())
-            assertEquals(literalRuleValue(JsonPrimitive(3)), value)
+            val right =
+                compose.onNode(hasSetTextAction() and hasContentDescription("Comparer avec"))
+            right.performScrollTo().performTextReplacement("1.5e")
+            compose.runOnIdle { assertEquals(1, ruleJsonDraftProblems(condition).size) }
+            compose.onNodeWithText("est supérieur à").performScrollTo().performClick()
+            compose.onNodeWithText("est inférieur à").performClick()
+            compose
+                .onNode(hasSetTextAction() and hasContentDescription("Champ à vérifier"))
+                .performScrollTo()
+                .performTextReplacement("payload.count + 0")
+            right.performScrollTo().assertTextContains("1.5e")
+            compose.runOnIdle { assertEquals(1, ruleJsonDraftProblems(condition).size) }
+            right.performTextReplacement("3")
+            compose.runOnIdle {
+                assertTrue(ruleJsonDraftProblems(condition).isEmpty())
+                assertEquals(literalRuleValue(JsonPrimitive(3)), condition["right"])
+            }
+        } finally {
+            compose.runOnIdle { models.clear() }
         }
     }
 

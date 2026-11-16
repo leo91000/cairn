@@ -1042,6 +1042,8 @@ fun typedComparisonRight(
     listOnly: Boolean = true,
 ): JsonObject {
     val held = value as? JsonObject ?: templateValue()
+    if (held.text("type") == "literal" && ruleValueJsonDrafts(held).isNotEmpty()) return held
+
     if (
         held.text("type") == "formula" ||
             (held.text("type") == "template" && expects == "json" && !listOnly)

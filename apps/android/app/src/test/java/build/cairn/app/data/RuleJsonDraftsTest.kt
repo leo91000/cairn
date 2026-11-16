@@ -48,6 +48,10 @@ class RuleJsonDraftsTest {
         val invalid =
             literalWithJsonDrafts(JsonPrimitive("{\"count\":"), jsonInputDraft("{\"count\":"))
         val restored = wireJson.parseToJsonElement(invalid.toString())
+        for (expects in listOf("json", "number", "boolean", "text")) assertEquals(
+            invalid,
+            typedComparisonRight(restored, expects, listOnly = false),
+        )
         assertEquals(1, ruleJsonDraftProblems(restored).size)
         val lookalike =
             wireJson.parseToJsonElement(
