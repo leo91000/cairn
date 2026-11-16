@@ -139,7 +139,7 @@ test('native rules persist edits, integer waits and every creator control agains
   await page.goto(workspacePath(`/rules?rule=${rule.id}`))
   await signIn(page)
   await page.goto(workspacePath('/rules'))
-  await expect(page.getByText('Support messages', { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Rule list', exact: true }).getByText('Support messages', { exact: true })).toBeVisible()
   await page.screenshot({ path: info.outputPath('web-list.png'), animations: 'disabled' })
   await page.goto(workspacePath(`/rules?rule=${rule.id}`))
   await expect(page.getByRole('heading', { name: 'Support messages', exact: true })).toBeVisible()
