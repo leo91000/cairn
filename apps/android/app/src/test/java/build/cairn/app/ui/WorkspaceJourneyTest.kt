@@ -432,6 +432,10 @@ class WorkspaceJourneyTest {
             compose.onNodeWithText("Stockage par tâche").performScrollTo()
             compose.waitForIdle()
             screenshot("settings-task-storage")
+            // Compose idleness does not wait for the task-storage HTTP response.
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Enregistrer la limite").fetchSemanticsNodes().size == 1
+            }
             compose.onNodeWithText("Enregistrer la limite").performScrollTo()
             compose.waitForIdle()
             screenshot("settings-task-limit")
