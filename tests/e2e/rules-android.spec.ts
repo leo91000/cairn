@@ -104,7 +104,9 @@ async function capture(file: string) {
 }
 
 test('native rules persist edits, integer waits and every creator control against the real service', async ({ page, workspace }, info) => {
-  test.setTimeout(360000)
+  // Includes the real email cooldown and each verified native edit/control/history step.
+  // Individual assertions retain their own bounds.
+  test.setTimeout(480000)
   expect(adb('shell', 'getprop', 'ro.kernel.qemu').trim()).toBe('1')
   expect(adb('shell', 'wm', 'size')).toContain('720x1280')
   const started = Date.now()
