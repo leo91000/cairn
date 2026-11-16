@@ -1317,7 +1317,9 @@ mod tests {
 
         let dropped = TABLES.map(|name| format!("DROP TABLE {name};")).join("");
         connection
-            .execute_batch(&format!("{dropped} PRAGMA user_version=33;"))
+            .execute_batch(&format!(
+                "{dropped} DROP TABLE background_jobs; PRAGMA user_version=33;"
+            ))
             .unwrap();
         assert!(tables(&connection).is_empty());
         drop(connection);
@@ -1328,7 +1330,7 @@ mod tests {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 34);
+        assert_eq!(version, crate::store::DATABASE_VERSION);
         // Reopening, or a concurrent startup, changes nothing.
         upgrade(&mut connection).unwrap();
         drop(Store::open(root.path()).unwrap());

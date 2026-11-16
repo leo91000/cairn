@@ -38,7 +38,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 34;
+pub(crate) const DATABASE_VERSION: i64 = 35;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -270,6 +270,10 @@ impl Store {
         }
         if !fresh && version == 33 {
             crate::conversation_writers::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 34 {
+            crate::worker::jobs::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -321,6 +325,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::artifacts::sql::SCHEMA)?;
             tx.execute_batch(crate::skills::sql::SCHEMA)?;
             tx.execute_batch(crate::waits::sql::SCHEMA)?;
+            tx.execute_batch(crate::worker::jobs::SCHEMA)?;
             tx.execute_batch(crate::chats::engine_switch::SCHEMA)?;
             tx.execute_batch(crate::timeline::SCHEMA)?;
             tx.commit()?;
@@ -1425,7 +1430,7 @@ mod schema_tests {
             let connection = Connection::open(root.path().join("manager.db")).unwrap();
             connection
                 .execute_batch(&format!(
-                    "DROP TABLE agent_account_access; ALTER TABLE nodes DROP COLUMN vm_disks; PRAGMA user_version={version};"
+                    "DROP TABLE background_jobs; DROP TABLE agent_account_access; ALTER TABLE nodes DROP COLUMN vm_disks; PRAGMA user_version={version};"
                 ))
                 .unwrap();
             if version == 27 {
@@ -1618,7 +1623,7 @@ mod schema_tests {
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());
         let db = Connection::open(root.path().join("manager.db")).unwrap();
-        db.execute_batch("DROP TABLE agent_account_access; DROP INDEX events_turn_boundaries; PRAGMA user_version=27;")
+        db.execute_batch("DROP TABLE background_jobs; DROP TABLE agent_account_access; DROP INDEX events_turn_boundaries; PRAGMA user_version=27;")
             .unwrap();
         drop(db);
 
@@ -1788,7 +1793,7 @@ mod schema_tests {
         let file = root.path().join("manager.db");
         let db = Connection::open(&file).unwrap();
         crate::chats::migration::tests::version14(&db);
-        db.execute_batch("DROP TABLE account_leases; DROP TABLE account_usage_windows; DROP TABLE account_usage; DROP TABLE account_exhaustion; DROP TABLE coding_agent_accounts; DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations; PRAGMA user_version=12;
+        db.execute_batch("DROP TABLE background_jobs; DROP TABLE account_leases; DROP TABLE account_usage_windows; DROP TABLE account_usage; DROP TABLE account_exhaustion; DROP TABLE coding_agent_accounts; DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations; PRAGMA user_version=12;
             INSERT INTO kv(key,data) VALUES('migration-fixture','{\"preserved\":true}');
             INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES('old-object','bucket','hash',4096,'{}','ready');").unwrap();
         drop(db);

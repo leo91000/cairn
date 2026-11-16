@@ -41,6 +41,40 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+async fn remove_environment_sockets(root: &Path) -> Result<()> {
+    for extension in ["environment", "environment-relays"] {
+        require_removed(tokio::fs::remove_dir_all(root.with_extension(extension)).await)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod environment_cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retirement_removes_only_its_environment_socket_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let attempt = root.path().join("attempt");
+        let other = root.path().join("other.environment");
+        for path in [
+            attempt.with_extension("environment"),
+            attempt.with_extension("environment-relays"),
+            other.clone(),
+        ] {
+            tokio::fs::create_dir(&path).await.unwrap();
+            tokio::fs::write(path.join("marker"), b"keep")
+                .await
+                .unwrap();
+        }
+        remove_environment_sockets(&attempt).await.unwrap();
+        remove_environment_sockets(&attempt).await.unwrap();
+        assert!(!attempt.with_extension("environment").exists());
+        assert!(!attempt.with_extension("environment-relays").exists());
+        assert!(other.join("marker").exists());
+    }
+}
+
 /// A completed retirement reaps only its captured old attempts, never the new
 /// environment's canonical disk, bootstrap state or manager namespace.
 async fn erase_native_attempts(
@@ -105,6 +139,7 @@ async fn erase_native_attempts(
             .await,
         )?;
         require_removed(tokio::fs::remove_dir_all(controller.state.join("roots").join(&id)).await)?;
+        remove_environment_sockets(&controller.state.join("roots").join(&id)).await?;
         require_removed(
             tokio::fs::remove_file(
                 controller
@@ -353,9 +388,115 @@ struct Controller {
     identity: Arc<systemd::Identity>,
     backend_namespace: Arc<tokio::sync::OnceCell<Result<storage::ublk::BackendNamespace>>>,
     cleanup: super::cleanup::Registry,
+    environments: Arc<Mutex<HashMap<String, crate::background_jobs::controller::Control>>>,
 }
 
 impl Controller {
+    async fn environment(
+        &self,
+        id: &str,
+        plan: &Value,
+        expected_uid: u32,
+        listener: tokio::net::UnixListener,
+        control: crate::background_jobs::controller::Control,
+        stop: CancellationToken,
+    ) -> Result<()> {
+        use crate::background_jobs::{
+            channel::Channel,
+            protocol::{Event as EnvironmentEvent, Request as EnvironmentRequest},
+        };
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(30), listener.accept())
+            .await
+            .map_err(|_| Error::timeout("Execution environment did not connect."))??;
+        let peer = stream.peer_cred()?;
+        if peer.uid() != expected_uid {
+            return Err(Error::forbidden(
+                "Unexpected execution environment identity.",
+            ));
+        }
+        let pid = peer
+            .pid()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .ok_or_else(|| Error::forbidden("Missing environment process identity."))?;
+        let before = crate::recovery::process_identity(pid)
+            .await?
+            .ok_or_else(|| Error::forbidden("Environment process exited."))?;
+        let membership = tokio::fs::read_to_string(format!("/proc/{pid}/cgroup")).await?;
+        let expected_group = format!("{}/{}", systemd::workload_cgroup()?, systemd::unit(id)?);
+        if !membership.lines().any(|line| {
+            line.strip_prefix("0::").is_some_and(|group| {
+                group == expected_group || group.starts_with(&format!("{expected_group}/"))
+            })
+        }) || crate::recovery::process_identity(pid).await?.as_ref() != Some(&before)
+        {
+            return Err(Error::forbidden(
+                "Environment process is outside its attempt cgroup.",
+            ));
+        }
+        let (channel, mut events) = Channel::attach(stream);
+        let ready = tokio::time::timeout(Duration::from_secs(30), events.recv())
+            .await
+            .map_err(|_| Error::timeout("Execution environment did not become ready."))?;
+        let Some(EnvironmentEvent::Ready {
+            attempt_id,
+            generation,
+        }) = ready
+        else {
+            return Err(Error::unavailable("Invalid environment readiness."));
+        };
+        if attempt_id != id {
+            return Err(Error::forbidden("Environment attempt does not match."));
+        }
+        control.canonical_plan(plan.clone()).await;
+        control.attach(channel, generation).await?;
+        let turn = plan["turnId"]
+            .as_str()
+            .ok_or_else(|| Error::bad("Missing provider turn identity."))?;
+        let initial = control
+            .request(EnvironmentRequest::ResumeTurn {
+                request_id: format!("start-{turn}"),
+                turn_id: turn.into(),
+                plan: plan.clone(),
+            })
+            .await?;
+        if let EnvironmentEvent::Refused { message, .. } = initial {
+            return Err(Error::unavailable(message));
+        }
+        loop {
+            let event = tokio::select! { () = stop.cancelled() => return Ok(()), event = events.recv() => event };
+            match event {
+                Some(EnvironmentEvent::TurnStarted { turn_id }) => {
+                    let _log = self.log_lock.lock().await;
+                    let length = match tokio::fs::metadata(self.file(id, "log")).await {
+                        Ok(metadata) => metadata.len(),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                        Err(error) => return Err(error.into()),
+                    };
+                    control.begin(&turn_id, length).await?;
+                }
+                Some(EnvironmentEvent::Output { stderr, data, .. }) => {
+                    let bytes = STANDARD.decode(data).map_err(Error::internal)?;
+                    self.append(id, stderr, &bytes, LogPurpose::Execution)
+                        .await?;
+                }
+                Some(EnvironmentEvent::TurnFinished { turn_id, code }) => {
+                    let _log = self.log_lock.lock().await;
+                    let length = tokio::fs::metadata(self.file(id, "log")).await?.len();
+                    control.finished(id, &turn_id, code, length).await?;
+                }
+                Some(EnvironmentEvent::TurnFailed { message, .. }) => {
+                    return Err(Error::unavailable(message));
+                }
+                Some(EnvironmentEvent::JobChanged {
+                    outcome: crate::background_jobs::Outcome::Unknown { message },
+                    ..
+                }) => return Err(Error::unavailable(message)),
+                Some(_) => {}
+                None => return Err(Error::unavailable("Execution environment disconnected.")),
+            }
+        }
+    }
+
     fn bases(&self) -> super::bases::Bases {
         super::bases::Bases {
             data: self.data.clone(),
@@ -684,6 +825,15 @@ impl Controller {
                 }
                 Err(error) => Err(error),
             };
+            let environment = controller.environments.lock().await.remove(&id);
+            if let Some(environment) = environment {
+                let message = result.as_ref().err().map_or_else(
+                    || "Execution environment stopped.".to_owned(),
+                    |error| error.message.clone(),
+                );
+                environment.fail(message).await;
+            }
+
             if result.is_err() {
                 observation.rejected();
             }
@@ -701,6 +851,11 @@ impl Controller {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             drop(launch_fence);
+            if let Err(error) =
+                remove_environment_sockets(&controller.state.join("roots").join(&id)).await
+            {
+                tracing::warn!(attempt = id, message = %error.message, "Environment socket cleanup deferred to retirement");
+            }
             let protection = controller
                 .active
                 .lock()
@@ -1407,7 +1562,7 @@ impl Controller {
             tokio::spawn(relay(
                 listener,
                 stage.join("home").join(crate::microvm::mcp::SOCKET),
-                mcp_stop,
+                mcp_stop.clone(),
             ));
         } else {
             plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = crate::microvm::mcp::ORIGIN.into();
@@ -1448,6 +1603,31 @@ impl Controller {
         } else {
             None
         };
+        let auth = if plan["environmentProtocol"] == 1 {
+            let relay_root = container.with_extension("environment-relays");
+            private_dir(&relay_root).await?;
+            tokio::fs::set_permissions(&relay_root, std::fs::Permissions::from_mode(0o711)).await?;
+            let auth_proxy = if let Some(destination) = auth {
+                let proxy = relay_root.join("auth.sock");
+                let listener = tokio::net::UnixListener::bind(&proxy)?;
+                std::os::unix::fs::chown(&proxy, Some(identity.uid()), Some(identity.gid()))?;
+                tokio::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o600)).await?;
+                tokio::spawn(relay_unix(listener, destination, mcp_stop.clone()));
+                Some(proxy)
+            } else {
+                None
+            };
+            if !administrator {
+                let proxy = relay_root.join("mcp.sock");
+                let listener = tokio::net::UnixListener::bind(&proxy)?;
+                std::os::unix::fs::chown(&proxy, Some(identity.root_uid), Some(identity.root_gid))?;
+                tokio::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o600)).await?;
+                tokio::spawn(relay_unix(listener, channel.clone(), mcp_stop.clone()));
+            }
+            auth_proxy
+        } else {
+            auth
+        };
         let plan_file = container.with_extension("plan.json");
         let encoded_plan = serde_json::to_vec(&plan)?;
         if encoded_plan.len() as u64 > self.disk_growth().await? {
@@ -1474,6 +1654,36 @@ impl Controller {
             docker_runtime: Some(runtime.as_path()),
             temporary: &temporary,
             auth: auth.as_deref(),
+        };
+        let environment = if plan["environmentProtocol"] == 1 {
+            if stop.is_cancelled() {
+                return Err(Error::conflict("Environment stopped before admission."));
+            }
+            let directory = container.with_extension("environment");
+            private_dir(&directory).await?;
+            // Keep the directory controller-owned: another same-UID run must
+            // not be able to replace the listener. Only the admitted UID may connect.
+            tokio::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o711)).await?;
+            let socket = directory.join("control.sock");
+            let listener = tokio::net::UnixListener::bind(&socket)?;
+            let uid = if administrator {
+                self.identity.uid
+            } else {
+                identity.uid()
+            };
+            std::os::unix::fs::chown(&socket, Some(uid), None)?;
+            tokio::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).await?;
+            let control = crate::background_jobs::controller::Control::default();
+            let bindings: Vec<super::home::Binding> =
+                serde_json::from_value(plan["nativeHomeBindings"].clone())?;
+            control.bind_native_files(&bindings).await?;
+            self.environments
+                .lock()
+                .await
+                .insert(id.into(), control.clone());
+            Some((listener, control, uid))
+        } else {
+            None
         };
         let arguments = systemd::arguments(&launch)?;
         let launch_fence = launch_guard.lock().await;
@@ -1504,6 +1714,23 @@ impl Controller {
             return Err(error);
         }
         drop(launch_fence);
+        let environment_task = if let Some((listener, control, uid)) = environment {
+            let controller = self.clone();
+            let id = id.to_owned();
+            let plan = plan.clone();
+            let stop = stop.clone();
+            Some(tokio::spawn(async move {
+                if let Err(error) = controller
+                    .environment(&id, &plan, uid, listener, control.clone(), stop.clone())
+                    .await
+                {
+                    control.fail(error.message).await;
+                    stop.cancel();
+                }
+            }))
+        } else {
+            None
+        };
         // The submission has settled; coding-engine readiness and first
         // output retain their separate protocol observations.
         observation.submitted();
@@ -1624,6 +1851,14 @@ impl Controller {
             }
         };
         systemd::stop(id).await?;
+        if let Some(task) = environment_task {
+            task.abort();
+            let _ = task.await;
+        }
+        let control = self.environments.lock().await.remove(id);
+        if let Some(control) = control {
+            control.fail("Execution environment stopped.".into()).await;
+        }
         let _ = child.wait().await;
         if readers & 1 == 0 {
             out.await.map_err(Error::internal)??;
@@ -1632,6 +1867,7 @@ impl Controller {
             err.await.map_err(Error::internal)??;
         }
         let _ = tokio::fs::remove_file(plan_file).await;
+        remove_environment_sockets(&container).await?;
         let _ = tokio::fs::remove_dir_all(container).await;
         Ok(code)
     }
@@ -2139,6 +2375,29 @@ fn replace_origin(value: &mut Value, origin: &str) {
     }
 }
 
+/// A stable, controller-owned socket reconnects each request to the current
+/// turn's broker. The destination can be rebound without a stale bind inode.
+async fn relay_unix(listener: tokio::net::UnixListener, target: PathBuf, stop: CancellationToken) {
+    let _ = crate::microvm::listener::serve(
+        || listener.accept(),
+        |(mut client, _)| {
+            let target = target.clone();
+            let stop = stop.clone();
+            async move {
+                if let Ok(mut server) = tokio::net::UnixStream::connect(target).await {
+                    tokio::select! {
+                        () = stop.cancelled() => {},
+                        _ = tokio::io::copy_bidirectional(&mut client,&mut server) => {},
+                    }
+                }
+            }
+        },
+        32,
+        stop.clone(),
+    )
+    .await;
+}
+
 async fn relay(listener: tokio::net::TcpListener, channel: PathBuf, stop: CancellationToken) {
     let _ = crate::microvm::listener::serve(
         || listener.accept(),
@@ -2619,6 +2878,53 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             )
                 .into_response());
         }
+        ("POST", ["runs", id, "environment"]) => {
+            let value = input(request, 2_000_000).await?;
+            let operation = serde_json::from_value(value)?;
+            let control = controller
+                .environments
+                .lock()
+                .await
+                .get(*id)
+                .cloned()
+                .ok_or_else(|| Error::unavailable("Execution environment is not active."))?;
+            serde_json::to_value(control.request(operation).await?)?
+        }
+        ("GET", ["runs", id, "turn", turn]) | ("GET", ["runs", id, "turn", turn, "start"]) => {
+            crate::validation::uuid(turn)?;
+            let control = controller
+                .environments
+                .lock()
+                .await
+                .get(*id)
+                .cloned()
+                .ok_or_else(|| Error::unavailable("Execution environment is not active."))?;
+            if parts.last() == Some(&"start") {
+                match tokio::time::timeout(Duration::from_secs(20), control.start_offset(turn))
+                    .await
+                {
+                    Ok(offset) => json!({ "offset": offset? }),
+                    Err(_) => {
+                        return Ok((
+                            axum::http::StatusCode::ACCEPTED,
+                            Json(json!({"pending":true})),
+                        )
+                            .into_response());
+                    }
+                }
+            } else {
+                match tokio::time::timeout(Duration::from_secs(20), control.wait(turn)).await {
+                    Ok(receipt) => serde_json::to_value(receipt?)?,
+                    Err(_) => {
+                        return Ok((
+                            axum::http::StatusCode::ACCEPTED,
+                            Json(json!({"pending":true})),
+                        )
+                            .into_response());
+                    }
+                }
+            }
+        }
         ("POST", ["runs", id, "projects", project]) => {
             let value = input(request, 16384).await?;
             controller.import_project(id, project, value).await?
@@ -2818,6 +3124,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         identity,
         backend_namespace,
         cleanup,
+        environments: Arc::default(),
     };
     controller.recover_exclusive().await?;
     let exclusive_monitor = tokio::spawn(controller.clone().monitor_exclusive());
@@ -3400,6 +3707,7 @@ pub(crate) mod tests {
                 storage::ublk::BackendNamespace::unavailable_for_test(),
             )))),
             cleanup: crate::native::cleanup::Registry::default(),
+            environments: Arc::default(),
             identity: Arc::new(systemd::Identity {
                 user: "synthetic-workload".into(),
                 uid: 65534,

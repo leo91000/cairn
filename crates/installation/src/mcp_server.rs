@@ -311,17 +311,20 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
             relayed_management && identity.role == crate::auth::InstallationRole::Owner
         })
         .map(|identity| identity.account_id.clone());
-    let dispatched = crate::backend_migration::OWNER
+    let dispatched = crate::worker::held::CALL_ID
         .scope(
-            migration_owner,
-            dispatch(
-                s,
-                &endpoint,
-                &bearer,
-                input.identity.as_ref(),
-                method,
-                &body["params"],
-                modern,
+            id.clone(),
+            crate::backend_migration::OWNER.scope(
+                migration_owner,
+                dispatch(
+                    s,
+                    &endpoint,
+                    &bearer,
+                    input.identity.as_ref(),
+                    method,
+                    &body["params"],
+                    modern,
+                ),
             ),
         )
         .await;

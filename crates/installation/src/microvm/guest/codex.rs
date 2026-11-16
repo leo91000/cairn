@@ -165,6 +165,13 @@ impl Codex {
         Ok(OutputLease(self.output.clone()))
     }
 
+    /// Intentional retirement before the multi-turn supervisor takes ownership.
+    /// Unexpected service death still leaves `started` set and fails closed.
+    pub async fn retire(&self) {
+        self.close().await;
+        self.started.store(false, Ordering::Release);
+    }
+
     pub async fn close(&self) {
         self.ready.store(false, Ordering::Release);
         let Some(mut service) = self.service.lock().await.take() else {

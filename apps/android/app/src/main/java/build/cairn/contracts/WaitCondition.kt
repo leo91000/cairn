@@ -26,8 +26,29 @@ sealed interface WaitCondition {
 
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @Serializable
+    @SerialName("job_finished")
+    data class C(val jobId: String) : WaitCondition {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("delay")
+    data class D(val seconds: Long) : WaitCondition {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("at")
+    data class E(val date: String) : WaitCondition {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
     @SerialName("plugin")
-    data class C(
+    data class F(
         val conditionType: String,
         val input: JsonObject,
         val pluginId: String,
@@ -40,7 +61,7 @@ sealed interface WaitCondition {
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @Serializable
     @SerialName("group")
-    data class D(
+    data class G(
         val conditions: List<WaitExternalCondition>,
         val mode: String,
     ) : WaitCondition {

@@ -210,6 +210,45 @@ impl Executor {
             let selection = json!({ "kind": "project", "projectId": project });
             seed(client, master, token, attempt, selection, &target).await?;
         }
+        if method == "POST"
+            && let ["runs", attempt, "environment"] = parts.as_slice()
+        {
+            let request: crate::background_jobs::protocol::Request = serde_json::from_slice(body)?;
+            if matches!(
+                request,
+                crate::background_jobs::protocol::Request::ResumeTurn { .. }
+            ) {
+                let plan: Value = serde_json::from_slice(
+                    &tokio::fs::read(plan_path(&self.data, attempt)).await?,
+                )?;
+                if plan["environmentProtocol"] != 1 {
+                    return Err(Error::conflict(
+                        "Environment does not support continuation.",
+                    ));
+                }
+                let _guard = self.preparation.lock(text(&plan, "runId")).await;
+                let home = self
+                    .data
+                    .join("runs")
+                    .join(text(&plan, "runId"))
+                    .join("home");
+                seed(
+                    client,
+                    master,
+                    token,
+                    attempt,
+                    json!({"kind":"runtime"}),
+                    &home,
+                )
+                .await?;
+                let descriptor = fetch(client, master, token, attempt, "plan", &json!({}))
+                    .await?
+                    .json::<Value>()
+                    .await
+                    .map_err(Error::internal)?;
+                refresh_credential_manifest(&home, &descriptor["credentialFiles"]).await?;
+            }
+        }
         if method == "DELETE"
             && let ["runs", attempt] = parts.as_slice()
         {
@@ -236,6 +275,55 @@ impl Executor {
             fetch(client, master, token, attempt, "result", &body).await?;
         }
         Ok(())
+    }
+}
+
+async fn refresh_credential_manifest(home: &Path, value: &Value) -> Result<()> {
+    let files: Vec<String> = serde_json::from_value(value.clone())?;
+    if files.len() > 4096 || files.iter().any(|path| !cairn_plugin_api::home_path(path)) {
+        return Err(Error::bad("Invalid runtime credential manifest."));
+    }
+    let run = home
+        .parent()
+        .ok_or_else(|| Error::bad("Missing runtime directory."))?;
+    crate::skills::atomic_write(
+        &run.join("credential-files.json"),
+        &serde_json::to_vec(&files)?,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod runtime_manifest_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn runtime_refresh_publishes_new_credential_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        crate::skills::private_dir(&home).await.unwrap();
+        refresh_credential_manifest(&home, &json!([".config/first/token"]))
+            .await
+            .unwrap();
+        refresh_credential_manifest(
+            &home,
+            &json!([".config/first/token", ".config/second/token"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::execution::credential_files(root.path()).await,
+            vec![".config/first/token", ".config/second/token"]
+        );
+        assert!(
+            refresh_credential_manifest(&home, &json!(["../secret"]))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            crate::execution::credential_files(root.path()).await.len(),
+            2
+        );
     }
 }
 

@@ -290,7 +290,9 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
     crate::chats::coding_agent::cancel_in(db, id)?;
     let run = required(db.run_state(id)?, "Run not found")?;
     let waiting = crate::chats::continuation::cancel_for_run(db, id)?;
-    if !run.status.is_active() {
+    let held =
+        RunCheckpoint::load_in(db, id)?.is_some_and(|saved| saved.held_environment.is_some());
+    if !run.status.is_active() && !(is_active && held) {
         if waiting || crate::environment_expiration::pending(db, id)? {
             return db.audit("run.wakeup.cancelled", &json!({ "id": id }));
         }
@@ -1000,6 +1002,32 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn completed_provider_with_live_jobs_can_be_cancelled() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({"id":"held", "taskId":"task", "status":"succeeded"}),
+                    None,
+                )?;
+                let mut saved = RunCheckpoint::fresh(None);
+                saved.runner_id = Some(Some("attempt".into()));
+                saved.held_environment = Some(super::super::checkpoint::HeldEnvironment {
+                    attempt: "attempt".into(),
+                    generation: "generation".into(),
+                    expires_at: now() + 60_000,
+                });
+                saved.store_in(db, "held")?;
+                request_cancel(db, "held", true)?;
+                assert!(db.run_state("held")?.unwrap().cancel_requested_at.is_some());
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

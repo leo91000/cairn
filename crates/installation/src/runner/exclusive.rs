@@ -838,6 +838,7 @@ mod tests {
                 plan: Plan::new(json!({ "runId": crate::config::id() })),
                 imports: Arc::default(),
                 control: Arc::default(),
+                environment: crate::background_jobs::controller::Control::default(),
             },
         );
         id

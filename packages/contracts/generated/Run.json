@@ -1413,6 +1413,55 @@
         },
         {
           "properties": {
+            "jobId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "job_finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "jobId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "seconds": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": {
+              "const": "delay",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seconds"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "date": {
+              "type": "string"
+            },
+            "type": {
+              "const": "at",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "date"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
             "conditionType": {
               "type": "string"
             },
@@ -1525,6 +1574,55 @@
         },
         {
           "properties": {
+            "jobId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "job_finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "jobId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "seconds": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": {
+              "const": "delay",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seconds"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "date": {
+              "type": "string"
+            },
+            "type": {
+              "const": "at",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "date"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
             "conditionType": {
               "type": "string"
             },
@@ -1632,6 +1730,22 @@
           "type": [
             "integer",
             "null"
+          ]
+        },
+        "jobId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jobResult": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginWaitData"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "members": {
@@ -1778,6 +1892,22 @@
           "type": [
             "integer",
             "null"
+          ]
+        },
+        "jobId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jobResult": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginWaitData"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "message": {

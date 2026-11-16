@@ -107,7 +107,8 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             Ok(Json(json!({ "remainingMs": lease_ms })).into_response())
         }
         "plan" => {
-            let mut descriptor = json!({ "plan": plan, "dataRoot": s.config.data_dir });
+            let mut descriptor = json!({ "plan": plan, "dataRoot": s.config.data_dir,
+                "credentialFiles": crate::execution::credential_files(&root).await });
             if plan["backend"] == "native"
                 && let Some(archives) =
                     crate::project_archives::run_archives(s, &run, &root, &plan).await?
@@ -198,6 +199,7 @@ async fn seed_source(
     let source = match text(selection, "kind") {
         "initial" => root.to_path_buf(),
         "inbox" => root.join("chat-input"),
+        "runtime" if plan["environmentProtocol"] == 1 => root.join("home"),
         "project" => {
             let project = text(selection, "projectId");
             crate::validation::uuid(project)?;
@@ -231,10 +233,12 @@ async fn seed_source(
     let (mut writer, reader) = tokio::io::duplex(131072);
     let attempt = text(plan, "id").to_owned();
     let initial = text(selection, "kind") == "initial";
+    let runtime = text(selection, "kind") == "runtime";
     tokio::spawn(async move {
         // A failed transfer ends the stream early, which the receiver rejects.
         if let Err(error) = super::files::send_filtered(&source, &mut writer, |path| {
-            project_root.as_deref() != Some(path)
+            (!runtime || path != Path::new(".agents/skills"))
+                && project_root.as_deref() != Some(path)
                 && (!initial
                     || path != Path::new(crate::conversation_deletion::retired::MANAGER_NAMESPACE))
         })
@@ -409,6 +413,9 @@ pub async fn seed(
     // bind-mounted directory would leave it reading the previous inbox forever.
     if crate::native::enabled() && selection["kind"] == "inbox" {
         return install_native_inbox(temp.path(), target).await;
+    }
+    if selection["kind"] == "runtime" {
+        return install_runtime_files(temp.path(), target).await;
     }
     // Only host staging files are replaced. Guest disks remain authoritative.
     if target.exists() {
@@ -881,4 +888,52 @@ mod seed_tests {
                 .exists()
         );
     }
+}
+
+/// Runtime refresh never removes the parent inode or the live broker sockets.
+/// Only regular generated files from the manager replace their matching paths.
+async fn install_runtime_files(source: &Path, target: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mut pending = vec![(source.to_owned(), target.to_owned())];
+    while let Some((source, target)) = pending.pop() {
+        let metadata = tokio::fs::symlink_metadata(&source).await?;
+        if metadata.is_dir() {
+            if let Ok(metadata) = tokio::fs::symlink_metadata(&target).await {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(Error::forbidden("Runtime directory was redirected."));
+                }
+            } else {
+                crate::skills::private_dir(&target).await?;
+            }
+            let mut entries = tokio::fs::read_dir(&source).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                pending.push((entry.path(), target.join(entry.file_name())));
+            }
+        } else if metadata.is_file() {
+            if let Ok(metadata) = tokio::fs::symlink_metadata(&target).await
+                && (!metadata.is_file() || metadata.file_type().is_symlink())
+            {
+                return Err(Error::forbidden("Runtime file was redirected."));
+            }
+            let owner = tokio::fs::metadata(&target)
+                .await
+                .ok()
+                .or(tokio::fs::metadata(
+                    target
+                        .parent()
+                        .ok_or_else(|| Error::bad("Missing runtime parent."))?,
+                )
+                .await
+                .ok());
+            crate::skills::atomic_write(&target, &tokio::fs::read(&source).await?).await?;
+            if let Some(owner) = owner {
+                std::os::unix::fs::lchown(&target, Some(owner.uid()), Some(owner.gid()))?;
+            }
+        } else {
+            return Err(Error::forbidden(
+                "Runtime refresh contains an unsupported entry.",
+            ));
+        }
+    }
+    Ok(())
 }

@@ -699,10 +699,11 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
     )
     .await?;
     crate::skills::private_dir(&runtime.join("private")).await?;
+    let managed_environment = policy.plan["environmentProtocol"] == 1;
     proxy::serve(policy, stop.clone()).await?;
     let mut engine = Command::new("/run/cairn-entrypoint/cairn");
     engine
-        .arg("runner-entry")
+        .arg(if managed_environment { "environment-entry" } else { "runner-entry" })
         .env("HOME", "/home/node")
         .env("DOCKER_HOST", format!("unix://{SOCKET}"))
         .env(

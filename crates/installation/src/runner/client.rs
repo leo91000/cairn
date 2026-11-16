@@ -123,6 +123,9 @@ impl Controller {
     }
 
     async fn run(&self) -> Result<i32> {
+        if let Ok(turn) = std::env::var("CAIRN_PROVIDER_TURN") {
+            return self.run_turn(&turn).await;
+        }
         self.start().await?;
         let output = self.output();
         let (output, status) = collect_completion(output, self.wait()).await;
@@ -157,6 +160,161 @@ impl Controller {
         match status {
             Ok(result) => Ok(result.code),
             Err(error) => Err(error),
+        }
+    }
+
+    async fn run_turn(&self, turn: &str) -> Result<i32> {
+        uuid(turn)?;
+        self.start().await?;
+        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let started = loop {
+            let response = self
+                .http
+                .get(format!("{}/turn/{turn}/start", self.url))
+                .bearer_auth(&self.token)
+                .timeout(Duration::from_secs(30))
+                .send()
+                .await
+                .map_err(Error::internal)?;
+            if !matches!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE | StatusCode::ACCEPTED
+            ) || tokio::time::Instant::now() >= ready_deadline
+            {
+                break response;
+            }
+            // POST start is idempotent. Retry only the observation endpoint;
+            // never submit another attempt because readiness is delayed.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        if !started.status().is_success() {
+            return Err(Error::unavailable("Provider turn did not start."));
+        }
+        let started: Value = started.json().await.map_err(Error::internal)?;
+        let offset = started["offset"]
+            .as_u64()
+            .ok_or_else(|| Error::bad("Invalid turn start cursor."))?;
+        // Keep collecting output while completion is pending. A provider can
+        // remain active arbitrarily long; waiting for its receipt first would
+        // hide tool activity and progress from the conversation.
+        let completion = async {
+            let response = loop {
+                let response = self
+                    .http
+                    .get(format!("{}/turn/{turn}", self.url))
+                    .bearer_auth(&self.token)
+                    .timeout(Duration::from_secs(25))
+                    .send()
+                    .await
+                    .map_err(Error::internal)?;
+                if response.status() != StatusCode::ACCEPTED {
+                    break response;
+                }
+            };
+            if !response.status().is_success() {
+                return Err(Error::unavailable(
+                    "Provider turn completion is unavailable.",
+                ));
+            }
+            let receipt: crate::background_jobs::controller::TurnReceipt =
+                response.json().await.map_err(Error::internal)?;
+            if receipt.turn_id != turn
+                || self.url.rsplit('/').next() != Some(receipt.attempt_id.as_str())
+                || receipt.log_start != offset
+                || receipt.log_end < offset
+            {
+                return Err(Error::bad("Invalid provider turn receipt."));
+            }
+            Ok(receipt)
+        };
+        tokio::pin!(completion);
+        self.relay_turn(
+            offset,
+            &mut completion,
+            &mut tokio::io::stdout(),
+            &mut tokio::io::stderr(),
+        )
+        .await
+    }
+
+    async fn relay_turn(
+        &self,
+        mut offset: u64,
+        completion: &mut (
+                 impl Future<Output = Result<crate::background_jobs::controller::TurnReceipt>> + Unpin
+             ),
+        stdout: &mut (impl tokio::io::AsyncWrite + Unpin),
+        stderr: &mut (impl tokio::io::AsyncWrite + Unpin),
+    ) -> Result<i32> {
+        let mut receipt = None;
+        let mut reconnects = 0u8;
+        let mut reader = None;
+        loop {
+            if let Some(receipt) = &receipt {
+                let receipt: &crate::background_jobs::controller::TurnReceipt = receipt;
+                if offset == receipt.log_end {
+                    return Ok(receipt.code);
+                }
+                if offset > receipt.log_end {
+                    return Err(Error::bad("Output crossed the turn boundary."));
+                }
+            }
+            if reader.is_none() {
+                let response = self.logs(offset).await?;
+                let stream = response
+                    .bytes_stream()
+                    .map(|result| result.map_err(std::io::Error::other));
+                reader = Some(BufReader::new(tokio_util::io::StreamReader::new(stream)));
+            }
+            let received = {
+                let packet = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    wire::read(reader.as_mut().unwrap()),
+                );
+                tokio::pin!(packet);
+                loop {
+                    tokio::select! {
+                        result = &mut *completion, if receipt.is_none() => {
+                            let finished = result?;
+                            if offset == finished.log_end { return Ok(finished.code); }
+                            if offset > finished.log_end { return Err(Error::bad("Output crossed the turn boundary.")); }
+                            receipt = Some(finished);
+                        }
+                        packet = &mut packet => break packet,
+                    }
+                }
+            };
+            let packet = match received {
+                Ok(Ok(Some(packet))) => packet,
+                _ if reconnects < 3 => {
+                    reconnects += 1;
+                    reader = None;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                _ => return Err(Error::unavailable("Provider turn output was interrupted.")),
+            };
+            if packet["type"] == "heartbeat" {
+                continue;
+            }
+            let next = packet["offset"]
+                .as_u64()
+                .filter(|n| *n > offset)
+                .ok_or_else(|| Error::bad("Invalid turn log boundary."))?;
+            let event: Event = serde_json::from_value(packet["event"].clone())?;
+            if let Event::Output {
+                stderr: is_error,
+                data,
+            } = event
+            {
+                let bytes = STANDARD.decode(data).map_err(Error::internal)?;
+                if is_error {
+                    stderr.write_all(&bytes).await?;
+                } else {
+                    stdout.write_all(&bytes).await?;
+                }
+            }
+            offset = next;
         }
     }
 
@@ -847,5 +1005,135 @@ mod physical_result_tests {
             assert_eq!(result.physical_finalized, confirmed);
             server.abort();
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_turn_does_not_wait_forever_for_missing_log_bytes() {
+        use crate::background_jobs::controller::TurnReceipt;
+        use axum::{Router, body::Body, routing::get};
+        let app = Router::new().route(
+            "/logs",
+            get(|| async {
+                Body::from_stream(futures_util::stream::pending::<
+                    std::result::Result<Vec<u8>, std::io::Error>,
+                >())
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let controller = Controller {
+            http: reqwest::Client::new(),
+            url: format!("http://{address}"),
+            token: "fixture".into(),
+        };
+        let completion = async {
+            Ok(TurnReceipt {
+                attempt_id: "a".into(),
+                generation: "g".into(),
+                turn_id: "t".into(),
+                code: 0,
+                log_start: 0,
+                log_end: 1,
+            })
+        };
+        tokio::pin!(completion);
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            controller.relay_turn(0, &mut completion, &mut Vec::new(), &mut Vec::new()),
+        )
+        .await;
+        assert!(result.unwrap().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn turn_completion_during_a_partial_log_frame_preserves_output() {
+        use crate::background_jobs::controller::TurnReceipt;
+        use axum::{Router, body::Body, routing::get};
+        use tokio::io::AsyncReadExt;
+        let packet = format!(
+            "{}\n",
+            json!({
+                "offset": 17,
+                "event": { "type": "output", "stderr": false, "data": STANDARD.encode(b"hello") }
+            })
+        )
+        .into_bytes();
+        let half = packet.len() / 2;
+        let (first, second) = (packet[..half].to_vec(), packet[half..].to_vec());
+        let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+        let completed = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (r, c) = (ready.clone(), completed.clone());
+        let app = Router::new().route(
+            "/logs",
+            get(move || {
+                let (first, second, ready, completed) =
+                    (first.clone(), second.clone(), r.clone(), c.clone());
+                async move {
+                    let stream = futures_util::stream::unfold(0, move |index| {
+                        let (first, second, ready, completed) = (
+                            first.clone(),
+                            second.clone(),
+                            ready.clone(),
+                            completed.clone(),
+                        );
+                        async move {
+                            match index {
+                                0 => Some((Ok::<_, std::io::Error>(first), 1)),
+                                1 => {
+                                    ready.notify_one();
+                                    completed.notified().await;
+                                    Some((Ok(second), 2))
+                                }
+                                _ => None,
+                            }
+                        }
+                    });
+                    Body::from_stream(stream)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let controller = Controller {
+            http: reqwest::Client::new(),
+            url: format!("http://{address}"),
+            token: "fixture".into(),
+        };
+        let completion = async move {
+            ready.notified().await;
+            completed.notify_one();
+            Ok(TurnReceipt {
+                attempt_id: "attempt".into(),
+                generation: "generation".into(),
+                turn_id: "turn".into(),
+                code: 0,
+                log_start: 0,
+                log_end: 17,
+            })
+        };
+        tokio::pin!(completion);
+        let (mut output, mut reader) = tokio::io::duplex(64);
+        let mut errors = Vec::new();
+        let code = tokio::time::timeout(
+            Duration::from_secs(3),
+            controller.relay_turn(0, &mut completion, &mut output, &mut errors),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(code, 0);
+        drop(output);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, b"hello");
+        assert!(errors.is_empty());
+        server.abort();
     }
 }

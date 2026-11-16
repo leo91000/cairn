@@ -12,8 +12,14 @@ pub const ENTRYPOINT: &str = "/run/cairn-entrypoint/cairn";
 
 /// Typed view of the plan document. The document itself is forwarded unchanged
 /// (except for storage credentials) to the guest entrypoint.
-#[derive(Clone, Debug)]
-pub struct Plan(Value);
+#[derive(Clone)]
+pub struct Plan(Value, Option<crate::background_jobs::controller::Control>);
+
+impl std::fmt::Debug for Plan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// A host directory copied into the guest.
 #[derive(Clone, Copy, Debug)]
@@ -25,7 +31,19 @@ pub struct Import<'a> {
 
 impl Plan {
     pub fn new(value: Value) -> Self {
-        Self(value)
+        Self(value, None)
+    }
+
+    pub fn with_environment(
+        mut self,
+        control: crate::background_jobs::controller::Control,
+    ) -> Self {
+        self.1 = Some(control);
+        self
+    }
+
+    pub fn environment(&self) -> Option<&crate::background_jobs::controller::Control> {
+        self.1.as_ref()
     }
 
     pub fn as_value(&self) -> &Value {

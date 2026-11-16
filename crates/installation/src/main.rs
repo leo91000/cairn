@@ -60,6 +60,19 @@ where
 
     if args
         .first()
+        .is_some_and(|arg| arg == "background-job-helper")
+    {
+        return match cairn_installation::background_jobs::helper() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Job supervision failed: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if args
+        .first()
         .is_some_and(|arg| arg == "native-administrator-daemon")
     {
         // Namespace changes must precede TLS/runtime/helper threads.
@@ -284,6 +297,7 @@ where
             .await?;
         }
         "runner-entry" => return runner_entry(stop).await,
+        "environment-entry" => return environment_entry(stop).await,
         "serve" => serve(stop, router).await?,
         _ => {
             return Err(Error::bad(
@@ -311,9 +325,73 @@ async fn chat_command(binary: Option<&String>, stop: CancellationToken) -> Resul
 
 async fn runner_entry(stop: CancellationToken) -> Result<i32> {
     let plan: Value = serde_json::from_slice(&tokio::fs::read("/run/cairn-plan.json").await?)?;
+    let launch = provider_launch(&plan).await?;
+    let command = cairn_installation::process::command(
+        &launch.program,
+        &launch.args,
+        &launch.environment,
+        Some(&launch.cwd),
+    );
+    agent_command(command, launch.prompt, stop).await
+}
+
+async fn environment_entry(stop: CancellationToken) -> Result<i32> {
+    use std::os::fd::FromRawFd;
+    // FD 3 is supplied by the guest supervisor. Native execution connects to
+    // its root-owned socket before any provider or workload job can start.
+    let stream =
+        if std::env::var("CAIRN_ENVIRONMENT_FD").as_deref() == Ok("3") && has_control_socket() {
+            let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(3) };
+            stream.set_nonblocking(true)?;
+            if unsafe { libc::fcntl(3, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                return Err(Error::internal(std::io::Error::last_os_error()));
+            }
+            tokio::net::UnixStream::from_std(stream)?
+        } else {
+            tokio::net::UnixStream::connect("/run/cairn-environment/control.sock").await?
+        };
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(Error::internal(std::io::Error::last_os_error()));
+    }
+    let plan: Value = serde_json::from_slice(&tokio::fs::read("/run/cairn-plan.json").await?)?;
+    let launch = provider_launch(&plan).await?;
+    let remaining = plan["expires"].as_i64().map_or(86_400_000, |expiry| {
+        expiry
+            .saturating_sub(cairn_installation::config::now())
+            .clamp(0, 86_400_000)
+    }) as u64;
+    let deadline = cairn_installation::background_jobs::boot_ms()?.saturating_add(remaining);
+    let mut job_environment = launch.environment;
+    // A background job does not inherit the provider turn's MCP or account
+    // broker. Workspace credentials remain under their normal grant policy.
+    for key in [
+        "CAIRN_MCP_RUN_TOKEN",
+        "CAIRN_MCP_ORIGIN",
+        "CAIRN_AUTH_SOCKET",
+        "CAIRN_CODEX_SERVICE",
+    ] {
+        job_environment.remove(key);
+    }
+    let jobs = cairn_installation::background_jobs::Registry::new(
+        &std::env::current_exe()?,
+        &launch.cwd,
+        job_environment,
+        deadline,
+    );
+    cairn_installation::background_jobs::environment::serve(stream, plan, jobs, stop, |plan| {
+        let plan = plan.clone();
+        Box::pin(async move { provider_launch(&plan).await })
+    })
+    .await?;
+    Ok(0)
+}
+
+async fn provider_launch(
+    plan: &Value,
+) -> Result<cairn_installation::background_jobs::environment::Launch> {
     let prepared = std::time::Instant::now();
-    let run_id = cairn_installation::performance::identity(text(&plan, "runId"));
-    let attempt_id = cairn_installation::performance::identity(text(&plan, "id"));
+    let run_id = cairn_installation::performance::identity(text(plan, "runId"));
+    let attempt_id = cairn_installation::performance::identity(text(plan, "id"));
     let mut env = cairn_installation::toolkit::environment(
         Path::new("/home/node"),
         std::env::vars().collect(),
@@ -326,7 +404,7 @@ async fn runner_entry(stop: CancellationToken) -> Result<i32> {
             env.insert(key.into(), value.into());
         }
     }
-    let cwd = Path::new(text(&plan, "cwd"));
+    let cwd = Path::new(text(plan, "cwd"));
 
     // Launch a Rust chat process with its complete private environment;
     // changing global process environment after Tokio starts is unsafe.
@@ -347,8 +425,13 @@ async fn runner_entry(stop: CancellationToken) -> Result<i32> {
     let binary = binary
         .to_str()
         .ok_or_else(|| Error::bad("Invalid executable path."))?;
-    let command = cairn_installation::process::command(binary, &args, &env, Some(cwd));
-    agent_command(command, plan["chat"].to_string(), stop).await
+    Ok(cairn_installation::background_jobs::environment::Launch {
+        program: binary.into(),
+        args,
+        cwd: cwd.to_owned(),
+        environment: env,
+        prompt: plan["chat"].to_string(),
+    })
 }
 
 /// Runs a periodic maintenance job until shutdown; failures are logged and retried.

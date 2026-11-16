@@ -9,6 +9,8 @@ export interface WaitObservation {
   message?: string
   runId?: string
   chatId?: string
+  jobId?: string
+  jobResult?: PluginWaitData
   status?: string
   outcomeStatus?: string
   waitingOn?: string

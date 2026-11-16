@@ -221,8 +221,11 @@ fn route(method: &str, path: &str) -> Result<()> {
                     (method, *operation),
                     ("GET", "logs" | "administrative-pause")
                         | ("POST", "wait")
-                        | ("POST", "artifact")
+                        | ("POST", "artifact" | "environment")
                 )
+        }
+        ["runs", id, "turn", turn] | ["runs", id, "turn", turn, "start"] => {
+            method == "GET" && uuid(id) && uuid(turn)
         }
         ["runs", id, "projects", project] => method == "POST" && uuid(id) && uuid(project),
         ["storage-policy"] | ["storage-policy", "probe"] => method == "POST",
@@ -244,8 +247,11 @@ fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
     if native && crate::nodes::is_project_import_request(method, path) {
         return crate::nodes::PROJECT_OPEN_RELAY_TIMEOUT;
     }
-    let seconds = if method == "POST" && matches!(path, "/exclusive/acquire" | "/exclusive/release")
+    let seconds = if (method == "GET" && path.contains("/turn/"))
+        || (method == "POST" && path.ends_with("/environment"))
     {
+        60
+    } else if method == "POST" && matches!(path, "/exclusive/acquire" | "/exclusive/release") {
         150
     } else if path.starts_with("/prepare/")
         || native

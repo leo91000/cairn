@@ -122,6 +122,50 @@ async fn stop_runtime(runtime: &Path) -> Result<()> {
     })?
 }
 
+/// Observe only a daemon that already exists. Calling the lazy gateway here
+/// would start Docker merely to ask whether useful work exists.
+pub async fn active_current(guest: bool) -> Result<bool> {
+    let runtime = Path::new(super::RUNTIME);
+    // The workload cannot traverse the root-owned private socket directory.
+    // The public proxy is safe only after a positive daemon-start marker;
+    // otherwise even this read would start a lazy daemon.
+    let socket = if tokio::fs::try_exists(runtime.join("daemon.started")).await? {
+        runtime.join("docker.sock")
+    } else if tokio::fs::try_exists(runtime.join("start.sock")).await? {
+        return Ok(false);
+    } else if guest && tokio::fs::try_exists("/var/run/docker.sock").await? {
+        "/var/run/docker.sock".into()
+    } else {
+        return Ok(false);
+    };
+    let client = crate::native::controller_client(&socket)?;
+    let path = if tokio::fs::try_exists(runtime.join("start.sock")).await? {
+        "http://localhost/cairn/activity"
+    } else {
+        "http://localhost/containers/json"
+    };
+    let mut response = client
+        .get(path)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .map_err(Error::internal)?;
+    if !response.status().is_success() {
+        return Err(Error::unavailable(
+            "Container activity could not be observed.",
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(Error::internal)? {
+        if bytes.len() + chunk.len() > 1_000_000 {
+            return Err(Error::unavailable("Container inventory exceeds its limit."));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let containers: Vec<Value> = serde_json::from_slice(&bytes)?;
+    Ok(!containers.is_empty())
+}
+
 /// systemd ExecStop runs before killing descendants, including when the engine
 /// exits normally. The '!' command prefix supplies host root without removing mount bindings for both stores.
 pub async fn stop_current() -> Result<()> {

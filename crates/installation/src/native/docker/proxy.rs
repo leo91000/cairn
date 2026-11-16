@@ -57,8 +57,10 @@ async fn rewrite(policy: &Policy, value: &mut Value) -> Result<()> {
     Ok(())
 }
 
-async fn forward(policy: Policy, mut request: Request) -> Result<Response> {
-    super::request(b"start").await?;
+async fn forward(policy: Policy, mut request: Request, start: bool) -> Result<Response> {
+    if start {
+        super::request(b"start").await?;
+    }
     let create = request.method() == "POST" && request.uri().path().ends_with("/containers/create");
     if create {
         let bytes = axum::body::to_bytes(
@@ -77,7 +79,12 @@ async fn forward(policy: Policy, mut request: Request) -> Result<Response> {
     super::containers::pin_uri(request.uri_mut(), &method, Path::new(super::DATA))?;
     // Capture the frontend's upgrade before transferring the HTTP request.
     let upgrade = hyper::upgrade::on(&mut request);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now()
+        + if start {
+            Duration::from_secs(60)
+        } else {
+            Duration::ZERO
+        };
     let stream = loop {
         match tokio::net::UnixStream::connect(PRIVATE_SOCKET).await {
             Ok(stream) => break stream,
@@ -117,7 +124,7 @@ struct Gateway {
     api_version: String,
 }
 
-async fn handler(State(gateway): State<Gateway>, request: Request) -> Response {
+async fn handler(State(gateway): State<Gateway>, mut request: Request) -> Response {
     // API negotiation is a client probe, not a reason to create a daemon. The
     // installer records this version from the checksum-pinned paired CLI.
     if request.uri().path() == "/_ping" && (request.method() == "GET" || request.method() == "HEAD")
@@ -133,8 +140,13 @@ async fn handler(State(gateway): State<Gateway>, request: Request) -> Response {
             }))
             .unwrap();
     }
+    // Observation must never restart a crashed or unused lazy daemon.
+    let activity = request.method() == "GET" && request.uri().path() == "/cairn/activity";
+    if activity {
+        *request.uri_mut() = "/containers/json".parse().unwrap();
+    }
     let policy = gateway.policy;
-    match forward(policy, request).await {
+    match forward(policy, request, !activity).await {
         Ok(response) => response,
         Err(error) => (
             StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),

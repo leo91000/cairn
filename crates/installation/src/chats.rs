@@ -1305,7 +1305,9 @@ fn continue_run(
     checkpoint.provider_retry_reservation = None;
     checkpoint.pending_paid_admission = None;
     checkpoint.controller_observation = None;
-    checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
+    if checkpoint.held_environment.is_none() {
+        checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
+    }
     checkpoint.last_message = None;
     checkpoint.settled = None;
     checkpoint.store_in(db, run_id)?;
@@ -1316,7 +1318,7 @@ fn continue_run(
         error: Some(None),
         finished_at: Some(None),
         cancel_requested_at: Some(None),
-        recovery_pending: Some(true),
+        recovery_pending: Some(checkpoint.held_environment.is_none()),
         boundary: Some(json!({
             "chatExecution": serde_json::to_value(execution)?,
             "environmentState": if expired { json!("expired") } else { run["environmentState"].clone() },

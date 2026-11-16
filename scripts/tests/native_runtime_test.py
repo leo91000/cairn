@@ -543,7 +543,7 @@ def main():
                 self.end_headers()
                 self.wfile.write(response)
 
-        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write', idle=False):
+        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write', idle=False, environment=False):
             seed(run)
             channel = data / 'runs' / run / 'home/cairn-mcp.sock'
             if run in mcp_servers:
@@ -624,6 +624,8 @@ def main():
                     model='fixture', reasoning='low', sandbox=sandbox, writableRoots=[str(workspace)],
                     args=['--fixture-workload', workload]),
                 imports=[dict(source=str(workspace), target=str(workspace)), dict(source=str(data / 'runs' / run / 'home'), target='/home/node')])
+            if environment:
+                plan.update(environmentProtocol=1, turnId=str(uuid.uuid4()), expires=int(time.time()*1000)+300000)
             if run in base_archives:
                 plan.update(nativeProjectArchives=base_archives[run], nativeProjectBase=base_keys[run])
                 os.link(state / 'native-bases' / base_keys[run] / 'pin', data / 'runs' / run / ('native-base-' + attempt + '.pin'))
@@ -711,6 +713,60 @@ def main():
             if long:
                 (managed(run) / 'ready').unlink()
             return attempt
+
+        def qualify_environment():
+            if api('/health', method='GET').get('environmentProtocol') != 1:
+                return
+            run = create()
+            attempt = start(run, long=False, lease=300000, environment=True)
+            plan = json.loads((data / 'runner-plans' / (attempt + '.json')).read_text())
+            def receipt(turn):
+                value = api('/runs/' + attempt + '/turn/' + turn, method='GET', timeout=25)
+                return value if value.get('turnId') == turn else None
+            first = eventually(lambda: receipt(plan['turnId']))
+            assert first['code'] == 0
+            control = '/runs/' + attempt + '/environment'
+            assert api(control, dict(operation='activity', requestId=str(uuid.uuid4())))['jobs'] is False
+            admitted = api(control, dict(operation='start_job', requestId='measurement', name='measurement',
+                command='echo $$ > job-pid; while ! test -e finish-job; do sleep 0.1; done; printf job-finished'))
+            job = admitted['jobId']
+            eventually(lambda: (managed(run) / 'job-pid').exists())
+            pid = int((managed(run) / 'job-pid').read_text())
+            group = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ControlGroup', '--value').stdout.strip()
+            assert Path('/proc', str(pid), 'cgroup').read_text().strip().startswith('0::' + group + '/')
+            assert not (state / (attempt + '.exit')).exists()
+            assert api(control, dict(operation='activity', requestId=str(uuid.uuid4())))['jobs'] is True
+            docker_job = None
+            if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
+                docker_job = api(control, dict(operation='start_job', requestId='docker', name='container',
+                    command='docker run -d --network=none --name=cairn-background alpine:3.22.2 sleep 300; echo started > container-ready'))['jobId']
+                eventually(lambda: (managed(run) / 'container-ready').exists(), timeout=180)
+                api('/runs/' + attempt + '/lease', {'remainingMs': 300000})
+                assert api(control, dict(operation='activity', requestId=str(uuid.uuid4())))['containers'] is True
+            plan['turnId'] = str(uuid.uuid4())
+            accepted = api(control, dict(operation='resume_turn', requestId='second', turnId=plan['turnId'], plan=plan))
+            assert accepted['event'] == 'accepted'
+            second = eventually(lambda: receipt(plan['turnId']))
+            assert second['code'] == 0 and second['generation'] == first['generation']
+            assert Path('/proc', str(pid)).exists(), 'Background job died between provider turns.'
+            if docker_job:
+                assert api(control, dict(operation='activity', requestId=str(uuid.uuid4())))['containers'] is True
+            (managed(run) / 'finish-job').touch()
+            def completed():
+                result = api(control, dict(operation='job_status', requestId=str(uuid.uuid4()), jobId=job))
+                return result if result['outcome']['state'] == 'finished' else None
+            api('/runs/' + attempt + '/lease', {'remainingMs': 300000})
+            outcome = eventually(completed)['outcome']['receipt']
+            assert outcome['exitCode'] == 0 and outcome['logTail'] == 'job-finished'
+            assert not Path('/proc', str(pid)).exists()
+            api(control, dict(operation='close', requestId='close'))
+            api('/runs/' + attempt, method='DELETE')
+            fenced(run, attempt)
+            for suffix in ('.environment', '.environment-relays'):
+                assert not (state / 'roots' / (attempt + suffix)).exists()
+            metrics['managedBackgroundJobs'] = dict(twoProviderTurns=True, sameEnvironment=True,
+                jobCgroup=True, completionReceipt=True, socketCleanup=True, containerPreserved=bool(docker_job))
+
 
         def qualify_exclusive(owner, peer, peer_run):
             # Older reference runtimes deliberately skip the new capability.
@@ -803,6 +859,7 @@ def main():
             other = create()
             start_controller()
             progress('fixture-controller-ready')
+            qualify_environment()
             first = start(run, lease=45000, measure='nativeRetained')
             fenced(run, first)
             # A terminal ext4 flush failure must retain a crash prefix and finish

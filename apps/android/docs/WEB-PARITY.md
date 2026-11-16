@@ -876,3 +876,10 @@ Rule engine limits (ADR-0075 F): the Rust-generated web and Android catalog mode
 share the 1,000-item and 16 MiB event-data limits across unresolved admissions and
 active triggerings. The server grants one action at a time per rule and shares
 executor slots between rules after each action. There is no platform difference.
+
+## Background job waits
+
+Web and Android identify a `job_finished` wait as background work and show its
+exit status, elapsed duration and bounded log tail. Both use the same durable
+wait observation and retain pause/stop behavior. No platform-only control is
+introduced.

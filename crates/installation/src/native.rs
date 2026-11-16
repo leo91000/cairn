@@ -9,7 +9,7 @@ mod capacity;
 mod cleanup;
 pub(crate) mod disk;
 pub mod docker;
-mod home;
+pub(crate) mod home;
 mod identity;
 pub(crate) mod limits;
 mod mode;

@@ -51,6 +51,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     tokio::spawn(super::mcp::serve_guest(stop.clone()));
     let running = Arc::new(Mutex::new(()));
     let codex = Arc::new(codex::Codex::default());
+    let environment = Arc::new(Mutex::new(None::<crate::background_jobs::channel::Channel>));
     // Native exports can arrive after an attempt detaches its output lease.
     // The VM owns this collector so those timings still reach its private console.
     let telemetry = crate::performance::native::Collector::start().await.ok();
@@ -60,11 +61,20 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
             let running = running.clone();
             let stopping = stop.clone();
             let codex = codex.clone();
+            let environment = environment.clone();
             let timing_endpoint = telemetry
                 .as_ref()
                 .map(|collector| collector.endpoint().to_owned());
             async move {
-                if let Err(error) = handle(stream, running, codex, stopping, timing_endpoint).await
+                if let Err(error) = handle(
+                    stream,
+                    running,
+                    codex,
+                    stopping,
+                    timing_endpoint,
+                    environment,
+                )
+                .await
                 {
                     tracing::warn!(message = %error.message, "Guest operation failed");
                 }
@@ -105,6 +115,7 @@ async fn handle(
     codex: Arc<codex::Codex>,
     stop: CancellationToken,
     timing_endpoint: Option<String>,
+    environment: Arc<Mutex<Option<crate::background_jobs::channel::Channel>>>,
 ) -> Result<()> {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
@@ -114,6 +125,14 @@ async fn handle(
         .ok_or_else(|| Error::bad("Missing guest request."))?;
     let request: GuestRequest = wire::decode(request, "Unknown guest operation.")?;
     match request {
+        GuestRequest::Environment { request } => {
+            let channel = environment
+                .lock()
+                .await
+                .clone()
+                .ok_or_else(|| Error::unavailable("Guest environment is not active."))?;
+            wire::write(&mut write, &channel.request(request).await?).await
+        }
         GuestRequest::Freeze => freeze(&mut write, true).await,
         GuestRequest::Thaw => freeze(&mut write, false).await,
         GuestRequest::MountWorkspace | GuestRequest::RestoreClone { .. } => {
@@ -203,7 +222,22 @@ async fn handle(
                 .map_err(|_| Error::conflict("Guest already running."))?;
             let plan = Plan::new(plan);
             prepare_run(&plan).await?;
-            let (child, events, output) = spawn_agent(&plan, &codex, timing_endpoint.as_deref())?;
+            if plan.as_value()["environmentProtocol"] == 1 {
+                // Provider processes for this protocol must belong to the
+                // per-turn subreaper, including Codex's app-server process.
+                codex.retire().await;
+                return stream_environment(
+                    &mut write,
+                    &plan,
+                    &codex,
+                    timing_endpoint.as_deref(),
+                    environment,
+                    stop,
+                )
+                .await;
+            }
+            let (child, events, output) =
+                spawn_agent(&plan, &codex, timing_endpoint.as_deref(), None)?;
             let result = tokio::select! {
                 result = stream_agent(&mut write, child, events, output, &plan) => result,
                 () = stop.cancelled() => Ok(()),
@@ -561,10 +595,14 @@ fn spawn_agent(
     plan: &Plan,
     codex: &codex::Codex,
     timing_endpoint: Option<&str>,
+    environment_fd: Option<std::os::fd::RawFd>,
 ) -> Result<(Child, mpsc::Receiver<Event>, Option<codex::OutputLease>)> {
-    let invocation = plan
-        .command()
-        .unwrap_or_else(|| vec!["/usr/local/bin/cairn", "runner-entry"]);
+    let invocation = if environment_fd.is_some() {
+        vec![super::plan::ENTRYPOINT, "environment-entry"]
+    } else {
+        plan.command()
+            .unwrap_or_else(|| vec!["/usr/local/bin/cairn", "runner-entry"])
+    };
     let binary = invocation
         .first()
         .ok_or_else(|| Error::bad("Missing guest command."))?;
@@ -581,7 +619,11 @@ fn spawn_agent(
     if let Some(endpoint) = timing_endpoint {
         command.env("CAIRN_CODEX_TIMING_ENDPOINT", endpoint);
     }
-    let socket = codex.socket()?;
+    let socket = if environment_fd.is_some() {
+        None
+    } else {
+        codex.socket()?
+    };
     if let Some(socket) = socket {
         if !plan.as_value()["chat"].is_object()
             || plan.chat_provider()? != Some(crate::provider::Provider::Codex)
@@ -592,6 +634,17 @@ fn spawn_agent(
             ));
         }
         command.env("CAIRN_CODEX_SERVICE", socket);
+    }
+    if let Some(fd) = environment_fd {
+        command.env("CAIRN_ENVIRONMENT_FD", "3");
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(fd, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     unprivileged(&mut command);
     let (tx, events) = mpsc::channel(32);
@@ -642,6 +695,46 @@ fn forward_output(
             }
         }
     });
+}
+
+async fn stream_environment(
+    write: &mut (impl AsyncWrite + Unpin),
+    plan: &Plan,
+    codex: &codex::Codex,
+    timing: Option<&str>,
+    environment: Arc<Mutex<Option<crate::background_jobs::channel::Channel>>>,
+    stop: CancellationToken,
+) -> Result<()> {
+    use crate::background_jobs::{channel::Channel, protocol::Event as EnvironmentEvent};
+    use std::os::fd::AsRawFd;
+    let (parent, child_control) = std::os::unix::net::UnixStream::pair()?;
+    parent.set_nonblocking(true)?;
+    let (mut child, mut output, _lease) =
+        spawn_agent(plan, codex, timing, Some(child_control.as_raw_fd()))?;
+    drop(child_control);
+    let (channel, mut events) = Channel::attach(tokio::net::UnixStream::from_std(parent)?);
+    *environment.lock().await = Some(channel);
+    let result = async {
+        let mut output_open = true;
+        loop {
+            let event = tokio::select! {
+                () = stop.cancelled() => return Ok(()),
+                status = child.wait() => return Err(Error::unavailable(format!("Guest environment exited: {:?}", status?.code()))),
+                event = output.recv(), if output_open => {
+                    if let Some(event) = event { wire::write(write, &event).await?; }
+                    else { output_open = false; }
+                    continue;
+                }
+                event = events.recv() => event.ok_or_else(|| Error::unavailable("Guest environment channel closed."))?,
+            };
+            let failed = matches!(event, EnvironmentEvent::TurnFailed { .. });
+            wire::write(write, &Event::Environment { event }).await?;
+            if failed { return Err(Error::unavailable("Guest provider termination failed.")); }
+        }
+    }.await;
+    *environment.lock().await = None;
+    let _ = child.kill().await;
+    result
 }
 
 async fn stream_agent(

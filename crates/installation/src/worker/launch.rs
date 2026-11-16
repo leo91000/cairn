@@ -97,6 +97,8 @@ async fn execute_inner(
         observation: None,
         attempt_id: String::new(),
         reservation: None,
+        retained: false,
+        turn: String::new(),
         #[cfg(test)]
         output_probe: None,
     };
@@ -117,6 +119,12 @@ async fn execute_inner(
                 .await?
             {
                 Attempt::Finished => return Ok(()),
+                Attempt::Held => {
+                    if !execution.wait_for_next_turn(&mut workspace).await? {
+                        return Ok(());
+                    }
+                    resume = execution.resume_session(&workspace).await?;
+                }
                 Attempt::Resume(session) => resume = Some(session),
             }
         }
@@ -168,6 +176,8 @@ struct Execution<'a> {
     directory: PathBuf,
     attempt_id: String,
     reservation: Option<(String, Value)>,
+    retained: bool,
+    turn: String,
     #[cfg(test)]
     output_probe: Option<stream_tests::OutputProbe>,
 }
@@ -210,6 +220,7 @@ struct Exit {
 
 enum Attempt {
     Finished,
+    Held,
     /// Usage ran out; continue the saved session, possibly on another account.
     Resume(String),
 }
@@ -235,6 +246,10 @@ struct RunnerPlan<'a> {
     runtime_id: &'a Value,
     storage: RunnerStorage<'a>,
     chat: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    environment_protocol: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -417,21 +432,27 @@ impl Execution<'_> {
             ));
         }
         crate::delegation::authorize_async(s, self.run).await?;
-        let current_policy = policy(&current);
-        self.run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
-        let snapshot = serde_json::from_value(self.run["snapshot"].clone())?;
+        // A held owner runs beside the scheduler. Never write its stale
+        // snapshot over a newly queued message, model or grant selection.
+        let nodes = policy(&current)["nodes"].clone();
+        self.run["snapshot"]["agent"]["access"]["nodes"] = nodes.clone();
         let revision = self.admission_revision.clone();
         let id = self.id.clone();
+        let expected = crate::waits::execution_id(self.run).clone();
         s.store
             .transaction(move |db| {
-                let current = db
+                let mut latest = db
                     .run(&id)?
                     .ok_or_else(|| Error::not_found("Run not found"))?;
-                crate::environment_expiration::require_admission_revision(&current, &revision)?;
+                crate::environment_expiration::require_admission_revision(&latest, &revision)?;
+                if *crate::waits::execution_id(&latest) != expected {
+                    return Ok(());
+                }
+                latest["snapshot"]["agent"]["access"]["nodes"] = nodes;
                 db.change_run(
                     &id,
                     crate::runs::RunChanges {
-                        snapshot: Some(snapshot),
+                        snapshot: Some(serde_json::from_value(latest["snapshot"].clone())?),
                         ..Default::default()
                     },
                 )?;
@@ -645,6 +666,14 @@ impl Execution<'_> {
     /// Finds the conversation to continue when a previous launch already started it.
     async fn resume_session(&self, workspace: &Workspace) -> Result<Option<String>> {
         let s = self.s;
+        if self.retained {
+            return s.store.run(&self.id).await?["sessionId"]
+                .as_str()
+                .map(|session| Some(session.to_owned()))
+                .ok_or_else(|| {
+                    Error::conflict("Retained environment has no resumable provider session.")
+                });
+        }
         if !self.checkpoint.read(RunCheckpoint::launched).await {
             return Ok(None);
         }
@@ -733,6 +762,7 @@ impl Execution<'_> {
     ) -> Result<Attempt> {
         let s = self.s;
         self.attempt_id = crate::config::id();
+        self.turn = crate::config::id();
         if self.stopping() {
             return Err(Error::conflict("Execution stopped."));
         }
@@ -818,10 +848,49 @@ impl Execution<'_> {
             let chat = self.chat_plan(workspace, resume, &mut launch).await?;
             workspace.authorization.recheck().await?;
             if workspace.isolated() {
-                self.prepare_runner(workspace, resume, chat, &mut launch)
-                    .await?;
+                if self.retained {
+                    self.resume_environment(workspace, chat, &mut launch)
+                        .await?;
+                } else {
+                    self.prepare_runner(workspace, resume, chat, &mut launch)
+                        .await?;
+                }
             }
             let mut exit = self.supervise(workspace, launch, log_total).await?;
+            let receipt =
+                if workspace.env.contains_key("CAIRN_PROVIDER_TURN") && exit.code == Some(0) {
+                    let receipt = super::held::turn_receipt(s, self.run, &self.turn).await?;
+                    if receipt.code != 0 {
+                        return Err(Error::unavailable(
+                            "Provider turn failed despite successful client exit.",
+                        ));
+                    }
+                    Some(receipt)
+                } else {
+                    None
+                };
+            let environment_expiry = if receipt.is_some() {
+                let path = s
+                    .config
+                    .data_dir
+                    .join("runner-plans")
+                    .join(format!("{}.json", self.attempt_id));
+                // The runner identity may predate this provider turn.
+                let runner = self
+                    .checkpoint
+                    .snapshot()
+                    .await
+                    .runner_id()
+                    .map(str::to_owned)
+                    .ok_or_else(|| Error::conflict("Missing environment identity."))?;
+                let path = path.with_file_name(format!("{runner}.json"));
+                let plan: Value = serde_json::from_slice(&tokio::fs::read(path).await?)?;
+                plan["expires"]
+                    .as_i64()
+                    .ok_or_else(|| Error::conflict("Missing environment deadline."))?
+            } else {
+                0
+            };
             self.checkpoint
                 .update(|c| {
                     c.process = Some(None);
@@ -829,7 +898,18 @@ impl Execution<'_> {
                     // controller result. Nonzero process statuses are ambiguous: local
                     // errors, panics, signals and worker stops share the same channel.
                     // Only a read of this attempt can establish their provenance.
-                    c.terminal_code = (exit.code == Some(0)).then_some(Some(0));
+                    c.terminal_code =
+                        (exit.code == Some(0) && receipt.is_none()).then_some(Some(0));
+                    if let Some(receipt) = &receipt {
+                        c.held_environment = Some(super::checkpoint::HeldEnvironment {
+                            attempt: receipt.attempt_id.clone(),
+                            generation: receipt.generation.clone(),
+                            expires_at: c
+                                .held_environment
+                                .as_ref()
+                                .map_or(environment_expiry, |held| held.expires_at),
+                        });
+                    }
                 })
                 .await?;
             if exit.code != Some(0) && !exit.timed_out {
@@ -879,7 +959,10 @@ impl Execution<'_> {
         }
         if saved.output_error().is_some()
             || saved.finalization_error().is_some()
-            || (managed && saved.completed() && saved.terminal_code() != Some(0))
+            || (managed
+                && saved.completed()
+                && saved.terminal_code() != Some(0)
+                && saved.held_environment.is_none())
         {
             // A provider completion cannot repair EIO/EROFS or an unknown flush.
             // Existing execution cleanup fences it before releasing its resources.
@@ -923,6 +1006,13 @@ impl Execution<'_> {
         if let Some(session) = session.as_ref()
             && self.may_switch_account(&exit)
         {
+            if has_live_environment(&saved, self.retained, &workspace.env) {
+                // A failed provider turn must not implicitly replay jobs or
+                // resume a controller that account rotation would fence.
+                return Err(Error::conflict(
+                    "Provider account exhausted in a live environment. Background work will stop; resume explicitly with an available account.",
+                ));
+            }
             // This adapter has exited; its side questions cannot wait for a different
             // account, even though the run and turn remain running during the switch.
             if self.run["chatExecution"].is_object() {
@@ -943,7 +1033,224 @@ impl Execution<'_> {
         }
         self.finish(workspace, &exit, &saved, session.is_some())
             .await?;
+        if exit.code == Some(0) && saved.completed() && saved.held_environment.is_some() {
+            return Ok(Attempt::Held);
+        }
         Ok(Attempt::Finished)
+    }
+
+    async fn close_idle_environment(&self) -> Result<bool> {
+        let id = self.id.clone();
+        self.checkpoint
+            .decide(move |saved, db| {
+                let run = db
+                    .run_state(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                if run.status == RunStatus::Queued || saved.turn_pending == Some(true) {
+                    return Ok(false);
+                }
+                saved.held_environment = None;
+                Ok(true)
+            })
+            .await
+    }
+
+    async fn wait_for_next_turn(&mut self, workspace: &mut Workspace) -> Result<bool> {
+        let s = self.s;
+        let held = self
+            .checkpoint
+            .snapshot()
+            .await
+            .held_environment
+            .ok_or_else(|| Error::conflict("Missing retained environment identity."))?;
+        s.worker.held.lock().await.insert(self.id.clone());
+        if let Some(account) = self.account.take() {
+            s.accounts.release(s, &account).await?;
+        }
+        s.mcps.revoke_run(s, &self.id).await?;
+        let result = async {
+            let mut timer = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    () = self.cancel.cancelled() => return Ok(false),
+                    () = s.shutdown.cancelled() => return Ok(false),
+                    _ = timer.tick() => {}
+                }
+                if self.checkpoint.expired() || now() >= held.expires_at {
+                    return Err(Error::conflict("Environment background work reached its time limit."));
+                }
+                let current = s.store.run(&self.id).await?;
+                if !current["cancelRequestedAt"].is_null() { return Ok(false); }
+                let run_id = self.id.clone();
+                s.store.read(move |db| crate::conversation_lifecycle::require_active_run(db, &run_id)).await?;
+                *self.run = current;
+                self.refresh_access().await?;
+                super::jobs::refresh_redacted(s, self.run, &self.sensitive.snapshot()).await?;
+                if self.run["status"] == RunStatus::Queued {
+                    // The scheduler has queued a fresh turn. Keep the existing
+                    // owner and lease; acquiring another placement would deadlock
+                    // against our still-live environment.
+                    let saved = RunCheckpoint::load(&s.store, &self.id).await?
+                        .ok_or_else(|| Error::conflict("Continuation checkpoint missing."))?;
+                    if saved.held_environment.as_ref().is_none_or(|value| value.attempt != held.attempt || value.generation != held.generation) {
+                        return Err(Error::conflict("Continuation environment changed."));
+                    }
+                    self.checkpoint.adopt_continuation().await?;
+                    let model = text(&self.run["snapshot"]["agent"], "model").to_owned();
+                    if !can_reuse_environment(self.provider, self.run)? {
+                        // Keep the accepted fresh-session turn queued while this
+                        // owner stops its old environment and background work.
+                        return Ok(false);
+                    }
+                    self.wait_for_account(&model).await?;
+                    if self.stopping() { return Ok(false); }
+                    self.mark_running().await?;
+                    self.refresh_access().await?;
+                    let authority = crate::capabilities::plugin_packages::Authority::for_run(s,self.run).await?;
+                    let credentials = crate::plugins::run_credentials::for_execution_authorized(s,self.run,&crate::project_workspaces::catalog(self.run),authority.clone()).await?;
+                    self.sensitive.extend(credentials.secrets.iter().cloned());
+                    let previous_files = execution::credential_files(&self.directory).await;
+                    if workspace.prepared["backend"] == "native"
+                        && credentials.files.iter().any(|(path, _)| !previous_files.contains(path)) {
+                        return Err(Error::conflict("New credential paths require a fresh environment."));
+                    }
+                    execution::run_credentials(&self.directory.join("home"), &self.directory, &credentials).await?;
+                    workspace.authorization = crate::plugins::run_credentials::Authorization::new(s,authority,&credentials);
+                    let home = self.prepare_state_home(&workspace.prepared).await?;
+                    workspace.env = self.environment(true, &home).await?;
+                    workspace.state_home = home;
+                    workspace.mcp = s.mcps.run_configuration(s, self.run).await?;
+                    self.sensitive.extend(workspace.mcp["redactions"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
+                    for (key, value) in workspace.mcp["env"].as_object().unwrap() {
+                        workspace.env.insert(key.clone(), value.as_str().unwrap_or("").into());
+                    }
+                    self.retained = true;
+                    return Ok(true);
+                }
+                let id = self.id.clone();
+                let pending = s.store.read(move |db| {
+                    let jobs: i64 = db.0.query_row("SELECT count(*) FROM background_jobs WHERE run_id=? AND (outcome IS NULL OR json_extract(outcome,'$.state')='running')", [id], |row| row.get(0))?;
+                    Ok(jobs > 0)
+                }).await?;
+                let activity = super::held::request(s,self.run,&crate::background_jobs::protocol::Request::Activity { request_id: crate::config::id() }).await?;
+                match activity {
+                    crate::background_jobs::protocol::Event::Activity { jobs, containers, .. } => {
+                        if !pending && !jobs && !containers {
+                            let may_close = self.close_idle_environment().await?;
+                            if may_close { return Ok(false); }
+                        }
+                    }
+                    crate::background_jobs::protocol::Event::Refused { message, .. } => return Err(Error::unavailable(message)),
+                    _ => return Err(Error::bad_gateway("Invalid environment activity observation.")),
+                }
+            }
+        }.await;
+        if !matches!(result, Ok(true)) {
+            // Request the helper's TERM/reap barrier before the existing
+            // outer cgroup/VM fence. Failure still proceeds to that fence.
+            let _ = super::held::request_bound(
+                s,
+                self.run,
+                Some(&held.attempt),
+                &crate::background_jobs::protocol::Request::Close {
+                    request_id: crate::config::id(),
+                },
+            )
+            .await;
+            let id = self.id.clone();
+            let attempt = held.attempt.clone();
+            self.checkpoint
+                .decide(move |state, db| {
+                    state.held_environment = None;
+                    super::jobs::unknown(
+                        db,
+                        &id,
+                        &attempt,
+                        "The environment stopped before background completion was confirmed.",
+                    )?;
+                    let run = db
+                        .run_state(&id)?
+                        .ok_or_else(|| Error::not_found("Run not found"))?;
+                    if run.cancel_requested_at.is_some() {
+                        state.settled = Some(Some(super::checkpoint::Settled::failure(
+                            RunStatus::Cancelled,
+                            "Background work was stopped.",
+                        )));
+                    }
+                    Ok(())
+                })
+                .await?;
+        }
+        if matches!(result, Ok(true)) {
+            s.worker.held.lock().await.remove(&self.id);
+        }
+        result
+    }
+
+    async fn resume_environment(
+        &mut self,
+        workspace: &mut Workspace,
+        chat: Value,
+        launch: &mut Launch,
+    ) -> Result<()> {
+        use crate::background_jobs::protocol::{Event, Request};
+        let saved = self.checkpoint.snapshot().await;
+        let held = saved
+            .held_environment
+            .clone()
+            .ok_or_else(|| Error::conflict("Missing live environment."))?;
+        let plan_path = self
+            .s
+            .config
+            .data_dir
+            .join("runner-plans")
+            .join(format!("{}.json", held.attempt));
+        let mut plan: Value = serde_json::from_slice(&tokio::fs::read(&plan_path).await?)?;
+        if plan["backend"] == "native" {
+            let mut context = crate::plugins::agents::with_instructions(self.s, self.run).await;
+            context["nativeMode"] = plan["nativeMode"].clone();
+            let mut native_chat = chat;
+            run_output::native_chat_privileges(&mut native_chat, &context, &plan["nativeMode"]);
+            plan["chat"] = native_chat;
+        } else {
+            plan["chat"] = chat;
+        }
+        plan["mcpEnv"] = workspace.mcp["env"].clone();
+        plan["turnId"] = self.turn.clone().into();
+        atomic_write(&plan_path, &serde_json::to_vec(&plan)?).await?;
+        match super::held::request(
+            self.s,
+            self.run,
+            &Request::ResumeTurn {
+                request_id: format!("turn-{}", self.turn),
+                turn_id: self.turn.clone(),
+                plan,
+            },
+        )
+        .await?
+        {
+            Event::Accepted { .. } => {}
+            Event::Refused { message, .. } => return Err(Error::conflict(message)),
+            _ => {
+                return Err(Error::unavailable(
+                    "Invalid environment continuation acknowledgement.",
+                ));
+            }
+        }
+        workspace.env.insert(
+            "RUNNER_URL".into(),
+            nodes::transport::url(self.s, &self.id).await?,
+        );
+        workspace.env.insert(
+            "RUNNER_TOKEN".into(),
+            execution::secret(&self.s.config.data_dir, "runner-secret").await?,
+        );
+        workspace
+            .env
+            .insert("CAIRN_PROVIDER_TURN".into(), self.turn.clone());
+        launch.binary = current_exe()?;
+        launch.args = vec!["runner-client".into(), held.attempt];
+        Ok(())
     }
 
     async fn prompt(&self, resume: Option<&str>) -> Result<String> {
@@ -1146,6 +1453,22 @@ impl Execution<'_> {
         let runner_token = execution::secret(&s.config.data_dir, "runner-secret").await?;
         workspace.env.insert("RUNNER_URL".into(), runner_url);
         workspace.env.insert("RUNNER_TOKEN".into(), runner_token);
+        let plan: Value = serde_json::from_slice(
+            &tokio::fs::read(
+                s.config
+                    .data_dir
+                    .join("runner-plans")
+                    .join(format!("{runner}.json")),
+            )
+            .await?,
+        )?;
+        if plan["environmentProtocol"] == 1 {
+            workspace
+                .env
+                .insert("CAIRN_PROVIDER_TURN".into(), self.turn.clone());
+        } else {
+            workspace.env.remove("CAIRN_PROVIDER_TURN");
+        }
         launch.binary = current_exe()?;
         launch.args = vec!["runner-client".into(), runner];
         timing.finish();
@@ -1215,6 +1538,9 @@ impl Execution<'_> {
                 .checkpoint
                 .read(|saved| saved.workspace_initialized == Some(true))
                 .await;
+        let supports_environment = super::held::supported(s, self.run).await?;
+        // Existing fixtures and older controllers keep the single-turn path.
+        // New controllers explicitly advertise their environment protocol.
         let plan = RunnerPlan {
             id: runner,
             run_id: &self.id,
@@ -1224,7 +1550,12 @@ impl Execution<'_> {
             project_root: &prepared["projectRoot"],
             prompt,
             imports,
-            expires: self.checkpoint.deadline(),
+            expires: Some(
+                self.checkpoint
+                    .deadline()
+                    .unwrap_or(i64::MAX)
+                    .min(now() + 86_400_000),
+            ),
             sandbox: policy(&self.run["snapshot"]["agent"])["sandbox"].clone(),
             mcp_env: &workspace.mcp["env"],
             resources: &placement["resources"],
@@ -1237,6 +1568,8 @@ impl Execution<'_> {
                 policy: storage_policy,
             },
             chat,
+            environment_protocol: supports_environment.then_some(1),
+            turn_id: supports_environment.then_some(self.turn.as_str()),
         };
         workspace.authorization.recheck().await?;
         atomic_write(
@@ -1581,7 +1914,10 @@ impl Execution<'_> {
                 .acquire_for(s, &self.id, self.provider, model, speed)
                 .await
             {
-                Ok(account) => *self.account = account,
+                Ok(account) => {
+                    *self.account = account;
+                    return Ok(());
+                }
                 Err(error) if error.is_conflict() => {
                     tokio::select! {
                         () = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -1753,6 +2089,14 @@ async fn close_output_readers(out: AbortOnDropHandle<()>, err: AbortOnDropHandle
     let _ = err.await;
 }
 
+fn has_live_environment(saved: &RunCheckpoint, retained: bool, env: &Environment) -> bool {
+    saved.held_environment.is_some() || retained || env.contains_key("CAIRN_PROVIDER_TURN")
+}
+
+fn can_reuse_environment(provider: Provider, run: &Value) -> Result<bool> {
+    Ok(provider == Provider::of_run(run)? && run["sessionId"].is_string())
+}
+
 fn controller_name(run: &Value) -> &'static str {
     if crate::native::policy::native(&run["snapshot"]["agent"]) {
         "Native controller"
@@ -1804,6 +2148,124 @@ mod tests {
             .await
             .unwrap();
         (service, run)
+    }
+
+    #[test]
+    fn first_negotiated_turn_cannot_fall_back_to_automatic_account_replacement() {
+        let saved = RunCheckpoint::fresh(None);
+        let mut env = Environment::new();
+        assert!(!has_live_environment(&saved, false, &env));
+        env.insert("CAIRN_PROVIDER_TURN".into(), "first".into());
+        assert!(has_live_environment(&saved, false, &env));
+    }
+
+    #[test]
+    fn explicit_session_restart_and_provider_switch_require_environment_fencing() {
+        let mut run = json!({"snapshot":{"agent":{"provider":"codex"}},"sessionId":"session"});
+        assert!(can_reuse_environment(Provider::Codex, &run).unwrap());
+        run["sessionId"] = Value::Null;
+        assert!(!can_reuse_environment(Provider::Codex, &run).unwrap());
+        run["sessionId"] = "session".into();
+        assert!(!can_reuse_environment(Provider::Claude, &run).unwrap());
+    }
+
+    #[tokio::test]
+    async fn queued_turn_wins_over_an_idle_environment_close() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let id = text(&run, "id").to_owned();
+        let mut saved = RunCheckpoint::fresh(None);
+        saved.runner_id = Some(Some("attempt".into()));
+        saved.completed = Some(true);
+        saved.held_environment = Some(super::super::checkpoint::HeldEnvironment {
+            attempt: "attempt".into(),
+            generation: "generation".into(),
+            expires_at: now() + 60_000,
+        });
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved.clone());
+        checkpoint.persist().await.unwrap();
+        service
+            .store
+            .transaction(move |db| {
+                saved.completed = Some(false);
+                saved.turn_pending = Some(true);
+                saved.store_in(db, &id)?;
+                db.change_run(
+                    &id,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut account = None;
+        let cancel = CancellationToken::new();
+        let sensitive = History::default();
+        let execution = Execution {
+            s: &service,
+            id: text(&run, "id").into(),
+            admission_revision: run["environmentAdmissionRevision"].clone(),
+            run: &mut run,
+            account: &mut account,
+            preparation: None,
+            cancel: &cancel,
+            checkpoint: &checkpoint,
+            sensitive: &sensitive,
+            observation: None,
+            provider: Provider::Codex,
+            directory: root.path().join("run"),
+            attempt_id: String::new(),
+            reservation: None,
+            retained: false,
+            turn: String::new(),
+            output_probe: None,
+        };
+        assert!(!execution.close_idle_environment().await.unwrap());
+        let saved = checkpoint.snapshot().await;
+        assert!(!saved.completed());
+        assert_eq!(saved.turn_pending, Some(true));
+        assert!(saved.held_environment.is_some());
+    }
+
+    #[tokio::test]
+    async fn unmanaged_account_selection_completes_without_a_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let mut account = None;
+        let cancel = CancellationToken::new();
+        let checkpoint = Checkpoint::new(
+            service.store.clone(),
+            text(&run, "id").into(),
+            RunCheckpoint::fresh(None),
+        );
+        let sensitive = History::default();
+        let mut execution = Execution {
+            s: &service,
+            id: text(&run, "id").into(),
+            admission_revision: run["environmentAdmissionRevision"].clone(),
+            run: &mut run,
+            account: &mut account,
+            preparation: None,
+            cancel: &cancel,
+            checkpoint: &checkpoint,
+            sensitive: &sensitive,
+            observation: None,
+            provider: Provider::Codex,
+            directory: root.path().join("run"),
+            attempt_id: String::new(),
+            reservation: None,
+            retained: true,
+            turn: String::new(),
+            output_probe: None,
+        };
+        tokio::time::timeout(Duration::from_secs(2), execution.wait_for_account(""))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(execution.account.is_none());
     }
 
     #[tokio::test]
@@ -1998,6 +2460,8 @@ mod tests {
             directory: root.path().into(),
             attempt_id: String::new(),
             reservation: None,
+            retained: false,
+            turn: String::new(),
             output_probe: None,
         };
         let error = execution.refresh_access().await.unwrap_err();
@@ -2167,6 +2631,8 @@ mod tests {
             directory: root.path().into(),
             attempt_id: String::new(),
             reservation: None,
+            retained: false,
+            turn: String::new(),
             output_probe: None,
         };
         let error = execution
@@ -2262,6 +2728,8 @@ mod tests {
                     directory: root.path().into(),
                     attempt_id: String::new(),
                     reservation: None,
+                    retained: false,
+                    turn: String::new(),
                     output_probe: None,
                 };
                 let workspace = Workspace {

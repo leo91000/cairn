@@ -317,6 +317,7 @@ pub(crate) async fn restore_authorized(
     restore::restore(run, prepared, config, credentials, Some(authorization)).await
 }
 
+pub(crate) use home::run_credentials;
 pub use home::{clear_run_credentials, credential_files};
 
 #[cfg(test)]

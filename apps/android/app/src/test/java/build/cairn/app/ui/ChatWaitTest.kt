@@ -9,6 +9,30 @@ private const val IMMEDIATE_WAIT_RESULT = "Wait condition already completed"
 
 class ChatWaitTest {
     @Test
+    fun `background result shows exit duration and bounded log`() {
+        val observed = buildJsonObject {
+            put("state", "completed")
+            put("type", "job_finished")
+            putJsonObject("jobResult") {
+                put("state", "finished")
+                putJsonObject("receipt") {
+                    put("exitCode", 7)
+                    put("elapsedMs", 1200)
+                    put("logTail", "last line")
+                }
+            }
+        }
+        assertEquals(
+            WaitOutcome(
+                WaitTone.ERROR,
+                "Le travail de fond s’est arrêté",
+                "Code 7 · 1200 ms\nlast line",
+            ),
+            waitOutcome(observed),
+        )
+    }
+
+    @Test
     fun `a late engine turn start keeps waits after final replies and before the next turn`() {
         for (type in listOf("chat.wait", "chat.sleep", "run.wait")) {
             val scheduled = wakeup()

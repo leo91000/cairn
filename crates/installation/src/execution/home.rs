@@ -34,7 +34,7 @@ pub async fn credential_files(run_directory: &Path) -> Vec<String> {
 
 /// Writes the granted instances' files and Git credentials into the home. Files a
 /// withdrawn grant wrote earlier are emptied, so a resumed guest receives the blank.
-pub(super) async fn run_credentials(
+pub(crate) async fn run_credentials(
     home: &Path,
     run_directory: &Path,
     credentials: &RunCredentials,

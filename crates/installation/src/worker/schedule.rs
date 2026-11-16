@@ -47,6 +47,7 @@ impl Worker {
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
+        let provider_active = self.provider_active(&active).await;
         crate::chats::coding_agent::tick(s, &active).await?;
         // Parked missions must release any pre-crash execution independently
         // of their wakeup and of admission capacity for new processes.
@@ -68,9 +69,9 @@ impl Worker {
                 recover_or_wait(s, &s.store.run(run_id).await?).await?;
             }
         }
-        crate::waits::tick_groups(s, &active).await?;
-        s.chat_tick(&active).await?;
-        crate::waits::tick_missions(s, &active).await?;
+        crate::waits::tick_groups(s, &provider_active).await?;
+        s.chat_tick(&provider_active).await?;
+        crate::waits::tick_missions(s, &provider_active).await?;
         if s.shutdown.is_cancelled() || s.store.kv("deployment-lease").await?.is_some() {
             return Ok(());
         }
@@ -278,6 +279,8 @@ impl Worker {
             )
             .await;
             worker.active.lock().await.remove(&run_id);
+            worker.held.lock().await.remove(&run_id);
+            worker.job_redactions.lock().await.remove(&run_id);
             worker.notify();
             worker.notify_retirement();
         });
