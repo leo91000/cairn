@@ -240,6 +240,7 @@ fun describeAction(
             "Démarrer ${agentName(action.text("agentId"))}" to
                 listOf(
                         describeValue(action.obj("prompt")),
+                        action.obj("author")?.let { "auteur ${describeValue(it)}" }.orEmpty(),
                         action.obj("key")?.let { "clé ${describeValue(it)}" }.orEmpty(),
                     )
                     .filter { it.isNotBlank() }
@@ -362,6 +363,19 @@ private val idBases =
 fun templateValue(text: String = ""): JsonObject = buildJsonObject {
     put("type", "template")
     put("text", text)
+}
+
+fun optionalRuleText(value: JsonObject): JsonObject? {
+    if (value.text("type") == "template" && value.text("text").isEmpty()) return null
+    if (value.text("type") == "literal") {
+        val literal = value["value"]
+        if (
+            literal == JsonNull ||
+                literal is JsonPrimitive && literal.isString && literal.content.isEmpty()
+        )
+            return null
+    }
+    return value
 }
 
 fun newRuleStep(definition: JsonElement, kind: String, catalog: HookRuleCatalog?): JsonObject {

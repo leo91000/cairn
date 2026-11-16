@@ -40,7 +40,8 @@ const props = withDefaults(defineProps<{
     resourceType: string
     agentId: string
   }
-}>(), { expects: 'text', placeholder: '' })
+  resourceLabel?: string
+}>(), { expects: 'text', placeholder: '', resourceLabel: 'Choose a resource…' })
 const model = defineModel<RuleValue>({ required: true })
 
 type Mode = 'template' | 'literal' | 'formula'
@@ -432,7 +433,7 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
       v-if="resourceSource"
       v-bind="resourceSource"
       :model-value="model.type === 'literal' && typeof model.value === 'string' && model.value ? [{ resourceType: resourceSource.resourceType, id: model.value }] : []"
-      label="Choose a resource…"
+      :label="resourceLabel"
       @update:model-value="values => model = { type: 'literal', value: values[0]?.id ?? '' }"
     />
   </div>

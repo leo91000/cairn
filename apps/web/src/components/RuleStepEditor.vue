@@ -11,6 +11,7 @@ import {
   describeAction,
   emptyValue,
   initialToolInput,
+  optionalRuleText,
   ownProblems,
   stepChoice,
 } from '../hook-rules'
@@ -333,13 +334,23 @@ const agentName = (id: string) => props.catalog?.agents.find(agent => agent.agen
         @update:model-value="prompt => patch({ prompt })"
       />
       <RuleValueInput
+        :model-value="action.author ?? emptyValue()"
+        label="External author (optional)"
+        :variables="variables"
+        :problems="problemsAt('/action/author')"
+        :resource-source="peopleSource"
+        resource-label="Choose a person…"
+        hint="The person from the connected service who started this conversation."
+        @update:model-value="author => patch({ author: optionalRuleText(author) })"
+      />
+      <RuleValueInput
         :model-value="action.key ?? emptyValue()"
         label="Conversation key (optional)"
         :variables="variables"
         :problems="problemsAt('/action/key')"
         placeholder="discord:{{threadId}}"
         hint="Binds the conversation to a key, so later events can steer it or answer its questions."
-        @update:model-value="key => patch({ key: key.type === 'template' && !key.text ? null : key })"
+        @update:model-value="key => patch({ key: optionalRuleText(key) })"
       />
       <label class="grid gap-1.5">
         <span class="text-xs font-semibold">Project</span>

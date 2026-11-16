@@ -7,6 +7,48 @@ import {
 } from './fixtures'
 import { referencedToolRulesFixture, rulesFixture, scalarRulesFixture } from './rules-fixture'
 
+test('starting an agent associates a selected external author and clears optional values', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  const rule = await workspace.api('/api/hook-rules', 'POST', {
+    definition: {
+      ...fixture.definition,
+      name: 'Conversation authors',
+      steps: [{
+        type: 'action',
+        id: 'start',
+        label: 'Start a conversation',
+        action: {
+          type: 'startAgent',
+          agentId: fixture.agent.id,
+          prompt: { type: 'template', text: 'Answer this message.' },
+          key: { type: 'template', text: 'support:{{payload.channel}}' },
+        },
+      }],
+    },
+    enabled: false,
+  })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit Start a conversation', exact: true }).click()
+  await page.getByRole('button', { name: 'Choose a person…', exact: true }).click()
+  await page.getByRole('button', { name: 'Alice', exact: true }).click()
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+  const saved = await workspace.api(`/api/hook-rules/${rule.id}`)
+  expect(saved.definition.steps[0].action.author).toEqual({ type: 'literal', value: 'alice' })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await page.getByRole('button', { name: 'Edit Start a conversation', exact: true }).click()
+  await page.getByRole('button', { name: 'Remove Alice', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Conversation key (optional)', exact: true }).fill('')
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(3)
+  const cleared = (await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0].action
+  expect(cleared.author ?? null).toBeNull()
+  expect(cleared.key ?? null).toBeNull()
+})
+
 test('a tool with a referenced root schema exposes its fields and executes the saved values', async ({ page, workspace }) => {
   const fixture = await referencedToolRulesFixture(workspace)
   const rule = await workspace.api('/api/hook-rules', 'POST', {

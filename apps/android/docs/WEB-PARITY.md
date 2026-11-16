@@ -36,6 +36,10 @@ variables into text or formulas.
 People and resource choices use the rule's execution agent on both apps,
 including rules created by members with access to that agent. Changing the
 agent discards choices and names loaded under the previous resource source.
+Starting an agent can associate an optional external author, selected by name or
+filled with a variable, on both apps. The flow summary includes this author.
+Clearing an optional author or conversation key removes it, including after a
+fixed resource selection; meaningful whitespace and numeric identifiers are kept.
 The installation validates drafts and reports
 errors at their step. Saving creates a version. A state-only revision change is
 refreshed while preserving the draft; a newer saved definition can be reviewed,

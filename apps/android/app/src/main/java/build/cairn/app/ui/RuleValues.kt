@@ -46,6 +46,7 @@ internal fun RuleValueEditor(
     schema: JsonObject? = null,
     resourceSource: RuleResourceSource? = null,
     vm: CairnViewModel? = null,
+    resourceLabel: String = "Choisir une ressource",
 ) {
     val held = value as? JsonObject ?: templateValue()
     val mode = held.text("type").ifBlank { "template" }
@@ -157,7 +158,7 @@ internal fun RuleValueEditor(
                     emittedExpects = expects
                     change(next)
                 },
-                Modifier.fillMaxWidth(),
+                Modifier.fillMaxWidth().semantics { contentDescription = label },
                 placeholder = {
                     Text(
                         if (mode == "formula") "Choisir une variable ou écrire une formule"
@@ -196,7 +197,7 @@ internal fun RuleValueEditor(
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { picking = true }) { Text("+ Insérer une variable") }
             if (resourceSource != null && vm != null)
-                TextButton(onClick = { browsing = true }) { Text("Choisir une ressource") }
+                TextButton(onClick = { browsing = true }) { Text(resourceLabel) }
         }
         if (mode == "template" && text.contains("{{"))
             Text(

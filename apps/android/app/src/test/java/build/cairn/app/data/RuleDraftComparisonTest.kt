@@ -6,6 +6,22 @@ import org.junit.Test
 
 class RuleDraftComparisonTest {
     @Test
+    fun optionalTextClearsEmptyInputsAndPreservesMeaningfulValues() {
+        assertNull(optionalRuleText(templateValue()))
+        assertNull(optionalRuleText(literalRuleValue(JsonPrimitive(""))))
+        assertNull(optionalRuleText(literalRuleValue(JsonNull)))
+        for (value in
+            listOf(
+                templateValue(" "),
+                literalRuleValue(JsonPrimitive("alice")),
+                literalRuleValue(JsonPrimitive(" ")),
+                literalRuleValue(JsonPrimitive(0)),
+            )) {
+            assertEquals(value, optionalRuleText(value))
+        }
+    }
+
+    @Test
     fun optionalNullsMatchButLiteralNullPropertiesRemainData() {
         val original =
             wireJson

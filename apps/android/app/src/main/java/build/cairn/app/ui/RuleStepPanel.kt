@@ -213,20 +213,23 @@ internal fun RuleStepPanel(
                             multiline = true,
                         )
                         RuleValueEditor(
+                            "Auteur externe (facultatif)",
+                            action["author"],
+                            variables,
+                            { patchAction("author" to optionalRuleText(it)) },
+                            resourceSource = peopleSource,
+                            vm = vm,
+                            resourceLabel = "Choisir une personne",
+                        )
+                        Text(
+                            "La personne du service connecté à l’origine de cette conversation.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        RuleValueEditor(
                             "Clé de conversation (facultative)",
                             action["key"],
                             variables,
-                            {
-                                patchAction(
-                                    "key" to
-                                        if (
-                                            it.text("type") == "template" &&
-                                                it.text("text").isBlank()
-                                        )
-                                            null
-                                        else it
-                                )
-                            },
+                            { patchAction("key" to optionalRuleText(it)) },
                         )
                         Choice(
                             "Projet",

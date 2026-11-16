@@ -260,7 +260,7 @@ export function describeAction(action: RuleAction, catalog: HookRuleCatalog | nu
     }
 
     case 'startAgent':
-      return { icon, title: `Start ${agentName(action.agentId)}`, detail: [describeValue(action.prompt), action.key ? `key ${describeValue(action.key)}` : ''].filter(Boolean).join(' · ') }
+      return { icon, title: `Start ${agentName(action.agentId)}`, detail: [describeValue(action.prompt), action.author ? `author ${describeValue(action.author)}` : '', action.key ? `key ${describeValue(action.key)}` : ''].filter(Boolean).join(' · ') }
     case 'steerConversation':
       return { icon, title: 'Steer the conversation', detail: `${describeValue(action.key)} · ${describeValue(action.message)}` }
     case 'answerQuestion':
@@ -330,6 +330,14 @@ const idBases: Record<StepKind, string> = {
 
 export function emptyValue(text = ''): RuleValue {
   return { type: 'template', text }
+}
+
+export function optionalRuleText(value: RuleValue): RuleValue | null {
+  if (value.type === 'template' && !value.text)
+    return null
+  if (value.type === 'literal' && (value.value === '' || value.value === null))
+    return null
+  return value
 }
 
 export function newStep(definition: HookRuleDefinition, kind: StepKind, catalog: HookRuleCatalog | null): RuleNode {

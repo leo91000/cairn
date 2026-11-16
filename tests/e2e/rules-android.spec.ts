@@ -28,8 +28,10 @@ function screen() {
   return adb('exec-out', 'cat', '/sdcard/cairn-rules-journey.xml')
 }
 
-function positionIn(document: string, text: string, includeClipped = false): number[] | null {
-  for (const node of document.match(/<node\b[^>]+>/g) ?? []) {
+function positionIn(document: string, text: string, includeClipped = false, preferEditable = false): number[] | null {
+  const nodes = document.match(/<node\b[^>]+>/g) ?? []
+  const ordered = preferEditable ? [...nodes.filter(node => node.includes('class="android.widget.EditText"')), ...nodes.filter(node => !node.includes('class="android.widget.EditText"'))] : nodes
+  for (const node of ordered) {
     if (node.match(/\btext="([^"]*)"/)?.[1] !== text && node.match(/content-desc="([^"]*)"/)?.[1] !== text)
       continue
     if (node.includes('enabled="false"'))
@@ -53,7 +55,7 @@ function tapPosition(position: number[]) {
   adb('shell', 'input', 'tap', String(position[0]), String(position[1]))
 }
 
-async function tap(text: string) {
+async function tap(text: string, preferEditable = false) {
   let previous = ''
   await expect.poll(() => {
     const current = screen()
@@ -65,7 +67,7 @@ async function tap(text: string) {
       return false
     }
 
-    const position = positionIn(current, text)
+    const position = positionIn(current, text, false, preferEditable)
     const signature = position?.join(',') ?? ''
     if (!position || signature !== previous) {
       previous = signature
@@ -96,7 +98,7 @@ async function scrollTo(text: string) {
 }
 
 async function fill(label: string, value: string | (() => string)) {
-  await tap(label)
+  await tap(label, true)
   const text = typeof value === 'function' ? value() : value
   adb('shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A')
   adb('shell', 'input', 'text', text.replaceAll(' ', '%s'))
@@ -123,11 +125,23 @@ test('native rules persist edits, integer waits and every creator control agains
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]?.status).toBe('completed')
   await page.goto(workspacePath(`/rules?rule=${rule.id}`))
   await signIn(page)
+  await page.goto(workspacePath('/rules'))
+  await expect(page.getByText('Support messages', { exact: true })).toBeVisible()
+  await page.screenshot({ path: info.outputPath('web-list.png'), animations: 'disabled' })
+  await page.goto(workspacePath(`/rules?rule=${rule.id}`))
+  await expect(page.getByRole('heading', { name: 'Support messages', exact: true })).toBeVisible()
+  await page.screenshot({ path: info.outputPath('web-detail.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: 'History', exact: true }).click()
+  await page.getByRole('button', { name: /Completed.*1 action/ }).click()
+  await page.getByText('Result', { exact: true }).click()
+  await expect(page.locator('details[open] pre').filter({ hasText: 'Received: A real local rule execution' })).toBeVisible()
+  await page.screenshot({ path: info.outputPath('web-history.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: 'Flow', exact: true }).click()
   await page.getByRole('button', { name: 'Edit', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Save version', exact: true })).toBeEnabled()
   await page.getByRole('button', { name: 'Edit Acknowledge the message', exact: true }).click()
   await expect(page.getByText('#support', { exact: true }).first()).toBeVisible()
-  await page.screenshot({ path: info.outputPath('web-editor.png'), animations: 'disabled' })
+  await page.screenshot({ path: info.outputPath('web-editor.png'), animations: 'disabled', fullPage: true })
   const port = new URL(workspace.url).port
   adb('reverse', `tcp:${port}`, `tcp:${port}`)
   adb('shell', 'am', 'force-stop', 'build.cairn.app')
@@ -145,8 +159,11 @@ test('native rules persist edits, integer waits and every creator control agains
   await expect.poll(() => screen().includes('Support messages')).toBe(true)
   await capture(info.outputPath('android-list.png'))
   await tap('Support messages')
+  await expect.poll(() => Boolean(positionIn(screen(), 'Modifier'))).toBe(true)
+  await capture(info.outputPath('android-detail.png'))
   await tap('Modifier')
   await fill('Nom de la règle', 'Support messages mobile')
+  await expect.poll(() => Boolean(positionIn(screen(), 'Enregistrer'))).toBe(true)
   await capture(info.outputPath('android-editor.png'))
   adb('shell', 'input', 'swipe', '360', '1000', '360', '300', '600')
   await capture(info.outputPath('android-flow.png'))
@@ -210,6 +227,13 @@ test('native rules persist edits, integer waits and every creator control agains
   await tap('Enregistrer')
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(2)
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).definition.steps[0].action.seconds).toEqual({ type: 'literal', value: 900 })
+  adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+  await tap('Support messages mobile')
+  await scrollTo('Historique')
+  await scrollTo('Terminé · 1 actions')
+  await scrollTo('Résultat')
+  await expect.poll(() => screen().includes('Received: A real local rule execution')).toBe(true)
+  await capture(info.outputPath('android-history.png'))
 })
 
 test('a native member selects people and a channel through the execution agent', async ({ page, browser, workspace }, info) => {
@@ -254,6 +278,25 @@ test('a native member selects people and a channel through the execution agent',
     expect(created.ok(), rule.error).toBe(true)
     expect(rule.creatorAccountId).toBe(accountId)
     expect(rule.definition.name).toBe('Member choices')
+    const createdAuthor = await member.request.post(`${workspace.url}/api/installations/${workspace.installationId}/api/hook-rules`, {
+      headers: { 'origin': workspace.url, 'x-csrf-token': session.csrf },
+      data: {
+        definition: {
+          ...fixture.definition,
+          name: 'Member conversation author',
+          steps: [{
+            type: 'action',
+            id: 'start',
+            label: 'Member author',
+            action: { type: 'startAgent', agentId: fixture.agent.id, prompt: { type: 'template', text: 'Answer the message.' } },
+          }],
+        },
+        enabled: false,
+      },
+    })
+    const authorRule = await createdAuthor.json()
+    expect(createdAuthor.ok(), authorRule.error).toBe(true)
+    expect(authorRule.creatorAccountId).toBe(accountId)
     const port = new URL(workspace.url).port
     adb('reverse', `tcp:${port}`, `tcp:${port}`)
     adb('shell', 'am', 'force-stop', 'build.cairn.app')
@@ -290,6 +333,21 @@ test('a native member selects people and a channel through the execution agent',
     expect(saved.definition.steps[0].condition.people).toContainEqual({ resourceType: 'person', id: 'bob' })
     expect(saved.definition.steps[0].then[0].action.input.channel).toEqual({ type: 'literal', value: 'general' })
     await capture(info.outputPath('android-member-saved.png'))
+    adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+    await scrollTo('Member conversation author')
+    await tap('Modifier')
+    await scrollTo('Member author')
+    await scrollTo('Choisir une personne')
+    await expect.poll(() => screen().includes('Alice'), { timeout: 15000 }).toBe(true)
+    await capture(info.outputPath('android-member-start-author-picker.png'))
+    await tap('Alice')
+    await scrollTo('Terminer cette étape')
+    await tap('Enregistrer')
+    await expect.poll(async () => (await workspace.api(`/api/hook-rules/${authorRule.id}`)).version).toBe(2)
+    const authored = await workspace.api(`/api/hook-rules/${authorRule.id}`)
+    expect(authored.creatorAccountId).toBe(accountId)
+    expect(authored.definition.steps[0].action.author).toEqual({ type: 'literal', value: 'alice' })
+    await capture(info.outputPath('android-member-start-author.png'))
   }
   finally {
     await memberContext.close()

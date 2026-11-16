@@ -8,6 +8,7 @@ import {
   comparisonListSchema,
   newStep,
   nodeAt,
+  optionalRuleText,
   pathOfNode,
   ruleConditionDepth,
   sameRuleDefinition,
@@ -20,6 +21,20 @@ import {
   withReplaced,
 } from '../src/hook-rules'
 import { resolveRuleSchema, ruleLiteralDefault } from '../src/rule-schema'
+
+it('clears optional text values without dropping meaningful literal data', () => {
+  expect(optionalRuleText({ type: 'template', text: '' })).toBeNull()
+  expect(optionalRuleText({ type: 'literal', value: '' })).toBeNull()
+  expect(optionalRuleText({ type: 'literal', value: null })).toBeNull()
+  for (const value of [
+    { type: 'template', text: ' ' },
+    { type: 'literal', value: 'alice' },
+    { type: 'literal', value: ' ' },
+    { type: 'literal', value: 0 },
+    { type: 'formula', expression: 'payload.author.id' },
+  ] as const)
+    expect(optionalRuleText(value)).toEqual(value)
+})
 
 const action: RuleNode = {
   type: 'action',

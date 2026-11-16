@@ -14,6 +14,7 @@ import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleCatalog
 import build.cairn.contracts.HookRuleLimits
+import build.cairn.contracts.RuleCatalogAgent
 import build.cairn.contracts.RuleCatalogLimits
 import build.cairn.contracts.RuleCatalogTool
 import java.util.concurrent.CopyOnWriteArrayList
@@ -45,6 +46,8 @@ abstract class RulesCreationCases {
                     defaultLimits =
                         HookRuleLimits(conversationsPerHour = 5, triggeringsPerHour = 60),
                     maxConversationsPerHour = 10,
+                    maxChainDepth = 8,
+                    maxConversationValuesBytes = 262144,
                     maxNodes = 100,
                     maxSteps = 500,
                     maxToolCalls = 100,
@@ -137,6 +140,76 @@ abstract class RulesCreationCases {
             compose.runOnIdle {
                 assertEquals(templateValue("Hello"), node.obj("action").obj("input").obj("text"))
             }
+        } finally {
+            compose.runOnIdle { models.clear() }
+        }
+    }
+
+    @Test
+    fun startingAnAgentEditsAndClearsItsExternalAuthor() {
+        val catalog =
+            rootSchemaCatalog()
+                .copy(agents = listOf(RuleCatalogAgent(MAIN_AGENT_ID, "Assistant", false)))
+        var node by
+            mutableStateOf(
+                ruleObject(
+                    "type" to JsonPrimitive("action"),
+                    "id" to JsonPrimitive("start"),
+                    "action" to
+                        ruleObject(
+                            "type" to JsonPrimitive("startAgent"),
+                            "agentId" to JsonPrimitive(MAIN_AGENT_ID),
+                            "prompt" to templateValue("Answer this message."),
+                        ),
+                )
+            )
+        val vm =
+            CairnViewModel(
+                ApplicationProvider.getApplicationContext<Application>(),
+                object : SessionVault {
+                    override fun read(origin: String): String? = null
+
+                    override fun write(origin: String, cookie: String?) {}
+                },
+                beaconOrigin = "",
+            )
+        val models = ViewModelStore().apply { put("fixture", vm) }
+        try {
+            compose.setContent {
+                CairnTheme {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        RuleStepPanel(
+                            vm,
+                            Workspace(),
+                            node,
+                            catalog,
+                            MAIN_AGENT_ID,
+                            emptyList(),
+                            RuleResourceSource("root", "support", "person", MAIN_AGENT_ID),
+                        ) {
+                            node = it
+                        }
+                    }
+                }
+            }
+            compose.onNodeWithText("Choisir une personne").performScrollTo().assertIsDisplayed()
+            compose
+                .onNodeWithContentDescription("Auteur externe (facultatif)")
+                .performScrollTo()
+                .performTextReplacement("alice")
+            compose.runOnIdle {
+                assertEquals(templateValue("alice"), node.obj("action").obj("author"))
+                assertTrue(
+                    describeAction(node["action"], catalog) { "Assistant" }
+                        .second
+                        .contains("auteur alice")
+                )
+            }
+            compose
+                .onNodeWithContentDescription("Auteur externe (facultatif)")
+                .performScrollTo()
+                .performTextReplacement("")
+            compose.runOnIdle { assertNull(node.obj("action").obj("author")) }
         } finally {
             compose.runOnIdle { models.clear() }
         }
@@ -314,7 +387,7 @@ abstract class RulesCreationCases {
                 .setHeader("Content-Type", "application/json")
                 .setBody(body)
         val catalog =
-            """{"agents":[{"agentId":"$MAIN_AGENT_ID","name":"Assistant","native":false}],"hooks":[{"agentIds":["$MAIN_AGENT_ID"],"title":"Réponse prête","description":"","payloadSchema":null,"resourceFields":[],"trigger":{"type":"cairn","hook":"replyReady"}}],"tools":[],"actions":[],"conditions":[],"operators":[],"functions":[],"variables":[],"limits":{"defaultLimits":{"triggeringsPerHour":60,"conversationsPerHour":5},"maxTriggeringsPerHour":100,"maxConversationsPerHour":10,"maxWaitSeconds":604800,"maxSteps":500,"maxToolCalls":100,"maxNodes":100}}"""
+            """{"agents":[{"agentId":"$MAIN_AGENT_ID","name":"Assistant","native":false}],"hooks":[{"agentIds":["$MAIN_AGENT_ID"],"title":"Réponse prête","description":"","payloadSchema":null,"resourceFields":[],"trigger":{"type":"cairn","hook":"replyReady"}}],"tools":[],"actions":[],"conditions":[],"operators":[],"functions":[],"variables":[],"limits":{"defaultLimits":{"triggeringsPerHour":60,"conversationsPerHour":5},"maxTriggeringsPerHour":100,"maxConversationsPerHour":10,"maxChainDepth":8,"maxConversationValuesBytes":262144,"maxWaitSeconds":604800,"maxSteps":500,"maxToolCalls":100,"maxNodes":100}}"""
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
