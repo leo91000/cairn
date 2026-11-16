@@ -117,6 +117,7 @@ test('native rules persist edits, integer waits and every creator control agains
   expect(adb('shell', 'getprop', 'ro.kernel.qemu').trim()).toBe('1')
   expect(adb('shell', 'wm', 'size')).toContain('720x1280')
   const started = Date.now()
+  await page.setViewportSize({ width: 1440, height: 1100 })
   const fixture = await rulesFixture(workspace)
   const rule = await workspace.api('/api/hook-rules', 'POST', {
     definition: { ...fixture.definition, limits: { triggeringsPerHour: 1, conversationsPerHour: 5 } },
@@ -142,6 +143,7 @@ test('native rules persist edits, integer waits and every creator control agains
   await expect(page.getByRole('button', { name: 'Save version', exact: true })).toBeEnabled()
   await page.getByRole('button', { name: 'Edit Acknowledge the message', exact: true }).click()
   await expect(page.getByText('#support', { exact: true }).first()).toBeVisible()
+  await page.getByRole('textbox', { name: 'Rule name', exact: true }).scrollIntoViewIfNeeded()
   await page.screenshot({ path: info.outputPath('web-editor.png'), animations: 'disabled', fullPage: true })
   const port = new URL(workspace.url).port
   adb('reverse', `tcp:${port}`, `tcp:${port}`)
@@ -168,6 +170,8 @@ test('native rules persist edits, integer waits and every creator control agains
   await capture(info.outputPath('android-editor.png'))
   adb('shell', 'input', 'swipe', '360', '1000', '360', '300', '600')
   await capture(info.outputPath('android-flow.png'))
+  adb('shell', 'input', 'swipe', '360', '1000', '360', '300', '600')
+  await capture(info.outputPath('android-flow-lower.png'))
   await workspace.api(`/api/hook-rules/${rule.id}/enabled`, 'POST', { ruleId: rule.id, enabled: false })
   await workspace.api(`/api/hook-rules/${rule.id}/enabled`, 'POST', { ruleId: rule.id, enabled: true })
   await tap('Enregistrer')
@@ -231,14 +235,14 @@ test('native rules persist edits, integer waits and every creator control agains
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).definition.steps[0].action.seconds).toEqual({ type: 'literal', value: 900 })
   await scrollTo('Modifier')
   await scrollTo('Syntaxe JSON')
-  await fill('Valeur', '{"count":')
+  await fill('Valeur à mémoriser', '{"count":')
   await scrollTo('Terminer cette étape')
   await expect.poll(() => (screen().match(/<node\b[^>]+>/g) ?? []).some(node => node.includes('text="Enregistrer"') && node.includes('enabled="false"'))).toBe(true)
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(2)
   await scrollTo('Syntaxe JSON')
   // The exact invalid text must survive dismissing/reopening its native sheet.
   await expect.poll(() => screen().includes('{&quot;count&quot;:')).toBe(true)
-  await fill('Valeur', '{"count":2}')
+  await fill('Valeur à mémoriser', '{"count":2}')
   await scrollTo('Terminer cette étape')
   await tap('Enregistrer')
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(3)
