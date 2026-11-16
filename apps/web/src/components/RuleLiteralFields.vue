@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { JsonDrafts } from '../rule-json-drafts'
 import {
   computed,
   ref,
@@ -7,17 +8,32 @@ import {
   watch,
 } from 'vue'
 import { Plus, Trash2 } from '../icons'
+import {
+  childJsonDrafts,
+  jsonInputDraft,
+  parseRuleJsonInput,
+  removeJsonDraftItem,
+  replaceChildJsonDrafts,
+} from '../rule-json-drafts'
 import { resolveRuleSchema, ruleLiteralDefault } from '../rule-schema'
 import Icon from './Icon.vue'
 
 defineOptions({ name: 'RuleLiteralFields' })
-const props = defineProps<{
+const props = withDefaults(defineProps<{
+  modelValue: unknown
+  jsonDrafts?: JsonDrafts
   schema: any
   root?: any
   label: string
   depth?: number
-}>()
-const model = defineModel<unknown>({ required: true })
+}>(), { jsonDrafts: () => ({}) })
+const emit = defineEmits<{ change: [value: unknown, drafts: JsonDrafts] }>()
+const model = computed(() => props.modelValue)
+
+function publish(value: unknown, drafts: JsonDrafts = {}) {
+  emit('change', value, drafts)
+}
+
 const fieldId = useId()
 const textField = ref<HTMLInputElement | HTMLTextAreaElement>()
 defineExpose({ field: textField })
@@ -28,23 +44,29 @@ const array = computed<unknown[]>(() => Array.isArray(model.value) ? model.value
 
 const numberDraft = ref('')
 let emittedNumber: unknown = Symbol('initial')
-watch(() => model.value, (value) => {
-  if (!Object.is(value, emittedNumber))
+watch(() => [model.value, props.jsonDrafts['']?.text] as const, ([value, raw]) => {
+  if (raw !== undefined)
+    numberDraft.value = raw
+  else if (!Object.is(value, emittedNumber))
     numberDraft.value = value === null || value === undefined ? '' : String(value)
 }, { immediate: true })
 
 function inputNumber(raw: string) {
   numberDraft.value = raw
   emittedNumber = raw.trim() && Number.isFinite(Number(raw)) ? Number(raw) : raw
-  model.value = emittedNumber
+  const valid = typeof emittedNumber === 'number' && Number.isFinite(emittedNumber)
+    && (resolved.value.type !== 'integer' || Number.isInteger(emittedNumber))
+  publish(emittedNumber, valid ? {} : jsonInputDraft(raw, resolved.value.type === 'integer' ? 'Enter a whole number.' : 'Enter a number.'))
 }
 
 const untyped = computed(() => !resolved.value.type && !resolved.value.properties && !resolved.value.items)
 const jsonNoun = computed(() => resolved.value.type === 'array' ? 'list' : 'object')
 const jsonDraft = ref('')
 let emittedJson: unknown = Symbol('initial')
-watch(() => model.value, (value) => {
-  if (!Object.is(toRaw(value), emittedJson))
+watch(() => [model.value, props.jsonDrafts['']?.text] as const, ([value, raw]) => {
+  if (raw !== undefined)
+    jsonDraft.value = raw
+  else if (!Object.is(toRaw(value), emittedJson))
     jsonDraft.value = typeof value === 'string' && !untyped.value ? value : JSON.stringify(value ?? null, null, 2)
 }, { immediate: true })
 
@@ -54,23 +76,25 @@ function matchesJson(value: unknown) {
 
 function inputJson(raw: string) {
   jsonDraft.value = raw
+  let drafts: JsonDrafts = {}
   try {
-    const value = JSON.parse(raw)
+    const value = parseRuleJsonInput(raw)
     emittedJson = matchesJson(value) ? value : raw
   }
   catch {
     emittedJson = raw
+    drafts = jsonInputDraft(raw)
   }
 
-  model.value = emittedJson
+  publish(emittedJson, drafts)
 }
 
-function setField(name: string, value: unknown) {
-  model.value = { ...object.value, [name]: value }
+function setField(name: string, value: unknown, drafts: JsonDrafts) {
+  publish({ ...object.value, [name]: value }, replaceChildJsonDrafts(props.jsonDrafts, name, drafts))
 }
 
-function setItem(index: number, value: unknown) {
-  model.value = array.value.map((held, at) => at === index ? value : held)
+function setItem(index: number, value: unknown, drafts: JsonDrafts) {
+  publish(array.value.map((held, at) => at === index ? value : held), replaceChildJsonDrafts(props.jsonDrafts, index, drafts))
 }
 </script>
 
@@ -79,7 +103,7 @@ function setItem(index: number, value: unknown) {
     v-if="resolved.enum?.length"
     :value="JSON.stringify(model)"
     :aria-label="label"
-    @change="model = JSON.parse(($event.target as HTMLSelectElement).value)"
+    @change="publish(JSON.parse(($event.target as HTMLSelectElement).value))"
   >
     <option v-for="option in resolved.enum" :key="JSON.stringify(option)" :value="JSON.stringify(option)">
       {{ String(option) }}
@@ -93,7 +117,7 @@ function setItem(index: number, value: unknown) {
       class="rounded-full border px-3 py-1.5 text-xs font-semibold"
       :class="model === flag ? 'border-ink bg-ink text-canvas' : 'border-line'"
       :aria-pressed="model === flag"
-      @click="model = flag"
+      @click="publish(flag)"
     >
       {{ flag ? 'Yes' : 'No' }}
     </button>
@@ -109,11 +133,12 @@ function setItem(index: number, value: unknown) {
       <span :id="`${fieldId}-${index}`" class="text-xs font-semibold">{{ field.title ?? name }}</span>
       <RuleLiteralFields
         :model-value="object[name] ?? ruleLiteralDefault(field, root ?? schema)"
+        :json-drafts="childJsonDrafts(jsonDrafts, name)"
         :schema="field"
         :root="root ?? schema"
         :depth="(depth ?? 0) + 1"
         :label="`${label}: ${field.title ?? name}`"
-        @update:model-value="value => setField(name, value)"
+        @change="(value, drafts) => setField(name, value, drafts)"
       />
       <small v-if="field.description" class="text-2xs text-muted">{{ field.description }}</small>
     </div>
@@ -123,23 +148,24 @@ function setItem(index: number, value: unknown) {
       <div class="min-w-0 flex-1">
         <RuleLiteralFields
           :model-value="item"
+          :json-drafts="childJsonDrafts(jsonDrafts, index)"
           :schema="resolved.items ?? {}"
           :root="root ?? schema"
           :depth="(depth ?? 0) + 1"
           :label="`${label} ${index + 1}`"
-          @update:model-value="value => setItem(index, value)"
+          @change="(value, drafts) => setItem(index, value, drafts)"
         />
       </div>
       <button
         type="button"
         class="grid size-8 shrink-0 place-items-center rounded-lg text-muted hover:bg-hover hover:text-coral"
         :aria-label="`Remove ${label} ${index + 1}`"
-        @click="model = array.filter((_, at) => at !== index)"
+        @click="publish(array.filter((_, at) => at !== index), removeJsonDraftItem(jsonDrafts, index))"
       >
         <Icon :name="Trash2" :size="14" />
       </button>
     </div>
-    <button type="button" class="inline-flex items-center gap-1.5 justify-self-start rounded-full border border-dashed border-line px-3 py-1.5 text-xs font-semibold text-muted hover:text-accent" @click="model = [...array, ruleLiteralDefault(resolved.items ?? {}, root ?? schema)]">
+    <button type="button" class="inline-flex items-center gap-1.5 justify-self-start rounded-full border border-dashed border-line px-3 py-1.5 text-xs font-semibold text-muted hover:text-accent" @click="publish([...array, ruleLiteralDefault(resolved.items ?? {}, root ?? schema)], jsonDrafts)">
       <Icon :name="Plus" :size="13" />Add an item
     </button>
   </div>
@@ -147,13 +173,14 @@ function setItem(index: number, value: unknown) {
     <textarea
       ref="textField"
       :value="jsonDraft"
+      :aria-invalid="Object.hasOwn(jsonDrafts, '') || !matchesJson(model) || undefined"
       :aria-label="`${label} (${untyped ? 'JSON' : `JSON ${jsonNoun}`})`"
       rows="4"
       spellcheck="false"
       @input="inputJson(($event.target as HTMLTextAreaElement).value)"
     />
     <small class="text-xs text-muted">{{ untyped ? 'Enter a JSON value: text in quotes, number, boolean, object or list.' : resolved.type === 'array' ? "Enter the list's values as JSON." : "Enter the object's key/value properties as JSON." }}</small>
-    <small v-if="!matchesJson(model)" class="text-xs text-coral" role="alert">Enter a valid JSON {{ jsonNoun }}.</small>
+    <small v-if="Object.hasOwn(jsonDrafts, '') || !matchesJson(model)" class="text-xs text-coral" role="alert">Enter a valid JSON{{ untyped ? ' value' : ` ${jsonNoun}` }}.</small>
   </div>
   <textarea
     v-else-if="resolved.type === 'string' && (resolved.maxLength ?? 0) > 200"
@@ -161,7 +188,7 @@ function setItem(index: number, value: unknown) {
     :value="typeof model === 'string' ? model : ''"
     :aria-label="label"
     rows="3"
-    @input="model = ($event.target as HTMLTextAreaElement).value"
+    @input="publish(($event.target as HTMLTextAreaElement).value)"
   />
   <input
     v-else-if="resolved.type === 'integer' || resolved.type === 'number'"
@@ -177,6 +204,7 @@ function setItem(index: number, value: unknown) {
     :value="model === null ? '' : String(model ?? '')"
     :aria-label="label"
     :inputmode="resolved.type === 'integer' || resolved.type === 'number' ? 'decimal' : 'text'"
-    @input="model = ($event.target as HTMLInputElement).value"
+    @input="publish(($event.target as HTMLInputElement).value)"
   >
+  <small v-if="jsonDrafts[''] && ['integer', 'number'].includes(resolved.type)" class="text-xs text-coral" role="alert">{{ jsonDrafts[''].message }}</small>
 </template>

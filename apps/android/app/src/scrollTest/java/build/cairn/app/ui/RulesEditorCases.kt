@@ -458,6 +458,65 @@ abstract class RulesEditorCases {
         compose.runOnIdle { assertEquals(formulaRuleValue("\"kept\""), value) }
     }
 
+    @Test fun malformedJsonKeepsItsDraftUntilFixed() = recoverInvalidValue(false)
+
+    @Test fun malformedSchemaJsonKeepsItsDraftUntilFixed() = recoverInvalidValue(true)
+
+    private fun recoverInvalidValue(schemaInput: Boolean) {
+        val raw = "{\"count\":"
+        var value by mutableStateOf(literalRuleValue(ruleObject("count" to JsonPrimitive(1))))
+        var shown by mutableStateOf(true)
+        compose.setContent {
+            CairnTheme {
+                if (shown)
+                    RuleValueEditor(
+                        "Valeur",
+                        value,
+                        emptyList(),
+                        { value = it },
+                        expects = if (schemaInput) "text" else "json",
+                        schema = if (schemaInput) JsonObject(emptyMap()) else null,
+                    )
+            }
+        }
+        compose.onNode(hasSetTextAction()).performTextReplacement(raw)
+        compose.runOnIdle {
+            assertEquals(1, ruleJsonDraftProblems(value).size)
+            value = wireJson.parseToJsonElement(value.toString()).jsonObject
+            shown = false
+        }
+        compose.runOnIdle { shown = true }
+        compose.onNode(hasSetTextAction()).assertTextContains(raw)
+        compose.onNode(hasSetTextAction()).performTextReplacement(JsonPrimitive(raw).toString())
+        compose.runOnIdle {
+            assertTrue(ruleJsonDraftProblems(value).isEmpty())
+            assertEquals(literalRuleValue(JsonPrimitive(raw)), value)
+        }
+    }
+
+    @Test
+    fun malformedNumericComparisonKeepsItsDraftAndBlocksValidation() {
+        var value by mutableStateOf(literalRuleValue(JsonPrimitive(1)))
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor(
+                    "Comparer avec",
+                    value,
+                    emptyList(),
+                    { value = it },
+                    expects = "number",
+                )
+            }
+        }
+        compose.onNode(hasSetTextAction()).performTextReplacement("oops")
+        compose.runOnIdle { assertEquals(1, ruleJsonDraftProblems(value).size) }
+        compose.onNode(hasSetTextAction()).performTextReplacement("3")
+        compose.runOnIdle {
+            assertTrue(ruleJsonDraftProblems(value).isEmpty())
+            assertEquals(literalRuleValue(JsonPrimitive(3)), value)
+        }
+    }
+
     @Test
     fun jsonStringEditingKeepsItsTypeAndTextModeHasNoEncodingQuotes() {
         var value by mutableStateOf(literalRuleValue(JsonPrimitive("5")))

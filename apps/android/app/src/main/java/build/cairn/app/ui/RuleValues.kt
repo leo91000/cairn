@@ -49,6 +49,7 @@ internal fun RuleValueEditor(
     resourceLabel: String = "Choisir une ressource",
 ) {
     val held = value as? JsonObject ?: templateValue()
+    val jsonDrafts = ruleValueJsonDrafts(held)
     val storedMode = held.text("type").ifBlank { "template" }
     val mode =
         if (storedMode == "literal" && expects in setOf("field", "formula")) "formula"
@@ -58,15 +59,18 @@ internal fun RuleValueEditor(
     var picking by remember { mutableStateOf(false) }
     var browsing by remember { mutableStateOf(false) }
     val text =
-        when (mode) {
-            "formula" ->
-                if (storedMode == "literal") (held["value"] ?: JsonNull).toString()
-                else held.text("expression")
-            "literal" ->
-                if (expects == "json") held["value"].toString()
-                else (held["value"] as? JsonPrimitive)?.contentOrNull ?: held["value"].toString()
-            else -> held.text("text")
-        }
+        if (jsonDrafts.containsKey("")) jsonDrafts.obj("").text("text")
+        else
+            when (mode) {
+                "formula" ->
+                    if (storedMode == "literal") (held["value"] ?: JsonNull).toString()
+                    else held.text("expression")
+                "literal" ->
+                    if (expects == "json") held["value"].toString()
+                    else
+                        (held["value"] as? JsonPrimitive)?.contentOrNull ?: held["value"].toString()
+                else -> held.text("text")
+            }
     var editorInput by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
     var emittedInput by remember { mutableStateOf<JsonObject?>(null) }
     var emittedExpects by remember { mutableStateOf(expects) }
@@ -129,9 +133,17 @@ internal fun RuleValueEditor(
                 held["value"] ?: JsonNull,
                 change = { change(literalRuleValue(it)) },
                 selectionChanged = { literalSelection = it },
+                jsonDrafts = jsonDrafts,
+                changeDraft = { value, drafts -> change(literalWithJsonDrafts(value, drafts)) },
             )
         else if (mode == "literal" && expects in setOf("number", "integer"))
-            RuleNumericField(held["value"] ?: JsonNull, expects == "integer", label) {
+            RuleNumericField(
+                held["value"] ?: JsonNull,
+                expects == "integer",
+                label,
+                hasProblem = jsonDrafts.isNotEmpty(),
+                changeDraft = { value, drafts -> change(literalWithJsonDrafts(value, drafts)) },
+            ) {
                 change(literalRuleValue(it))
             }
         else if (mode == "literal" && expects == "boolean")
@@ -153,14 +165,21 @@ internal fun RuleValueEditor(
                         when (mode) {
                             "formula" -> formulaRuleValue(input.text)
                             "literal" ->
-                                literalRuleValue(
-                                    if (expects in setOf("number", "integer"))
-                                        ruleNumber(input.text, expects == "integer")
-                                    else if (expects == "json")
-                                        runCatching { wireJson.parseToJsonElement(input.text) }
-                                            .getOrElse { JsonPrimitive(input.text) }
-                                    else JsonPrimitive(input.text)
-                                )
+                                if (expects == "json") {
+                                    val parsed = runCatching {
+                                        parseRuleJsonInput(input.text)
+                                    }
+                                    literalWithJsonDrafts(
+                                        parsed.getOrElse { JsonPrimitive(input.text) },
+                                        if (parsed.isFailure) jsonInputDraft(input.text)
+                                        else JsonObject(emptyMap()),
+                                    )
+                                } else
+                                    literalRuleValue(
+                                        if (expects in setOf("number", "integer"))
+                                            ruleNumber(input.text, expects == "integer")
+                                        else JsonPrimitive(input.text)
+                                    )
                             else -> templateValue(input.text)
                         }
                     emittedInput = next
@@ -174,6 +193,7 @@ internal fun RuleValueEditor(
                         else "Texte avec {{variables}}"
                     )
                 },
+                isError = jsonDrafts.isNotEmpty(),
                 minLines = if (multiline) 3 else 1,
                 maxLines = if (multiline) 8 else 3,
                 textStyle =
@@ -181,6 +201,12 @@ internal fun RuleValueEditor(
                         MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace)
                     else MaterialTheme.typography.bodyMedium,
                 shape = RoundedCornerShape(14.dp),
+            )
+        if (jsonDrafts.containsKey(""))
+            Text(
+                jsonDrafts.obj("").text("message"),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
             )
         val expected =
             declaredSchemaKind
@@ -395,7 +421,12 @@ internal fun RuleLiteralEditor(
     change: (JsonElement) -> Unit,
     depth: Int = 0,
     selectionChanged: ((TextFieldValue) -> Unit)? = null,
+    jsonDrafts: JsonObject = JsonObject(emptyMap()),
+    changeDraft: ((JsonElement, JsonObject) -> Unit)? = null,
 ) {
+    fun publish(next: JsonElement, drafts: JsonObject = JsonObject(emptyMap())) {
+        if (changeDraft == null) change(next) else changeDraft(next, drafts)
+    }
     val options = (schema["enum"] as? JsonArray).orEmpty()
     val kind = schemaKind(schema, value)
     when {
@@ -407,9 +438,9 @@ internal fun RuleLiteralEditor(
                     it.toString() to ((it as? JsonPrimitive)?.contentOrNull ?: it.toString())
                 },
             ) { key ->
-                change(options.first { it.toString() == key })
+                publish(options.first { it.toString() == key })
             }
-        kind == "boolean" -> Toggle("Oui", value.flag() == true) { change(JsonPrimitive(it)) }
+        kind == "boolean" -> Toggle("Oui", value.flag() == true) { publish(JsonPrimitive(it)) }
         kind == "object" && !schema.obj("properties").isNullOrEmpty() && depth < 6 -> {
             val fields = schema.obj("properties").orEmpty()
             val current = value as? JsonObject ?: JsonObject(emptyMap())
@@ -425,8 +456,20 @@ internal fun RuleLiteralEditor(
                     RuleLiteralEditor(
                         definition as? JsonObject ?: JsonObject(emptyMap()),
                         current[name] ?: JsonNull,
-                        { change(current.patch(name to it)) },
+                        {
+                            publish(
+                                current.patch(name to it),
+                                replaceChildJsonDrafts(jsonDrafts, name, JsonObject(emptyMap())),
+                            )
+                        },
                         depth + 1,
+                        jsonDrafts = childJsonDrafts(jsonDrafts, name),
+                        changeDraft = { next, drafts ->
+                            publish(
+                                current.patch(name to next),
+                                replaceChildJsonDrafts(jsonDrafts, name, drafts),
+                            )
+                        },
                     )
                     if (definition.text("description").isNotBlank())
                         Text(
@@ -450,15 +493,34 @@ internal fun RuleLiteralEditor(
                                 schema.obj("items").orEmpty(),
                                 item,
                                 { next ->
-                                    change(
-                                        JsonArray(values.toMutableList().apply { set(index, next) })
+                                    publish(
+                                        JsonArray(
+                                            values.toMutableList().apply { set(index, next) }
+                                        ),
+                                        replaceChildJsonDrafts(
+                                            jsonDrafts,
+                                            index,
+                                            JsonObject(emptyMap()),
+                                        ),
                                     )
                                 },
                                 depth + 1,
+                                jsonDrafts = childJsonDrafts(jsonDrafts, index),
+                                changeDraft = { next, drafts ->
+                                    publish(
+                                        JsonArray(
+                                            values.toMutableList().apply { set(index, next) }
+                                        ),
+                                        replaceChildJsonDrafts(jsonDrafts, index, drafts),
+                                    )
+                                },
                             )
                             TextButton(
                                 onClick = {
-                                    change(JsonArray(values.filterIndexed { at, _ -> at != index }))
+                                    publish(
+                                        JsonArray(values.filterIndexed { at, _ -> at != index }),
+                                        removeJsonDraftItem(jsonDrafts, index),
+                                    )
                                 }
                             ) {
                                 Text("Retirer cet élément")
@@ -468,8 +530,9 @@ internal fun RuleLiteralEditor(
                 }
                 OutlinedButton(
                     onClick = {
-                        change(
-                            JsonArray(values + defaultRuleLiteral(schema.obj("items").orEmpty()))
+                        publish(
+                            JsonArray(values + defaultRuleLiteral(schema.obj("items").orEmpty())),
+                            jsonDrafts,
                         )
                     }
                 ) {
@@ -486,11 +549,16 @@ internal fun RuleLiteralEditor(
             fun display(value: JsonElement): String =
                 (value as? JsonPrimitive)?.takeIf { it.isString && kind != "json" }?.content
                     ?: value.toString()
-            var draft by remember(kind) { mutableStateOf(TextFieldValue(display(value))) }
+            val initialText =
+                if (jsonDrafts.containsKey("")) jsonDrafts.obj("").text("text") else display(value)
+            var draft by remember(kind) { mutableStateOf(TextFieldValue(initialText)) }
             var emitted by remember(kind) { mutableStateOf(value) }
-            LaunchedEffect(value) {
-                if (value != emitted) {
-                    draft = TextFieldValue(display(value))
+            LaunchedEffect(value, jsonDrafts) {
+                if (
+                    value != emitted ||
+                        jsonDrafts.containsKey("") && draft.text != jsonDrafts.obj("").text("text")
+                ) {
+                    draft = TextFieldValue(initialText)
                     emitted = value
                 }
             }
@@ -501,12 +569,15 @@ internal fun RuleLiteralEditor(
                     draft = input
                     selectionChanged?.invoke(input)
                     if (textChanged) {
-                        val parsed = runCatching {
-                            wireJson.parseToJsonElement(input.text)
-                        }
-                            .getOrNull()
-                        emitted = parsed?.takeIf { matchesJson(it) } ?: JsonPrimitive(input.text)
-                        change(emitted)
+                        val parsed = runCatching { parseRuleJsonInput(input.text) }
+                        emitted =
+                            parsed.getOrNull()?.takeIf { matchesJson(it) }
+                                ?: JsonPrimitive(input.text)
+                        publish(
+                            emitted,
+                            if (parsed.isFailure) jsonInputDraft(input.text)
+                            else JsonObject(emptyMap()),
+                        )
                     }
                 },
                 Modifier.fillMaxWidth(),
@@ -520,7 +591,10 @@ internal fun RuleLiteralEditor(
                     )
                 },
                 minLines = 3,
-                isError = !matchesJson(value),
+                isError =
+                    jsonDrafts.containsKey("") ||
+                        runCatching { parseRuleJsonInput(draft.text) }.isFailure ||
+                        !matchesJson(value),
                 supportingText = {
                     Text(
                         when {
@@ -537,13 +611,21 @@ internal fun RuleLiteralEditor(
             )
         }
         kind in setOf("number", "integer") ->
-            RuleNumericField(value, kind == "integer", "Valeur") { change(it) }
+            RuleNumericField(
+                value,
+                kind == "integer",
+                "Valeur",
+                hasProblem = jsonDrafts.isNotEmpty(),
+                changeDraft = { next, drafts -> publish(next, drafts) },
+            ) {
+                publish(it)
+            }
         else -> {
             val text = (value as? JsonPrimitive)?.contentOrNull.orEmpty()
             OutlinedTextField(
                 text,
                 { raw ->
-                    change(
+                    publish(
                         if (kind in setOf("number", "integer"))
                             raw.toDoubleOrNull()?.let(::JsonPrimitive) ?: JsonPrimitive(raw)
                         else JsonPrimitive(raw)
@@ -575,6 +657,8 @@ private fun RuleNumericField(
     value: JsonElement,
     integer: Boolean,
     label: String,
+    changeDraft: ((JsonElement, JsonObject) -> Unit)? = null,
+    hasProblem: Boolean = false,
     change: (JsonElement) -> Unit,
 ) {
     var draft by
@@ -593,7 +677,15 @@ private fun RuleNumericField(
         { raw ->
             draft = raw
             emitted = ruleNumber(raw, integer)
-            change(emitted)
+            val valid = (emitted as? JsonPrimitive)?.isString == false
+            val drafts =
+                if (valid) JsonObject(emptyMap())
+                else
+                    jsonInputDraft(
+                        raw,
+                        if (integer) "Saisissez un nombre entier." else "Saisissez un nombre.",
+                    )
+            if (changeDraft == null) change(emitted) else changeDraft(emitted, drafts)
         },
         Modifier.fillMaxWidth().semantics { contentDescription = label },
         singleLine = true,
@@ -602,8 +694,9 @@ private fun RuleNumericField(
                 keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal
             ),
         isError =
-            draft.isNotBlank() &&
-                (if (integer) draft.toLongOrNull() == null else draft.toDoubleOrNull() == null),
+            hasProblem ||
+                draft.isNotBlank() &&
+                    (if (integer) draft.toLongOrNull() == null else draft.toDoubleOrNull() == null),
         shape = RoundedCornerShape(12.dp),
     )
 }

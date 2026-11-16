@@ -54,6 +54,7 @@ import {
   Webhook,
   Zap,
 } from '../icons'
+import { ruleJsonDraftProblems } from '../rule-json-drafts'
 
 // The visual rule editor: what the rule listens to, with whose rights, and a flow of
 // steps edited block by block. The installation checks the rule as it is written.
@@ -173,7 +174,10 @@ function scheduleValidation(value: HookRuleDefinition | null, delay = 350) {
   checking.value = true
   timer = setTimeout(async () => {
     try {
-      const output = await validateHookRule(api, { definition: value, ruleId: rule.value?.id ?? id.value })
+      const local = ruleJsonDraftProblems(value)
+      const output = local.length
+        ? { valid: false, problems: local, warnings: [] }
+        : await validateHookRule(api, { definition: value, ruleId: rule.value?.id ?? id.value })
       if (!disposed && current === generation) {
         validated.value = true
         validationError.value = ''
@@ -196,7 +200,7 @@ watch(definition, value => scheduleValidation(value), { deep: true })
 
 const general = computed(() => problems.value.filter(problem => !problem.path.startsWith('/steps/')))
 const stepProblems = computed(() => problems.value.filter(problem => problem.path.startsWith('/steps')))
-const ready = computed(() => (!rule.value || rule.value.allowed.edit) && validated.value && !checking.value && problems.value.length === 0 && !!definition.value?.name.trim())
+const ready = computed(() => (!rule.value || rule.value.allowed.edit) && validated.value && !checking.value && problems.value.length === 0 && ruleJsonDraftProblems(definition.value).length === 0 && !!definition.value?.name.trim())
 
 function insert(container: string, index: number, kind: StepKind) {
   if (!definition.value)

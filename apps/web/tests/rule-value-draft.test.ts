@@ -4,6 +4,7 @@ import ts from 'typescript'
 import { expect, it } from 'vitest'
 import * as vue from 'vue'
 import { compileScript, parse } from 'vue/compiler-sfc'
+import * as jsonDrafts from '../src/rule-json-drafts'
 
 function valueEditor(initial: any, expects: string) {
   const source = readFileSync(new URL('../src/components/RuleValueInput.vue', import.meta.url), 'utf8')
@@ -16,7 +17,7 @@ function valueEditor(initial: any, expects: string) {
   vm.runInNewContext(code, {
     exports,
     document: { addEventListener() {}, removeEventListener() {} },
-    require: (name: string) => name === 'vue' ? { ...vue, useModel: () => model, onBeforeUnmount() {} } : {},
+    require: (name: string) => name === 'vue' ? { ...vue, useModel: () => model, onBeforeUnmount() {} } : name === '../rule-json-drafts' ? jsonDrafts : {},
   })
   const props = vue.reactive({ label: 'Value', variables: [], expects })
   const input = exports.default.setup(props, { expose() {} })
@@ -77,4 +78,17 @@ it.each([null, false, 0, '5', [], {}])('keeps the literal meaning when switching
   const { input, model } = valueEditor({ type: 'literal', value }, 'json')
   input.switchMode('formula')
   expect(model.value).toEqual({ type: 'formula', expression: JSON.stringify(value) })
+})
+
+it.each(['json', 'number'])('keeps an invalid %s draft after recovery and blocks it locally', (expects) => {
+  const raw = expects === 'json' ? '{"count":' : '1.5e'
+  const editor = valueEditor({ type: 'literal', value: expects === 'json' ? { count: 1 } : 1 }, expects)
+  editor.input.text.value = raw
+  expect(editor.input.text.value).toBe(raw)
+  expect(jsonDrafts.ruleJsonDraftProblems({ steps: [editor.model.value] })).toHaveLength(1)
+  const reopened = valueEditor(JSON.parse(JSON.stringify(editor.model.value)), expects)
+  expect(reopened.input.text.value).toBe(raw)
+  reopened.input.text.value = expects === 'json' ? JSON.stringify(raw) : '1.5e2'
+  expect(jsonDrafts.ruleJsonDraftProblems({ steps: [reopened.model.value] })).toEqual([])
+  expect(reopened.model.value).toEqual({ type: 'literal', value: expects === 'json' ? raw : 150 })
 })

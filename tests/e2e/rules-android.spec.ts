@@ -101,7 +101,8 @@ async function fill(label: string, value: string | (() => string)) {
   await tap(label, true)
   const text = typeof value === 'function' ? value() : value
   adb('shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A')
-  adb('shell', 'input', 'text', text.replaceAll(' ', '%s'))
+  const shellText = text.replaceAll(' ', '%s').replaceAll('\'', '\'\\\'\'')
+  adb('shell', 'input', 'text', `'${shellText}'`)
   if (label === 'Adresse e-mail')
     await expect.poll(() => screen().includes(text), { timeout: 7000 }).toBe(true)
   adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
@@ -206,6 +207,7 @@ test('native rules persist edits, integer waits and every creator control agains
         {
           type: 'action',
           id: 'remember',
+          label: 'Syntaxe JSON',
           action: {
             type: 'storeValue',
             scope: 'rule',
@@ -227,6 +229,20 @@ test('native rules persist edits, integer waits and every creator control agains
   await tap('Enregistrer')
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(2)
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).definition.steps[0].action.seconds).toEqual({ type: 'literal', value: 900 })
+  await scrollTo('Modifier')
+  await scrollTo('Syntaxe JSON')
+  await fill('Valeur', '{"count":')
+  await scrollTo('Terminer cette étape')
+  await expect.poll(() => (screen().match(/<node\b[^>]+>/g) ?? []).some(node => node.includes('text="Enregistrer"') && node.includes('enabled="false"'))).toBe(true)
+  expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(2)
+  await scrollTo('Syntaxe JSON')
+  // The exact invalid text must survive dismissing/reopening its native sheet.
+  await expect.poll(() => screen().includes('{&quot;count&quot;:')).toBe(true)
+  await fill('Valeur', '{"count":2}')
+  await scrollTo('Terminer cette étape')
+  await tap('Enregistrer')
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(3)
+  expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).definition.steps[1].action.value).toEqual({ type: 'literal', value: { count: 2 } })
   adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
   await tap('Support messages mobile')
   await scrollTo('Historique')

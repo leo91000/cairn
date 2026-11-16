@@ -63,6 +63,9 @@ expression. Numeric and boolean membership lists retain their item types. Both
 editors preserve text templates while editing an untyped comparison and display
 fixed JSON strings with quotes, keeping their string type during edits. Switching
 to text or inserting a variable uses the decoded string on both platforms. Both
+retain incomplete JSON and numeric input as an invalid draft, including after a
+step is closed or recovered, and block saving until it is corrected. Nested list
+errors follow their item when an earlier item is removed. Both
 initialize a comparison from its first event field with the corresponding value
 type. Deeply nested object and list fields fall back to editable JSON, preserving
 their structure (after eight expanded levels on web and six on Android). Both

@@ -14,6 +14,12 @@ import {
   Variable,
   X,
 } from '../icons'
+import {
+  jsonInputDraft,
+  literalWithJsonDrafts,
+  parseRuleJsonInput,
+  valueJsonDrafts,
+} from '../rule-json-drafts'
 import { resolveRuleSchema, ruleLiteralDefault } from '../rule-schema'
 import Icon from './Icon.vue'
 import RuleLiteralFields from './RuleLiteralFields.vue'
@@ -75,6 +81,9 @@ const literalDraft = ref<{ value: RuleValue, text: string, expects: string } | n
 const text = computed({
   get: () => {
     const value = model.value
+    const raw = valueJsonDrafts(value)['']?.text
+    if (raw !== undefined)
+      return raw
     if (value.type === 'literal' && mode.value === 'formula')
       return JSON.stringify(value.value ?? null)
     if (value.type === 'template')
@@ -93,7 +102,22 @@ const text = computed({
       model.value = { type: 'template', text: next }
     }
     else {
-      const value: RuleValue = { type: 'literal', value: parseLiteral(next) }
+      let value: RuleValue
+      if (props.expects === 'json') {
+        try {
+          value = literalWithJsonDrafts(parseRuleJsonInput(next))
+        }
+        catch {
+          value = literalWithJsonDrafts(next, jsonInputDraft(next))
+        }
+      }
+      else {
+        const parsed = parseLiteral(next)
+        value = props.expects === 'number' && (typeof parsed !== 'number' || !Number.isFinite(parsed))
+          ? literalWithJsonDrafts(parsed, jsonInputDraft(next, 'Enter a number.'))
+          : literalWithJsonDrafts(parsed)
+      }
+
       literalDraft.value = { value, text: next, expects: props.expects }
       model.value = value
     }
@@ -276,7 +300,7 @@ const expectedLabels: Record<string, string> = {
 }
 const expectedLabel = computed(() => expectedLabels[expectedKind.value ?? ''] ?? 'value')
 
-const invalid = computed(() => (props.problems?.length ?? 0) > 0)
+const invalid = computed(() => (props.problems?.length ?? 0) > 0 || Object.keys(valueJsonDrafts(model.value)).length > 0)
 const fieldLabel = computed(() => props.variables.find(option => option.expression === text.value)?.label)
 </script>
 
@@ -313,10 +337,11 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
         <RuleLiteralFields
           ref="literalEditor"
           :model-value="model.type === 'literal' ? model.value : null"
+          :json-drafts="valueJsonDrafts(model)"
           :schema="schema"
           :root="schemaRoot ?? schema"
           :label="label"
-          @update:model-value="value => model = { type: 'literal', value }"
+          @change="(value, drafts) => model = literalWithJsonDrafts(value, drafts)"
         />
       </div>
       <div
@@ -435,6 +460,7 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
         </div>
       </div>
     </div>
+    <small v-if="Object.hasOwn(valueJsonDrafts(model), '') && !schema" class="text-xs text-coral" role="alert">{{ valueJsonDrafts(model)['']?.message }}</small>
     <small v-if="typeMismatch" class="text-xs text-coral" role="alert">Use a fixed {{ expectedLabel }} or a formula returning one.</small>
     <small v-if="expects === 'field' && fieldLabel" class="text-xs text-muted">{{ fieldLabel }}</small>
     <small v-else-if="hint && !invalid" class="text-xs text-muted">{{ hint }}</small>

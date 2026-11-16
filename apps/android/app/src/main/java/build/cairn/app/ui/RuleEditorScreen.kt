@@ -131,6 +131,7 @@ fun RuleEditorScreen(
         remember(draft) {
             if (draft.isBlank()) null else wireJson.parseToJsonElement(draft).jsonObject
         }
+    val localJsonProblems = definition?.let(::ruleJsonDraftProblems).orEmpty()
     val dirty = draft.isNotBlank() && draft != original
     fun leave() {
         if (dirty) discard = true
@@ -175,6 +176,13 @@ fun RuleEditorScreen(
         validationError = ""
         if (loading || definition == null || !canEdit) return@LaunchedEffect
         checking = true
+        if (localJsonProblems.isNotEmpty()) {
+            problems = localJsonProblems
+            warnings = emptyList()
+            checked = true
+            checking = false
+            return@LaunchedEffect
+        }
         delay(350)
         try {
             val result: JsonObject =
@@ -203,7 +211,15 @@ fun RuleEditorScreen(
         checked = false
     }
     fun save() {
-        if (definition == null || saving || !checked || problems.isNotEmpty() || !canEdit) return
+        if (
+            definition == null ||
+                saving ||
+                !checked ||
+                problems.isNotEmpty() ||
+                localJsonProblems.isNotEmpty() ||
+                !canEdit
+        )
+            return
         val submittedDraft = draft
         val submittedDefinition = wireJson.parseToJsonElement(submittedDraft).jsonObject
         saving = true
@@ -316,6 +332,7 @@ fun RuleEditorScreen(
                     canEdit &&
                         checked &&
                         problems.isEmpty() &&
+                        localJsonProblems.isEmpty() &&
                         !saving &&
                         !loading &&
                         conflict == null,
@@ -383,7 +400,8 @@ fun RuleEditorScreen(
                         conflict = null
                         save()
                     },
-                    enabled = checked && problems.isEmpty() && !saving,
+                    enabled =
+                        checked && problems.isEmpty() && localJsonProblems.isEmpty() && !saving,
                 ) {
                     Text("Enregistrer mon brouillon à la suite")
                 }

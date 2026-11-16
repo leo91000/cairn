@@ -12,6 +12,63 @@ import {
   untypedTextRulesFixture,
 } from './rules-fixture'
 
+for (const kind of ['stored JSON', 'schema JSON', 'number'] as const) {
+  test(`an invalid literal draft blocks saving and survives closing its step (${kind})`, async ({ page, workspace }) => {
+    const numeric = kind === 'number'
+    const fixture = await (kind === 'schema JSON' ? untypedTextRulesFixture(workspace) : numeric ? scalarRulesFixture(workspace, 'integer') : rulesFixture(workspace))
+    const call = fixture.definition.steps[0].then?.[0]
+    const step = kind === 'schema JSON'
+      ? { ...call, label: 'Syntax check', action: { ...call.action, input: { ...call.action.input, text: { type: 'literal', value: 'hello' } } } }
+      : numeric
+        ? {
+            type: 'if',
+            id: 'syntax',
+            condition: {
+              type: 'compare',
+              left: { type: 'formula', expression: 'payload.first' },
+              operator: 'equals',
+              right: { type: 'literal', value: 1 },
+            },
+            then: [],
+            otherwise: [],
+          }
+        : {
+            type: 'action',
+            id: 'syntax',
+            label: 'Syntax check',
+            action: {
+              type: 'storeValue',
+              scope: 'rule',
+              name: 'last',
+              value: { type: 'literal', value: { count: 1 } },
+            },
+          }
+    const rule = await workspace.api('/api/hook-rules', 'POST', { definition: { ...fixture.definition, steps: [step] }, enabled: false })
+    await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+    await signIn(page)
+    const open = () => page.getByRole('button', { name: numeric ? 'Edit syntax' : 'Edit Syntax check', exact: true }).click()
+    await open()
+    const field = page.getByRole('textbox', { name: kind === 'schema JSON' ? 'Message (JSON)' : 'Value', exact: true })
+    const raw = numeric ? '1.5e' : '{"count":'
+    await field.fill(raw)
+    await expect(page.getByRole('button', { name: 'Save version', exact: true })).toBeDisabled()
+    await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Save version', exact: true })).toBeDisabled()
+    expect((await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(1)
+    await open()
+    await expect(field).toHaveValue(raw)
+    // An intentionally quoted JSON string is valid and must not keep the syntax marker.
+    const fixed = numeric ? '150' : JSON.stringify(raw)
+    await field.fill(fixed)
+    await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+    await page.getByRole('button', { name: 'Save version', exact: true }).click()
+    await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+    const saved = (await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0]
+    const value = kind === 'schema JSON' ? saved.action.input.text : numeric ? saved.condition.right : saved.action.value
+    expect(value).toEqual({ type: 'literal', value: numeric ? 150 : raw })
+  })
+}
+
 test('starting an agent associates the event author and clears optional values', async ({ page, workspace }) => {
   const fixture = await rulesFixture(workspace)
   const rule = await workspace.api('/api/hook-rules', 'POST', {

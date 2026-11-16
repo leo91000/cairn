@@ -5,6 +5,7 @@ import { expect, it } from 'vitest'
 import * as vue from 'vue'
 import { compileScript, parse } from 'vue/compiler-sfc'
 import * as rules from '../src/hook-rules'
+import * as jsonDrafts from '../src/rule-json-drafts'
 import * as schemas from '../src/rule-schema'
 
 function component(name: string, inlineTemplate = false, extraVue = {}) {
@@ -19,6 +20,8 @@ function component(name: string, inlineTemplate = false, extraVue = {}) {
     require: (dependency: string) => {
       if (dependency === 'vue')
         return { ...vue, ...extraVue }
+      if (dependency === '../rule-json-drafts')
+        return jsonDrafts
       if (dependency === '../rule-schema')
         return schemas
       if (dependency === '../hook-rules')
@@ -64,14 +67,19 @@ function literalEditor(schema: any, initial: any, depth: number) {
     },
   })
   const model = vue.ref(initial)
+  const drafts = vue.ref<jsonDrafts.JsonDrafts>({})
   const field = component('RuleLiteralFields', true)
   const app = renderer.createApp({
     setup: () => () => vue.h(field, {
       schema,
       depth,
-      'label': 'Nested list',
-      'modelValue': model.value,
-      'onUpdate:modelValue': (value: unknown) => { model.value = value },
+      label: 'Nested list',
+      modelValue: model.value,
+      jsonDrafts: drafts.value,
+      onChange: (value: unknown, nextDrafts: jsonDrafts.JsonDrafts) => {
+        model.value = value
+        drafts.value = nextDrafts
+      },
     }),
   })
   const root = node('root')
@@ -80,6 +88,7 @@ function literalEditor(schema: any, initial: any, depth: number) {
   return {
     app,
     model,
+    drafts,
     controls: () => descendants(root).filter(held => ['input', 'textarea'].includes(held.tag)),
     buttons: () => descendants(root).filter(held => held.tag === 'button'),
   }
@@ -109,6 +118,27 @@ it.each([false, true])('keeps the deepest list editable as JSON (nested=%s)', as
     await vue.nextTick()
     expect(editor.model.value).toEqual(expected)
     expect(editor.controls()[0].props.value).toBe('[3,4]')
+  }
+  finally {
+    editor.app.unmount()
+  }
+})
+
+it('keeps nested JSON errors with their list item when earlier items are removed', async () => {
+  const editor = literalEditor({ type: 'array', items: { type: 'object', properties: { 'a/b': {} } } }, [{ 'a/b': true }, { 'a/b': false }], 0)
+  try {
+    editor.controls()[1].props.onInput({ target: { value: '{' } })
+    await vue.nextTick()
+    expect(editor.drafts.value).toEqual({ '/1/a~1b': { text: '{', message: 'Enter a valid JSON value.' } })
+    editor.buttons()[0].props.onClick()
+    await vue.nextTick()
+    expect(editor.model.value).toEqual([{ 'a/b': '{' }])
+    expect(editor.drafts.value).toEqual({ '/0/a~1b': { text: '{', message: 'Enter a valid JSON value.' } })
+    expect(editor.controls()[0].props.value).toBe('{')
+    editor.controls()[0].props.onInput({ target: { value: '"valid text"' } })
+    await vue.nextTick()
+    expect(editor.model.value).toEqual([{ 'a/b': 'valid text' }])
+    expect(editor.drafts.value).toEqual({})
   }
   finally {
     editor.app.unmount()
