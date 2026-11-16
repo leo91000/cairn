@@ -8,6 +8,7 @@ import {
   test,
   workspacePath,
 } from './fixtures'
+import { nativeNodes, nativePositionIn as positionIn } from './native-android-ui'
 import { rulesFixture } from './rules-fixture'
 
 // Opt-in journey against the real installation and Beacon. Use a disposable emulator:
@@ -26,29 +27,6 @@ function adb(...args: string[]) {
 function screen() {
   adb('shell', 'uiautomator', 'dump', '/sdcard/cairn-rules-journey.xml')
   return adb('exec-out', 'cat', '/sdcard/cairn-rules-journey.xml')
-}
-
-function positionIn(document: string, text: string, includeClipped = false, preferEditable = false): number[] | null {
-  const nodes = document.match(/<node\b[^>]+>/g) ?? []
-  const ordered = preferEditable ? [...nodes.filter(node => node.includes('class="android.widget.EditText"')), ...nodes.filter(node => !node.includes('class="android.widget.EditText"'))] : nodes
-  for (const node of ordered) {
-    if (node.match(/\btext="([^"]*)"/)?.[1] !== text && node.match(/content-desc="([^"]*)"/)?.[1] !== text)
-      continue
-    if (node.includes('enabled="false"'))
-      continue
-    const match = node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/)
-    if (!match)
-      continue
-    const bounds = match.slice(1).map(Number)
-    if (bounds[2] - bounds[0] < 20 || bounds[3] - bounds[1] < (includeClipped ? 1 : 30))
-      continue
-    const center = [Math.floor((bounds[0] + bounds[2]) / 2), Math.floor((bounds[1] + bounds[3]) / 2)]
-    if (center[1] < 64 || center[1] > 1160)
-      continue
-    return center
-  }
-
-  return null
 }
 
 function tapPosition(position: number[]) {
@@ -103,8 +81,7 @@ async function fill(label: string, value: string | (() => string)) {
   adb('shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A')
   const shellText = text.replaceAll(' ', '%s').replaceAll('\'', '\'\\\'\'')
   adb('shell', 'input', 'text', `'${shellText}'`)
-  if (label === 'Adresse e-mail')
-    await expect.poll(() => screen().includes(text), { timeout: 7000 }).toBe(true)
+  await expect.poll(() => nativeNodes(screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.focused === 'true' && node.attributes.text === text), { timeout: 7000 }).toBe(true)
   adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
 }
 
@@ -248,11 +225,11 @@ test('native rules persist edits, integer waits and every creator control agains
   await scrollTo('Syntaxe JSON')
   await fill('Valeur à mémoriser', '{"count":')
   await finishStep()
-  await expect.poll(() => (screen().match(/<node\b[^>]+>/g) ?? []).some(node => node.includes('text="Enregistrer"') && node.includes('enabled="false"'))).toBe(true)
+  await expect.poll(() => nativeNodes(screen()).some(node => node.attributes.text === 'Enregistrer' && !node.enabled)).toBe(true)
   expect((await workspace.api(`/api/hook-rules/${waiting.id}`)).version).toBe(2)
   await scrollTo('Syntaxe JSON')
   // The exact invalid text must survive dismissing/reopening its native sheet.
-  await expect.poll(() => screen().includes('{&quot;count&quot;:')).toBe(true)
+  await expect.poll(() => nativeNodes(screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.text === '{"count":')).toBe(true)
   await fill('Valeur à mémoriser', '{"count":2}')
   await finishStep()
   await tap('Enregistrer')
