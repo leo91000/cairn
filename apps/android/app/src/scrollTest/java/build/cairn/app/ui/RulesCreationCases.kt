@@ -97,7 +97,11 @@ abstract class RulesCreationCases {
                             "type" to JsonPrimitive("callTool"),
                             "instanceId" to JsonPrimitive(catalog.tools[0].instanceId),
                             "tool" to JsonPrimitive("root_post"),
-                            "input" to ruleObject("text" to templateValue()),
+                            "input" to
+                                ruleObject(
+                                    "text" to templateValue(),
+                                    "legacy" to literalRuleValue(JsonPrimitive("old")),
+                                ),
                         ),
                 )
             )
@@ -140,6 +144,17 @@ abstract class RulesCreationCases {
             compose.runOnIdle {
                 assertEquals(templateValue("Hello"), node.obj("action").obj("input").obj("text"))
             }
+            compose
+                .onNodeWithText("Retirer le champ inconnu legacy")
+                .performScrollTo()
+                .performClick()
+            compose.runOnIdle {
+                assertEquals(
+                    ruleObject("text" to templateValue("Hello")),
+                    node.obj("action").obj("input"),
+                )
+            }
+            compose.onNodeWithText("Retirer le champ inconnu legacy").assertDoesNotExist()
         } finally {
             compose.runOnIdle { models.clear() }
         }

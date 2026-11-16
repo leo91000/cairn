@@ -78,6 +78,22 @@ it.each([null, false, 0, '5', [], {}])('keeps the literal meaning when switching
   const { input, model } = valueEditor({ type: 'literal', value }, 'json')
   input.switchMode('formula')
   expect(model.value).toEqual({ type: 'formula', expression: JSON.stringify(value) })
+  input.switchMode('literal')
+  expect(model.value).toEqual({ type: 'literal', value })
+})
+
+it.each([[false, 'boolean'], ['fixed', 'text'], [1.5, 'number']] as const)('preserves the typed constant %j through a formula round trip', (value, expects) => {
+  const editor = valueEditor({ type: 'literal', value }, expects)
+  editor.input.switchMode('formula')
+  editor.input.switchMode('literal')
+  expect(editor.model.value).toEqual({ type: 'literal', value })
+  expect(editor.input.conversionNotice.value).toBe('')
+})
+
+it('explains replacing a nonconstant formula with a fixed value', () => {
+  const editor = valueEditor({ type: 'formula', expression: 'payload.active' }, 'boolean')
+  editor.input.switchMode('literal')
+  expect(editor.input.conversionNotice.value).toContain('Check this value before saving')
 })
 
 it.each(['json', 'number'])('keeps an invalid %s draft after recovery and blocks it locally', (expects) => {

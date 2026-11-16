@@ -195,6 +195,13 @@ internal fun RuleStepPanel(
                                         Text("+ ${fieldSchema.text("title").ifBlank { name }}")
                                     }
                             }
+                            for (name in input.keys.filter { it !in fields }) {
+                                TextButton(
+                                    onClick = { patchAction("input" to input.patch(name to null)) }
+                                ) {
+                                    Text("Retirer le champ inconnu $name")
+                                }
+                            }
                         }
                     }
                     "startAgent" -> {

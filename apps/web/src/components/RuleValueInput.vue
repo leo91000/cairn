@@ -49,6 +49,7 @@ const props = withDefaults(defineProps<{
   resourceLabel?: string
 }>(), { expects: 'text', placeholder: '', resourceLabel: 'Choose a resource…' })
 const model = defineModel<RuleValue>({ required: true })
+const conversionNotice = ref('')
 
 type Mode = 'template' | 'literal' | 'formula'
 
@@ -171,6 +172,7 @@ function unwrap(template: string) {
 function switchMode(next: Mode) {
   if (next === mode.value)
     return
+  conversionNotice.value = ''
   const held = model.value
   const literalText = held.type === 'literal' && typeof held.value === 'string' ? held.value : null
   const current = next === 'template' && literalText !== null ? literalText : text.value
@@ -181,7 +183,17 @@ function switchMode(next: Mode) {
     model.value = { type: 'formula', expression: mode.value === 'template' ? unwrap(current) : JSON.stringify(model.value.type === 'literal' ? model.value.value ?? null : current) }
   }
   else {
-    let value = props.expects === 'boolean' ? true : parseLiteral(current)
+    if (held.type === 'formula') {
+      try {
+        model.value = literalWithJsonDrafts(parseRuleJsonInput(current))
+        return
+      }
+      catch {
+        conversionNotice.value = 'The formula was replaced with a fixed value. Check this value before saving.'
+      }
+    }
+
+    let value = props.expects === 'boolean' ? current.trim() !== 'false' : parseLiteral(current)
     if (props.schema) {
       const schema = resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema)
       const kind = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value
@@ -354,6 +366,7 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
           type="button"
           class="h-9 rounded-full border px-4 text-sm font-semibold"
           :class="model.type === 'literal' && model.value === choice ? 'border-ink bg-ink text-canvas' : 'border-line hover:bg-hover'"
+          :aria-pressed="model.type === 'literal' && model.value === choice"
           @click="model = { type: 'literal', value: choice }"
         >
           {{ choice ? 'Yes' : 'No' }}
@@ -460,6 +473,7 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
         </div>
       </div>
     </div>
+    <small v-if="conversionNotice" class="text-xs text-muted" role="status">{{ conversionNotice }}</small>
     <small v-if="Object.hasOwn(valueJsonDrafts(model), '') && !schema" class="text-xs text-coral" role="alert">{{ valueJsonDrafts(model)['']?.message }}</small>
     <small v-if="typeMismatch" class="text-xs text-coral" role="alert">Use a fixed {{ expectedLabel }} or a formula returning one.</small>
     <small v-if="expects === 'field' && fieldLabel" class="text-xs text-muted">{{ fieldLabel }}</small>

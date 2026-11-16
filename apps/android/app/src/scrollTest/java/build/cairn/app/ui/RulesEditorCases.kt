@@ -460,6 +460,43 @@ abstract class RulesEditorCases {
 
     @Test fun malformedJsonKeepsItsDraftUntilFixed() = recoverInvalidValue(false)
 
+    @Test
+    fun constantModeRoundTripsPreserveValuesAndExplainReplacingAnExpression() {
+        var value by mutableStateOf(literalRuleValue(JsonPrimitive(false)))
+        var expects by mutableStateOf("boolean")
+        compose.setContent {
+            CairnTheme {
+                RuleValueEditor("Constante", value, emptyList(), { value = it }, expects = expects)
+            }
+        }
+        for ((kind, fixed) in
+            listOf(
+                "boolean" to JsonPrimitive(false),
+                "text" to JsonPrimitive("fixed"),
+                "number" to JsonPrimitive(1.5),
+                "json" to JsonNull,
+                "json" to JsonArray(listOf(JsonPrimitive(1))),
+            )) {
+            compose.runOnIdle {
+                expects = kind
+                value = literalRuleValue(fixed)
+            }
+            compose.onNodeWithText("Formule").performClick()
+            compose.onNodeWithText("Valeur").performClick()
+            compose.runOnIdle { assertEquals(literalRuleValue(fixed), value) }
+        }
+        compose.runOnIdle {
+            expects = "boolean"
+            value = formulaRuleValue("payload.active")
+        }
+        compose.onNodeWithText("Valeur").performClick()
+        compose
+            .onNodeWithText(
+                "La formule a été remplacée par une valeur fixe. Vérifiez cette valeur avant d’enregistrer."
+            )
+            .assertIsDisplayed()
+    }
+
     @Test fun malformedSchemaJsonKeepsItsDraftUntilFixed() = recoverInvalidValue(true)
 
     private fun recoverInvalidValue(schemaInput: Boolean) {

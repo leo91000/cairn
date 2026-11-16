@@ -58,6 +58,7 @@ internal fun RuleValueEditor(
         remember(mode, schema, expects) { mutableStateOf<TextFieldValue?>(null) }
     var picking by remember { mutableStateOf(false) }
     var browsing by remember { mutableStateOf(false) }
+    var conversionNotice by remember { mutableStateOf("") }
     val text =
         if (jsonDrafts.containsKey("")) jsonDrafts.obj("").text("text")
         else
@@ -98,9 +99,20 @@ internal fun RuleValueEditor(
                     selected = mode == kind,
                     onClick = {
                         if (kind == mode) return@FilterChip
+                        val fromFormula = kind == "literal" && mode == "formula"
+                        val constant =
+                            if (fromFormula) runCatching { parseRuleJsonInput(text) }.getOrNull()
+                            else null
+                        conversionNotice =
+                            if (fromFormula && constant == null)
+                                "La formule a été remplacée par une valeur fixe. Vérifiez cette valeur avant d’enregistrer."
+                            else ""
                         change(
                             when (kind) {
-                                "literal" -> literalRuleValue(fixedRuleValue(text, expects, schema))
+                                "literal" ->
+                                    literalRuleValue(
+                                        constant ?: fixedRuleValue(text, expects, schema)
+                                    )
                                 "formula" ->
                                     formulaRuleValue(
                                         when (mode) {
@@ -201,6 +213,12 @@ internal fun RuleValueEditor(
                         MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace)
                     else MaterialTheme.typography.bodyMedium,
                 shape = RoundedCornerShape(14.dp),
+            )
+        if (conversionNotice.isNotBlank())
+            Text(
+                conversionNotice,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
             )
         if (jsonDrafts.containsKey(""))
             Text(
@@ -387,7 +405,7 @@ private fun fixedRuleValue(text: String, expects: String, schema: JsonObject?): 
                 text.toLongOrNull()?.let(::JsonPrimitive)
                     ?: JsonPrimitive(text.toDoubleOrNull()?.takeIf { it.isFinite() } ?: 0.0)
             "integer" -> JsonPrimitive(text.toLongOrNull() ?: 0L)
-            "boolean" -> JsonPrimitive(true)
+            "boolean" -> JsonPrimitive(text.trim() != "false")
             "json" ->
                 runCatching { wireJson.parseToJsonElement(text) }.getOrElse { JsonPrimitive(text) }
             else -> JsonPrimitive(text)

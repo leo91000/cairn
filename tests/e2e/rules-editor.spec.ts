@@ -12,6 +12,43 @@ import {
   untypedTextRulesFixture,
 } from './rules-fixture'
 
+for (const kind of ['boolean', 'text'] as const) {
+  test(`a constant mode round trip keeps its saved ${kind} value`, async ({ page, workspace }) => {
+    const fixture = await (kind === 'boolean' ? scalarRulesFixture(workspace, 'boolean') : rulesFixture(workspace))
+    const call = fixture.definition.steps[0].then?.[0]
+    const step = kind === 'boolean'
+      ? {
+          type: 'if',
+          id: 'constant',
+          condition: {
+            type: 'compare',
+            left: { type: 'formula', expression: 'payload.first' },
+            operator: 'equals',
+            right: { type: 'literal', value: false },
+          },
+          then: [],
+          otherwise: [],
+        }
+      : { ...call, label: 'Constant text', action: { ...call.action, input: { ...call.action.input, text: { type: 'literal', value: 'fixed' } } } }
+    const rule = await workspace.api('/api/hook-rules', 'POST', { definition: { ...fixture.definition, steps: [step] }, enabled: false })
+    await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+    await signIn(page)
+    await page.getByRole('button', { name: kind === 'boolean' ? 'Edit constant' : 'Edit Constant text', exact: true }).click()
+    const modes = page.getByRole('group', { name: kind === 'boolean' ? 'How to fill Value' : 'How to fill Message', exact: true })
+    await modes.getByRole('button', { name: 'ƒ', exact: true }).click()
+    await modes.getByRole('button', { name: 'Value', exact: true }).click()
+    if (kind === 'boolean')
+      await expect(page.getByRole('button', { name: 'No', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    else
+      await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('fixed')
+    await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+    await page.getByRole('button', { name: 'Save version', exact: true }).click()
+    await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+    const saved = (await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0]
+    expect(kind === 'boolean' ? saved.condition.right : saved.action.input.text).toEqual({ type: 'literal', value: kind === 'boolean' ? false : 'fixed' })
+  })
+}
+
 for (const kind of ['stored JSON', 'schema JSON', 'number'] as const) {
   test(`an invalid literal draft blocks saving and survives closing its step (${kind})`, async ({ page, workspace }) => {
     const numeric = kind === 'number'
