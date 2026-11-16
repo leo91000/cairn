@@ -271,6 +271,11 @@ pub enum RuleAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional = nullable)]
         key: Option<RuleValue>,
+        /// The external author the conversation is started for, recorded as its origin
+        /// and tested by `authorStartedConversation`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
+        author: Option<RuleValue>,
     },
     /// Send a message to the conversation bound to a key.
     SteerConversation { key: RuleValue, message: RuleValue },
@@ -529,7 +534,8 @@ pub struct HookRuleVersion {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListHookRulesInput {
-    /// Rules that use this agent, as execution agent or started agent.
+    /// Rules that use this agent, as execution agent or started agent, or that steer or
+    /// answer by key a conversation of this agent bound to their creator's keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub agent_id: Option<AgentId>,
@@ -762,6 +768,15 @@ pub struct RuleCatalogLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub max_pending_event_bytes: Option<u32>,
+    /// Links Cairn follows in a chain where a rule's conversation action causes a Cairn
+    /// hook that triggers a rule. A conversation action beyond it fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub max_chain_depth: Option<u32>,
+    /// Bytes of the values rules remember on one conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub max_conversation_values_bytes: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -911,7 +926,7 @@ pub struct ListHookRuleTriggeringsOutput {
     /// Triggerings that ended without any action in the last 24 hours. They are not
     /// kept and do not count against the hourly caps.
     pub without_effect: u32,
-    /// Events refused for this rule's capacity or admission deadline in the last 24 hours. No payload is retained.
+    /// Events refused for this rule's capacity, admission deadline or recorded-data budget in the last 24 hours. No payload is retained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub not_admitted: Option<u32>,

@@ -631,6 +631,7 @@ impl Service {
                     )?;
                 }
                 let run = crate::runs::admit_prepared(db, &run, dedupe.as_deref())?;
+                crate::rules::engine::conversations::record_run(db, &run, &origin)?;
                 db.event(text(&run, "id"), &EventKind::Status, "Queued", None)?;
                 let detail = json!({
                     "id": run["id"],

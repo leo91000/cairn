@@ -622,7 +622,9 @@ pub(crate) fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
     chat.session_restart_requested = true;
     chat.wakeup = None;
     chat.paused = true;
-    Ok(serde_json::to_value(db.save_conversation(&chat)?)?)
+    let saved = serde_json::to_value(db.save_conversation(&chat)?)?;
+    // A person asked for a new session: rules wait until they resume it.
+    Ok(saved)
 }
 
 impl Service {

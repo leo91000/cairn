@@ -85,6 +85,7 @@ fn receive(db: &Db<'_>, mut question: Question) -> Result<()> {
         return save_question(db, &existing);
     }
     save_question(db, &question)?;
+    crate::rules::engine::record_question(db, &question)?;
     notifications::enqueue(db, &question)
 }
 
@@ -322,7 +323,7 @@ fn answer_text(fields: &[QuestionField], answers: &BTreeMap<String, FieldAnswer>
     )
 }
 
-fn answer(
+pub(crate) fn answer(
     db: &Db<'_>,
     chat_id: &str,
     id: &str,

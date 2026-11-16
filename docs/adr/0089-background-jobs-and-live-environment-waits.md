@@ -29,7 +29,7 @@ Loss of supervision invalidates running job outcomes. Recovery fences the old
 environment before releasing ownership and reports the interruption; it does
 not replay jobs. Existing runs use the legacy single-turn path until a freshly
 admitted environment negotiates this protocol. Retained directories and VM images keep the storage lifecycle of ADR-0088;
-legacy journal conversion remains subject to that decision. Database version 35 adds job references and extends wait
+legacy journal conversion remains subject to that decision. Database version 36 adds job references and extends wait
 conditions while preserving prior wakeups and observations; rollback requires
 a reader that understands that database version.
 

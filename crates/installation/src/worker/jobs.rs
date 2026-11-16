@@ -27,11 +27,11 @@ CREATE INDEX background_jobs_run ON background_jobs(run_id,attempt_id);";
 pub(crate) fn upgrade(db: &mut rusqlite::Connection) -> Result<()> {
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 34 {
+    if version == 35 {
         tx.execute_batch(SCHEMA)?;
         crate::waits::sql::upgrade_jobs(&tx)?;
-        tx.pragma_update(None, "user_version", 35)?;
-    } else if version != 35 {
+        tx.pragma_update(None, "user_version", 36)?;
+    } else if version != crate::store::DATABASE_VERSION {
         return Err(Error::conflict(
             "Unexpected version during background jobs upgrade.",
         ));
@@ -380,7 +380,7 @@ mod tests {
             .replace("'job_finished','delay','at',", "")
             .replace("       OR (kind IN ('job_finished','delay','at') AND target_run_id IS NULL AND target_chat_id IS NULL AND plugin_id IS NULL AND condition_type IS NOT NULL AND project_id IS NULL AND plugin_input IS NULL)\n", "");
         connection.execute_batch(&legacy).unwrap();
-        connection.execute_batch("INSERT INTO durable_wakeups(key,chat_id,id,reason,seconds,created_at,wake_at) VALUES(1,'chat','w','fixture',60,1,60001); INSERT INTO wait_conditions(wakeup_key,position,kind,target_run_id) VALUES(1,0,'run_finished','target'); PRAGMA user_version=34;").unwrap();
+        connection.execute_batch("INSERT INTO durable_wakeups(key,chat_id,id,reason,seconds,created_at,wake_at) VALUES(1,'chat','w','fixture',60,1,60001); INSERT INTO wait_conditions(wakeup_key,position,kind,target_run_id) VALUES(1,0,'run_finished','target'); PRAGMA user_version=35;").unwrap();
         upgrade(&mut connection).unwrap();
         upgrade(&mut connection).unwrap();
         let target: String = connection

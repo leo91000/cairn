@@ -4,7 +4,8 @@ import type { PluginInstanceId } from './PluginInstanceId'
 
 export interface ListHookRulesInput {
 /**
- * Rules that use this agent, as execution agent or started agent.
+ * Rules that use this agent, as execution agent or started agent, or that steer or
+ * answer by key a conversation of this agent bound to their creator's keys.
  */
   agentId?: AgentId | null
   /**

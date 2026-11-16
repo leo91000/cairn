@@ -61,6 +61,13 @@ async fn emit(f: &Fixture, external: &str, payload: Value) {
 }
 
 async fn emit_on(f: &Fixture, instance_id: &str, external: &str, payload: Value) {
+    queue_on(f, instance_id, external, payload).await;
+    f.s.rules.notify_queued();
+}
+
+/// Queues a hook event without waking the engine, as an event left by a failed intake:
+/// only the engine's polling reads it.
+async fn queue_on(f: &Fixture, instance_id: &str, external: &str, payload: Value) {
     let instance =
         f.s.store
             .plugin_instance(instance_id)
@@ -89,7 +96,6 @@ async fn emit_on(f: &Fixture, instance_id: &str, external: &str, payload: Value)
         })
         .await
         .unwrap();
-    f.s.rules.notify_queued();
 }
 
 fn steps(actions: &Value) -> Value {
@@ -555,7 +561,7 @@ fn version_32_adds_the_engine_tables_and_reopens_without_changing_them() {
         assert_eq!(
             db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            35
+            36
         );
         for table in [
             "hook_rule_triggerings",
@@ -1434,53 +1440,6 @@ async fn a_claim_error_does_not_abort_another_triggerings_in_flight_tool() {
     assert_eq!(states, 2);
 }
 
-#[tokio::test]
-async fn conversation_actions_and_predicates_fail_explicitly_until_ticket_g() {
-    for nodes in [
-        json!([{
-            "type": "action",
-            "id": "start",
-            "action": {
-                "type": "startAgent",
-                "agentId": MAIN_AGENT_ID,
-                "prompt": { "type": "literal", "value": "hello" },
-            },
-        }]),
-        json!([{
-            "type": "if",
-            "id": "exists",
-            "condition": {
-                "type": "conversationExists",
-                "key": { "type": "literal", "value": "key" },
-            },
-            "then": [],
-            "otherwise": [],
-        }]),
-    ] {
-        let f = granted().await;
-        let mut nodes = nodes.as_array().unwrap().clone();
-        nodes.insert(0, remember_seen());
-        let rule = rule(&f, OWNER, json!(nodes), 60).await;
-        emit(
-            &f,
-            "conversation-stub",
-            json!({ "channel": "support", "author": "alice" }),
-        )
-        .await;
-        engine::tick(&f.s).await.unwrap();
-        let listed = history(&f, OWNER, &rule).await;
-        let failed = detail(&f, OWNER, &listed["triggerings"][0]).await;
-        assert_eq!(failed["status"], "failed", "{failed}");
-        assert!(
-            failed["error"]
-                .as_str()
-                .unwrap()
-                .contains("conversation keys"),
-            "{failed}"
-        );
-    }
-}
-
 fn remember_seen() -> Value {
     json!({
         "type": "action", "id": "remember",
@@ -1657,6 +1616,74 @@ async fn a_slow_resolver_does_not_block_other_listeners_or_new_instances() {
             .await
             .unwrap();
     assert_eq!(completed, 61);
+}
+
+#[tokio::test]
+async fn a_continuous_flow_of_completions_does_not_postpone_reading_the_queues() {
+    let f = granted().await;
+    rule(
+        &f,
+        OWNER,
+        steps(&json!([post("post", &f, &json!({}))])),
+        200,
+    )
+    .await;
+    let late = rule(
+        &f,
+        OWNER,
+        json!([{
+            "type": "if",
+            "id": "late",
+            "condition": { "type": "formula", "expression": "author == \"late\"" },
+            "then": [remember_seen()],
+            "otherwise": [],
+        }]),
+        200,
+    )
+    .await;
+    // Every post waits for the test to release it, one completion at a time.
+    f.hold_posts.store(true, Ordering::SeqCst);
+    let flow = 20;
+    // No wakeup is left for the late event to ride on: the pass reads every queue first.
+    for index in 0..flow {
+        queue_on(
+            &f,
+            &f.instance,
+            &format!("flow-{index}"),
+            json!({ "channel": "support", "author": "alice" }),
+        )
+        .await;
+    }
+    let service = f.s.clone();
+    let worker = tokio::spawn(async move { engine::tick(&service).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+        .await
+        .unwrap();
+    queue_on(
+        &f,
+        &f.instance,
+        "late",
+        json!({ "channel": "support", "author": "late" }),
+    )
+    .await;
+    let mut released = 0;
+    while released < flow && !has_seen(&f, &late).await {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        f.release.notify_one();
+        released += 1;
+    }
+    let seen_during_flow = has_seen(&f, &late).await;
+    f.hold_posts.store(false, Ordering::SeqCst);
+    while f.posts.load(Ordering::SeqCst) > released {
+        f.release.notify_one();
+        released += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    worker.await.unwrap().unwrap();
+    assert!(
+        seen_during_flow,
+        "Completions every 300 ms postponed reading the queue past the flow."
+    );
 }
 
 #[tokio::test]

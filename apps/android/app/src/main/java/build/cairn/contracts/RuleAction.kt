@@ -43,6 +43,8 @@ sealed interface RuleAction {
     data class B(
         val agentId: String,
         @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+        val author: RuleValue? = null,
+        @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
         val key: RuleValue? = null,
         @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
         val projectId: String? = null,

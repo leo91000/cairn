@@ -179,6 +179,8 @@ pub(crate) fn merge(
             text(&record, "id"),
             &crate::conversation_writers::EntryWriter::Unknown,
         )?;
+        // A moved conversation no longer answers to the rule keys that reached it.
+        crate::rules::engine::conversations::detach(db, text(&record, "id"))?;
         chats += 1;
     }
     // Keep each run's provider, model, instructions and access snapshot. Only its

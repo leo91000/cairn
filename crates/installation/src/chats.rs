@@ -110,7 +110,7 @@ fn chat(db: &Db<'_>, id: &str) -> Result<Value> {
     required(db.conversation_boundary(id)?, "Chat not found")
 }
 
-fn conversation(db: &Db<'_>, id: &str) -> Result<Conversation> {
+pub(crate) fn conversation(db: &Db<'_>, id: &str) -> Result<Conversation> {
     required(db.conversation(id)?, "Chat not found")
 }
 
@@ -453,7 +453,7 @@ fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -
         text(&run, "id"),
         &EventKind::Status,
         "Compacting the conversation context",
-        None,
+        Some(&json!({ "chatOperation": COMPACT })),
     )?;
     let saved = db.save_conversation(&chat)?;
     Ok(serde_json::to_value(conversation_view(db, saved)?)?)
@@ -911,6 +911,8 @@ pub(crate) fn send(
         &saved.id,
         &crate::conversation_writers::EntryWriter::of(origin),
     )?;
+    // Cairn hooks retain the writer of the turn as well as its attestation.
+    crate::rules::engine::conversations::record_input(db, chat_id, &saved.id, origin)?;
     Ok(serde_json::to_value(saved)?)
 }
 
@@ -1034,6 +1036,8 @@ pub(crate) fn edit_as(
         &saved.id,
         &crate::conversation_writers::EntryWriter::of(origin),
     )?;
+    // Cairn hooks retain the writer of the turn as well as its attestation.
+    crate::rules::engine::conversations::record_input(db, chat_id, &saved.id, origin)?;
     Ok(serde_json::to_value(saved)?)
 }
 
@@ -1052,6 +1056,7 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     }
     message.status = MessageStatus::Delivered;
     db.save_message(&message)?;
+    crate::rules::engine::conversations::delivered_input(db, &chat_id, run_id, message_id)?;
     let private = db.private_answer_message(message_id)?;
     if let Some(question_id) = message.question_id.as_deref()
         && let Some(mut question) = find_question(db, &chat_id, question_id)?
@@ -1420,6 +1425,12 @@ fn launch_turn(
     };
     // A wakeup resumes a turn; only a message launches one. Both record what they freeze.
     let launched_by = (!waking).then(|| execution.message_id.clone());
+    let previous_turn = run.as_ref().map(|run| {
+        json!({
+            "status": run["status"],
+            "error": run["error"],
+        })
+    });
     let run_id = if let Some(run) = run {
         continue_run(db, &chat, &run, &snapshot, execution)?;
         text(&run, "id").to_owned()
@@ -1434,6 +1445,13 @@ fn launch_turn(
         Some(message) => crate::conversation_writers::record_turn(db, &run_id, message)?,
         None => crate::conversation_writers::record_relaunch(db, &run_id, &chat.id)?,
     }
+    crate::rules::engine::conversations::begin_chat_turn(
+        db,
+        &chat.id,
+        &run_id,
+        launched_by.as_deref(),
+        previous_turn.as_ref(),
+    )?;
     chat.cancelled_by_deletion = false;
     chat.session_restart_requested = false;
     chat.environment_state = None;
@@ -1557,6 +1575,22 @@ pub(crate) fn create_as(
     input: Value,
     origin: &crate::native::policy::Origin,
 ) -> Result<Value> {
+    create_as_writer(
+        db,
+        input,
+        origin,
+        &crate::conversation_writers::EntryWriter::of(origin),
+    )
+}
+
+/// Native authority and the writer of the entry are distinct: a rule carries its
+/// saved native grant, but never becomes the person who saved it.
+pub(crate) fn create_as_writer(
+    db: &Db<'_>,
+    input: Value,
+    origin: &crate::native::policy::Origin,
+    writer: &crate::conversation_writers::EntryWriter,
+) -> Result<Value> {
     let input: cairn_contracts::CreateChatInput =
         serde_json::from_value(input).map_err(|e| Error::bad(e.to_string()))?;
     let agent = required(
@@ -1580,11 +1614,7 @@ pub(crate) fn create_as(
     task_projects(&agent, &chat, &db.projects()?)?;
     let chat: Conversation = serde_json::from_value(chat)?;
     let saved = db.save_conversation(&chat)?;
-    crate::conversation_writers::record_creation(
-        db,
-        &saved,
-        &crate::conversation_writers::EntryWriter::of(origin),
-    )?;
+    crate::conversation_writers::record_creation(db, &saved, writer)?;
     Ok(serde_json::to_value(saved)?)
 }
 
@@ -1605,7 +1635,10 @@ pub(crate) fn pause_in(db: &Db<'_>, id: &str, paused: bool) -> Result<Value> {
     }
     chat.paused = paused;
     chat.updated_at = now();
-    Ok(serde_json::to_value(db.save_conversation(&chat)?)?)
+    let saved = serde_json::to_value(db.save_conversation(&chat)?)?;
+    // A rule that cancels pauses again after this; any other pause or resumption
+    // takes the conversation back from the rule's cancellation.
+    Ok(saved)
 }
 
 /// Preparation happens outside the writer. A merge may have transferred the
@@ -2296,6 +2329,11 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 withdraw(db, "chat", &queued)?;
 
                 let started = compact(db, "chat", &origin)?;
+                let marker: String = db.0.query_row(
+                    "SELECT payload FROM events WHERE run_id='run' AND type='status' AND text='Compacting the conversation context' ORDER BY id DESC LIMIT 1",
+                    [], |row| row.get(0),
+                )?;
+                assert_eq!(serde_json::from_str::<Value>(&marker)?, json!({ "chatOperation": COMPACT }));
                 assert_eq!(started["compaction"]["running"], true);
                 assert_eq!(started["compaction"]["available"], false);
                 let compacting = db.run("run")?.unwrap();

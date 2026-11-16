@@ -205,7 +205,7 @@ fn warn_open(
     if !author.agent() {
         return Ok(());
     }
-    let Some(warning) = validation::warnings(db, definition)?
+    let Some(warning) = validation::warnings(db, definition, &writer.creator.account)?
         .into_iter()
         .find(|warning| warning.kind == "openToAnyone")
     else {
@@ -560,7 +560,7 @@ pub(crate) fn view(db: &Db<'_>, id: &str, viewer: &Viewer) -> Result<HookRule> {
         version: row.version,
         blocks: blocks(db, &row, &definition)?,
         allowed: allowed(db, &row, &definition, viewer)?,
-        warnings: validation::warnings(db, &definition)?,
+        warnings: validation::warnings(db, &definition, &row.creator_account_id)?,
         native_authority: version.native_authority(),
         source: version.source,
         conversation_id: version
@@ -1053,7 +1053,9 @@ pub(crate) async fn list(
             let filtered = filtered.transpose()?;
             let mut rules = Vec::new();
             for row in db.hook_rules()? {
-                if filtered.as_ref().is_some_and(|ids| !ids.contains(&row.id)) {
+                if filtered.as_ref().is_some_and(|ids| !ids.contains(&row.id))
+                    && !directs_by_key(db, &row, &input)?
+                {
                     continue;
                 }
                 rules.push(summary(db, &row, &viewer)?);
@@ -1061,6 +1063,27 @@ pub(crate) async fn list(
             Ok(ListHookRulesOutput { rules })
         })
         .await
+}
+
+/// A rule that steers or answers by key directs the agents of the conversations bound
+/// to its creator's keys, which listing the rules of an agent includes.
+fn directs_by_key(db: &Db<'_>, row: &RuleRow, input: &ListHookRulesInput) -> Result<bool> {
+    let (Some(agent), None) = (input.agent_id, input.instance_id) else {
+        return Ok(false);
+    };
+    let Some(version) = db.hook_rule_version(&row.id, row.version)? else {
+        return Ok(false);
+    };
+    let mut directs = false;
+    validation::visit_actions(&version.definition.steps, &mut |action| {
+        directs |= matches!(
+            action,
+            RuleAction::SteerConversation { .. } | RuleAction::AnswerQuestion { .. }
+        );
+    });
+    Ok(directs
+        && engine::conversations::keyed_agents(db, &row.creator_account_id)?
+            .contains(&agent.to_string()))
 }
 
 pub(crate) async fn versions(

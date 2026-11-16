@@ -131,13 +131,6 @@ pub(crate) enum EntryWriter {
     /// A person, from the web, Android or the public MCP they authorized.
     Person(String),
     /// A hook rule, which acts for its creator but is not that person.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the rule engine records the conversations rules reach"
-        )
-    )]
     Rule(String),
     /// An agent, `cairn_installation` or a delegated task included.
     Agent,
