@@ -10,6 +10,20 @@ pub const CHAT_INBOX: &str = "/run/cairn-chat";
 /// Volatile runner code supplied by the current controller, outside the saved disk.
 pub const ENTRYPOINT: &str = "/run/cairn-entrypoint/cairn";
 
+/// Controller-compatible lifetime for a retained environment.
+pub(crate) const MAX_ENVIRONMENT_MS: i64 = 13 * 3_600_000;
+
+pub(crate) fn execution_deadline(deadline: Option<i64>, retained: bool, now: i64) -> Option<i64> {
+    if !retained {
+        return deadline;
+    }
+    Some(
+        deadline
+            .unwrap_or(i64::MAX)
+            .min(now.saturating_add(MAX_ENVIRONMENT_MS)),
+    )
+}
+
 /// Typed view of the plan document. The document itself is forwarded unchanged
 /// (except for storage credentials) to the guest entrypoint.
 #[derive(Clone)]

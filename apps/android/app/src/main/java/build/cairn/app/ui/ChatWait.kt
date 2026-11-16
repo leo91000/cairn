@@ -419,7 +419,9 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
         val code = (receipt?.get("exitCode") as? JsonPrimitive)?.contentOrNull
         val signal = (receipt?.get("signal") as? JsonPrimitive)?.contentOrNull
         val elapsed = (receipt?.get("elapsedMs") as? JsonPrimitive)?.contentOrNull.orEmpty()
-        val success = code == "0" && (signal == null || signal == "null")
+        val stopped = (receipt?.get("stopped") as? JsonPrimitive)?.booleanOrNull == true
+        val timedOut = (receipt?.get("timedOut") as? JsonPrimitive)?.booleanOrNull == true
+        val success = code == "0" && (signal == null || signal == "null") && !stopped && !timedOut
         return WaitOutcome(
             if (success) WaitTone.OK else WaitTone.ERROR,
             if (success) "Le travail de fond est terminé" else "Le travail de fond s’est arrêté",

@@ -1199,6 +1199,10 @@ impl Execution<'_> {
             .await;
             let id = self.id.clone();
             let attempt = held.attempt.clone();
+            let interruption = result
+                .as_ref()
+                .err()
+                .map(|error| run_output::redact(&error.message, &self.sensitive.snapshot()));
             self.checkpoint
                 .decide(move |state, db| {
                     state.held_environment = None;
@@ -1216,6 +1220,19 @@ impl Execution<'_> {
                             RunStatus::Cancelled,
                             "Background work was stopped.",
                         )));
+                    } else if let Some(message) = interruption {
+                        state.settled = Some(Some(super::checkpoint::Settled::failure(
+                            RunStatus::Failed,
+                            &message,
+                        )));
+                        db.change_run(
+                            &id,
+                            crate::runs::RunChanges {
+                                wakeup: Some(None),
+                                ..Default::default()
+                            },
+                        )?;
+                        db.event(&id, &EventKind::Error, &message, None)?;
                     }
                     Ok(())
                 })
@@ -1590,11 +1607,10 @@ impl Execution<'_> {
             project_root: &prepared["projectRoot"],
             prompt,
             imports,
-            expires: Some(
-                self.checkpoint
-                    .deadline()
-                    .unwrap_or(i64::MAX)
-                    .min(now() + 86_400_000),
+            expires: crate::microvm::plan::execution_deadline(
+                self.checkpoint.deadline(),
+                supports_environment,
+                now(),
             ),
             sandbox: policy(&self.run["snapshot"]["agent"])["sandbox"].clone(),
             mcp_env: &workspace.mcp["env"],
@@ -2340,6 +2356,86 @@ mod tests {
             .await
             .unwrap();
         assert!(execution.close_idle_environment().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn held_deadline_failure_survives_successful_physical_close() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let id = text(&run, "id").to_owned();
+        let authority = crate::capabilities::plugin_packages::Authority::for_run(&service, &run)
+            .await
+            .unwrap();
+        let mut workspace = Workspace {
+            prepared: json!({}),
+            state_home: root.path().into(),
+            env: Environment::new(),
+            mcp: json!({}),
+            authorization: crate::plugins::run_credentials::Authorization::new(
+                &service,
+                authority,
+                &RunCredentials::default(),
+            ),
+        };
+        let mut saved = RunCheckpoint::fresh(None);
+        saved.completed = Some(true);
+        saved.runner_id = Some(Some("attempt".into()));
+        saved.held_environment = Some(super::super::checkpoint::HeldEnvironment {
+            attempt: "attempt".into(),
+            generation: "generation".into(),
+            expires_at: now() - 1,
+        });
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+        checkpoint.persist().await.unwrap();
+        let mut account = None;
+        let cancel = CancellationToken::new();
+        let sensitive = History::default();
+        let mut execution = Execution {
+            s: &service,
+            id: id.clone(),
+            admission_revision: run["environmentAdmissionRevision"].clone(),
+            run: &mut run,
+            account: &mut account,
+            preparation: None,
+            cancel: &cancel,
+            checkpoint: &checkpoint,
+            sensitive: &sensitive,
+            observation: None,
+            provider: Provider::Codex,
+            directory: root.path().join("run"),
+            attempt_id: String::new(),
+            reservation: None,
+            retained: false,
+            turn: String::new(),
+            output_probe: None,
+        };
+        let error = execution
+            .wait_for_next_turn(&mut workspace)
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("time limit"));
+        checkpoint
+            .update(|saved| saved.terminal_code = Some(Some(0)))
+            .await
+            .unwrap();
+        let saved = checkpoint.snapshot().await;
+        assert!(saved.held_environment.is_none());
+        assert_eq!(saved.settled().unwrap().status, RunStatus::Failed);
+        service
+            .store
+            .transaction(move |db| {
+                assert!(!super::super::schedule::finish_recovery(
+                    db,
+                    &id,
+                    Some(&saved)
+                )?);
+                let run = db.run_state(&id)?.unwrap();
+                assert_eq!(run.status, RunStatus::Failed);
+                assert!(run.error.unwrap().contains("time limit"));
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

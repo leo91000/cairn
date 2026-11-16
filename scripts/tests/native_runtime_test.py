@@ -67,6 +67,28 @@ def require_finalization_failure(path, wait_result):
     return proof
 
 
+def owned_namespace_pid(group, namespace_pid, proc=Path('/proc')):
+    """Resolve a workload PID only inside its attempt's host cgroup."""
+    assert group.startswith('/') and group != '/', 'Missing attempt cgroup.'
+    matches = []
+    for task in proc.iterdir():
+        if not task.name.isdecimal():
+            continue
+        try:
+            membership = next((line[3:] for line in (task / 'cgroup').read_text().splitlines()
+                               if line.startswith('0::')), None)
+            if membership != group and not (membership or '').startswith(group + '/'):
+                continue
+            namespaces = next((line.split()[1:] for line in (task / 'status').read_text().splitlines()
+                               if line.startswith('NSpid:')), [])
+            if namespaces and int(namespaces[-1]) == namespace_pid:
+                matches.append(int(task.name))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    assert len(matches) == 1, f'Expected one owned process for namespace PID {namespace_pid}; found {matches} in {group}'
+    return matches[0]
+
+
 def retained_workspace(state, run, project=None):
     workspace = state / 'native-data' / run / 'data/workspaces'
     return workspace / project if project else workspace
@@ -724,9 +746,9 @@ def main():
                 command='echo $$ > job-pid; while ! test -e finish-job; do sleep 0.1; done; printf job-finished'))
             job = admitted['jobId']
             eventually(lambda: (managed(run) / 'job-pid').exists())
-            pid = int((managed(run) / 'job-pid').read_text())
+            namespace_pid = int((managed(run) / 'job-pid').read_text())
             group = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ControlGroup', '--value').stdout.strip()
-            assert Path('/proc', str(pid), 'cgroup').read_text().strip().startswith('0::' + group + '/')
+            pid = owned_namespace_pid(group, namespace_pid)
             assert not (state / (attempt + '.exit')).exists()
             assert api(control, dict(operation='activity', requestId=str(uuid.uuid4())))['jobs'] is True
             docker_job = None
@@ -741,7 +763,7 @@ def main():
             assert accepted['event'] == 'accepted'
             second = eventually(lambda: receipt(plan['turnId']))
             assert second['code'] == 0 and second['generation'] == first['generation']
-            assert Path('/proc', str(pid)).exists(), 'Background job died between provider turns.'
+            assert owned_namespace_pid(group, namespace_pid) == pid, 'Background job changed between provider turns.'
             if docker_job:
                 assert api(control, dict(operation='activity', requestId=str(uuid.uuid4())))['containers'] is True
             (managed(run) / 'finish-job').touch()

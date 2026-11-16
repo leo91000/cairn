@@ -9,6 +9,24 @@ private const val IMMEDIATE_WAIT_RESULT = "Wait condition already completed"
 
 class ChatWaitTest {
     @Test
+    fun `an interrupted job stays unsuccessful when its TERM handler exits zero`() {
+        for (flag in listOf("stopped", "timedOut")) {
+            val observed = buildJsonObject {
+                put("state", "completed")
+                put("type", "job_finished")
+                putJsonObject("jobResult") {
+                    put("state", "finished")
+                    putJsonObject("receipt") {
+                        put("exitCode", 0)
+                        put(flag, true)
+                    }
+                }
+            }
+            assertEquals(WaitTone.ERROR, waitOutcome(observed)?.tone)
+        }
+    }
+
+    @Test
     fun `background result shows exit duration and bounded log`() {
         val observed = buildJsonObject {
             put("state", "completed")

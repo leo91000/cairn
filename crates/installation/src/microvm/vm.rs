@@ -990,8 +990,8 @@ pub(crate) async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
             continue;
         }
         if let Some(provider) = plan.chat_provider()?
-            && (provider.adapter().refresh_state_on_resume()
-                || plan.as_value()["environmentProtocol"] == 1)
+            && provider.adapter().refresh_state_on_resume()
+            && plan.as_value()["environmentProtocol"] != 1
         {
             let adapter = provider.adapter();
             let source = import.source.join(adapter.state_directory());
@@ -1230,6 +1230,31 @@ mod tests {
     use super::*;
     use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    async fn retained_turn_refresh_preserves_provider_session_directories() {
+        let root = tempfile::tempdir().unwrap();
+        for (provider, directory) in [
+            ("claude", ".claude"),
+            ("codex", ".codex"),
+            ("opencode", ".opencode"),
+        ] {
+            let home = root.path().join(provider).join("home");
+            tokio::fs::create_dir_all(home.join(directory))
+                .await
+                .unwrap();
+            let plan = Plan::new(json!({
+                "environmentProtocol": 1,
+                "chat": { "provider": provider },
+                "imports": [{ "source": home, "target": HOME }],
+            }));
+            // No transient plugin files or inbox need importing. Opening this
+            // nonexistent socket would reveal a destructive state-directory refresh.
+            refresh_imports(&root.path().join("no-guest.sock"), &plan)
+                .await
+                .unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn unassigned_vmm_is_stopped_when_capacity_observations_fail() {

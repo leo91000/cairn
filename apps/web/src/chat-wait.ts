@@ -381,10 +381,12 @@ export function waitOutcome(observation: Observation): WaitOutcome {
     const receipt = job?.receipt as {
       exitCode?: number
       signal?: number
+      stopped?: boolean
+      timedOut?: boolean
       elapsedMs?: number
       logTail?: string
     } | undefined
-    const success = receipt?.exitCode === 0 && !receipt?.signal
+    const success = receipt?.exitCode === 0 && !receipt?.signal && !receipt?.stopped && !receipt?.timedOut
     return { tone: success ? 'ok' : 'error', title: success ? 'Background job finished' : 'Background job stopped', detail: receipt ? `Exit ${receipt.exitCode ?? receipt.signal ?? 'unknown'} · ${((receipt.elapsedMs ?? 0) / 1000).toFixed(1)}s\n${receipt.logTail ?? ''}` : '' }
   }
 

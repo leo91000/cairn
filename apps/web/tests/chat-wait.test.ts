@@ -636,3 +636,13 @@ it('shows the background job exit, elapsed time and bounded log from its observa
     },
   })).toEqual({ tone: 'error', title: 'Background job stopped', detail: 'Exit 7 · 1.2s\nlast line' })
 })
+
+it('does not report an interrupted job as successful when its TERM handler exits zero', () => {
+  for (const flag of ['stopped', 'timedOut']) {
+    expect(waitOutcome({
+      state: 'completed',
+      type: 'job_finished',
+      jobResult: { state: 'finished', receipt: { exitCode: 0, [flag]: true } },
+    })).toMatchObject({ tone: 'error', title: 'Background job stopped' })
+  }
+})

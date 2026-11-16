@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_PLAN_BYTES: usize = 8_000_000;
 /// Longest attempt deadline a plan may request.
-const MAX_ATTEMPT_MS: i64 = 13 * 3_600_000;
+const MAX_ATTEMPT_MS: i64 = crate::microvm::plan::MAX_ENVIRONMENT_MS;
 
 pub(super) struct Attempt {
     pub stop: CancellationToken,
@@ -1192,6 +1192,26 @@ mod tests {
         }
         plan.as_object_mut().unwrap().remove("expires");
         assert!(!valid(&plan));
+    }
+
+    #[test]
+    fn manager_environment_deadlines_obey_the_controller_contract() {
+        use crate::microvm::plan::execution_deadline;
+        let clock = now();
+        assert_eq!(execution_deadline(None, false, clock), None);
+        for retained in [false, true] {
+            for budget in [None, Some(clock + 60_000)] {
+                let deadline = execution_deadline(budget, retained, clock);
+                let expires = deadline.map_or(Value::Null, Value::from);
+                assert!(valid(&plan(&expires)));
+                if retained {
+                    assert!(deadline.unwrap() <= clock + MAX_ATTEMPT_MS);
+                } else {
+                    assert_eq!(deadline, budget);
+                }
+            }
+        }
+        assert!(!valid(&plan(&json!(clock + MAX_ATTEMPT_MS + 60_000))));
     }
 
     #[test]

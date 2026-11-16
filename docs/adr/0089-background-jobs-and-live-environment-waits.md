@@ -33,7 +33,7 @@ legacy journal conversion remains subject to that decision. Database version 36 
 conditions while preserving prior wakeups and observations; rollback requires
 a reader that understands that database version.
 
-The environment deadline is fixed at admission, capped at 24 hours, and survives
+The environment deadline is fixed at admission, capped at 13 hours (the existing controller deadline limit), and survives
 agent continuations without renewal. The environment keeps its physical node
 slot while releasing its provider account. A scheduler-queued continuation wins
 atomically over idle closure; cancellation and restart fence the original
