@@ -131,13 +131,6 @@ pub(crate) enum EntryWriter {
     /// A person, from the web, Android or the public MCP they authorized.
     Person(String),
     /// A hook rule, which acts for its creator but is not that person.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the rule engine records the conversations rules reach"
-        )
-    )]
     Rule(String),
     /// An agent, `cairn_installation` or a delegated task included.
     Agent,
@@ -1328,7 +1321,7 @@ mod tests {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 34);
+        assert_eq!(version, crate::store::DATABASE_VERSION);
         // Reopening, or a concurrent startup, changes nothing.
         upgrade(&mut connection).unwrap();
         drop(Store::open(root.path()).unwrap());

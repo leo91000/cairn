@@ -196,6 +196,7 @@ impl Fixture {
                 "large": { "type": "string" },
                 "agentView": { "type": "boolean" },
                 "result": {},
+                "cairn": {},
                 "instance": { "type": "string" },
                 "items": {
                     "type": "array",

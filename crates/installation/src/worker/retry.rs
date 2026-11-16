@@ -151,6 +151,11 @@ pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
             ..Default::default()
         },
     )?;
-    db.event(id, &EventKind::Status, RunStatus::Failed.as_str(), None)?;
+    db.event(
+        id,
+        &EventKind::Status,
+        RunStatus::Failed.as_str(),
+        Some(&json!({ "error": { "message": message } })),
+    )?;
     Ok(true)
 }

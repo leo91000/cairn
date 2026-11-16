@@ -3,7 +3,7 @@
   "additionalProperties": false,
   "properties": {
     "agentId": {
-      "description": "Rules that use this agent, as execution agent or started agent.",
+      "description": "Rules that use this agent, as execution agent or started agent, or that steer or\nanswer by key a conversation of this agent bound to their creator's keys.",
       "format": "uuid",
       "type": [
         "string",

@@ -297,6 +297,17 @@ exemple un fil Discord, pour la retrouver et l’orienter lors des hooks suivant
 clés appartiennent au créateur de la règle.
 _Avoid_ : thread, binding
 
+**Hook de Cairn** :
+Un événement que Cairn émet pour une conversation rattachée à une clé : réponse prête,
+question posée, progression ou fin. Seules les règles du créateur de la clé le
+reçoivent, tant qu’il a accès à l’agent de la conversation.
+_Avoid_ : notification, callback
+
+**Profondeur de chaîne** :
+Le nombre de liens qu’une suite d’actions de règles sur des conversations et de hooks
+de Cairn qu’elles provoquent a parcourus. Cairn seul l’enregistre et la borne.
+_Avoid_ : récursion, niveau
+
 **Programme déclaré** :
 Un exécutable du serveur qu’un package liste dans son manifeste et que le propriétaire
 approuve avec lui. Cairn le lance sans shell, avec un environnement vide et, au besoin,

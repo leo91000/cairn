@@ -298,6 +298,11 @@ impl Missions {
                     );
                 }
                 db.save_mission(&mission)?;
+                crate::rules::engine::conversations::record_task(
+                    db,
+                    &mission.id.to_string(),
+                    &origin,
+                )?;
                 db.audit("task.saved", &json!({"id":mission.id}))?;
                 Ok(mission)
             })

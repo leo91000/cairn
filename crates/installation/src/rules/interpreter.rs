@@ -1,7 +1,8 @@
 //! The tree interpreter. It walks a pinned rule version between actions, evaluating
 //! conditions and loops, and stops at each action so that the engine can persist its
 //! position before any effect. [`Cursor`] persists control flow; the engine hydrates
-//! prior action results from step records.
+//! prior action results from step records. Cairn predicates read conversation keys and
+//! author quotas through [`Facts`].
 use super::evaluate::Evaluator;
 use cairn_contracts::{RuleCondition, RuleNode, RuleOperator, RuleValue};
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,34 @@ pub(crate) struct Cursor {
     pub steps: Map<String, Json>,
     /// Blocks and iterations run so far.
     pub count: u32,
+    /// The authors quota conditions examined, to whom the triggering counts once it acts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+}
+
+/// What Cairn predicates read: the conversations bound to the creator's keys and the
+/// triggerings of this rule by each author.
+pub(crate) trait Facts {
+    /// The conversation bound to a key, with the author that started it if any.
+    fn conversation(&self, key: &str) -> Result<Option<Option<String>>, String>;
+
+    /// Other triggerings of this rule by an author in the last minutes.
+    fn author_triggerings(&self, author: &str, window_minutes: u32) -> Result<u32, String>;
+}
+
+/// Facts for a tree that reads none.
+#[cfg(test)]
+pub(crate) struct NoFacts;
+
+#[cfg(test)]
+impl Facts for NoFacts {
+    fn conversation(&self, _key: &str) -> Result<Option<Option<String>>, String> {
+        Ok(None)
+    }
+
+    fn author_triggerings(&self, _author: &str, _window_minutes: u32) -> Result<u32, String> {
+        Ok(0)
+    }
 }
 
 impl Default for Cursor {
@@ -61,6 +90,7 @@ impl Default for Cursor {
             }],
             steps: Map::new(),
             count: 0,
+            authors: Vec::new(),
         }
     }
 }
@@ -125,6 +155,7 @@ impl Cursor {
         &mut self,
         steps: &'a [RuleNode],
         evaluator: &Evaluator,
+        facts: &dyn Facts,
     ) -> Result<Option<&'a RuleNode>, String> {
         loop {
             super::evaluate::check_deadline()?;
@@ -154,7 +185,16 @@ impl Cursor {
             }
             match node {
                 RuleNode::If { condition, .. } => {
-                    let holds = self::condition(condition, evaluator, &self.items())?;
+                    let items = self.items();
+                    let holds = self::condition(
+                        condition,
+                        &Context {
+                            evaluator,
+                            facts,
+                            items: &items,
+                        },
+                        &mut self.authors,
+                    )?;
                     let branch = if holds {
                         Branch::Then(position)
                     } else {
@@ -200,7 +240,7 @@ impl Cursor {
 }
 
 /// A value, where a missing field, or a field of a missing value, reads as null.
-fn lenient(
+pub(super) fn lenient(
     value: &RuleValue,
     evaluator: &Evaluator,
     items: &Map<String, Json>,
@@ -280,16 +320,34 @@ fn compare(left: &Json, operator: RuleOperator, right: &Json) -> Result<bool, St
     })
 }
 
-/// Evaluates a condition. Conditions about conversation keys belong to them.
+/// What a condition reads.
+pub(crate) struct Context<'a> {
+    pub evaluator: &'a Evaluator,
+    pub facts: &'a dyn Facts,
+    pub items: &'a Map<String, Json>,
+}
+
+fn key(value: &RuleValue, context: &Context<'_>) -> Result<String, String> {
+    let key = context.evaluator.value(value, context.items)?;
+    crate::rules::engine::conversations::key(&key)
+}
+
+fn author(value: &RuleValue, context: &Context<'_>) -> Result<Option<String>, String> {
+    let author = lenient(value, context.evaluator, context.items)?;
+    crate::rules::engine::conversations::author(&author)
+}
+
+/// Evaluates a condition. A quota condition records the author it examined.
 pub(crate) fn condition(
     condition: &RuleCondition,
-    evaluator: &Evaluator,
-    items: &Map<String, Json>,
+    context: &Context<'_>,
+    authors: &mut Vec<String>,
 ) -> Result<bool, String> {
+    let (evaluator, items) = (context.evaluator, context.items);
     match condition {
         RuleCondition::All { conditions } => {
             for condition in conditions {
-                if !self::condition(condition, evaluator, items)? {
+                if !self::condition(condition, context, authors)? {
                     return Ok(false);
                 }
             }
@@ -297,13 +355,13 @@ pub(crate) fn condition(
         }
         RuleCondition::Any { conditions } => {
             for condition in conditions {
-                if self::condition(condition, evaluator, items)? {
+                if self::condition(condition, context, authors)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-        RuleCondition::Not { condition } => Ok(!self::condition(condition, evaluator, items)?),
+        RuleCondition::Not { condition } => Ok(!self::condition(condition, context, authors)?),
         RuleCondition::Compare {
             left,
             operator,
@@ -326,10 +384,30 @@ pub(crate) fn condition(
                 .as_str()
                 .is_some_and(|author| people.iter().any(|person| person.id == author)))
         }
-        RuleCondition::AuthorStartedConversation { .. }
-        | RuleCondition::ConversationExists { .. }
-        | RuleCondition::AuthorQuota { .. } => {
-            Err("This condition needs conversation keys, which are not available yet.".into())
+        RuleCondition::ConversationExists { key } => Ok(context
+            .facts
+            .conversation(&self::key(key, context)?)?
+            .is_some()),
+        RuleCondition::AuthorStartedConversation { author, key } => {
+            let Some(author) = self::author(author, context)? else {
+                return Ok(false);
+            };
+            let started = context.facts.conversation(&self::key(key, context)?)?;
+            Ok(started.flatten().is_some_and(|starter| starter == author))
+        }
+        RuleCondition::AuthorQuota {
+            author,
+            limit,
+            window_minutes,
+        } => {
+            let Some(author) = self::author(author, context)? else {
+                return Ok(false);
+            };
+            let used = context.facts.author_triggerings(&author, *window_minutes)?;
+            if !authors.contains(&author) {
+                authors.push(author);
+            }
+            Ok(used < *limit)
         }
     }
 }
@@ -376,7 +454,7 @@ mod tests {
         let steps = tree();
         let base = evaluator("alice");
         let mut cursor = Cursor::default();
-        let first = cursor.advance(&steps, &base).unwrap().unwrap();
+        let first = cursor.advance(&steps, &base, &NoFacts).unwrap().unwrap();
         assert_eq!(first.id(), "post");
         assert_eq!(cursor.items()["entry"], json!("a"));
         cursor.steps.insert("post".into(), json!({ "ok": 1 }));
@@ -384,16 +462,27 @@ mod tests {
         // The position survives persistence between actions.
         let mut cursor: Cursor =
             serde_json::from_value(serde_json::to_value(&cursor).unwrap()).unwrap();
-        let second = cursor.advance(&steps, &base).unwrap().unwrap();
+        let second = cursor.advance(&steps, &base, &NoFacts).unwrap().unwrap();
         assert_eq!(second.id(), "post");
         assert_eq!(cursor.items()["entry"], json!("b"));
-        assert_eq!(cursor.advance(&steps, &base).unwrap().unwrap().id(), "last");
-        assert!(cursor.advance(&steps, &base).unwrap().is_none());
+        assert_eq!(
+            cursor
+                .advance(&steps, &base, &NoFacts)
+                .unwrap()
+                .unwrap()
+                .id(),
+            "last"
+        );
+        assert!(cursor.advance(&steps, &base, &NoFacts).unwrap().is_none());
 
         let stranger = evaluator("mallory");
         let mut cursor = Cursor::default();
         assert_eq!(
-            cursor.advance(&steps, &stranger).unwrap().unwrap().id(),
+            cursor
+                .advance(&steps, &stranger, &NoFacts)
+                .unwrap()
+                .unwrap()
+                .id(),
             "refuse"
         );
     }
@@ -414,7 +503,7 @@ mod tests {
             let mut cursor = Cursor::default();
             let mut actions = 0;
             loop {
-                match cursor.advance(&steps, &evaluator) {
+                match cursor.advance(&steps, &evaluator, &NoFacts) {
                     Ok(Some(_)) => actions += 1,
                     Ok(None) => {
                         assert_eq!(actions, length);
@@ -485,8 +574,13 @@ mod tests {
         ];
         for (condition, expected) in cases {
             let parsed: RuleCondition = serde_json::from_value(condition.clone()).unwrap();
+            let context = Context {
+                evaluator: &v,
+                facts: &NoFacts,
+                items: &Map::new(),
+            };
             assert_eq!(
-                super::condition(&parsed, &v, &Map::new()),
+                super::condition(&parsed, &context, &mut Vec::new()),
                 Ok(expected),
                 "{condition}"
             );
@@ -498,7 +592,7 @@ mod tests {
         .unwrap();
         assert!(
             Cursor::default()
-                .advance(&looping, &v)
+                .advance(&looping, &v, &NoFacts)
                 .unwrap_err()
                 .contains("does not hold a list")
         );

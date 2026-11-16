@@ -245,6 +245,24 @@
         "defaultLimits": {
           "$ref": "#/definitions/HookRuleLimits"
         },
+        "maxChainDepth": {
+          "description": "Links Cairn follows in a chain where a rule's conversation action causes a Cairn\nhook that triggers a rule. A conversation action beyond it fails.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxConversationValuesBytes": {
+          "description": "Bytes of the values rules remember on one conversation.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "maxConversationsPerHour": {
           "format": "uint32",
           "minimum": 0,

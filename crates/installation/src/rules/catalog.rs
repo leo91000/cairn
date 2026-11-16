@@ -15,10 +15,10 @@ use std::collections::BTreeMap;
 fn origin_schema() -> Value {
     json!({
         "type": "object",
-        "description": "What started the turn.",
+        "description": "Who started the turn: a person, a rule, an agent, `cairn_installation`, a resumption without new input (a wakeup, the end of a wait), or an entry Cairn did not attribute.",
         "properties": {
-            "kind": { "type": "string", "enum": ["person", "rule", "agent", "installation", "resume"] },
-            "accountId": { "type": "string", "description": "The person's Cairn account." },
+            "kind": { "type": "string", "enum": ["person", "rule", "agent", "installation", "resume", "unknown"] },
+            "accountId": { "type": "string", "description": "The person's Cairn account, or the creator of the rule." },
             "ruleId": { "type": "string" },
         },
         "required": ["kind"],
@@ -32,26 +32,53 @@ pub(crate) fn cairn_payload(hook: CairnHookKind) -> Value {
         "conversationId": { "type": "string" },
         "agentId": { "type": "string" },
         "origin": origin_schema(),
+        "values": {
+            "type": "object",
+            "description": "The values rules remembered on this conversation.",
+        },
     });
     let extra = match hook {
         CairnHookKind::ReplyReady => json!({
-            "text": { "type": "string", "description": "The agent's reply." },
+            "text": { "type": "string", "description": "The agent's reply, at most 128 KiB." },
+            "truncated": { "type": "boolean", "description": "Whether the reply was longer and was cut." },
             "deliverables": {
                 "type": "array",
+                "description": "Files the agent published during the turn, at most 10.",
                 "items": {
                     "type": "object",
                     "properties": {
+                        "id": { "type": "string" },
                         "name": { "type": "string" },
+                        "title": { "type": "string" },
                         "mediaType": { "type": "string" },
-                        "url": { "type": "string" },
+                        "size": { "type": "integer" },
                     },
                 },
             },
         }),
         CairnHookKind::QuestionAsked => json!({
             "questionId": { "type": "string" },
-            "title": { "type": "string" },
-            "text": { "type": "string", "description": "The question as text." },
+            "title": { "type": "string", "description": "The first question's title." },
+            "text": { "type": "string", "description": "Every question with its options, as text." },
+            "fields": {
+                "type": "array",
+                "description": "Each question: its id, title, mode (single or multiple) and options.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "title": { "type": "string" },
+                        "mode": { "type": "string" },
+                        "options": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": { "id": { "type": "string" }, "label": { "type": "string" } },
+                            },
+                        },
+                    },
+                },
+            },
         }),
         CairnHookKind::Progress => json!({
             "step": { "type": "string", "description": "A short step, without detail." },
@@ -101,22 +128,22 @@ fn action(kind: &str) -> (&'static str, &'static str, bool) {
         ),
         "startAgent" => (
             "Start an agent",
-            "Starts a conversation with an agent, optionally bound to a key. Fails when the key is already bound: steer it instead.",
+            "Starts a conversation with an agent, optionally bound to a key and recording the external author it starts for. Fails when the key is already bound: steer it instead.",
             true,
         ),
         "steerConversation" => (
             "Steer a conversation",
-            "Sends a message to the conversation bound to a key. Fails while a person keeps it paused or archived.",
+            "Sends a message to the conversation bound to a key, after its current turn. Fails while it is paused, until a person resumes it.",
             true,
         ),
         "cancelConversation" => (
             "Cancel a conversation",
-            "Stops the current turn of the conversation bound to a key.",
+            "Stops the current turn of the conversation bound to a key, like Stop in Cairn. A person must resume it before rules can steer it again.",
             false,
         ),
         "answerQuestion" => (
             "Answer a question",
-            "Answers the pending question of the conversation bound to a key.",
+            "Answers the oldest pending question of the conversation bound to a key: a text for every question, or an object by question id. Fails while it is paused, until a person resumes it.",
             false,
         ),
         "storeValue" => (
@@ -197,17 +224,17 @@ fn conditions() -> Vec<RuleCatalogEntry> {
         entry(
             "authorStartedConversation",
             "Author started the conversation",
-            "The author started the conversation bound to a key.",
+            "The author recorded when a rule started the conversation bound to a key is this author.",
         ),
         entry(
             "conversationExists",
             "Conversation exists",
-            "A conversation is bound to a key.",
+            "A conversation, not deleted, is bound to a key of the rule's creator.",
         ),
         entry(
             "authorQuota",
             "Author quota",
-            "The author triggered this rule fewer times than a limit within a window.",
+            "The author triggered this rule fewer times than a limit within a window. Triggerings that acted count, once each, for the authors their quota conditions examined.",
         ),
     ]
 }
@@ -283,6 +310,10 @@ pub(crate) fn limits() -> RuleCatalogLimits {
         max_rule_values_bytes: Some(super::engine::MAX_RULE_VALUES_BYTES as u32),
         max_pending: Some(super::engine::MAX_PENDING as u32),
         max_pending_event_bytes: Some(super::engine::MAX_PENDING_EVENT_BYTES as u32),
+        max_chain_depth: Some(super::engine::conversations::MAX_CHAIN_DEPTH),
+        max_conversation_values_bytes: Some(
+            super::engine::conversations::MAX_CONVERSATION_VALUES_BYTES as u32,
+        ),
     }
 }
 
