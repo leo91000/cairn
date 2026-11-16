@@ -235,7 +235,7 @@ const ranTone: Record<string, string> = {
                 @move="(path, offset) => emit('move', path, offset)"
               />
               <p v-if="!node.otherwise.length && !editable" class="m-0! px-1 py-2 text-xs text-muted">
-                Nothing: the triggering ends.
+                No action in this branch.
               </p>
             </section>
           </div>
