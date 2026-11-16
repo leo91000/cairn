@@ -1087,11 +1087,11 @@ impl Execution<'_> {
             .held_environment
             .ok_or_else(|| Error::conflict("Missing retained environment identity."))?;
         s.worker.held.lock().await.insert(self.id.clone());
-        if let Some(account) = self.account.take() {
-            s.accounts.release(s, &account).await?;
-        }
-        s.mcps.revoke_run(s, &self.id).await?;
         let result = async {
+            if let Some(account) = self.account.take() {
+                s.accounts.release(s, &account).await?;
+            }
+            s.mcps.revoke_run(s, &self.id).await?;
             let mut timer = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tokio::select! {
@@ -2360,82 +2360,104 @@ mod tests {
 
     #[tokio::test]
     async fn held_deadline_failure_survives_successful_physical_close() {
-        let root = tempfile::tempdir().unwrap();
-        let (service, mut run) = preparation_fixture(root.path()).await;
-        let id = text(&run, "id").to_owned();
-        let authority = crate::capabilities::plugin_packages::Authority::for_run(&service, &run)
-            .await
-            .unwrap();
-        let mut workspace = Workspace {
-            prepared: json!({}),
-            state_home: root.path().into(),
-            env: Environment::new(),
-            mcp: json!({}),
-            authorization: crate::plugins::run_credentials::Authorization::new(
-                &service,
-                authority,
-                &RunCredentials::default(),
-            ),
-        };
-        let mut saved = RunCheckpoint::fresh(None);
-        saved.completed = Some(true);
-        saved.runner_id = Some(Some("attempt".into()));
-        saved.held_environment = Some(super::super::checkpoint::HeldEnvironment {
-            attempt: "attempt".into(),
-            generation: "generation".into(),
-            expires_at: now() - 1,
-        });
-        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
-        checkpoint.persist().await.unwrap();
-        let mut account = None;
-        let cancel = CancellationToken::new();
-        let sensitive = History::default();
-        let mut execution = Execution {
-            s: &service,
-            id: id.clone(),
-            admission_revision: run["environmentAdmissionRevision"].clone(),
-            run: &mut run,
-            account: &mut account,
-            preparation: None,
-            cancel: &cancel,
-            checkpoint: &checkpoint,
-            sensitive: &sensitive,
-            observation: None,
-            provider: Provider::Codex,
-            directory: root.path().join("run"),
-            attempt_id: String::new(),
-            reservation: None,
-            retained: false,
-            turn: String::new(),
-            output_probe: None,
-        };
-        let error = execution
-            .wait_for_next_turn(&mut workspace)
-            .await
-            .unwrap_err();
-        assert!(error.message.contains("time limit"));
-        checkpoint
-            .update(|saved| saved.terminal_code = Some(Some(0)))
-            .await
-            .unwrap();
-        let saved = checkpoint.snapshot().await;
-        assert!(saved.held_environment.is_none());
-        assert_eq!(saved.settled().unwrap().status, RunStatus::Failed);
-        service
-            .store
-            .transaction(move |db| {
-                assert!(!super::super::schedule::finish_recovery(
-                    db,
-                    &id,
-                    Some(&saved)
-                )?);
-                let run = db.run_state(&id)?.unwrap();
-                assert_eq!(run.status, RunStatus::Failed);
-                assert!(run.error.unwrap().contains("time limit"));
-                Ok(())
-            })
-            .await
-            .unwrap();
+        for credential_clear_failure in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (service, mut run) = preparation_fixture(root.path()).await;
+            let id = text(&run, "id").to_owned();
+            let authority =
+                crate::capabilities::plugin_packages::Authority::for_run(&service, &run)
+                    .await
+                    .unwrap();
+            let mut workspace = Workspace {
+                prepared: json!({}),
+                state_home: root.path().into(),
+                env: Environment::new(),
+                mcp: json!({}),
+                authorization: crate::plugins::run_credentials::Authorization::new(
+                    &service,
+                    authority,
+                    &RunCredentials::default(),
+                ),
+            };
+            let mut saved = RunCheckpoint::fresh(None);
+            saved.completed = Some(true);
+            saved.runner_id = Some(Some("attempt".into()));
+            saved.held_environment = Some(super::super::checkpoint::HeldEnvironment {
+                attempt: "attempt".into(),
+                generation: "generation".into(),
+                expires_at: now() - 1,
+            });
+            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+            checkpoint.persist().await.unwrap();
+            let mut account = if credential_clear_failure {
+                let home = root.path().join("account");
+                tokio::fs::create_dir_all(home.join("auth.json"))
+                    .await
+                    .unwrap();
+                Some(Lease {
+                    account_id: crate::config::id(),
+                    provider: Provider::Codex,
+                    run_id: id.clone(),
+                    home,
+                    model: "fixture".into(),
+                })
+            } else {
+                None
+            };
+            let cancel = CancellationToken::new();
+            let sensitive = History::default();
+            let mut execution = Execution {
+                s: &service,
+                id: id.clone(),
+                admission_revision: run["environmentAdmissionRevision"].clone(),
+                run: &mut run,
+                account: &mut account,
+                preparation: None,
+                cancel: &cancel,
+                checkpoint: &checkpoint,
+                sensitive: &sensitive,
+                observation: None,
+                provider: Provider::Codex,
+                directory: root.path().join("run"),
+                attempt_id: String::new(),
+                reservation: None,
+                retained: false,
+                turn: String::new(),
+                output_probe: None,
+            };
+            let error = execution
+                .wait_for_next_turn(&mut workspace)
+                .await
+                .unwrap_err();
+            if credential_clear_failure {
+                assert!(!error.message.contains("time limit"));
+            } else {
+                assert!(error.message.contains("time limit"));
+            }
+            let expected_message = error.message;
+            checkpoint
+                .update(|saved| saved.terminal_code = Some(Some(0)))
+                .await
+                .unwrap();
+            let saved = checkpoint.snapshot().await;
+            assert!(saved.held_environment.is_none());
+            assert_eq!(saved.settled().unwrap().status, RunStatus::Failed);
+            service
+                .store
+                .transaction(move |db| {
+                    assert!(!super::super::schedule::finish_recovery(
+                        db,
+                        &id,
+                        Some(&saved)
+                    )?);
+                    let run = db.run_state(&id)?.unwrap();
+                    assert_eq!(run.status, RunStatus::Failed);
+                    assert_eq!(run.error.unwrap(), expected_message);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]
