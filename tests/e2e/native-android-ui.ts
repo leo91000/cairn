@@ -48,12 +48,19 @@ function editableAncestor(node: NativeNode): NativeNode | undefined {
   return node.parent ? editableAncestor(node.parent) : undefined
 }
 
-export function nativePositionIn(document: string, text: string, includeClipped = false, preferEditable = false): number[] | null {
+function matchingNodes(document: string, text: string, preferEditable: boolean): NativeNode[] {
   const matches = nativeNodes(document).filter(node => [node.attributes.text, node.attributes['content-desc'], node.attributes.hint].includes(text))
   // A field description/label may be a child of EditText, while a separate
   // caption with identical text is not an editable target at all.
-  const candidates = preferEditable ? matches.map(editableAncestor).filter((node): node is NativeNode => !!node) : matches
-  for (const node of candidates) {
+  return preferEditable ? matches.map(editableAncestor).filter((node): node is NativeNode => !!node) : matches
+}
+
+export function nativeInputFocused(document: string, label: string): boolean {
+  return matchingNodes(document, label, true).some(node => node.enabled && node.attributes.focused === 'true')
+}
+
+export function nativePositionIn(document: string, text: string, includeClipped = false, preferEditable = false): number[] | null {
+  for (const node of matchingNodes(document, text, preferEditable)) {
     if (!node.enabled)
       continue
     const bounds = node.attributes.bounds?.match(/^\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]$/)?.slice(1).map(Number)

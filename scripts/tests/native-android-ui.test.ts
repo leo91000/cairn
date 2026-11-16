@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { nativeNodes, nativePositionIn } from '../../tests/e2e/native-android-ui'
+import { nativeInputFocused, nativeNodes, nativePositionIn } from '../../tests/e2e/native-android-ui'
 
 it('targets the described input rather than its separate caption', () => {
   const document = `<hierarchy><node class="android.view.View" enabled="true">
@@ -26,4 +26,12 @@ it('reads entered JSON from single or double quoted XML attributes', () => {
   }
 
   expect(nativeNodes('<node text="a&gt;b &amp; &#x1f600;"/>')[0].attributes.text).toBe('a>b & 😀')
+})
+
+it('waits for the requested input to take focus rather than another field', () => {
+  const document = `<node class="android.widget.EditText" focused="true" text="previous"><node content-desc="Previous"/></node>
+    <node class="android.widget.EditText" focused="false" text="next"><node content-desc="Next"/></node>`
+  expect(nativeInputFocused(document, 'Previous')).toBe(true)
+  expect(nativeInputFocused(document, 'Next')).toBe(false)
+  expect(nativeInputFocused(document.replace('focused="false"', 'focused="true"'), 'Next')).toBe(true)
 })

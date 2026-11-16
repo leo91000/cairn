@@ -8,7 +8,7 @@ import {
   test,
   workspacePath,
 } from './fixtures'
-import { nativeNodes, nativePositionIn as positionIn } from './native-android-ui'
+import { nativeInputFocused, nativeNodes, nativePositionIn as positionIn } from './native-android-ui'
 import { rulesFixture } from './rules-fixture'
 
 // Opt-in journey against the real installation and Beacon. Use a disposable emulator:
@@ -77,8 +77,11 @@ async function scrollTo(text: string) {
 
 async function fill(label: string, value: string | (() => string)) {
   await tap(label, true)
+  await expect.poll(() => nativeInputFocused(screen(), label), { timeout: 7000 }).toBe(true)
   const text = typeof value === 'function' ? value() : value
   adb('shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A')
+  adb('shell', 'input', 'keyevent', 'KEYCODE_DEL')
+  await expect.poll(() => nativeNodes(screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.focused === 'true' && node.attributes.text === ''), { timeout: 7000 }).toBe(true)
   const shellText = text.replaceAll(' ', '%s').replaceAll('\'', '\'\\\'\'')
   adb('shell', 'input', 'text', `'${shellText}'`)
   await expect.poll(() => nativeNodes(screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.focused === 'true' && node.attributes.text === text), { timeout: 7000 }).toBe(true)
