@@ -113,6 +113,7 @@ fun RuleEditorScreen(
     val targetRuleId = ruleId.ifBlank { recoveredRuleId }
     val creationId = rememberSaveable(cacheScope, ruleId) { java.util.UUID.randomUUID().toString() }
     var selected by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
+    var configuring by rememberSaveable(cacheScope, ruleId) { mutableStateOf(ruleId.isBlank()) }
     var catalog by remember(cacheScope) { mutableStateOf<HookRuleCatalog?>(null) }
     var loading by remember { mutableStateOf(true) }
     var checking by remember { mutableStateOf(false) }
@@ -451,62 +452,81 @@ fun RuleEditorScreen(
                         Text("Réessayer la vérification")
                     }
                 }
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
-                ) {
+                OutlinedCard(onClick = { configuring = !configuring }) {
                     Column(
-                        Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Text("QUAND CECI ARRIVE", style = MaterialTheme.typography.labelSmall)
-                        Choice(
-                            "Événement",
-                            triggerKey(definition.obj("trigger")),
-                            ruleChoicesWithCurrent(
-                                currentCatalog.hooks.map {
-                                    triggerKey(wireJson.encodeToJsonElement(it.trigger)) to it.title
-                                },
-                                triggerKey(definition.obj("trigger")),
-                                definition.obj("trigger").text("hook"),
-                            ),
-                            enabled = canEdit,
-                        ) { key ->
-                            val next =
-                                currentCatalog.hooks.firstOrNull {
-                                    triggerKey(wireJson.encodeToJsonElement(it.trigger)) == key
-                                } ?: return@Choice
-                            val agent =
-                                definition.text("executionAgentId").takeIf { it in next.agentIds }
-                                    ?: next.agentIds.firstOrNull().orEmpty()
-                            update(
-                                definition.patch(
-                                    "trigger" to wireJson.encodeToJsonElement(next.trigger),
-                                    "executionAgentId" to JsonPrimitive(agent),
-                                )
-                            )
-                        }
-                        if (hook?.description?.isNotBlank() == true)
-                            Text(hook.description, style = MaterialTheme.typography.bodySmall)
-                        Choice(
-                            "Avec les droits de",
-                            definition.text("executionAgentId"),
-                            ruleChoicesWithCurrent(
-                                agentChoices.map { it.agentId to it.name },
-                                definition.text("executionAgentId"),
-                                ruleAgentName(state, definition.text("executionAgentId")),
-                            ),
-                            enabled = canEdit,
-                        ) {
-                            update(definition.patch("executionAgentId" to JsonPrimitive(it)))
-                        }
+                        Text(
+                            hook?.title ?: definition.obj("trigger").text("hook"),
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            "Droits de ${ruleAgentName(state, definition.text("executionAgentId"))}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            if (configuring) "Fermer les réglages"
+                            else "Modifier le déclencheur et l’agent",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
                     }
                 }
-                Text(
-                    "FAIRE CELA",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                if (configuring)
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                    ) {
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Text("QUAND CECI ARRIVE", style = MaterialTheme.typography.labelSmall)
+                            Choice(
+                                "Événement",
+                                triggerKey(definition.obj("trigger")),
+                                ruleChoicesWithCurrent(
+                                    currentCatalog.hooks.map {
+                                        triggerKey(wireJson.encodeToJsonElement(it.trigger)) to
+                                            it.title
+                                    },
+                                    triggerKey(definition.obj("trigger")),
+                                    definition.obj("trigger").text("hook"),
+                                ),
+                                enabled = canEdit,
+                            ) { key ->
+                                val next =
+                                    currentCatalog.hooks.firstOrNull {
+                                        triggerKey(wireJson.encodeToJsonElement(it.trigger)) == key
+                                    } ?: return@Choice
+                                val agent =
+                                    definition.text("executionAgentId").takeIf {
+                                        it in next.agentIds
+                                    } ?: next.agentIds.firstOrNull().orEmpty()
+                                update(
+                                    definition.patch(
+                                        "trigger" to wireJson.encodeToJsonElement(next.trigger),
+                                        "executionAgentId" to JsonPrimitive(agent),
+                                    )
+                                )
+                            }
+                            if (hook?.description?.isNotBlank() == true)
+                                Text(hook.description, style = MaterialTheme.typography.bodySmall)
+                            Choice(
+                                "Avec les droits de",
+                                definition.text("executionAgentId"),
+                                ruleChoicesWithCurrent(
+                                    agentChoices.map { it.agentId to it.name },
+                                    definition.text("executionAgentId"),
+                                    ruleAgentName(state, definition.text("executionAgentId")),
+                                ),
+                                enabled = canEdit,
+                            ) {
+                                update(definition.patch("executionAgentId" to JsonPrimitive(it)))
+                            }
+                        }
+                    }
                 RuleFlowTree(
                     definition.list("steps"),
                     "/steps",

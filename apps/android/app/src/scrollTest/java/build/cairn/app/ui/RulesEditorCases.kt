@@ -221,6 +221,59 @@ abstract class RulesEditorCases {
     }
 
     @Test
+    fun fittedGraphKeepsSelectionAndStepActionsOnTheChosenBranch() {
+        val action =
+            ruleObject(
+                "type" to JsonPrimitive("action"),
+                "id" to JsonPrimitive("target"),
+                "label" to JsonPrimitive("Target node"),
+                "action" to
+                    ruleObject(
+                        "type" to JsonPrimitive("storeValue"),
+                        "name" to JsonPrimitive("saved"),
+                        "value" to literalRuleValue(JsonPrimitive("value")),
+                    ),
+            )
+        val nodes =
+            listOf(
+                ruleObject(
+                    "type" to JsonPrimitive("if"),
+                    "id" to JsonPrimitive("choice"),
+                    "condition" to
+                        ruleObject(
+                            "type" to JsonPrimitive("all"),
+                            "conditions" to JsonArray(emptyList()),
+                        ),
+                    "then" to JsonArray(listOf(action)),
+                    "otherwise" to JsonArray(emptyList()),
+                )
+            )
+        var selected = ""
+        var removed = ""
+        compose.setContent {
+            CairnTheme {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    RuleFlowTree(
+                        nodes,
+                        "/steps",
+                        null,
+                        { "Assistant" },
+                        editable = true,
+                        select = { selected = it },
+                        remove = { removed = it },
+                    )
+                }
+            }
+        }
+        compose.onNodeWithText("Tout voir").performClick()
+        compose.onNodeWithText("Target node").performClick()
+        compose.runOnIdle { assertEquals("/steps/0/then/0", selected) }
+        compose.onAllNodesWithContentDescription("Actions de l’étape")[1].performClick()
+        compose.onNodeWithText("Supprimer l’étape").performClick()
+        compose.runOnIdle { assertEquals("/steps/0/then/0", removed) }
+    }
+
+    @Test
     fun nestedLoopsHaveUniqueNamesAndTheirVariablePickerDoesNotCrash() {
         val empty = ruleObject("steps" to JsonArray(emptyList()))
         val outer = newRuleStep(empty, "forEach", null)

@@ -9,6 +9,7 @@ import {
 import { rulesFixture } from './rules-fixture'
 
 test('rules show the actual saved tree, creator controls and real triggering history', async ({ page, workspace }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 1280 })
   const pageErrors: string[] = []
   page.on('pageerror', error => pageErrors.push(error.message))
   test.setTimeout(60000)
@@ -29,7 +30,20 @@ test('rules show the actual saved tree, creator controls and real triggering his
   await page.getByRole('button', { name: 'Edit', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Rule name' })).toHaveValue('Support messages')
   await expect(page.getByRole('button', { name: 'Save version', exact: true })).toBeEnabled()
-  await page.screenshot({ path: testInfo.outputPath('rules-editor.png'), animations: 'disabled' })
+  const graph = page.locator('.rule-graph')
+  await expect(graph.locator('.graph-link-split')).toHaveCount(1)
+  await expect(graph.locator('.graph-link-merge')).toHaveCount(1)
+  await expect(graph.locator('.node-card .branches')).toHaveCount(0)
+  const originalWidth = (await graph.locator('.node-card').first().boundingBox())!.width
+  await graph.getByRole('button', { name: 'Zoom out', exact: true }).click()
+  await expect.poll(async () => (await graph.locator('.node-card').first().boundingBox())!.width).toBeLessThan(originalWidth)
+  await graph.getByRole('button', { name: 'Fit', exact: true }).click()
+  await expect(graph.getByText('End', { exact: true })).toBeVisible()
+  await graph.screenshot({ path: testInfo.outputPath('rules-editor.png'), animations: 'disabled' })
+  await page.screenshot({ path: testInfo.outputPath('rules-editor-page.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: 'Edit Acknowledge the message', exact: true }).click()
+  await expect(page.getByRole('complementary', { name: 'Step', exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('rules-node-settings.png'), animations: 'disabled' })
   expect(pageErrors).toEqual([])
   await expectSingleScroll(page)
 })

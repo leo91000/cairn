@@ -427,19 +427,11 @@ onBeforeUnmount(() => {
         :agent-name="agentName"
       />
     </section>
-    <div v-if="definition" class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_420px] gap-6 pt-5 max-[1100px]:grid-cols-1">
+    <div v-if="definition" class="grid min-h-0 flex-1 gap-6 pt-5" :class="wide && selectedNode ? 'grid-cols-[minmax(0,1fr)_360px]' : 'grid-cols-1'">
       <div class="min-h-0 overflow-y-auto pr-1 pb-16 [scrollbar-width:thin]">
-        <div class="mx-auto grid max-w-190 gap-4">
-          <textarea
-            v-model="definition.description"
-            rows="1"
-            class="min-h-5! w-full resize-none border-0! bg-transparent! p-0! text-sm text-muted shadow-none! outline-none"
-            placeholder="Add a description (optional)"
-            aria-label="Description"
-          />
-
+        <div class="mx-auto grid max-w-none gap-4">
           <!-- When -->
-          <section class="trigger-card grid grid-cols-2 gap-4 rounded-[22px] border border-line bg-raised p-4 max-[700px]:grid-cols-1" aria-label="When">
+          <section class="trigger-card grid grid-cols-2 gap-3 rounded-[18px] border border-line bg-raised p-3 max-[700px]:grid-cols-1" aria-label="When">
             <div class="flex items-start gap-3">
               <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-ink text-canvas"><Icon :name="Zap" :size="19" /></span>
               <div class="min-w-0 flex-1">
@@ -461,17 +453,20 @@ onBeforeUnmount(() => {
                     </option>
                   </optgroup>
                 </select>
-                <p v-if="hook" class="m-0! mt-1.5! text-xs text-muted">
-                  {{ hook.description }}
-                </p>
-                <div v-if="payloadFields.length" class="mt-2.5 flex flex-wrap gap-1.5" aria-label="What the event carries">
-                  <span
-                    v-for="field in payloadFields.slice(0, 10)"
-                    :key="field.expression"
-                    class="rounded-md bg-hover px-2 py-0.5 font-mono text-2xs text-muted"
-                    :title="field.description"
-                  >{{ field.label }}</span>
-                </div>
+                <details v-if="payloadFields.length || hook" class="mt-1 text-xs text-muted">
+                  <summary>Event fields</summary>
+                  <p v-if="hook" class="m-0! my-2!">
+                    {{ hook.description }}
+                  </p>
+                  <div class="mt-2 flex flex-wrap gap-1.5" aria-label="What the event carries">
+                    <span
+                      v-for="field in payloadFields.slice(0, 10)"
+                      :key="field.expression"
+                      class="rounded-md bg-hover px-2 py-0.5 font-mono text-2xs text-muted"
+                      :title="field.description"
+                    >{{ field.label }}</span>
+                  </div>
+                </details>
               </div>
               <Icon :name="Webhook" :size="18" class="mt-1 text-muted" />
             </div>
@@ -492,9 +487,6 @@ onBeforeUnmount(() => {
                     </option>
                   </select>
                 </div>
-                <p class="m-0! mt-1.5! text-xs text-muted">
-                  Its grants decide which events reach the rule and which tools it calls. It does not work by itself.
-                </p>
               </div>
             </div>
             <p v-for="problem in general.filter(entry => entry.path.startsWith('/trigger') || entry.path.startsWith('/executionAgentId'))" :key="problem.path + problem.message" class="col-span-full m-0! mt-3! flex items-start gap-1.5 text-xs font-semibold text-coral">
@@ -515,9 +507,6 @@ onBeforeUnmount(() => {
 
           <!-- Then -->
           <section aria-label="Then">
-            <p class="m-0! mb-1! pl-1 text-xs font-bold tracking-wide text-muted uppercase">
-              Then
-            </p>
             <RuleFlow
               :nodes="definition.steps"
               container="/steps"
@@ -539,6 +528,14 @@ onBeforeUnmount(() => {
               {{ problem.message }}
             </p>
           </section>
+
+          <textarea
+            v-model="definition.description"
+            rows="1"
+            class="min-h-5! w-full resize-none border-0! bg-transparent! p-0! text-sm text-muted shadow-none! outline-none"
+            placeholder="Add a description (optional)"
+            aria-label="Description"
+          />
 
           <!-- Limits -->
           <section class="rounded-[22px] border border-line bg-raised p-4" aria-label="Limits">
@@ -576,7 +573,7 @@ onBeforeUnmount(() => {
           </p>
         </div>
       </div>
-      <aside v-if="wide" class="min-h-0 overflow-y-auto rounded-[22px] border border-line bg-raised p-5 [scrollbar-width:thin]" aria-label="Step">
+      <aside v-if="wide && selectedNode" class="min-h-0 overflow-y-auto rounded-[22px] border border-line bg-raised p-5 [scrollbar-width:thin]" aria-label="Step">
         <RuleStepEditor
           v-if="selectedNode && selected"
           :key="selected"
@@ -590,20 +587,6 @@ onBeforeUnmount(() => {
           @close="selected = null"
           @remove="remove(selected!)"
         />
-        <div v-else class="grid gap-3 text-sm text-muted">
-          <h2 class="m-0! font-heading text-lg font-bold text-ink">
-            Build the flow
-          </h2>
-          <p class="m-0!">
-            Add steps with <b class="text-ink">+</b>, then select a step to edit it here. Steps run from top to bottom; an <b class="text-ink">If</b> chooses one of its two paths.
-          </p>
-          <p class="m-0!">
-            Every value can be text with variables such as <code class="rounded bg-hover px-1">{{ '{' }}{{ '{' }}payload.author{{ '}' }}{{ '}' }}</code>, a fixed value, or a formula. The <b class="text-ink">x</b> button lists what the event and earlier steps provide.
-          </p>
-          <p v-if="!problems.length && definition.steps.length" class="m-0! flex items-center gap-1.5 font-semibold text-success">
-            <Icon :name="CircleCheck" :size="15" />The rule is ready to save.
-          </p>
-        </div>
       </aside>
     </div>
     <p v-else-if="!error" class="mt-6 text-sm text-muted" role="status">

@@ -979,3 +979,7 @@ Web and Android identify a `job_finished` wait as background work and show its
 exit status, elapsed duration and bounded log tail. Both use the same durable
 wait observation and retain pause/stop behavior. No platform-only control is
 introduced.
+
+### Rule graph editor
+
+Rules use connected nodes on web and Android. Conditions split into labelled Then/Otherwise (Alors/Sinon) paths that rejoin before the next step; loops have separate next-item and finished paths. Add controls sit on the connections. Selecting a node opens its properties in the desktop side panel or native/mobile sheet. Both clients provide zoom and fit-to-width, with horizontal panning for wide graphs; the editor retains one vertical scroll. Secondary move/delete actions use hover/focus controls on web and a native overflow menu on Android. This changes presentation only: both clients save the same rule tree through the existing rules APIs and installation tools.
