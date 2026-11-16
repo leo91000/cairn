@@ -50,6 +50,8 @@ internal fun RuleValueEditor(
 ) {
     val held = value as? JsonObject ?: templateValue()
     val mode = held.text("type").ifBlank { "template" }
+    var literalSelection by
+        remember(mode, schema, expects) { mutableStateOf<TextFieldValue?>(null) }
     var picking by remember { mutableStateOf(false) }
     var browsing by remember { mutableStateOf(false) }
     val text =
@@ -121,6 +123,7 @@ internal fun RuleValueEditor(
                 schema,
                 held["value"] ?: JsonNull,
                 change = { change(literalRuleValue(it)) },
+                selectionChanged = { literalSelection = it },
             )
         else if (mode == "literal" && expects in setOf("number", "integer"))
             RuleNumericField(held["value"] ?: JsonNull, expects == "integer", label) {
@@ -248,7 +251,8 @@ internal fun RuleValueEditor(
                                         (fixedValue !is JsonPrimitive || !fixedValue.isString)
                                 val typedSchema =
                                     schema != null &&
-                                        schemaKind(schema, fixedValue ?: JsonNull) != "string"
+                                        schemaKind(schema, fixedValue ?: JsonNull) !in
+                                            setOf("string", "json")
                                 val typed =
                                     expects in setOf("number", "integer", "boolean") ||
                                         typedLiteral ||
@@ -261,22 +265,36 @@ internal fun RuleValueEditor(
                                 val insertion =
                                     if (nextFormula) variable.expression
                                     else "{{${variable.expression}}}"
+                                val selectedLiteral = literalSelection?.takeIf {
+                                    runCatching { wireJson.parseToJsonElement(it.text) }
+                                        .getOrNull() == fixedValue
+                                }
+                                val inputSelection = selectedLiteral ?: editorInput
                                 val jsonString =
                                     mode == "literal" &&
-                                        expects == "json" &&
+                                        (expects == "json" ||
+                                            (schema != null &&
+                                                schemaKind(schema, fixedValue ?: JsonNull) ==
+                                                    "json")) &&
                                         (fixedValue as? JsonPrimitive)?.isString == true
                                 val content =
                                     if (jsonString) fixedValue!!.jsonPrimitive.content else text
                                 val start =
                                     if (replace) 0
                                     else if (jsonString)
-                                        jsonStringCaret(editorInput.text, editorInput.selection.min)
-                                    else editorInput.selection.min
+                                        jsonStringCaret(
+                                            inputSelection.text,
+                                            inputSelection.selection.min,
+                                        )
+                                    else inputSelection.selection.min
                                 val end =
                                     if (replace) content.length
                                     else if (jsonString)
-                                        jsonStringCaret(editorInput.text, editorInput.selection.max)
-                                    else editorInput.selection.max
+                                        jsonStringCaret(
+                                            inputSelection.text,
+                                            inputSelection.selection.max,
+                                        )
+                                    else inputSelection.selection.max
                                 val nextText = content.take(start) + insertion + content.drop(end)
                                 editorInput =
                                     TextFieldValue(nextText, TextRange(start + insertion.length))
@@ -371,6 +389,7 @@ internal fun RuleLiteralEditor(
     value: JsonElement,
     change: (JsonElement) -> Unit,
     depth: Int = 0,
+    selectionChanged: ((TextFieldValue) -> Unit)? = null,
 ) {
     val options = (schema["enum"] as? JsonArray).orEmpty()
     val kind = schemaKind(schema, value)
@@ -462,21 +481,28 @@ internal fun RuleLiteralEditor(
             fun display(value: JsonElement): String =
                 (value as? JsonPrimitive)?.takeIf { it.isString && kind != "json" }?.content
                     ?: value.toString()
-            var draft by remember(kind) { mutableStateOf(display(value)) }
+            var draft by remember(kind) { mutableStateOf(TextFieldValue(display(value))) }
             var emitted by remember(kind) { mutableStateOf(value) }
             LaunchedEffect(value) {
                 if (value != emitted) {
-                    draft = display(value)
+                    draft = TextFieldValue(display(value))
                     emitted = value
                 }
             }
             OutlinedTextField(
                 draft,
-                { raw ->
-                    draft = raw
-                    val parsed = runCatching { wireJson.parseToJsonElement(raw) }.getOrNull()
-                    emitted = parsed?.takeIf { matchesJson(it) } ?: JsonPrimitive(raw)
-                    change(emitted)
+                { input ->
+                    val textChanged = input.text != draft.text
+                    draft = input
+                    selectionChanged?.invoke(input)
+                    if (textChanged) {
+                        val parsed = runCatching {
+                            wireJson.parseToJsonElement(input.text)
+                        }
+                            .getOrNull()
+                        emitted = parsed?.takeIf { matchesJson(it) } ?: JsonPrimitive(input.text)
+                        change(emitted)
+                    }
                 },
                 Modifier.fillMaxWidth(),
                 label = {

@@ -5,7 +5,12 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
-import { referencedToolRulesFixture, rulesFixture, scalarRulesFixture } from './rules-fixture'
+import {
+  referencedToolRulesFixture,
+  rulesFixture,
+  scalarRulesFixture,
+  untypedTextRulesFixture,
+} from './rules-fixture'
 
 test('starting an agent associates the event author and clears optional values', async ({ page, workspace }) => {
   const fixture = await rulesFixture(workspace)
@@ -48,38 +53,40 @@ test('starting an agent associates the event author and clears optional values',
   expect(cleared.key ?? null).toBeNull()
 })
 
-test('schema text selection is replaced by a variable and the saved message executes', async ({ page, workspace }) => {
-  const fixture = await rulesFixture(workspace)
-  const call = fixture.definition.steps[0].then[0]
-  const rule = await workspace.api('/api/hook-rules', 'POST', {
-    definition: { ...fixture.definition, name: 'Selected message text', steps: [{ ...call, action: { ...call.action, input: { ...call.action.input, text: { type: 'literal', value: 'Hello Alice!' } } } }] },
-    enabled: true,
+for (const free of [false, true]) {
+  test(`${free ? 'free ' : ''}schema text selection is replaced by a variable and the saved message executes`, async ({ page, workspace }) => {
+    const fixture = await (free ? untypedTextRulesFixture(workspace) : rulesFixture(workspace))
+    const call = fixture.definition.steps[0].then[0]
+    const rule = await workspace.api('/api/hook-rules', 'POST', {
+      definition: { ...fixture.definition, name: 'Selected message text', steps: [{ ...call, action: { ...call.action, input: { ...call.action.input, text: { type: 'literal', value: 'Hello Alice!' } } } }] },
+      enabled: true,
+    })
+    await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+    await signIn(page)
+    await page.getByRole('button', { name: 'Edit Acknowledge the message', exact: true }).click()
+    const message = page.getByRole('textbox', { name: free ? 'Message (JSON)' : 'Message', exact: true })
+    await expect(message).toHaveValue(free ? JSON.stringify('Hello Alice!') : 'Hello Alice!')
+    await message.evaluate((element: HTMLInputElement | HTMLTextAreaElement, offset: number) => {
+      element.focus()
+      element.setSelectionRange(6 + offset, 11 + offset)
+    }, free ? 1 : 0)
+    await page.getByRole('button', { name: 'Insert a variable into Message', exact: true }).click()
+    await page.getByRole('dialog', { name: 'Variables for Message', exact: true }).getByRole('button').filter({ has: page.getByText('author', { exact: true }) }).click()
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('Hello {{payload.author}}!')
+    await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+    await page.getByRole('button', { name: 'Save version', exact: true }).click()
+    await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
+    expect((await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0].action.input.text).toEqual({ type: 'template', text: 'Hello {{payload.author}}!' })
+    workspace.service.emitHook(fixture.instanceId, 'message', { author: 'alice', channel: 'support', content: 'Selection' }, 'selected-message')
+    let triggering: any
+    await expect.poll(async () => {
+      triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
+      return triggering?.status
+    }).toBe('completed')
+    const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
+    expect(JSON.stringify(history.steps[0].result)).toContain('Hello alice!')
   })
-  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
-  await signIn(page)
-  await page.getByRole('button', { name: 'Edit Acknowledge the message', exact: true }).click()
-  const message = page.getByRole('textbox', { name: 'Message', exact: true })
-  await expect(message).toHaveValue('Hello Alice!')
-  await message.evaluate((element: HTMLInputElement | HTMLTextAreaElement) => {
-    element.focus()
-    element.setSelectionRange(6, 11)
-  })
-  await page.getByRole('button', { name: 'Insert a variable into Message', exact: true }).click()
-  await page.getByRole('dialog', { name: 'Variables for Message', exact: true }).getByRole('button').filter({ has: page.getByText('author', { exact: true }) }).click()
-  await expect(message).toHaveValue('Hello {{payload.author}}!')
-  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
-  await page.getByRole('button', { name: 'Save version', exact: true }).click()
-  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).version).toBe(2)
-  expect((await workspace.api(`/api/hook-rules/${rule.id}`)).definition.steps[0].action.input.text).toEqual({ type: 'template', text: 'Hello {{payload.author}}!' })
-  workspace.service.emitHook(fixture.instanceId, 'message', { author: 'alice', channel: 'support', content: 'Selection' }, 'selected-message')
-  let triggering: any
-  await expect.poll(async () => {
-    triggering = (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]
-    return triggering?.status
-  }).toBe('completed')
-  const history = await workspace.api(`/api/hook-rule-triggerings/${triggering.id}`)
-  expect(JSON.stringify(history.steps[0].result)).toContain('Hello alice!')
-})
+}
 
 test('a tool with a referenced root schema exposes its fields and executes the saved values', async ({ page, workspace }) => {
   const fixture = await referencedToolRulesFixture(workspace)

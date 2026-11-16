@@ -21,7 +21,11 @@ export function referencedToolRulesFixture(workspace: Workspace) {
   return installRulesFixture(workspace, undefined, true)
 }
 
-async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' | 'boolean', referencedTool = false) {
+export function untypedTextRulesFixture(workspace: Workspace) {
+  return installRulesFixture(workspace, undefined, false, true)
+}
+
+async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' | 'boolean', referencedTool = false, freeMessage = false) {
   const prepare = async (path: string, body: unknown): Promise<any> => {
     const started = await workspace.api(path, 'POST', body)
     if (!started.operation)
@@ -117,7 +121,17 @@ async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' 
             inputSchema: { type: 'object', $ref: '#/$defs/Input', $defs: { Input: manifest.tools[0].inputSchema } },
           }],
         }
-      : manifest
+      : freeMessage
+        ? {
+            ...manifest,
+            id: 'rules-any-text',
+            tools: [{
+              ...manifest.tools[0],
+              name: 'rules_any_text_post_message',
+              inputSchema: { ...manifest.tools[0].inputSchema, properties: { ...manifest.tools[0].inputSchema.properties, text: { title: 'Message' } } },
+            }],
+          }
+        : manifest
   const installed = await prepare('/api/plugins/packages', {
     manifest: activeManifest,
     manifestFormat: 'json',

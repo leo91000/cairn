@@ -70,6 +70,7 @@ const literalTextSchema = computed(() => {
   return schema.type === 'string' && !schema.enum?.length
 })
 
+const literalEditor = ref<{ field?: HTMLInputElement | HTMLTextAreaElement }>()
 const literalDraft = ref<{ value: RuleValue, text: string, expects: string } | null>(null)
 const text = computed({
   get: () => {
@@ -216,7 +217,8 @@ const groups = computed(() => {
 })
 
 function insert(option: VariableOption) {
-  const element = field.value
+  const literalElement = literalEditor.value?.field
+  const element = field.value ?? literalElement
   const current = text.value
   const schemaType = props.schema ? resolveRuleSchema(props.schema, props.schemaRoot ?? props.schema).type : null
   const typedSchema = schemaType != null && schemaType !== 'string'
@@ -225,12 +227,13 @@ function insert(option: VariableOption) {
   const replace = props.expects === 'field' || (typed && mode.value !== 'formula')
   const nextMode = ['field', 'formula'].includes(props.expects) || replace ? 'formula' : mode.value === 'literal' ? 'template' : mode.value
   const insertion = nextMode === 'template' ? `{{${option.expression}}}` : option.expression
-  const jsonString = model.value.type === 'literal' && props.expects === 'json' && typeof model.value.value === 'string'
+  const jsonString = model.value.type === 'literal' && typeof model.value.value === 'string'
+    && (props.expects === 'json' || (!!literalElement && element === literalElement))
   const content = jsonString && model.value.type === 'literal' ? model.value.value as string : current
   const selectionStart = element?.selectionStart ?? current.length
   const selectionEnd = element?.selectionEnd ?? current.length
-  const start = replace ? 0 : jsonString ? jsonStringCaret(current, selectionStart) : selectionStart
-  const end = replace ? content.length : jsonString ? jsonStringCaret(current, selectionEnd) : selectionEnd
+  const start = replace ? 0 : jsonString ? jsonStringCaret(element?.value ?? current, selectionStart) : selectionStart
+  const end = replace ? content.length : jsonString ? jsonStringCaret(element?.value ?? current, selectionEnd) : selectionEnd
   const value = `${content.slice(0, start)}${insertion}${content.slice(end)}`
   model.value = nextMode === 'formula' ? { type: 'formula', expression: value } : { type: 'template', text: value }
   picking.value = false
@@ -306,6 +309,7 @@ const fieldLabel = computed(() => props.variables.find(option => option.expressi
         class="grid gap-2"
       >
         <RuleLiteralFields
+          ref="literalEditor"
           :model-value="model.type === 'literal' ? model.value : null"
           :schema="schema"
           :root="schemaRoot ?? schema"

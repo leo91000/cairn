@@ -19,6 +19,8 @@ const props = defineProps<{
 }>()
 const model = defineModel<unknown>({ required: true })
 const fieldId = useId()
+const textField = ref<HTMLInputElement | HTMLTextAreaElement>()
+defineExpose({ field: textField })
 const resolved = computed(() => resolveRuleSchema(props.schema, props.root ?? props.schema))
 const fields = computed(() => Object.entries<any>(resolved.value.properties ?? {}))
 const object = computed<Record<string, unknown>>(() => model.value && typeof model.value === 'object' && !Array.isArray(model.value) ? model.value as Record<string, unknown> : {})
@@ -143,6 +145,7 @@ function setItem(index: number, value: unknown) {
   </div>
   <div v-else-if="resolved.type === 'object' || resolved.type === 'array' || untyped" class="grid gap-1.5">
     <textarea
+      ref="textField"
       :value="jsonDraft"
       :aria-label="`${label} (${untyped ? 'JSON' : `JSON ${jsonNoun}`})`"
       rows="4"
@@ -154,6 +157,7 @@ function setItem(index: number, value: unknown) {
   </div>
   <textarea
     v-else-if="resolved.type === 'string' && (resolved.maxLength ?? 0) > 200"
+    ref="textField"
     :value="typeof model === 'string' ? model : ''"
     :aria-label="label"
     rows="3"
@@ -161,6 +165,7 @@ function setItem(index: number, value: unknown) {
   />
   <input
     v-else-if="resolved.type === 'integer' || resolved.type === 'number'"
+    ref="textField"
     :value="numberDraft"
     :aria-label="label"
     inputmode="decimal"
@@ -168,6 +173,7 @@ function setItem(index: number, value: unknown) {
   >
   <input
     v-else
+    ref="textField"
     :value="model === null ? '' : String(model ?? '')"
     :aria-label="label"
     :inputmode="resolved.type === 'integer' || resolved.type === 'number' ? 'decimal' : 'text'"

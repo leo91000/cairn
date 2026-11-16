@@ -407,7 +407,11 @@ abstract class RulesEditorCases {
     fun aNullableSchemaStringReplacesTheSelectedTextWhenInsertingAVariable() =
         insertSchemaStringVariable(true)
 
-    private fun insertSchemaStringVariable(nullable: Boolean) {
+    @Test
+    fun aFreeSchemaStringReplacesTheSelectedTextWhenInsertingAVariable() =
+        insertSchemaStringVariable(false, true)
+
+    private fun insertSchemaStringVariable(nullable: Boolean, untyped: Boolean = false) {
         var value by mutableStateOf(literalRuleValue(JsonPrimitive("Hello Alice!")))
         compose.setContent {
             CairnTheme {
@@ -417,22 +421,24 @@ abstract class RulesEditorCases {
                     listOf(RuleVariable("Événement", "payload.author", "Auteur", "string", "")),
                     { value = it },
                     schema =
-                        ruleObject(
-                            "type" to
-                                if (nullable)
-                                    JsonArray(
-                                        listOf(JsonPrimitive("string"), JsonPrimitive("null"))
-                                    )
-                                else JsonPrimitive("string"),
-                            "maxLength" to JsonPrimitive(300),
-                        ),
+                        if (untyped) JsonObject(emptyMap())
+                        else
+                            ruleObject(
+                                "type" to
+                                    if (nullable)
+                                        JsonArray(
+                                            listOf(JsonPrimitive("string"), JsonPrimitive("null"))
+                                        )
+                                    else JsonPrimitive("string"),
+                                "maxLength" to JsonPrimitive(300),
+                            ),
                 )
             }
         }
         compose
             .onNode(hasSetTextAction())
             .performClick()
-            .performTextInputSelection(TextRange(6, 11))
+            .performTextInputSelection(if (untyped) TextRange(7, 12) else TextRange(6, 11))
         compose.onNodeWithText("+ Insérer une variable").performClick()
         compose.onNodeWithText("Utiliser Auteur").performClick()
         compose.runOnIdle { assertEquals(templateValue("Hello {{payload.author}}!"), value) }
