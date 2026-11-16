@@ -61,3 +61,16 @@ it('waits for the sheet and scroll viewport even when the button center is uncha
   expect(ready('<hierarchy/>', 'Modifier')).toBeNull()
   expect(ready(settled, 'Modifier')).toBeNull()
 })
+
+it('targets the clickable card around a scaled graph caption', () => {
+  // Geometry recorded from the actual 54% Android graph, not an enlarged label.
+  const document = `<node clickable="true" enabled="true" bounds="[229,993][491,1084]">
+    <node text="Si / sinon" enabled="true" clickable="false" bounds="[298,1009][371,1030]"/>
+  </node>`
+  expect(nativePositionIn(document, 'Si / sinon')).toEqual([360, 1038])
+  const ready = createNativeTargetTracker()
+  expect(ready(document, 'Si / sinon')).toBeNull()
+  expect(ready(document, 'Si / sinon')).toEqual([360, 1038])
+  expect(nativePositionIn(document.replace('enabled="true" clickable="false"', 'enabled="false" clickable="false"'), 'Si / sinon')).toBeNull()
+  expect(nativePositionIn('<node text="Si / sinon" bounds="[298,1009][371,1030]"/>', 'Si / sinon')).toBeNull()
+})

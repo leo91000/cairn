@@ -307,7 +307,7 @@ test('a native member selects people and a channel through the execution agent',
     headers: { 'origin': workspace.url, 'x-csrf-token': owner.csrf },
     data: { email },
   })
-  expect(invitation.ok()).toBe(true)
+  expect(invitation.ok(), invitation.ok() ? '' : (await invitation.json()).error).toBe(true)
   const memberContext = await browser.newContext({ serviceWorkers: 'block' })
   try {
     const member = await memberContext.newPage()

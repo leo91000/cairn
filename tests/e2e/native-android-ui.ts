@@ -48,11 +48,23 @@ function editableAncestor(node: NativeNode): NativeNode | undefined {
   return node.parent ? editableAncestor(node.parent) : undefined
 }
 
+function clickableAncestor(node: NativeNode): NativeNode | undefined {
+  if (!node.enabled)
+    return undefined
+  if (node.attributes.clickable === 'true')
+    return node
+  return node.parent ? clickableAncestor(node.parent) : undefined
+}
+
 function matchingNodes(document: string, text: string, preferEditable: boolean): NativeNode[] {
   const matches = nativeNodes(document).filter(node => [node.attributes.text, node.attributes['content-desc'], node.attributes.hint].includes(text))
   // A field description/label may be a child of EditText, while a separate
   // caption with identical text is not an editable target at all.
-  return preferEditable ? matches.map(editableAncestor).filter((node): node is NativeNode => !!node) : matches
+  return preferEditable
+    ? matches.map(editableAncestor).filter((node): node is NativeNode => !!node)
+    // A scaled caption may be tiny while its surrounding card is still an
+    // accessible target. Track and touch the actual control's full geometry.
+    : matches.map(node => clickableAncestor(node) ?? node)
 }
 
 export function nativeInputFocused(document: string, label: string): boolean {
