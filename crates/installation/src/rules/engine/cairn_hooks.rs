@@ -575,7 +575,10 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                 }
                 watch.begin_work(at);
             }
-            "retry.scheduled" => watch.failed = None,
+            "retry.scheduled" => {
+                watch.failed = None;
+                watch.error = None;
+            }
             "turn.failed" if watch.open => {
                 watch.failed = Some(id);
                 watch.error =
@@ -590,11 +593,9 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
                 let outcome = if text == "cancelled" {
                     "cancelled"
                 } else {
-                    // A run that fails without a failed turn, such as one over its time
-                    // limit, says why on its status.
-                    if watch.error.is_none() {
-                        watch.error = failure(&payload["error"]["message"]);
-                    }
+                    // The terminal cause overrides a transient provider error.
+                    // Keep it on the event so replay cannot borrow a later turn's error.
+                    watch.error = failure(&payload["error"]["message"]).or(watch.error.take());
                     "failed"
                 };
                 watch.end(&mut emissions, outcome);
@@ -629,8 +630,10 @@ fn advance(db: &Db<'_>, chat: &str, at: i64) -> Result<Option<Advanced>> {
         };
         if let Some(outcome) = outcome {
             watch.ask(&mut emissions, &questions, None);
-            if outcome == "failed" && watch.error.is_none() {
-                watch.error = failure(&state["error"]);
+            if outcome == "failed"
+                && matches!(status, Some(RunStatus::Failed | RunStatus::Interrupted))
+            {
+                watch.error = failure(&state["error"]).or(watch.error.take());
             }
             watch.end(&mut emissions, outcome);
         }

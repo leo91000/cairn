@@ -2031,6 +2031,160 @@ async fn a_status_only_failure_reports_its_error() {
 }
 
 #[tokio::test]
+async fn terminal_status_replaces_the_last_attempts_transient_failure() {
+    use common::run_fixture::RunFixture;
+
+    let (f, ended, _, run) = retrying_conversation().await;
+    event(&f, &run, "turn.failed", "Still disconnected", None).await;
+    let final_error = "Run exceeded its time limit.";
+    f.s.store
+        .change_run_fixture(
+            &run,
+            json!({
+                "status": "failed", "error": final_error, "recoveryPending": false,
+            }),
+        )
+        .await
+        .unwrap();
+    event(
+        &f,
+        &run,
+        "status",
+        "failed",
+        Some(json!({
+            "error": { "message": final_error },
+        })),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(values(&f, &ended).await["error"], final_error);
+}
+
+#[tokio::test]
+async fn terminal_run_state_replaces_the_last_attempts_transient_failure() {
+    use common::run_fixture::RunFixture;
+
+    let (f, ended, _, run) = retrying_conversation().await;
+    event(&f, &run, "turn.failed", "Still disconnected", None).await;
+    let final_error = "Working files were preserved because finalization failed.";
+    f.s.store
+        .change_run_fixture(
+            &run,
+            json!({
+                "status": "failed", "error": final_error, "recoveryPending": false,
+            }),
+        )
+        .await
+        .unwrap();
+    // Recovery can settle the run without a terminal provider/status event.
+    engine::tick(&f.s).await.unwrap();
+    assert_eq!(values(&f, &ended).await["error"], final_error);
+}
+
+async fn retrying_conversation() -> (Fixture, String, String, String) {
+    let f = granted().await;
+    rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
+    let ended = rule_on(
+        &f,
+        OWNER,
+        cairn("ended"),
+        json!([remember(
+            "error",
+            "error",
+            "has(payload.error) ? payload.error : \"\""
+        )]),
+        limits(),
+    )
+    .await;
+    emit(&f, "start", message("alice", "hello")).await;
+    engine::tick(&f.s).await.unwrap();
+    let chat = bound(&f, OWNER, "chat:alice").await.unwrap();
+    let run = launched(&f, &chat).await;
+    event(
+        &f,
+        &run,
+        "chat.user",
+        "",
+        Some(json!({ "messageId": first_message(&f, &chat).await })),
+    )
+    .await;
+    event(&f, &run, "turn.started", "", None).await;
+    event(&f, &run, "turn.failed", "Temporary disconnect", None).await;
+    event(
+        &f,
+        &run,
+        "retry.scheduled",
+        "Recovering the connection",
+        None,
+    )
+    .await;
+    (f, ended, chat, run)
+}
+
+#[tokio::test]
+async fn expired_recovery_keeps_its_own_error_after_a_later_resume() {
+    use common::run_fixture::RunFixture;
+
+    let (f, ended, chat, run) = retrying_conversation().await;
+    let now = cairn_installation::config::now();
+    f.s.store.change_run_fixture(&run, json!({
+        "status": "queued", "recoveryPending": false,
+        "retry": {
+            "attempt": 1, "limit": 5, "nextAttemptAt": now - 1,
+            "startedAt": now - 600_001, "deadlineAt": now - 1,
+            "cause": { "kind": "connection", "message": "Temporary disconnect", "startup": true },
+        },
+    })).await.unwrap();
+    // Exercise the worker's real expiry producer; it must not launch an adapter.
+    f.s.worker.tick(&f.s).await.unwrap();
+    let failed = f.s.store.run(&run).await.unwrap();
+    assert_eq!(failed["status"], "failed");
+    let expired_error = text(&failed, "error").to_owned();
+    assert!(expired_error.contains("10-minute limit"), "{failed}");
+
+    // Reuse the run for a later attempt before the hook observer reads either
+    // boundary. Its current error must never replace the historical expiry.
+    let token = common::relay_fixture::grant(&f.s, &["read", "write", "run", "manage"]).await;
+    let resumed = f
+        .mcp("/mcp", &token, "resume_chat", json!({ "chatId": chat }))
+        .await;
+    assert_ne!(resumed["result"]["isError"], true, "{resumed}");
+    let later_error = "A later attempt could not authenticate.";
+    f.s.store
+        .change_run_fixture(
+            &run,
+            json!({
+                "status": "failed", "error": later_error, "recoveryPending": false,
+            }),
+        )
+        .await
+        .unwrap();
+    event(
+        &f,
+        &run,
+        "status",
+        "failed",
+        Some(json!({
+            "error": { "message": later_error },
+        })),
+    )
+    .await;
+    engine::tick(&f.s).await.unwrap();
+    let history = triggerings(&f, &ended).await;
+    assert_eq!(history.len(), 2, "{history:?}");
+    let original = history
+        .iter()
+        .find(|entry| entry["event"]["payload"]["origin"]["kind"] == "rule")
+        .unwrap();
+    assert_eq!(original["event"]["payload"]["error"], expired_error);
+    let resumed = history
+        .iter()
+        .find(|entry| entry["event"]["payload"]["origin"]["kind"] == "resume")
+        .unwrap();
+    assert_eq!(resumed["event"]["payload"]["error"], later_error);
+}
+
+#[tokio::test]
 async fn a_cairn_hook_over_the_recorded_data_budget_is_counted_as_not_admitted() {
     let f = granted().await;
     rule_on(&f, OWNER, plugin(&f), json!([start("start")]), limits()).await;
