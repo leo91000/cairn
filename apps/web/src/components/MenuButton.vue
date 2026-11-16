@@ -22,6 +22,8 @@ const props = withDefaults(defineProps<{
   width?: number
   /** Ids of content (such as the header slot) that screen readers announce with the menu. */
   describedby?: string
+  /** Keep a menu at screen scale when its trigger lives in a zoomed graph. */
+  teleport?: boolean
 }>(), { placement: 'below', align: 'end', width: 224 })
 const emit = defineEmits<{ open: [], close: [] }>()
 const trigger = ref<HTMLButtonElement>()
@@ -212,28 +214,30 @@ defineExpose({ show, hide, trigger })
   >
     <slot name="trigger" :open="open" />
   </button>
-  <!-- A header (what the menu is about) sits beside the menu, which may own only its items. -->
-  <div
-    ref="menu"
-    popover="manual"
-    tabindex="-1"
-    :style="{ width: `${width}px`, ...position }"
-    class="fixed inset-auto m-0 overflow-y-auto overscroll-contain rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003] outline-none"
-    @keydown="menuKeydown"
-    @click.stop
-  >
-    <template v-if="open">
-      <slot name="header" />
-      <div
-        :id="id"
-        role="menu"
-        :aria-label="menuLabel ?? label"
-        :aria-describedby="describedby"
-      >
-        <slot :select="select" :close="hide" />
-      </div>
-    </template>
-  </div>
+  <Teleport to="body" :disabled="!teleport">
+    <!-- A header (what the menu is about) sits beside the menu, which may own only its items. -->
+    <div
+      ref="menu"
+      popover="manual"
+      tabindex="-1"
+      :style="{ width: `${width}px`, ...position }"
+      class="fixed inset-auto m-0 overflow-y-auto overscroll-contain rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003] outline-none"
+      @keydown="menuKeydown"
+      @click.stop
+    >
+      <template v-if="open">
+        <slot name="header" />
+        <div
+          :id="id"
+          role="menu"
+          :aria-label="menuLabel ?? label"
+          :aria-describedby="describedby"
+        >
+          <slot :select="select" :close="hide" />
+        </div>
+      </template>
+    </div>
+  </Teleport>
 </template>
 
 <style>

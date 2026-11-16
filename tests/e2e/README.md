@@ -14,6 +14,38 @@ pnpm test:e2e
 
 Set `CAIRN_BEACON_TEST_DATABASE_URL` to a disposable Postgres database.
 
+## Rules in the native Android app
+
+`rules.spec.ts` and `rules-editor.spec.ts` exercise the visual editor, history,
+creator controls and member visibility against the real services on Chromium and
+WebKit. The `journeys-rules`, `layout-webkit-rules`, `journeys-rule-editor` and
+`layout-webkit-rule-editor` projects each own their installation and its production
+rate limiter. Splitting the list and editor journeys, and running typed-operand and author editor cases in a
+fresh Playwright process, keeps each fixture account within that limiter;
+the production limits are unchanged. The opt-in
+`rules-android` project drives the installed native app on a disposable Android 16
+emulator at 720 × 1280, density 320. It signs in through the actual email-code flow,
+edits a rule, uses its lifecycle controls and saves an integer wait. The services
+execute a local test plugin and use fixture mail delivery. The UI, execution
+records and captures come from the running applications. Captures go to the test
+output directory.
+
+With the normal browser binaries and disposable database ready:
+
+```sh
+CAIRN_BEACON_ORIGIN=http://localhost:4422 apps/android/gradlew -p apps/android :app:assembleDebug
+adb -s emulator-5580 install -r apps/android/app/build/outputs/apk/debug/app-debug.apk
+ANDROID_SERIAL=emulator-5580 CAIRN_RULES_ANDROID=1 CAIRN_RULES_ANDROID_RESET=1 pnpm test:e2e --project=rules-android --workers=1
+```
+
+The native journey pauses animations on that emulator for stable input and restores their original settings when its worker exits. Update prompts are postponed; no update is downloaded or installed. Native tap XML and coordinates are retained with the test artifacts.
+
+Use a disposable emulator: `CAIRN_RULES_ANDROID_RESET=1` clears its Cairn app data
+before this journey. Keep `ANDROID_HOME` set to the SDK. The default browser port
+base is 4322, making the Beacon origin `http://localhost:4422`; an overridden port
+base needs the corresponding APK origin. Component interactions remain covered
+by the shared `RulesEditorCases` on Robolectric and Android instrumentation.
+
 The relay/NAT browser scenarios write a bounded `*.phases.json` journal beside
 their reports. `testPhase` identifies the last entered operation; `cleanupPhase` and
 browser lifecycle events are recorded separately. An entered phase does not

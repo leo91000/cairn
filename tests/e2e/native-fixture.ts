@@ -52,6 +52,9 @@ export class NativeFixture {
     return JSON.parse(output).result ?? undefined
   }
 
+  /** Seeds the hook queue for engine/UI journeys; plugin_hooks tests cover transport validation. */
+  emitHook = (instanceId: string, hook: string, payload: Record<string, unknown>, externalId: string) => this.call('emitHook', instanceId, hook, payload, externalId)
+
   // Test-created agents explicitly grant access to the shared development runner.
   agent = (input: Record<string, unknown>): Agent => this.call('agent', {
     access: { projects: null, skills: null, mcps: null },

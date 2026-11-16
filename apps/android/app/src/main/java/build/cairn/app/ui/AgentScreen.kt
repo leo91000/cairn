@@ -575,6 +575,10 @@ private fun AgentPage(
             ) {
                 errors[current]?.let { InlineError(it) }
                 if (errorSection == current && current != null) saveError?.let { InlineError(it) }
+                if (!creating && current == null)
+                    TextButton(onClick = { navigate("rules?agent=${segment(agentId)}") }) {
+                        Text("Règles utilisant cet agent ›")
+                    }
                 when (current) {
                     null ->
                         AgentOverview(

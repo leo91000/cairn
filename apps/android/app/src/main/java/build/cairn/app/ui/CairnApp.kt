@@ -25,6 +25,7 @@ import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.*
+import androidx.navigation.navArgument
 import build.cairn.app.data.*
 import build.cairn.app.diagnostics.PerfConnection
 import build.cairn.app.diagnostics.PerfScreen
@@ -43,7 +44,8 @@ private fun focusedRoute(route: String) =
         route.startsWith("fil/run/") ||
         route.startsWith("agents/") ||
         route.startsWith("coding-agent-configuration/") ||
-        route == "search"
+        route == "search" ||
+        route.startsWith("rules/edit/")
 
 internal fun dockSelection(route: String): String =
     when {
@@ -308,10 +310,7 @@ private fun WorkspaceApp(
     }
     LaunchedEffect(targetChat, vm.api.cacheScope) {
         if (targetChat.isNotBlank() && targetCacheScope == vm.api.cacheScope) {
-            nav.navigate(
-                if (targetChat == INSTALLATION_NOTIFICATION_TARGET) "fil"
-                else "chat/${segment(targetChat)}"
-            ) {
+            nav.navigate(notificationRoute(targetChat)) {
                 // A pager may now display a different page from its route's starting id.
                 val pager = nav.currentDestination?.route
                 if (pager == "chat/{id}" || pager == "fil/run/{id}") {
@@ -522,6 +521,63 @@ private fun WorkspaceApp(
                                     openSettings = ::openSettings,
                                 )
                             }
+                            composable(
+                                "rules?agent={agent}&instance={instance}&rule={rule}",
+                                arguments =
+                                    listOf(
+                                        navArgument("agent") { defaultValue = "" },
+                                        navArgument("instance") { defaultValue = "" },
+                                        navArgument("rule") { defaultValue = "" },
+                                    ),
+                            ) { entry ->
+                                val agent = entry.arguments?.getString("agent").orEmpty()
+                                val instance = entry.arguments?.getString("instance").orEmpty()
+                                RulesScreen(
+                                    vm,
+                                    state,
+                                    entry.arguments?.getString("rule").orEmpty(),
+                                    agent,
+                                    instance,
+                                    openConversation = { nav.navigate("chat/${segment(it)}") },
+                                ) { id ->
+                                    nav.navigate(
+                                        "rules/edit/${id.ifBlank { "new" }}?agent=${segment(agent)}&instance=${segment(instance)}"
+                                    )
+                                }
+                            }
+                            composable(
+                                "rules/edit/{id}?agent={agent}&instance={instance}",
+                                arguments =
+                                    listOf(
+                                        navArgument("agent") { defaultValue = "" },
+                                        navArgument("instance") { defaultValue = "" },
+                                    ),
+                            ) { entry ->
+                                val id =
+                                    entry.arguments
+                                        ?.getString("id")
+                                        .orEmpty()
+                                        .takeUnless { it == "new" }
+                                        .orEmpty()
+                                RuleEditorScreen(
+                                    vm,
+                                    state,
+                                    id,
+                                    entry.arguments?.getString("agent").orEmpty(),
+                                    entry.arguments?.getString("instance").orEmpty(),
+                                    saved = { saved ->
+                                        nav.navigate("rules?rule=${segment(saved)}") {
+                                            popUpTo(
+                                                "rules/edit/{id}?agent={agent}&instance={instance}"
+                                            ) {
+                                                inclusive = true
+                                            }
+                                            launchSingleTop = true
+                                        }
+                                    },
+                                    back = { nav.popBackStack() },
+                                )
+                            }
                             composable("missions") {
                                 MissionsScreen(vm, state) { nav.navigate("run/$it") }
                             }
@@ -589,6 +645,9 @@ private fun WorkspaceApp(
                                         entry.arguments?.getString("id").orEmpty(),
                                         openChat = { nav.navigate("chat/$it") },
                                         openAgents = { nav.navigate("agents") },
+                                        openRules = {
+                                            nav.navigate("rules?instance=${segment(it)}")
+                                        },
                                     )
                                 }
                             if (state.isOwner)

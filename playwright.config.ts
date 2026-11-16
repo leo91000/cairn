@@ -15,6 +15,38 @@ export default defineConfig({
   reporter: [['list'], ['html', { open: 'never' }]],
   use: { trace: 'retain-on-failure', screenshot: 'only-on-failure', ...devices['Desktop Chrome'] },
   projects: [
+    ...(process.env.CAIRN_RULES_ANDROID === '1'
+      ? [{
+          name: 'rules-android',
+          testMatch: 'rules-android.spec.ts',
+          workers: 1,
+          use: { serviceWorkers: 'block' as const },
+        }]
+      : []),
+    { name: 'journeys-rules', testMatch: 'rules.spec.ts', use: { serviceWorkers: 'block' } },
+    {
+      name: 'layout-webkit-rules',
+      testMatch: 'rules.spec.ts',
+      use: {
+        browserName: 'webkit',
+        isMobile: true,
+        hasTouch: true,
+        viewport: { width: 390, height: 844 },
+        serviceWorkers: 'block',
+      },
+    },
+    { name: 'journeys-rule-editor', testMatch: 'rules-editor.spec.ts', use: { serviceWorkers: 'block' } },
+    {
+      name: 'layout-webkit-rule-editor',
+      testMatch: 'rules-editor.spec.ts',
+      use: {
+        browserName: 'webkit',
+        isMobile: true,
+        hasTouch: true,
+        viewport: { width: 390, height: 844 },
+        serviceWorkers: 'block',
+      },
+    },
     { name: 'journeys-web-update', testMatch: 'web-update.spec.ts' },
     {
       name: 'layout-webkit-web-update',

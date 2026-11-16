@@ -2786,3 +2786,42 @@ async fn the_person_is_warned_of_an_agent_rule_open_to_anyone() {
         .unwrap_or_else(|| panic!("{alerts:?}"));
     assert_eq!(alert["members"], json!([OWNER]));
 }
+
+#[tokio::test]
+async fn listing_rules_remains_consistent_during_concurrent_deletions() {
+    let f = granted().await;
+    let mut ids = Vec::new();
+    for index in 0..32 {
+        let mut data = definition(&f, MAIN_AGENT_ID);
+        data["name"] = format!("Concurrent rule {index}").into();
+        let (status, saved) = create(&f, OWNER, data).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        ids.push(text(&saved, "id").to_owned());
+    }
+    let read = || async {
+        for _ in 0..32 {
+            let (status, listed) = call(&f, OWNER, "GET", "/api/hook-rules", Value::Null).await;
+            assert_eq!(status, StatusCode::OK, "{listed}");
+            assert!(listed["rules"].is_array());
+            tokio::task::yield_now().await;
+        }
+    };
+    let remove = async {
+        for id in ids {
+            let (status, deleted) = call(
+                &f,
+                OWNER,
+                "DELETE",
+                &format!("/api/hook-rules/{id}"),
+                Value::Null,
+            )
+            .await;
+            assert!(status.is_success(), "{deleted}");
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::join!(read(), read(), read(), read(), remove);
+    let (status, listed) = call(&f, OWNER, "GET", "/api/hook-rules", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["rules"], json!([]));
+}

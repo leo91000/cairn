@@ -728,6 +728,9 @@ onBeforeUnmount(() => {
               </div>
             </dl>
             <p v-if="manifest.agentAccess" class="text-xs text-muted">
+              <RouterLink :to="{ path: '/rules', query: { instance: connection.id } }" class="inline-flex items-center rounded-full border border-line px-3 py-1.5 text-xs font-semibold hover:bg-hover">
+                Rules for this instance
+              </RouterLink>
               <template v-if="agentNames(connection).length">
                 Authorized agents: <b class="text-ink">{{ agentNames(connection).join(', ') }}</b>
               </template>

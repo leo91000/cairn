@@ -87,6 +87,7 @@ constructor(
     private val beaconOrigin: String = BuildConfig.BEACON_SERVICE_ORIGIN,
 ) : AndroidViewModel(application) {
     val historyCache = HistoryCache.encrypted(application)
+    val ruleDrafts by lazy { RuleDraftStore.encrypted(application) }
     private val retentionPreferences = application.getSharedPreferences("conversation-cache", 0)
 
     suspend fun acceptCacheRevision(revision: String?) {
@@ -256,6 +257,7 @@ constructor(
         if (forgetSession) {
             connection?.clearSession()
             accountConnection?.clearSession()
+            withContext(Dispatchers.IO) { ruleDrafts.clear() }
         }
 
         if (scheduleNotifications != null) schedule(getApplication(), scheduleNotifications)
@@ -683,6 +685,7 @@ constructor(
             preferences.selectInstallation(current.origin, accountId, installation.id)
             val next =
                 withContext(Dispatchers.IO) {
+                    ruleDrafts.sweep()
                     CairnApi(account.origin, vault, installationId = installation.id).also {
                         it.csrf = account.csrf
                     }

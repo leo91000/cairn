@@ -1043,6 +1043,9 @@ pub(crate) async fn list(
     let viewer = actor.viewer();
     s.store
         .read(move |db| {
+            // The immutable version can disappear through the rule's deletion
+            // cascade. Keep the rows, versions and filters in one read snapshot.
+            let snapshot = db.0.unchecked_transaction()?;
             actor.authorize(db)?;
             let filtered = (input.agent_id.is_some() || input.instance_id.is_some()).then(|| {
                 db.hook_rules_using(
@@ -1060,6 +1063,7 @@ pub(crate) async fn list(
                 }
                 rules.push(summary(db, &row, &viewer)?);
             }
+            snapshot.commit()?;
             Ok(ListHookRulesOutput { rules })
         })
         .await

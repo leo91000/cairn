@@ -123,6 +123,50 @@ async fn main() -> Result<()> {
             let string = |index: usize| args.get(index).and_then(Value::as_str).unwrap_or("");
             let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
             let result = match operation {
+                "emitHook" => {
+                    let instance = db
+                        .plugin_instance(string(0))?
+                        .ok_or_else(|| Error::bad("Fixture instance not found."))?;
+                    let package = db.plugin_package(&instance.plugin_id)?;
+                    let digest = package
+                        .active
+                        .as_ref()
+                        .and_then(|version| package.approvals.get(version))
+                        .ok_or_else(|| Error::bad("Fixture hook needs an approved package."))?;
+                    let payload = arg(2);
+                    let encoded = payload.to_string();
+                    if !payload.is_object() || encoded.len() > 262_144 {
+                        return Err(Error::bad("Fixture hook payload is invalid."));
+                    }
+                    let pending: i64 = db.0.query_row(
+                        "SELECT count(*) FROM plugin_hook_events WHERE instance_id=?",
+                        [&instance.id],
+                        |row| row.get(0),
+                    )?;
+                    if pending >= 50 {
+                        return Err(Error::bad("Fixture transport queue is full."));
+                    }
+                    let external = string(3);
+                    if external.is_empty() || external.len() > 200 {
+                        return Err(Error::bad("Fixture event identity is invalid."));
+                    }
+                    let now = cairn_installation::config::now();
+                    let accepted = db.0.execute(
+                        "INSERT OR IGNORE INTO plugin_hook_receipts(instance_id,external_id,expires_at) VALUES(?1,?2,?3)",
+                        rusqlite::params![instance.id, external, now + 30 * 86_400_000],
+                    )?;
+                    if accepted > 0 {
+                        db.0.execute(
+                            "INSERT INTO plugin_hook_events(id,instance_id,revision,package_digest,external_id,name,payload,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                            rusqlite::params![
+                                cairn_installation::config::id(), instance.id, instance.revision,
+                                digest, external, string(1), encoded, now,
+                            ],
+                        )?;
+                    }
+                    json!({ "accepted": accepted > 0 })
+                }
+
                 "accountFixture" => serde_json::to_value(db.coding_account(string(0))?)?,
                 "saveAccountFixture" => {
                     db.save_coding_account(&serde_json::from_value(arg(0))?)?;

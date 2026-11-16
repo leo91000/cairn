@@ -2,6 +2,7 @@ package build.cairn.app.data
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationManagerCompat
@@ -19,6 +20,36 @@ import kotlinx.coroutines.flow.map
 const val QUESTION_CHANNEL = "cairn-questions"
 const val EXECUTION_CHANNEL = "cairn-execution"
 const val INSTALLATION_NOTIFICATION_TARGET = "@installation"
+const val RULE_NOTIFICATION_TARGET_PREFIX = "@rule/"
+
+internal fun notificationTarget(intent: Intent): String? =
+    when (intent.action) {
+        "build.cairn.app.OPEN_INSTALLATION" -> {
+            val rule =
+                intent.data
+                    ?.takeIf { it.isHierarchical }
+                    ?.getQueryParameter("rule")
+                    ?.takeIf { runCatching { UUID.fromString(it) }.isSuccess }
+            if (rule == null) INSTALLATION_NOTIFICATION_TARGET
+            else RULE_NOTIFICATION_TARGET_PREFIX + rule
+        }
+        "build.cairn.app.OPEN_CHAT" ->
+            intent
+                .getStringExtra("chat")
+                .orEmpty()
+                .takeIf { runCatching { UUID.fromString(it) }.isSuccess }
+                .orEmpty()
+        else -> null
+    }
+
+internal fun notificationRoute(target: String): String =
+    when {
+        target.startsWith(RULE_NOTIFICATION_TARGET_PREFIX) ->
+            "rules?rule=${segment(target.removePrefix(RULE_NOTIFICATION_TARGET_PREFIX))}"
+        target == INSTALLATION_NOTIFICATION_TARGET -> "fil"
+        else -> "chat/${segment(target)}"
+    }
+
 const val NATIVE_PUSH_REENROLLMENT_MESSAGE =
     "Les notifications push ont été désactivées. Confirmez votre identité par e-mail ou passkey dans les réglages du compte, puis réactivez-les."
 private val enabledKey = booleanPreferencesKey("notifications")

@@ -19,6 +19,94 @@ clickable model-picker control, which has no DOM text-target replacement.
 Model, reasoning and connection selection remain the same on both platforms;
 public MCP and `cairn_installation` operations and authorization are unchanged.
 
+## No-code hook rules (ADR-0075)
+
+Web and Android expose the same rules list, search, creator/stopped filters,
+agent and plugin entry points, rule detail, creator controls, owner emergency
+pause, budget reset, duplication, deletion, immutable versions and triggering
+history. Both obey the server's allowed actions and history visibility; a
+notification for an exhausted rule opens that rule in the selected installation.
+The public MCP and `cairn_installation` already expose these operations through
+the rule CRUD/catalog/history contracts, preserving their distinct authority.
+
+Both editors build nested If/otherwise and For-each branches visually, move and
+remove steps, compose AND/OR conditions and native conversation predicates, pick
+people/resources by name, fill schema-driven tool fields and insert scoped
+variables into text or formulas.
+Root tool schemas composed with allOf/oneOf/anyOf expose their declared inputs
+on both apps. Branch-specific fields remain optional; conflicting field shapes
+use an explicit JSON value rather than choosing a branch's type. The plugin
+still validates the complete schema when the tool runs.
+People and resource choices use the rule's execution agent on both apps,
+including rules created by members with access to that agent. Changing the
+agent discards choices and names loaded under the previous resource source.
+Starting an agent can associate an optional external author using an event field
+or formula on both apps. The flow summary includes this author. Clearing an
+optional author or conversation key removes it; meaningful whitespace and numeric
+identifiers are kept. Agent/instance lists use the server filters, including rules
+that direct conversations bound by their creator’s keys. Confirmed state changes
+invalidate earlier polling responses on both apps.
+The installation validates drafts and reports
+errors at their step. Saving creates a version. A state-only revision change is
+refreshed while preserving the draft; a newer saved definition can be reviewed,
+adopted or explicitly replaced by the draft as the next version.
+An uncertain creation keeps its original identity and submitted definition. Edits
+made afterwards remain in the editor and can be saved as the recovered rule's
+next version, including after native recreation. A replacement whose response
+was lost is recovered as already saved when its definition matches the draft,
+without writing an identical extra version. Clearing an action label restores
+its default title. Removing a block with nested
+steps asks first. Both enforce the tree and condition-depth limits, counting
+negation as a separate level. History shows retry counts and the resume time on
+both platforms.
+Comparison values follow the selected field's number or boolean type. Both
+pickers expose the catalog's variables and formula functions, with signatures,
+descriptions and examples. Inserting a variable into a typed value produces a
+formula; insertion into an existing formula preserves its cursor and surrounding
+expression. Numeric and boolean membership lists retain their item types. Both
+editors preserve text templates while editing an untyped comparison and display
+fixed JSON strings with quotes, keeping their string type during edits. Switching
+to text or inserting a variable uses the decoded string on both platforms. Both
+retain incomplete JSON and numeric input as an invalid draft, including after a
+step is closed or recovered, and block saving until it is corrected. Nested list
+errors follow their item when an earlier item is removed. Both
+preserve JSON constants when switching a value to a formula and back; replacing
+a dynamic formula with a fixed value shows a notice to check the replacement.
+Nullable values, omitted nested properties and concrete values are shown separately;
+optional nested fields are explicitly added or removed. A union with multiple concrete
+types uses JSON to retain its exact type. Rendering never replaces null or omission
+with a visible false/default value. Both allow removing an unknown tool input after a plugin schema changes without
+resetting its other parameters. Both
+initialize a comparison from its first event field with the corresponding value
+type. Deeply nested object and list fields fall back to editable JSON, preserving
+their structure (after eight expanded levels on web and six on Android). Both
+editors preserve the agent selected at their entry point, require nonempty
+condition groups and omit waits inside loops. Validation and catalog-load
+failures offer retry.
+
+If edit rights disappear while saving, both retain the unsaved definition for
+recovery. Android shows it read-only and offers a sensitive clipboard copy of
+the complete draft; web keeps its fields accessible for copying.
+
+Web uses an adjacent step inspector on wide screens and a sheet on phones.
+Android uses native Compose cards and bottom sheets, with a two-pane list on
+tablets. Android retains drafts across recreation with a short saved-state reference to
+an account/installation-scoped encrypted private snapshot, rather than putting
+the definition copies in Binder. Saving or explicitly discarding removes the
+snapshot; signing out clears retained rule drafts. Web confirms navigation or
+page exit while changes are unsaved. Existing history uses expandable data
+sections on both platforms; raw data appears only when inspecting an execution.
+
+
+Presentation differences: Android edits fixed waits in seconds; web offers an
+amount with seconds/minutes/hours/days. Android history uses an ordered list of
+executed steps and their data; web also overlays their status on the flow.
+Web versions add the native-authority and “by you” notes, and its hook picker
+previews payload fields; Android exposes event fields through the variable
+picker instead. Both resource pickers browse names; web retains a resolved-name
+chip after selection, while Android currently keeps the identifier in the input.
+
+
 ## Search during workspace startup (2026-11-13)
 
 Web registers its existing workspace shortcuts before the initial resource lists
@@ -877,9 +965,21 @@ share the 1,000-item and 16 MiB event-data limits across unresolved admissions a
 active triggerings. The server grants one action at a time per rule and shares
 executor slots between rules after each action. There is no platform difference.
 
+Rule editor recovery on Android retains at most 32 encrypted snapshots for seven days, swept on store creation and editor scope changes. Snapshot keys and authenticated encryption bind the account, installation and editor session. Web recovery uses the current editor session draft.
+
+Existing literal values in field/formula inputs display as constant expressions and become formulas when edited, preserving list types in imported loops and quotes in constant strings.
+
+Schema string inputs preserve their text selection when inserting a variable on both platforms, including nullable strings and strings entered as JSON under a free schema. Contact resource fields named sender offer the person picker on both apps.
+
+Rule literal inputs whose object schema declares no fields use a JSON object editor on both platforms; invalid JSON remains visible and is reported. List membership retains numeric/boolean element types, and author defaults prefer a declared person identifier.
+
 ## Background job waits
 
 Web and Android identify a `job_finished` wait as background work and show its
 exit status, elapsed duration and bounded log tail. Both use the same durable
 wait observation and retain pause/stop behavior. No platform-only control is
 introduced.
+
+### Rule graph editor
+
+Rules use connected nodes on web and Android. Conditions split into labelled Then/Otherwise (Alors/Sinon) paths that rejoin before the next step; loops have separate next-item and finished paths. Add controls sit on the connections. Selecting a node opens its properties in the desktop side panel or native/mobile sheet. Both clients provide zoom and fit-to-width, with horizontal panning for wide graphs; the editor retains one vertical scroll. Secondary move/delete actions use hover/focus controls on web and a native overflow menu on Android. This changes presentation only: both clients save the same rule tree through the existing rules APIs and installation tools.

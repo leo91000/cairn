@@ -27,6 +27,7 @@ export interface Workspace {
   signIn: (page: Page) => Promise<void>
   installationId: string
   installationSlug: string
+  emailProof: () => { email: string, code: string }
   setAccountUsage: (id: string, value: unknown) => Promise<void>
   setOpenCodeGoUsage: (id: string, apiKey: string, value: unknown) => void
 }
@@ -337,6 +338,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
         installationId,
         installationSlug,
         signIn,
+        emailProof: () => ({ email: accountEmail, code: beacon.messages.at(-1)?.match(/\b\d{8}\b/)?.[0] ?? '' }),
         projectPath,
         service,
         api,
