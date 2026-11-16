@@ -149,7 +149,10 @@ jobs:
         run: pnpm test:e2e --project=journeys-rules --project=layout-webkit-rules --workers=1 --retries=0 --fail-on-flaky-tests --output=test-results/rules-pages
       - name: Run existing rule editor journeys
         timeout-minutes: 5
-        run: pnpm test:e2e --project=journeys-rule-editor --project=layout-webkit-rule-editor --grep-invert 'nullable nested|invalid literal draft|constant mode round trip|literal list loop|schema text selection|starting an agent|adding an author condition|a newly added comparison|formula equality and editing nested|editing a comparison field preserves templates|reopening a JSON string comparison' --workers=1 --retries=0 --fail-on-flaky-tests --output=test-results/rules-editor
+        run: pnpm test:e2e --project=journeys-rule-editor --project=layout-webkit-rule-editor --grep-invert 'formula conditions insert|changing a numeric compared field|contains keeps a numeric member|changing equality operators|nullable nested|invalid literal draft|constant mode round trip|literal list loop|schema text selection|starting an agent|adding an author condition|a newly added comparison|formula equality and editing nested|editing a comparison field preserves templates|reopening a JSON string comparison' --workers=1 --retries=0 --fail-on-flaky-tests --output=test-results/rules-editor
+      - name: Qualify rule comparisons and formulas
+        timeout-minutes: 5
+        run: pnpm test:e2e --project=journeys-rule-editor --project=layout-webkit-rule-editor --grep 'formula conditions insert|changing a numeric compared field|contains keeps a numeric member|changing equality operators' --workers=1 --retries=0 --fail-on-flaky-tests --output=test-results/rules-editor-comparisons
       - name: Run typed rule editor journeys
         timeout-minutes: 5
         run: pnpm test:e2e --project=journeys-rule-editor --project=layout-webkit-rule-editor --grep 'constant mode round trip|literal list loop|schema text selection|starting an agent|adding an author condition|a newly added comparison|formula equality and editing nested|editing a comparison field preserves templates|reopening a JSON string comparison' --workers=1 --retries=0 --fail-on-flaky-tests --output=test-results/rules-editor-types
