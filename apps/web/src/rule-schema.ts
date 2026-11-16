@@ -1,6 +1,61 @@
 const nullableKey = '_cairnAllowsNull'
 const jsonWidgetKey = '_cairnJsonWidget'
 
+// Project root object compositions onto editable inputs. This is a presentation
+// index, not a replacement for the plugin's complete JSON Schema validation.
+export function ruleToolInputSchema(root: any): any {
+  const budget = { remaining: 512 }
+
+  function collect(schema: any, depth: number): { properties: Record<string, any>, required: string[] } {
+    const result = { properties: Object.create(null) as Record<string, any>, required: [] as string[] }
+    if (!schema || typeof schema !== 'object' || depth > 8 || budget.remaining-- <= 0)
+      return result
+    if (typeof schema.$ref === 'string' && schema.$ref.startsWith('#/')) {
+      const target = schema.$ref.slice(2).split('/').reduce((value: any, part: string) => value?.[part.replace(/~1/g, '/').replace(/~0/g, '~')], root)
+      const { $ref: _ref, ...rest } = schema
+      return collect({ ...target, ...rest }, depth + 1)
+    }
+
+    Object.assign(result.properties, schema.properties ?? {})
+    result.required = Array.isArray(schema.required) ? [...schema.required] : []
+    const merge = (properties: Record<string, any>, composition = 'allOf') => {
+      for (const [name, field] of Object.entries(properties)) {
+        const previous = result.properties[name]
+        // Several constraints/variants on one input need a truthful JSON editor;
+        // choosing one variant's widget could silently change the value's type.
+        result.properties[name] = Object.hasOwn(result.properties, name) && JSON.stringify(previous) !== JSON.stringify(field)
+          ? { title: previous?.title ?? field?.title, [composition]: [previous, field], [jsonWidgetKey]: true }
+          : field
+      }
+    }
+
+    for (const branch of schema.allOf ?? []) {
+      const fields = collect(branch, depth + 1)
+      merge(fields.properties)
+      result.required.push(...fields.required)
+    }
+
+    for (const kind of ['oneOf', 'anyOf']) {
+      if (!Array.isArray(schema[kind]) || !schema[kind].length)
+        continue
+      const branches = schema[kind].map((branch: any) => collect(branch, depth + 1))
+      for (const branch of branches)
+        merge(branch.properties, 'anyOf')
+      result.required.push(...branches[0].required.filter((name: string) => branches.every((branch: { required: string[] }) => branch.required.includes(name))))
+    }
+
+    result.required = [...new Set(result.required)]
+    for (const name of result.required) {
+      if (!Object.hasOwn(result.properties, name))
+        result.properties[name] = { [jsonWidgetKey]: true }
+    }
+
+    return result
+  }
+
+  return { ...root, ...collect(root, 0) }
+}
+
 export function resolveRuleSchema(schema: any, root = schema, depth = 0): any {
   return resolveSchema(schema, root, depth, { remaining: 512 })
 }

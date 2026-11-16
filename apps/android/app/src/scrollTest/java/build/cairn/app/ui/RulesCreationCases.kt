@@ -30,7 +30,7 @@ import org.junit.Test
 abstract class RulesCreationCases {
     @get:Rule val compose = createComposeRule()
 
-    private fun rootSchemaCatalog(): HookRuleCatalog {
+    private fun rootSchemaCatalog(composed: Boolean = false): HookRuleCatalog {
         val schema =
             wireJson.parseToJsonElement(
                 """{"type":"object","${'$'}ref":"#/${'$'}defs/Input","${'$'}defs":{"Input":{"type":"object","required":["text"],"properties":{"text":{"type":"string","title":"Message","minLength":1}}}}}"""
@@ -60,7 +60,21 @@ abstract class RulesCreationCases {
                     RuleCatalogTool(
                         agentIds = listOf(MAIN_AGENT_ID),
                         description = "",
-                        inputSchema = schema,
+                        inputSchema =
+                            if (composed)
+                                JsonObject(
+                                    schema.jsonObject.filterKeys { it != "\$ref" } +
+                                        ("allOf" to
+                                            JsonArray(
+                                                listOf(
+                                                    ruleObject(
+                                                        "\$ref" to
+                                                            schema.jsonObject.getValue("\$ref")
+                                                    )
+                                                )
+                                            ))
+                                )
+                            else schema,
                         instanceId = "00000000-0000-4000-8000-000000000015",
                         instanceName = "Root schema",
                         pluginId = "root",
@@ -84,9 +98,12 @@ abstract class RulesCreationCases {
         assertTrue(step.obj("action").obj("input")!!.containsKey("text"))
     }
 
-    @Test
-    fun aRootToolReferenceShowsItsEditableFields() {
-        val catalog = rootSchemaCatalog()
+    @Test fun aRootToolReferenceShowsItsEditableFields() = showRootToolFields(false)
+
+    @Test fun aComposedRootToolShowsItsEditableFields() = showRootToolFields(true)
+
+    private fun showRootToolFields(composed: Boolean) {
+        val catalog = rootSchemaCatalog(composed)
         var node by
             mutableStateOf(
                 ruleObject(

@@ -422,6 +422,7 @@ abstract class RulesEditorCases {
         untyped: Boolean = false,
         generic: Boolean = false,
     ) {
+        val changes = mutableListOf<JsonObject>()
         var value by mutableStateOf(literalRuleValue(JsonPrimitive("Hello Alice!")))
         compose.setContent {
             CairnTheme {
@@ -429,7 +430,10 @@ abstract class RulesEditorCases {
                     "Message",
                     value,
                     listOf(RuleVariable("Événement", "payload.author", "Auteur", "string", "")),
-                    { value = it },
+                    {
+                        changes += it
+                        value = it
+                    },
                     schema =
                         if (untyped) JsonObject(emptyMap())
                         else
@@ -456,8 +460,32 @@ abstract class RulesEditorCases {
                 if (untyped || generic) TextRange(7, 12) else TextRange(6, 11)
             )
         compose.onNodeWithText("+ Insérer une variable").performClick()
-        compose.onNodeWithText("Utiliser Auteur").performClick()
-        compose.runOnIdle { assertEquals(templateValue("Hello {{payload.author}}!"), value) }
+        val use = compose.onNodeWithText("Utiliser Auteur")
+        // Android's IME/window insets can still move a dialog after Compose is
+        // idle. Wait for the actual touch target to settle before tapping it.
+        var position = use.fetchSemanticsNode().boundsInWindow
+        var settledAt = System.nanoTime()
+        compose.waitUntil(3000) {
+            val current = use.fetchSemanticsNode().boundsInWindow
+            if (current != position) {
+                position = current
+                settledAt = System.nanoTime()
+            }
+            current.width > 0 && current.height > 0 && System.nanoTime() - settledAt >= 200_000_000L
+        }
+        use.assertIsDisplayed()
+        use.performClick()
+        val remaining =
+            compose.onAllNodesWithText("Utiliser Auteur").fetchSemanticsNodes().map {
+                it.boundsInRoot
+            }
+        compose.runOnIdle {
+            assertEquals(
+                "changes=$changes remaining=$remaining",
+                templateValue("Hello {{payload.author}}!"),
+                value,
+            )
+        }
     }
 
     @Test

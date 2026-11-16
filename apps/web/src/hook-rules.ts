@@ -24,7 +24,7 @@ import {
   Wrench,
 } from './icons'
 import { valueJsonDrafts } from './rule-json-drafts'
-import { resolveRuleSchema, ruleLiteralDefault } from './rule-schema'
+import { resolveRuleSchema, ruleLiteralDefault, ruleToolInputSchema } from './rule-schema'
 
 // Hook rules (ADR-0075): presentation and editing helpers shared by the list, the detail
 // and the visual editor. The installation validates and authorizes everything again.
@@ -33,7 +33,7 @@ export type ActionKind = RuleAction['type']
 export type StepKind = ActionKind | 'if' | 'forEach'
 
 export function initialToolInput(root: unknown): Record<string, RuleValue> {
-  const schema = resolveRuleSchema(root)
+  const schema = ruleToolInputSchema(root)
   const required: string[] = Array.isArray(schema.required) ? schema.required : []
   return Object.fromEntries(required.map(name => [name, {
     type: 'literal',

@@ -425,7 +425,7 @@ fun newRuleStep(definition: JsonElement, kind: String, catalog: HookRuleCatalog?
                     put("instanceId", tool?.instanceId.orEmpty())
                     put("tool", tool?.tool.orEmpty())
                     val schema =
-                        resolveRuleSchema(
+                        ruleToolInputSchema(
                             tool?.inputSchema as? JsonObject ?: JsonObject(emptyMap())
                         )
                     val required = schema.list("required").map { it.jsonPrimitive.content }.toSet()
@@ -740,6 +740,68 @@ internal fun JsonElement.asArray(): JsonArray = jsonArray
 
 private const val RULE_SCHEMA_NULLABLE = "_cairnAllowsNull"
 private const val RULE_SCHEMA_JSON = "_cairnJsonWidget"
+
+/** A presentation index of composed tool inputs; the plugin validates the full schema. */
+fun ruleToolInputSchema(root: JsonObject): JsonObject {
+    val budget = intArrayOf(512)
+    fun collect(schema: JsonObject, depth: Int): JsonObject {
+        if (depth > 8 || budget[0]-- <= 0) return JsonObject(emptyMap())
+        val reference = schema.text("\$ref")
+        if (reference.startsWith("#/")) {
+            var target: JsonElement? = root
+            for (part in reference.removePrefix("#/").split('/')) {
+                target = (target as? JsonObject)?.get(part.replace("~1", "/").replace("~0", "~"))
+            }
+            return collect(
+                JsonObject((target as? JsonObject).orEmpty() + schema.filterKeys { it != "\$ref" }),
+                depth + 1,
+            )
+        }
+        val properties = schema.obj("properties").orEmpty().toMutableMap()
+        val required = schema.list("required").map { it.jsonPrimitive.content }.toMutableSet()
+        fun merge(fields: JsonObject?, composition: String = "allOf") {
+            for ((name, field) in fields.orEmpty()) {
+                val previous = properties[name]
+                properties[name] =
+                    if (previous != null && previous != field)
+                        buildJsonObject {
+                            (previous as? JsonObject)?.get("title")?.let { put("title", it) }
+                            put(composition, JsonArray(listOf(previous, field)))
+                            put(RULE_SCHEMA_JSON, true)
+                        }
+                    else field
+            }
+        }
+        for (branch in schema.list("allOf")) {
+            val fields = collect(branch as? JsonObject ?: JsonObject(emptyMap()), depth + 1)
+            merge(fields.obj("properties"))
+            required.addAll(fields.list("required").map { it.jsonPrimitive.content })
+        }
+        for (kind in listOf("oneOf", "anyOf")) {
+            val branches =
+                schema.list(kind).map {
+                    collect(it as? JsonObject ?: JsonObject(emptyMap()), depth + 1)
+                }
+            for (branch in branches) merge(branch.obj("properties"), "anyOf")
+            val common =
+                branches.firstOrNull().list("required").filter { name ->
+                    branches.all { name in it.list("required") }
+                }
+            required.addAll(common.map { it.jsonPrimitive.content })
+        }
+        for (name in required) {
+            if (name !in properties)
+                properties[name] = JsonObject(mapOf(RULE_SCHEMA_JSON to JsonPrimitive(true)))
+        }
+        return JsonObject(
+            mapOf(
+                "properties" to JsonObject(properties),
+                "required" to JsonArray(required.map(::JsonPrimitive)),
+            )
+        )
+    }
+    return JsonObject(root + collect(root, 0))
+}
 
 fun resolveRuleSchema(schema: JsonObject, root: JsonObject = schema, depth: Int = 0): JsonObject =
     resolveRuleSchemaBounded(schema, root, depth, intArrayOf(512))

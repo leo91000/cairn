@@ -284,12 +284,13 @@ it('adds list items with defaults resolved from the root schema', async () => {
   }
 })
 
-it('shows required fields declared by a reference at the tool schema root', () => {
-  const schema = {
+it.each(['reference', 'allOf', 'anyOf'] as const)('shows required fields declared by %s at the tool schema root', (composition) => {
+  const referenced = {
     type: 'object',
     $ref: '#/$defs/Input',
     $defs: { Input: { type: 'object', required: ['text'], properties: { text: { type: 'string', title: 'Message', minLength: 1 } } } },
   }
+  const schema = composition === 'reference' ? referenced : { type: 'object', [composition]: [{ $ref: '#/$defs/Input' }], $defs: referenced.$defs }
   const model = vue.ref<any>({
     type: 'action',
     id: 'post',
@@ -324,4 +325,19 @@ it('shows required fields declared by a reference at the tool schema root', () =
   finally {
     scope.stop()
   }
+})
+
+it('indexes all alternative inputs without inventing branch-specific required fields', () => {
+  const schema = schemas.ruleToolInputSchema({
+    type: 'object',
+    oneOf: [
+      { required: ['text'], properties: { text: { type: 'string' }, shared: { type: 'number' } } },
+      { required: ['count'], properties: { count: { type: 'integer' }, shared: { type: 'string' } } },
+    ],
+  })
+  expect(Object.keys(schema.properties)).toEqual(['text', 'shared', 'count'])
+  expect(schema.required).toEqual([])
+  expect(schemas.ruleSchemaUsesJson(schema.properties.shared)).toBe(true)
+  const recursive: any = { type: 'object', $defs: { Loop: { allOf: [{ $ref: '#/$defs/Loop' }] } }, $ref: '#/$defs/Loop' }
+  expect(schemas.ruleToolInputSchema(recursive).properties).toEqual({})
 })

@@ -6,6 +6,27 @@ import org.junit.Test
 
 class RuleSchemaTest {
     @Test
+    fun composedToolInputsExposeFieldsAndOnlyCommonRequirements() {
+        val root =
+            wireJson
+                .parseToJsonElement(
+                    """{"type":"object","allOf":[{"required":["text"],"properties":{"text":{"type":"string"}}}],"oneOf":[{"required":["count"],"properties":{"count":{"type":"number"},"shared":{"type":"number"}}},{"required":["flag"],"properties":{"flag":{"type":"boolean"},"shared":{"type":"string"}}}]}"""
+                )
+                .jsonObject
+        val indexed = ruleToolInputSchema(root)
+        assertEquals(setOf("text", "count", "shared", "flag"), indexed.obj("properties")!!.keys)
+        assertEquals(listOf(JsonPrimitive("text")), indexed.list("required"))
+        assertTrue(ruleSchemaUsesJson(indexed.obj("properties").obj("shared")!!))
+        val recursive =
+            wireJson
+                .parseToJsonElement(
+                    """{"type":"object","${'$'}ref":"#/${'$'}defs/Loop","${'$'}defs":{"Loop":{"allOf":[{"${'$'}ref":"#/${'$'}defs/Loop"}]}}}"""
+                )
+                .jsonObject
+        assertTrue(ruleToolInputSchema(recursive).obj("properties")!!.isEmpty())
+    }
+
+    @Test
     fun nullableReferencesKeepTheirMeaningAfterResolution() {
         val schema =
             wireJson

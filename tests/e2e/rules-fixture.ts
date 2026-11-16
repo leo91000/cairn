@@ -17,8 +17,8 @@ export function scalarRulesFixture(workspace: Workspace, type: 'integer' | 'bool
   return installRulesFixture(workspace, type)
 }
 
-export function referencedToolRulesFixture(workspace: Workspace) {
-  return installRulesFixture(workspace, undefined, true)
+export function referencedToolRulesFixture(workspace: Workspace, composed = false) {
+  return installRulesFixture(workspace, undefined, true, false, false, composed)
 }
 
 export function untypedTextRulesFixture(workspace: Workspace) {
@@ -29,7 +29,7 @@ export function nullableOptionsRulesFixture(workspace: Workspace) {
   return installRulesFixture(workspace, undefined, false, false, true)
 }
 
-async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' | 'boolean', referencedTool = false, freeMessage = false, nullableOptions = false) {
+async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' | 'boolean', referencedTool = false, freeMessage = false, nullableOptions = false, composedTool = false) {
   const prepare = async (path: string, body: unknown): Promise<any> => {
     const started = await workspace.api(path, 'POST', body)
     if (!started.operation)
@@ -117,12 +117,12 @@ async function installRulesFixture(workspace: Workspace, scalarType?: 'integer' 
     : referencedTool
       ? {
           ...manifest,
-          id: 'rules-referenced',
+          id: composedTool ? 'rules-composed' : 'rules-referenced',
           tools: [{
             ...manifest.tools[0],
-            name: 'rules_referenced_post_message',
+            name: composedTool ? 'rules_composed_post_message' : 'rules_referenced_post_message',
             resourceFields: [],
-            inputSchema: { type: 'object', $ref: '#/$defs/Input', $defs: { Input: manifest.tools[0].inputSchema } },
+            inputSchema: { type: 'object', ...(composedTool ? { allOf: [{ $ref: '#/$defs/Input' }] } : { $ref: '#/$defs/Input' }), $defs: { Input: manifest.tools[0].inputSchema } },
           }],
         }
       : freeMessage

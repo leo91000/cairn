@@ -33,6 +33,10 @@ Both editors build nested If/otherwise and For-each branches visually, move and
 remove steps, compose AND/OR conditions and native conversation predicates, pick
 people/resources by name, fill schema-driven tool fields and insert scoped
 variables into text or formulas.
+Root tool schemas composed with allOf/oneOf/anyOf expose their declared inputs
+on both apps. Branch-specific fields remain optional; conflicting field shapes
+use an explicit JSON value rather than choosing a branch's type. The plugin
+still validates the complete schema when the tool runs.
 People and resource choices use the rule's execution agent on both apps,
 including rules created by members with access to that agent. Changing the
 agent discards choices and names loaded under the previous resource source.

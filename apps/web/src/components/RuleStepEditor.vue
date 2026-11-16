@@ -16,7 +16,7 @@ import {
   stepChoice,
 } from '../hook-rules'
 import { Plus, Trash2, X } from '../icons'
-import { resolveRuleSchema, ruleLiteralDefault } from '../rule-schema'
+import { resolveRuleSchema, ruleLiteralDefault, ruleToolInputSchema } from '../rule-schema'
 import Icon from './Icon.vue'
 import RuleConditionEditor from './RuleConditionEditor.vue'
 import RuleValueInput from './RuleValueInput.vue'
@@ -99,7 +99,7 @@ interface Field {
 
 const fields = computed<Field[]>(() => {
   const root = tool.value?.inputSchema ?? {}
-  const schema = resolveRuleSchema(root)
+  const schema = ruleToolInputSchema(root)
   const required = new Set<string>(Array.isArray(schema.required) ? schema.required : [])
   return Object.entries<any>(schema.properties ?? {}).map(([name, raw]) => {
     const property = resolveRuleSchema(raw, root)
@@ -114,7 +114,7 @@ const fields = computed<Field[]>(() => {
     }
   })
 })
-const shownFields = computed(() => fields.value.filter(field => field.required || (action.value?.type === 'callTool' && field.name in action.value.input)))
+const shownFields = computed(() => fields.value.filter(field => field.required || (action.value?.type === 'callTool' && Object.hasOwn(action.value.input, field.name))))
 const optionalFields = computed(() => fields.value.filter(field => !shownFields.value.includes(field)))
 
 function defaultValue(field: Field): RuleValue {
@@ -132,10 +132,8 @@ function defaultValue(field: Field): RuleValue {
 function setInput(name: string, value: RuleValue | null) {
   if (action.value?.type !== 'callTool')
     return
-  const input = { ...action.value.input }
-  if (value)
-    input[name] = value
-  else
+  const input = value ? { ...action.value.input, [name]: value } : { ...action.value.input }
+  if (!value)
     delete input[name]
   setAction({ ...action.value, input })
 }
