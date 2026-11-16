@@ -117,8 +117,15 @@ async function fill(label: string, value: string | (() => string)) {
   await scrollTo(label, true)
   await expect.poll(async () => nativeInputFocused(await screen(), label), { timeout: 7000 }).toBe(true)
   const text = typeof value === 'function' ? value() : value
-  await adb('shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A')
-  await adb('shell', 'input', 'keyevent', 'KEYCODE_DEL')
+  // Ctrl+A can arrive before Android applies the selection. Read the focused
+  // field after moving its cursor, erase its observed characters, then require
+  // it to be empty before sending the replacement once.
+  await adb('shell', 'input', 'keyevent', 'KEYCODE_MOVE_END')
+  const input = nativeNodes(await screen()).find(node => node.attributes.class === 'android.widget.EditText' && node.attributes.focused === 'true')
+  expect(input).toBeTruthy()
+  const erase = Array.from(input!.attributes.text ?? '', () => 'KEYCODE_DEL')
+  if (erase.length)
+    await adb('shell', 'input', 'keyevent', ...erase)
   await expect.poll(async () => nativeNodes(await screen()).some(node => node.attributes.class === 'android.widget.EditText' && node.attributes.focused === 'true' && node.attributes.text === ''), { timeout: 7000 }).toBe(true)
   const shellText = text.replaceAll(' ', '%s').replaceAll('\'', '\'\\\'\'')
   await adb('shell', 'input', 'text', `'${shellText}'`)
