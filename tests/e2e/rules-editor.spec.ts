@@ -1,7 +1,7 @@
 import {
   expect,
   signIn,
-  test,
+  isolatedWorkspaceTest as test,
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
