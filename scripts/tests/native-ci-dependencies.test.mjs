@@ -13,6 +13,25 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
+import { replaceEc2UbuntuMirror } from '../install-native-ci-dependencies.mjs'
+
+it('replaces the Ubuntu EC2 archive while preserving the other mirror entries', () => {
+  const mirrors = [
+    'http://us-east-2.ec2.archive.ubuntu.com/ubuntu/',
+    'https://eu-west-1.ec2.archive.ubuntu.com/ubuntu priority:2',
+    'http://security.ubuntu.com/ubuntu/',
+    'https://archive.ubuntu.com/ubuntu/',
+    '',
+  ].join('\n')
+
+  expect(replaceEc2UbuntuMirror(mirrors)).toBe([
+    'https://azure.archive.ubuntu.com/ubuntu/',
+    'https://azure.archive.ubuntu.com/ubuntu priority:2',
+    'http://security.ubuntu.com/ubuntu/',
+    'https://archive.ubuntu.com/ubuntu/',
+    '',
+  ].join('\n'))
+})
 
 const root = new URL('../../', import.meta.url)
 const workflow = parse(readFileSync(new URL('.github/workflows/ci.yaml', root), 'utf8'))

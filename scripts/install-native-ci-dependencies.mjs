@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import {
   closeSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -15,6 +16,34 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 const aptOptions = ['-o', 'Acquire::http::Timeout=20', '-o', 'Acquire::https::Timeout=20', '-o', 'DPkg::Lock::Timeout=20']
+const runnerMirrorList = '/etc/apt/apt-mirrors.txt'
+
+export function replaceEc2UbuntuMirror(mirrors) {
+  return mirrors.replace(
+    /^https?:\/\/[a-z0-9-]+\.ec2\.archive\.ubuntu\.com\/ubuntu(?=\/?(?:[ \t]|\r?$))/gm,
+    'https://azure.archive.ubuntu.com/ubuntu',
+  )
+}
+
+function configureRunnerMirror() {
+  if (process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || !existsSync(runnerMirrorList))
+    return
+
+  const mirrors = readFileSync(runnerMirrorList, 'utf8')
+  const updated = replaceEc2UbuntuMirror(mirrors)
+  if (updated === mirrors)
+    return
+
+  // Keep Ubuntu's suites, keyring and signature checks. Only change the stalled mirror.
+  const result = spawnSync('sudo', ['-n', 'tee', runnerMirrorList], {
+    input: updated,
+    stdio: ['pipe', 'ignore', 'inherit'],
+    timeout: 10000,
+  })
+  if (result.error || result.status !== 0)
+    throw new Error('Could not configure the Ubuntu archive mirror on the hosted runner.', { cause: result.error })
+}
+
 const phases = {
   update: { args: [...aptOptions, '-o', 'APT::Update::Error-Mode=any', 'update', '-qq'] },
   install: { args: [...aptOptions, 'install', '-y', '--no-install-recommends'] },
@@ -523,12 +552,17 @@ export async function installNativeCiDependencies({
 
 if (import.meta.main) {
   const args = process.argv.slice(2)
-  if (args.length === 0)
+  if (args.length === 0) {
+    configureRunnerMirror()
     process.exitCode = await installNativeCiDependencies()
-  else if (args.length === 2 && args[0] === '--profile')
+  }
+  else if (args.length === 2 && args[0] === '--profile') {
     process.exitCode = await installNativeCiDependencies({ profile: args[1] })
-  else if (args.length === 6 && args[0] === '--apt-phase')
+  }
+  else if (args.length === 6 && args[0] === '--apt-phase') {
     process.exitCode = await runAptPhase(args[1], Number(args[2]), Number(args[3]), args[4], args[5])
-  else
+  }
+  else {
     process.exitCode = 2
+  }
 }
