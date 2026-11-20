@@ -18,6 +18,9 @@ use tokio_util::sync::CancellationToken;
 const STOPPED: i32 = 143;
 const ERROR_BODY_LIMIT: usize = 10_000;
 const LOCAL_OUTPUT_FAILURE: &str = "Local output forwarding failed.";
+// Native startup can spend two minutes waiting for disk ownership before it
+// initializes the filesystem and starts the provider.
+const TURN_START_TIMEOUT: Duration = Duration::from_secs(180);
 /// Terminal reconciliation after output EOF is bounded independently of execution.
 pub(crate) const RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -166,34 +169,40 @@ impl Controller {
     async fn run_turn(&self, turn: &str) -> Result<i32> {
         uuid(turn)?;
         self.start().await?;
-        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        let started = loop {
-            let response = self
-                .http
-                .get(format!("{}/turn/{turn}/start", self.url))
-                .bearer_auth(&self.token)
-                .timeout(Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(Error::internal)?;
-            if !matches!(
-                response.status(),
-                StatusCode::SERVICE_UNAVAILABLE | StatusCode::ACCEPTED
-            ) || tokio::time::Instant::now() >= ready_deadline
-            {
-                break response;
+        let start_url = format!("{}/turn/{turn}/start", self.url);
+        let offset = tokio::time::timeout(TURN_START_TIMEOUT, async {
+            loop {
+                let response = self
+                    .http
+                    .get(&start_url)
+                    .bearer_auth(&self.token)
+                    .timeout(Duration::from_secs(30))
+                    .send()
+                    .await
+                    .map_err(Error::internal)?;
+                match response.status() {
+                    StatusCode::SERVICE_UNAVAILABLE | StatusCode::ACCEPTED => {
+                        // Observe the same attempt while its environment prepares.
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    status if status.is_success() => {
+                        let started: Value = response.json().await.map_err(Error::internal)?;
+                        return started["offset"]
+                            .as_u64()
+                            .ok_or_else(|| Error::bad("Invalid turn start cursor."));
+                    }
+                    status => {
+                        return Err(Error::unavailable(format!(
+                            "Provider turn did not start (HTTP {status})."
+                        )));
+                    }
+                }
             }
-            // POST start is idempotent. Retry only the observation endpoint;
-            // never submit another attempt because readiness is delayed.
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
-        if !started.status().is_success() {
-            return Err(Error::unavailable("Provider turn did not start."));
-        }
-        let started: Value = started.json().await.map_err(Error::internal)?;
-        let offset = started["offset"]
-            .as_u64()
-            .ok_or_else(|| Error::bad("Invalid turn start cursor."))?;
+        })
+        .await
+        .map_err(|_| {
+            Error::unavailable("Provider turn did not start before the preparation deadline.")
+        })??;
         // Keep collecting output while completion is pending. A provider can
         // remain active arbitrarily long; waiting for its receipt first would
         // hide tool activity and progress from the conversation.
@@ -1005,6 +1014,66 @@ mod physical_result_tests {
             assert_eq!(result.physical_finalized, confirmed);
             server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn provider_turn_can_start_after_a_slow_filesystem_preparation() {
+        use axum::{Json, Router, body::Body, response::IntoResponse, routing::get, routing::post};
+
+        let attempt = crate::config::id();
+        let turn = crate::config::id();
+        let prepared_at = tokio::time::Instant::now() + Duration::from_secs(35);
+        let environment_at = prepared_at - Duration::from_secs(2);
+        let receipt = json!({
+            "attemptId": attempt,
+            "generation": "fixture",
+            "turnId": turn,
+            "code": 0,
+            "logStart": 0,
+            "logEnd": 0,
+        });
+        let app = Router::new()
+            .route("/runs/{attempt}", post(|| async { StatusCode::OK }))
+            .route(
+                "/runs/{attempt}/turn/{turn}/start",
+                get(move || async move {
+                    let now = tokio::time::Instant::now();
+                    if now < environment_at {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    if now < prepared_at {
+                        return (StatusCode::ACCEPTED, Json(json!({"pending": true})))
+                            .into_response();
+                    }
+                    Json(json!({"offset": 0})).into_response()
+                }),
+            )
+            .route(
+                "/runs/{attempt}/turn/{turn}",
+                get(move || async move { Json(receipt) }),
+            )
+            .route(
+                "/runs/{attempt}/logs",
+                get(|| async {
+                    Body::from_stream(futures_util::stream::pending::<
+                        std::result::Result<Vec<u8>, std::io::Error>,
+                    >())
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let controller = Controller {
+            http: reqwest::Client::new(),
+            url: format!("http://{address}/runs/{attempt}"),
+            token: "fixture".into(),
+        };
+        let result = controller.run_turn(&turn).await;
+        server.abort();
+
+        assert_eq!(result.unwrap(), 0);
     }
 
     #[tokio::test(start_paused = true)]
