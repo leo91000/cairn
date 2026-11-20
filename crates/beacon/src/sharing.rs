@@ -28,7 +28,7 @@ pub(super) async fn task_authors(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("");
-    let mut transaction = service.pool.begin().await?;
+    let mut transaction = authority_transaction(&service).await?;
     let owner: Option<(String,)> = query_as(
         "SELECT owner_id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL FOR SHARE",
     ).bind(&installation).bind(super::digest(token)).fetch_optional(&mut *transaction).await?;
@@ -79,7 +79,7 @@ pub(super) async fn native_authority(
         .and_then(|header| header.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("");
-    let mut transaction = service.pool.begin().await?;
+    let mut transaction = authority_transaction(&service).await?;
     let owner: Option<(String, String)> = query_as("SELECT a.id,a.email FROM installations i JOIN cairn_accounts a ON a.id=i.owner_id WHERE i.id=$1 AND i.token_digest=$2 FOR SHARE OF i")
         .bind(&installation).bind(super::digest(token)).fetch_optional(&mut *transaction).await?;
     let Some((owner, email)) = owner else {
@@ -103,6 +103,17 @@ pub(super) async fn native_authority(
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(accounts.into()),
     ))
+}
+
+/// The share lock orders an installation's authority check after in-flight owner and
+/// membership changes; it records nothing. Its commit therefore skips the WAL flush,
+/// which under disk pressure alone can outlast the installation's check deadline.
+async fn authority_transaction(service: &Service) -> Result<Transaction<'_, Postgres>, ApiError> {
+    let mut transaction = service.pool.begin().await?;
+    query("SET LOCAL synchronous_commit = off")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
 }
 
 async fn owner_transaction<'a>(
