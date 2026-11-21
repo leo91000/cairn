@@ -982,10 +982,17 @@ pub async fn sync(path: &Path) -> Result<()> {
 }
 
 pub(super) async fn sync_io(path: &Path) -> std::io::Result<()> {
-    let path = path.to_owned();
+    let directory = tokio::fs::File::open(path).await?.into_std().await;
+    sync_opened(directory).await
+}
+
+/// syncfs reports a filesystem writeback error recorded after the descriptor's
+/// last check, but a descriptor opened late starts past any error another
+/// syncfs caller has already seen. Open the directory before writing a tree so
+/// concurrent syncfs callers on the same filesystem cannot hide its errors.
+pub(super) async fn sync_opened(directory: std::fs::File) -> std::io::Result<()> {
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
-        let directory = std::fs::File::open(path)?;
         require_writable(&directory)?;
         if unsafe { libc::syncfs(directory.as_raw_fd()) } != 0 {
             return Err(std::io::Error::last_os_error());
