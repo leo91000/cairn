@@ -24,7 +24,6 @@ import {
 import { useRoute, useRouter } from 'vue-router'
 import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
-import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { compactChat } from '../../../../packages/contracts/generated/compactChat'
 import { createChat } from '../../../../packages/contracts/generated/createChat'
 import { deleteChatMessage } from '../../../../packages/contracts/generated/deleteChatMessage'
@@ -92,12 +91,10 @@ import SubagentPanel from '../components/SubagentPanel.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import UiNotice from '../components/UiNotice.vue'
-import VirtualSelect from '../components/VirtualSelect.vue'
 import { contextNeedsAttention, contextSummary } from '../context-usage'
 import {
   ArrowUp,
   ArrowUpRight,
-  Bot,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -129,7 +126,7 @@ import { modelCatalogs } from '../models'
 import { useReadWhileOpen } from '../reads'
 import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, headerStatus, isExclusivelySuspended } from '../run-status'
-import { backgroundWait } from '../signal'
+import { backgroundWait, identityColor } from '../signal'
 import { chatSkills } from '../skill-mentions'
 import {
   needsResumeSelection,
@@ -620,12 +617,7 @@ const phoneDescription = computed(() => [
   heading.value?.provider ? `Latest harness: ${providers[heading.value.provider].label}` : '',
   connectionDescription.value,
 ].filter(Boolean).join(' · '))
-const agents = computed(() => state.agents.filter(agent => canUseAgent(state.usableAgents, agent.id)).map(agent => ({
-  value: agent.id,
-  label: agent.name,
-  icon: Bot,
-  description: agent.id === MAIN_AGENT_ID ? 'Full access' : agent.description,
-})))
+const agents = computed(() => state.agents.filter(agent => canUseAgent(state.usableAgents, agent.id)))
 watch(() => state.usableAgents, (usable) => {
   if (!route.params.id && !canUseAgent(usable, agentId.value))
     agentId.value = defaultAgent(usable, state.agents)
@@ -671,10 +663,8 @@ const skills = computed(() => chatSkills(state.skills, selectedAgent.value, deta
 const skillNames = computed(() => skills.value.map(skill => skill.name))
 const projects = computed(() => [{
   value: '',
-  label: 'No project',
-  description: 'Use the agent’s available workspaces',
-  icon: FolderGit2,
-}, ...state.projects.filter(project => selectedAgent.value?.access.projects === null || selectedAgent.value?.access.projects.includes(project.id)).map(project => ({ value: project.id, label: project.name, icon: FolderGit2 }))])
+  label: 'All authorized projects',
+}, ...state.projects.filter(project => selectedAgent.value?.access.projects === null || selectedAgent.value?.access.projects.includes(project.id)).map(project => ({ value: project.id, label: project.name }))])
 const draftScope = state.installationId ? `${state.installationId}:` : ''
 let createdChat: Chat | undefined
 let draftKey = ''
@@ -1739,26 +1729,91 @@ function key(event: KeyboardEvent) {
               Only people with access to {{ detail?.agentName || 'its agent' }} can restore it.
             </p>
           </div>
-          <div v-else-if="!detail?.run && !delivery.sending.length" class="flex min-h-0 flex-1 flex-col items-center justify-center overflow-auto px-6 pb-[8vh] pt-8 text-center phone:px-2 phone:py-5">
-            <AgentAvatar
-              v-if="selectedAgent"
-              :name="selectedAgent.name"
-              :identity="selectedAgent.id"
-              :size="56"
-              class="mb-4"
-            />
-            <h2 class="mb-7 text-[30px] font-semibold tracking-tight phone:text-2xl">
-              What are we building?
-            </h2>
-            <div v-if="!detail" class="flex flex-wrap justify-center gap-2">
-              <button
-                v-for="idea in ['Explore this project', 'Review recent changes', 'Help me build…']"
-                :key="idea"
-                class="rounded-full bg-surface px-4 py-2.5 text-xs text-muted hover:bg-hover hover:text-ink"
-                @click="draft = idea; textarea?.focus()"
-              >
-                {{ idea }}
-              </button>
+          <div v-else-if="!detail?.run && !delivery.sending.length" class="flex min-h-0 flex-1 flex-col overflow-auto px-6 pb-[8vh] pt-8 text-center phone:px-2 phone:py-5">
+            <div class="m-auto flex w-full max-w-170 shrink-0 flex-col items-center">
+              <AgentAvatar
+                v-if="selectedAgent"
+                :name="selectedAgent.name"
+                :identity="selectedAgent.id"
+                :size="56"
+                class="mb-4"
+              />
+              <h2 class="mb-7 text-[30px] font-semibold tracking-tight phone:text-2xl">
+                What are we building?
+              </h2>
+              <div v-if="!route.params.id && agents.length" class="mb-6 grid w-full gap-4 text-left">
+                <fieldset :disabled="busy" class="min-w-0">
+                  <legend class="mb-2 text-xs font-semibold text-muted">
+                    Agent
+                  </legend>
+                  <div class="grid grid-cols-3 gap-2 phone:grid-cols-2">
+                    <label
+                      v-for="agent in agents"
+                      :key="agent.id"
+                      class="relative flex min-h-14 min-w-0 cursor-pointer flex-row! items-center gap-2.5! rounded-xl border border-line bg-surface px-2.5 py-2 text-sm! font-semibold! text-ink! hover:bg-hover has-checked:border-accent/65 has-checked:bg-soft has-disabled:cursor-default has-focus-visible:outline-2 has-focus-visible:outline-offset-2 has-focus-visible:outline-accent"
+                    >
+                      <input
+                        v-model="agentId"
+                        type="radio"
+                        name="chat-agent"
+                        :value="agent.id"
+                        class="absolute inset-0 z-1 m-0 size-full cursor-inherit opacity-0"
+                      >
+                      <AgentAvatar :name="agent.name" :identity="agent.id" :size="32" />
+                      <span class="min-w-0 flex-1 wrap-anywhere">{{ agent.name }}</span>
+                      <span
+                        aria-hidden="true"
+                        class="grid size-4 shrink-0 place-items-center rounded-full border"
+                        :class="agentId === agent.id ? 'border-transparent bg-brand text-on-brand' : 'border-control phone:hidden'"
+                      >
+                        <Icon v-if="agentId === agent.id" :name="Check" :size="11" />
+                      </span>
+                    </label>
+                  </div>
+                </fieldset>
+                <fieldset :disabled="busy" class="min-w-0">
+                  <legend class="mb-2 text-xs font-semibold text-muted">
+                    Project
+                  </legend>
+                  <div class="flex flex-wrap gap-1.5">
+                    <label
+                      v-for="project in projects"
+                      :key="project.value"
+                      class="relative inline-flex! min-h-9 max-w-full cursor-pointer flex-row! items-center gap-2 rounded-full border border-line bg-surface px-3 py-1 text-ink! hover:bg-hover has-checked:border-accent/65 has-checked:bg-soft has-disabled:cursor-default has-focus-visible:outline-2 has-focus-visible:outline-offset-2 has-focus-visible:outline-accent"
+                    >
+                      <input
+                        v-model="projectId"
+                        type="radio"
+                        name="chat-project"
+                        :value="project.value"
+                        class="absolute inset-0 z-1 m-0 size-full cursor-inherit opacity-0"
+                      >
+                      <span aria-hidden="true" class="grid size-3 shrink-0 place-items-center">
+                        <span v-if="projectId === project.value" class="grid size-3 place-items-center rounded-full bg-brand text-on-brand">
+                          <Icon :name="Check" :size="9" />
+                        </span>
+                        <span
+                          v-else
+                          class="size-1.75 rounded-full"
+                          :class="project.value ? '' : 'border border-muted'"
+                          :style="project.value ? { background: identityColor(project.value) } : undefined"
+                        />
+                      </span>
+                      <span class="min-w-0 wrap-anywhere">{{ project.label }}</span>
+                    </label>
+                  </div>
+                </fieldset>
+              </div>
+              <div v-if="!detail" class="flex flex-wrap justify-center gap-2">
+                <button
+                  v-for="idea in ['Explore this project', 'Review recent changes', 'Help me build…']"
+                  :key="idea"
+                  class="rounded-full bg-surface px-4 py-2.5 text-xs text-muted hover:bg-hover hover:text-ink"
+                  @click="draft = idea; textarea?.focus()"
+                >
+                  {{ idea }}
+                </button>
+              </div>
             </div>
           </div>
           <ActivityFeed
@@ -2010,25 +2065,6 @@ function key(event: KeyboardEvent) {
               <div class="px-3 pt-2 pb-2">
                 <div v-if="dragging && !readOnly && !noAgent" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-surface/95 text-sm font-semibold text-accent">
                   <Icon :name="Paperclip" :size="20" />Drop files here
-                </div>
-                <!-- A new conversation chooses its agent and project; one still opening does not. -->
-                <div v-if="!route.params.id" class="mb-3 flex max-w-100 items-center gap-1 phone:mb-2">
-                  <VirtualSelect
-                    v-model="agentId"
-                    :options="agents"
-                    label="Chat agent"
-                    hide-label
-                    compact
-                    variant="ghost"
-                  />
-                  <VirtualSelect
-                    v-model="projectId"
-                    :options="projects"
-                    label="Chat project"
-                    hide-label
-                    compact
-                    variant="ghost"
-                  />
                 </div>
                 <div v-if="editing" class="mb-2 flex items-center justify-between text-[11px] text-accent">
                   Editing queued message<button

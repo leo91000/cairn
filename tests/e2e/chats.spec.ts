@@ -2271,8 +2271,8 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await expect(page.locator('.task-focus-detail')).toBeVisible()
   await page.goto(workspacePath('/projects'))
   await page.getByRole('link', { name: 'Start chat' }).first().click()
-  await expect(page.getByRole('combobox', { name: 'Chat agent' })).toHaveValue('Main agent')
-  await expect(page.getByRole('combobox', { name: 'Chat project' })).toHaveValue('Design system')
+  await expect(page.getByRole('group', { name: 'Agent', exact: true }).getByRole('radio', { name: 'Main agent', exact: true })).toBeChecked()
+  await expect(page.getByRole('group', { name: 'Project', exact: true }).getByRole('radio', { name: 'Design system', exact: true })).toBeChecked()
   await page.setViewportSize({ width: 1440, height: 1000 })
   await expectSingleScroll(page)
   await page.screenshot({ path: test.info().outputPath('chat-new-desktop-light.png'), animations: 'disabled' })
@@ -2322,7 +2322,7 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await expect(page.locator('.activity-message').filter({ hasText: 'Add a regression test for keyboard navigation' }).last()).toBeVisible()
   await page.goto(workspacePath('/agents'))
   await page.locator('article').filter({ has: page.getByRole('heading', { name: 'Release engineer', exact: true }) }).getByRole('link', { name: 'Start chat' }).click()
-  await expect(page.getByRole('combobox', { name: 'Chat agent' })).toHaveValue('Release engineer')
+  await expect(page.getByRole('group', { name: 'Agent', exact: true }).getByRole('radio', { name: 'Release engineer', exact: true })).toBeChecked()
 })
 
 test('withdraws an obsolete question without sending an answer on desktop and mobile', async ({ page, workspace }) => {
