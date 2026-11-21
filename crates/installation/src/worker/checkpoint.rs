@@ -548,6 +548,14 @@ impl RunCheckpoint {
                     provider_cause,
                 });
         }
+        if self
+            .held_environment
+            .as_ref()
+            .is_some_and(|held| held.attempt != runner)
+        {
+            // A retained environment only authorizes completions for its own attempt.
+            self.held_environment = None;
+        }
         self.runner_id = Some(Some(runner.to_owned()));
         self.provider_failure_attempt = None;
         self.finalization_failure_attempt = None;
@@ -1264,6 +1272,39 @@ mod tests {
         stale.retry_cause = Some(Some(cause));
         stale.bind_paid_admission("candidate", &state);
         assert!(stale.pending_paid_admission.is_none());
+    }
+
+    #[tokio::test]
+    async fn admitting_a_replacement_detaches_the_old_retained_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "replacement", "taskId": "task", "status": "running" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let state = store.run_state("replacement").await.unwrap();
+        let mut saved = RunCheckpoint::from_value(json!({
+            "runnerId": "old",
+            "heldEnvironment": {
+                "attempt": "old",
+                "generation": "old-generation",
+                "expiresAt": now() + 60_000,
+            },
+        }))
+        .unwrap();
+
+        saved.bind_paid_admission("old", &state);
+        assert!(saved.held_environment.is_some());
+
+        saved.bind_paid_admission("replacement", &state);
+        assert_eq!(saved.runner_id(), Some("replacement"));
+        assert!(saved.held_environment.is_none());
     }
 
     #[tokio::test]
