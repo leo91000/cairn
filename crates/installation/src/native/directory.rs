@@ -760,9 +760,9 @@ async fn copy_verified_with_capacity(
     }
     // No per-file fsync: on a loop-backed pool each one costs a host journal
     // commit. One syncfs flushes the copy, and every caller publishes it only
-    // after this returns, through writes that fail if ext4 shut down meanwhile.
-    // Its descriptor is opened before the copy so writeback errors during the
-    // copy are reported to this barrier.
+    // after this returns. Callers first read or rename the copy on the data
+    // pool, which fails if ext4 shut down during this flush. The descriptor is
+    // opened before the copy so writeback errors during it reach this barrier.
     let barrier = tokio::fs::File::open(target).await?.into_std().await;
     copy.args(["-aHAX", "--numeric-ids", "--sparse", "--"])
         .arg(format!("{}/", source.display()))
