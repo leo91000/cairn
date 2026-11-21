@@ -1,5 +1,5 @@
 //! Attempt lifecycle on the VM controller.
-use super::{CONTROLLER_FAILED, CONTROLLER_INTERRUPTED};
+use super::{CONTROLLER_FAILED, CONTROLLER_INTERRUPTED, FINALIZATION_FAILED_SENTINEL, STOPPED};
 use crate::runner::exclusive::Reservations;
 use crate::{
     config::now,
@@ -431,17 +431,8 @@ impl Execution {
         if let Err(error) = &result {
             log_failure(broker, id, &error.message).await;
         }
-        let finalization_failed = matches!(result, Ok(crate::runner::FINALIZATION_FAILED_SENTINEL));
-        let code = if finalization_failed {
-            CONTROLLER_FAILED
-        } else {
-            exit_code(result, lease_expired.load(Ordering::SeqCst))
-        };
-        let outcome = if finalization_failed {
-            serde_json::json!({ "StatusCode": code, "FinalizationFailed": true }).to_string()
-        } else {
-            code.to_string()
-        };
+        let (outcome, finalization_failed) =
+            exit_record(result, lease_expired.load(Ordering::SeqCst));
         let mut retry_delay = Duration::from_secs(1);
         loop {
             match crate::runner::write_final_result(
@@ -465,6 +456,23 @@ impl Execution {
         let _ = tokio::fs::remove_file(broker.state_file(id, "active")).await;
         broker.active.lock().await.remove(id);
         let _ = self.done.send(true);
+    }
+}
+
+fn exit_record(result: Result<i32>, lease_expired: bool) -> (String, bool) {
+    match result {
+        Ok(FINALIZATION_FAILED_SENTINEL) => (
+            serde_json::json!({ "StatusCode": CONTROLLER_FAILED, "FinalizationFailed": true })
+                .to_string(),
+            true,
+        ),
+        // Unlike a successful turn, a stopped VM is never retained. execute_attempt
+        // returns this status only after closing the disk successfully.
+        Ok(STOPPED) if !lease_expired => (
+            serde_json::json!({ "StatusCode": STOPPED, "PhysicalFinalized": true }).to_string(),
+            false,
+        ),
+        result => (exit_code(result, lease_expired).to_string(), false),
     }
 }
 
@@ -1212,6 +1220,27 @@ mod tests {
             }
         }
         assert!(!valid(&plan(&json!(clock + MAX_ATTEMPT_MS + 60_000))));
+    }
+
+    #[test]
+    fn stop_receipt_only_confirms_successful_vm_close() {
+        let (outcome, failed) = exit_record(Ok(STOPPED), false);
+        assert!(!failed);
+        assert_eq!(
+            serde_json::from_str::<Value>(&outcome).unwrap(),
+            serde_json::json!({ "StatusCode": STOPPED, "PhysicalFinalized": true })
+        );
+        assert_eq!(
+            exit_record(Ok(STOPPED), true),
+            (CONTROLLER_INTERRUPTED.to_string(), false)
+        );
+        assert_eq!(exit_record(Ok(0), false), ("0".into(), false));
+        let (outcome, failed) = exit_record(Ok(FINALIZATION_FAILED_SENTINEL), false);
+        assert!(failed);
+        assert_eq!(
+            serde_json::from_str::<Value>(&outcome).unwrap(),
+            serde_json::json!({ "StatusCode": CONTROLLER_FAILED, "FinalizationFailed": true })
+        );
     }
 
     #[test]
