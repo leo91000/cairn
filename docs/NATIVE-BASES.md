@@ -7,6 +7,16 @@ and decompressing another ZIP; it still creates private files and verifies their
 contents. File ownership, links and xattrs are preserved. The cache shares no
 mutable working-file inodes with conversations.
 
+The copy does not fsync each file. After the checksum verification, one `syncfs`
+of the data pool is the durability barrier; the copy is renamed and its format
+published only after that barrier succeeds. A crash before it leaves a partial
+private tree that initialization retries from the pinned source. Per-file
+fsync cost one host journal commit per file on a loop-backed pool: on a 32-thread
+i9-14900K host, the 5,201-file / 113 MiB cairn base took 66.7 s with per-file
+fsync and 2.0 s without it (0.2 s copy, 0.1 s verification, 1.7 s `syncfs`).
+These are local measurements on an idle host; `syncfs` also flushes other
+writers on the same pool and grows with their dirty data.
+
 [ADR-0088](adr/0088-native-directories-and-direct-vm-images.md) supersedes the
 journal-clone format in [ADR-0058](adr/0058-prepared-native-project-bases.md).
 A durable environment-qualified initialization pin keeps the verified source
