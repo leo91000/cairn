@@ -9,22 +9,24 @@ outputs consumed by `ci.yaml`.
 | Tool | Official source | Channel | Native check in CI |
 | --- | --- | --- | --- |
 | Codex | npm `@openai/codex` | dist-tag `latest` | plan-turn boundary |
-| Claude Code | npm `@anthropic-ai/claude-code` | dist-tag `stable` | catalog, usage, turn, resumption, plan-turn boundary |
+| Claude Code | npm `@anthropic-ai/claude-code` | exact `2.1.311` | catalog, usage, turn, resumption, plan-turn boundary |
 | OpenCode | npm `opencode-ai` | dist-tag `latest` | catalog, turn, resumption |
 | GitHub CLI | GitHub `cli/cli` latest release | not draft or prerelease | none |
 
-Every tool follows its channel into new minor and major releases. There is no
-version range to widen by hand: a release that breaks its adapter fails CI
-instead of shipping.
+Tools configured with a dist-tag follow it into new minor and major releases.
+A release that breaks its adapter fails CI.
 
-Claude Code follows Anthropic's
+Claude Code normally follows Anthropic's
 [stable release channel](https://code.claude.com/docs/en/setup#configure-release-channel):
 a version "typically about one week old, skipping releases with major
 regressions", published as the npm `stable` dist-tag. Its `latest` channel is
 never used, even when it names a newer release. Anthropic notes that a newly
 launched model can require a version newer than the stable channel serves. Such
-a model becomes available to Cairn when the stable channel reaches that version.
-Builds only install a release the stable channel serves.
+a model becomes available to Cairn when it ships in a qualified stable release.
+Builds currently resolve `2.1.311`, the version shipped in Cairn v0.78.1.
+Anthropic's `2.1.323` puts the native tool archive above the installed
+supervisors' 1 GiB extraction limit. Return to `stable` after qualifying a
+bundle that fits the existing limits.
 
 OpenCode documents its npm package `opencode-ai` as the install path and
 publishes releases on the `latest` dist-tag. Only that dist-tag is read; the
