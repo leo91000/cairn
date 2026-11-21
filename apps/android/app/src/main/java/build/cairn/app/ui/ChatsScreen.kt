@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.InputTransformation
@@ -23,7 +22,6 @@ import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.maxLength
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -480,7 +478,6 @@ internal fun ChatPage(
     var compacting by remember(id) { mutableStateOf(false) }
     var sharing by remember(id) { mutableStateOf(false) }
     var renaming by remember(id) { mutableStateOf(false) }
-    var cancelledExpanded by rememberSaveable(id) { mutableStateOf(false) }
     BackHandler(selected && fullscreen) { fullscreen = false }
     var choosing by rememberSaveable(id) { mutableStateOf(false) }
     var details by rememberSaveable(id) { mutableStateOf(false) }
@@ -744,6 +741,24 @@ internal fun ChatPage(
         }
     val delivery = chatDelivery(chat, live.entries, outgoing)
     val pending = delivery.queued
+    // The running turn keeps its coding agent, model, reasoning and speed: a message changing
+    // them waits for the next turn, as the server requires.
+    val runningAgent = chat?.run?.snapshot?.agent
+    val changesRunningAgent =
+        runningAgent != null &&
+            (switchingProvider ||
+                (model.isNotEmpty() && model != runningAgent.model) ||
+                (reasoning.isNotEmpty() && reasoning != runningAgent.reasoning) ||
+                (speed.isNotEmpty() && speed != runningAgent.speed.ifEmpty { "standard" }))
+    // While the agent works, a message joins its turn unless it must wait for the next one.
+    val steers = active && !changesRunningAgent && !steerBlocked
+    // Stopping or a failed turn pauses an empty queue, which the next message resumes. A queue
+    // paused on purpose, or holding messages, keeps holding what is added to it.
+    val resumesOnSend =
+        chat?.paused == true &&
+            pending.isEmpty() &&
+            chat.run?.status in setOf("failed", "interrupted", "cancelled")
+    val held = chat?.paused == true && !resumesOnSend
     val questions = chat?.questions.orEmpty().filter { it.status == "pending" }
     // Files over the limits stay visible as refused cards; the others join the draft.
     fun attach(
@@ -888,6 +903,7 @@ internal fun ChatPage(
                         plan = plan,
                         speed = selectedSpeed,
                     )
+            val resumes = editing == null && resumesOnSend
             try {
                 val edited = editing
                 if (edited == null)
@@ -913,6 +929,7 @@ internal fun ChatPage(
                     api.editChatMessage(
                         EditChatMessageInput(chatId = chatId, messageId = edited, message = content)
                     )
+                if (resumes) api.setChatPaused(SetChatPausedInput(chatId = chatId, paused = false))
             } catch (e: Exception) {
                 outgoing = null
                 if (planApproval != null && e is ApiException && e.status == 409) {
@@ -948,6 +965,42 @@ internal fun ChatPage(
         planning = message.plan == true
         speed = message.speed
         attachments = message.attachments.map { DraftAttachment(it) }
+    }
+    // A turn that failed or stopped returns the messages it never delivered: they come back to
+    // the composer, ahead of any draft, and leave the conversation so no other device restores
+    // them again.
+    val restored = remember(id) { mutableSetOf<String>() }
+    val returned =
+        chat?.messages.orEmpty().filter {
+            it.status == "cancelled" && it.questionId == null && it.id !in restored
+        }
+    LaunchedEffect(returned.map { it.id }, readOnly, editing) {
+        val current = chat ?: return@LaunchedEffect
+        if (returned.isEmpty() || readOnly || editing != null || current.lifecycle != "active")
+            return@LaunchedEffect
+        returned.forEach { restored += it.id }
+        composer.setTextAndPlaceCursorAtEnd(
+            (returned.map { it.text.trim() } + draft.trim())
+                .filter { it.isNotEmpty() }
+                .joinToString("\n\n")
+        )
+        val kept = attachments.map { it.attachment.id }.toSet()
+        attachments =
+            attachments +
+                returned
+                    .flatMap { it.attachments }
+                    .filter { it.id !in kept }
+                    .map { DraftAttachment(it) }
+        try {
+            returned.forEach {
+                vm.api.deleteChatMessage(
+                    ChatMessageReference(chatId = current.id, messageId = it.id)
+                )
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            vm.report(e)
+        }
     }
     // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation, with
     // the agent's usual permissions.
@@ -1532,35 +1585,11 @@ internal fun ChatPage(
                             }
                         if (chat?.sessionRestartRequested == true && !readOnly)
                             Text(
-                                "Écrivez un nouveau message, puis reprenez la file pour continuer.",
+                                "Votre prochain message démarre la nouvelle session.",
                                 Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                        val cancelled = chat?.messages.orEmpty().filter { it.status == "cancelled" }
-                        if (cancelled.isNotEmpty()) {
-                            TextButton({ cancelledExpanded = !cancelledExpanded }) {
-                                Text("Messages annulés (${cancelled.size})")
-                            }
-                            if (cancelledExpanded)
-                                Column(
-                                    Modifier.heightIn(max = 200.dp)
-                                        .verticalScroll(rememberScrollState())
-                                ) {
-                                    cancelled.forEach { message ->
-                                        Text(message.text)
-                                        if (!readOnly)
-                                            TextButton({
-                                                composer.setTextAndPlaceCursorAtEnd(message.text)
-                                                attachments =
-                                                    message.attachments.map { DraftAttachment(it) }
-                                                cancelledExpanded = false
-                                            }) {
-                                                Text("Copier dans le message")
-                                            }
-                                    }
-                                }
-                        }
                         if (live.catchingUp && id != null) {
                             Column(
                                 Modifier.weight(1f).fillMaxWidth(),
@@ -2080,12 +2109,14 @@ internal fun ChatPage(
                                                             "Réservé aux personnes ayant accès à cet agent"
                                                         else if (planRequested)
                                                             "Que faut-il planifier ? Rien ne sera modifié"
-                                                        else if (chat?.paused == true)
+                                                        else if (held)
                                                             if (liveWakeup(chat) != null)
                                                                 "Ajouter à la file — annule l’attente"
                                                             else "Ajouter à la file…"
                                                         else if (liveWakeup(chat) != null)
                                                             "Répondre maintenant annule l’attente"
+                                                        else if (steers)
+                                                            "Écrire à l’agent pendant qu’il travaille…"
                                                         else if (active) "Ajouter un message…"
                                                         else if (skillOptions.isNotEmpty())
                                                             "Votre message… $ pour les skills"
@@ -2180,20 +2211,21 @@ internal fun ChatPage(
                                         // stopping stays offered.
                                         val hasDraft =
                                             draft.isNotBlank() || attachments.isNotEmpty()
-                                        if (active && editing == null && hasDraft && !readOnly)
+                                        // During a reply, sending joins the agent's turn; the
+                                        // clock queues the message for the next one.
+                                        if (steers && editing == null && hasDraft && !readOnly)
                                             RoundAction(
-                                                "Intervenir maintenant",
-                                                CairnIcons.Steer,
+                                                "Envoyer après ce tour",
+                                                CairnIcons.Clock,
                                                 container =
                                                     MaterialTheme.colorScheme.primaryContainer,
                                                 content =
                                                     MaterialTheme.colorScheme.onPrimaryContainer,
                                                 outlined = false,
                                                 size = 40.dp,
-                                                enabled =
-                                                    canSend && !switchingProvider && !steerBlocked,
+                                                enabled = canSend,
                                             ) {
-                                                send(if (switchingProvider) "queue" else "steer")
+                                                send("queue")
                                             }
                                         if (
                                             (active || chat?.wakeup != null) &&
@@ -2210,7 +2242,9 @@ internal fun ChatPage(
                                             }
                                         else
                                             IconButton(
-                                                onClick = { send("queue") },
+                                                onClick = {
+                                                    send(if (steers) "steer" else "queue")
+                                                },
                                                 enabled = canSend,
                                                 modifier =
                                                     Modifier.size(48.dp)
@@ -2245,11 +2279,12 @@ internal fun ChatPage(
                                                     ) {
                                                         Icon(
                                                             if (editing != null) Icons.Default.Check
-                                                            else if (active || chat?.paused == true)
+                                                            else if (!steers && (active || held))
                                                                 Icons.Default.Add
                                                             else CairnIcons.Up,
                                                             if (editing != null) "Modifier"
-                                                            else if (active || chat?.paused == true)
+                                                            else if (steers) "Envoyer maintenant"
+                                                            else if (active || held)
                                                                 "Ajouter à la file"
                                                             else "Envoyer",
                                                             Modifier.size(18.dp),

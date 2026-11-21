@@ -34,8 +34,9 @@ export function chatDelivery(chat: ChatDetail | null, cards: TimelineEntry[], ou
   if (outgoing && !messages.some(message => message.id === outgoing.id))
     messages.push(outgoing)
   const active = !!chat?.run && ['queued', 'running'].includes(chat.run.status)
-  // A scheduled wait resumes the task before queued follow-ups start.
-  const canStart = !chat?.paused && (!chat?.run || chat.run.status === 'succeeded') && !scheduledWakeup(chat)
+  // A scheduled wait resumes the task before queued follow-ups start. After a turn that failed
+  // or stopped, the next message starts a new one: what it never delivered came back unsent.
+  const canStart = !chat?.paused && !active && !scheduledWakeup(chat)
   const first = messages[0]
   const sending: SendingMessage[] = []
   const queued: ChatMessage[] = []

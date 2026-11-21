@@ -1,0 +1,38 @@
+# Failed turns return unsent messages
+
+Date: 2026-11-20. Updates the queue behaviour after a failed or stopped turn in
+ADR-0063; the bounded automatic retry policy is unchanged.
+
+## Context
+
+A turn that did not succeed paused its conversation. The message that started it
+and any follow-up written meanwhile stayed in a paused queue, and the only way on
+was to resume: resuming the queue alone paused it again on the next tick, so the
+failed turn had to be replayed before anything else could be said. People read
+this as a conversation they must repair rather than one they can keep writing in.
+
+## Decision
+
+A turn that failed, was interrupted or was stopped no longer pauses its
+conversation. The dispatcher returns the ordinary messages that turn never
+delivered — its own message when the agent never acknowledged it, and messages
+written before the turn ended — by marking them cancelled. Questionnaire answers
+are not returned. Messages written after the turn ended start the next turn on
+the same run, session and workspace, as after a successful turn.
+
+Web and Android put returned messages back in the composer, ahead of any draft,
+with their attachments, and withdraw them so another device does not restore them
+again. Withdrawal of a cancelled ordinary message is accepted for that reason,
+including through public MCP and `cairn_installation` (`delete_chat_message`).
+
+Explicit pauses keep their meaning: a person's pause, Stop, a rule's
+cancellation and a requested fresh session still pause the conversation, and
+rules still cannot lift them. When the last turn failed or was stopped and the
+queue is empty, the next message a person sends resumes it. A queue paused after
+a successful turn, or holding messages, keeps holding what is added to it. When a
+message is waiting, resuming sends it rather than replaying the stopped turn.
+
+While the agent works, the composer sends into its turn (steer) by default.
+Queueing for the next turn is the secondary action (Alt+Enter on web). A message
+that changes the coding agent, model, reasoning or speed, or requests a plan
+during a turn that can change files, is queued, as the installation requires.

@@ -983,7 +983,9 @@ pub(crate) fn edit_as(
     }
     require_live(&chat)?;
     let mut current = required(find_message(db, chat_id, message_id)?, "Message not found")?;
-    if current.status != MessageStatus::Queued {
+    // A returned message goes back to its author's composer, which withdraws it.
+    let returned = current.status == MessageStatus::Cancelled && values.is_none();
+    if current.status != MessageStatus::Queued && !returned {
         return Err(Error::conflict("This message is already being sent."));
     }
     crate::conversation_writers::record_message_before_change(db, &current)?;
@@ -1138,13 +1140,59 @@ fn next_queued(db: &Db<'_>, chat_id: &str) -> Result<Option<Value>> {
         .map_err(Into::into)
 }
 
-/// A chat whose last turn did not succeed waits for the user, unless a deletion
-/// cancelled it or the user asked for a fresh session.
+/// A chat whose last turn did not succeed returns what it never delivered, unless a
+/// deletion cancelled it or the user asked for a fresh session.
 fn needs_attention(chat: &Conversation, run: Option<&Value>) -> bool {
     run.is_some_and(|run| run["status"] != RunStatus::Succeeded)
         && !chat.cancelled_by_deletion
         && !chat.session_restart_requested
         && chat.environment_state != Some(EnvironmentState::Expired)
+}
+
+/// Ordinary messages a turn that did not succeed never delivered: its own message and
+/// those written before it ended. Messages written since start the next turn.
+fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Vec<Message>> {
+    let turn = run["chatExecution"]["messageId"].as_str();
+    let ended_at = run["finishedAt"].as_i64().unwrap_or(0);
+    Ok(db
+        .conversation_messages(chat_id)?
+        .into_iter()
+        .filter(|message| {
+            matches!(
+                message.status,
+                MessageStatus::Queued | MessageStatus::Sending
+            ) && message.question_id.is_none()
+                && (message.created_at <= ended_at || Some(message.id.as_str()) == turn)
+        })
+        .collect())
+}
+
+/// A resumed turn replays its own message, which a failure returned to its author.
+pub(crate) fn take_back_returned(db: &Db<'_>, run: &Value) -> Result<()> {
+    let Some(turn) = run["chatExecution"]["messageId"].as_str() else {
+        return Ok(());
+    };
+    let Some(chat) = db.conversation_for_run(text(run, "id"))? else {
+        return Ok(());
+    };
+    if let Some(mut message) = find_message(db, &chat.id, turn)?
+        && message.status == MessageStatus::Cancelled
+        && message.question_id.is_none()
+    {
+        message.status = MessageStatus::Sending;
+        db.save_message(&message)?;
+    }
+    Ok(())
+}
+
+/// Returns unsent messages to their author instead of replaying them after a failure.
+/// Clients put them back in the composer; nothing waits for a resumption.
+fn return_unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<()> {
+    for mut message in unsent(db, chat_id, run)? {
+        message.status = MessageStatus::Cancelled;
+        db.save_message(&message)?;
+    }
+    Ok(())
 }
 
 /// Applies the provider, model, reasoning and speed chosen for this message. The speed is
@@ -1254,8 +1302,13 @@ fn continue_run(
         || run["environmentState"] == "expired";
     let fresh_environment_without_session =
         run["environmentExpiredAt"].is_number() && !run["sessionId"].is_string();
+    // A turn that handed the conversation over failed before its session existed: the
+    // next message hands it over again rather than starting without its history.
+    let unfinished_handoff =
+        run["chatExecution"]["context"].is_string() && !run["sessionId"].is_string();
     let restart_requested = expired
         || fresh_environment_without_session
+        || unfinished_handoff
         || chat.session_restart_requested
         || checkpoint.fresh_session == Some(true);
     if provider != Provider::of_run(run)? || restart_requested {
@@ -1880,17 +1933,32 @@ impl Service {
                 continue;
             }
             let id = chat.id.clone();
-            if needs_attention(&chat, run.as_ref()) {
+            if let Some(run) = run.as_ref().filter(|run| needs_attention(&chat, Some(run))) {
                 self.chat_cancel_wait(&id).await?;
-                if chat.paused {
+                // Read first: an idle failed conversation needs no writer on each tick.
+                let (chat_id, ended) = (id.clone(), run.clone());
+                let (returning, waiting) = self
+                    .store
+                    .read(move |db| {
+                        let returning = unsent(db, &chat_id, &ended)?;
+                        let waiting = db.conversation_messages(&chat_id)?.iter().any(|message| {
+                            message.status == MessageStatus::Queued
+                                && message.question_id.is_none()
+                                && returning.iter().all(|returned| returned.id != message.id)
+                        });
+                        Ok((!returning.is_empty(), waiting))
+                    })
+                    .await?;
+                if returning {
+                    let (chat_id, ended) = (id.clone(), run.clone());
+                    self.store
+                        .transaction(move |db| return_unsent(db, &chat_id, &ended))
+                        .await?;
+                }
+                // A message written since the turn ended starts the next one.
+                if chat.paused || !waiting {
                     continue;
                 }
-                let chat_id = id.clone();
-                self.store
-                    .transaction(move |db| next_queued(db, &chat_id).map(|_| ()))
-                    .await?;
-                self.chat_pause(&id, true).await?;
-                continue;
             }
             // A scheduled wait continues the current task before queued follow-ups.
             let (waiting_chat, waiting_run) = (chat.clone(), run.clone());
@@ -2280,6 +2348,60 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     |id: &str| runs.iter().find(|run| run["id"] == id).unwrap()["provider"].clone();
                 assert_eq!(provider("switched"), "claude");
                 assert_eq!(provider("codex"), "codex");
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_turn_returns_what_it_never_delivered() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "status": "failed",
+                        "finishedAt": 500,
+                        "chatExecution": { "messageId": "turn", "text": "Turn", "attachments": [], "recovery": false },
+                        "snapshot": { "agent": { "provider": "codex" } },
+                    }),
+                    None,
+                )?;
+                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                let message = |id: &str, status: &str, created_at: i64| {
+                    json!({ "id": id, "chatId": "chat", "text": id, "status": status, "createdAt": created_at })
+                };
+                db.put_message(&message("delivered", "delivered", 10))?;
+                // The turn's own message, never acknowledged, was written before others.
+                db.put_message(&message("turn", "sending", 600))?;
+                db.put_message(&message("follow-up", "queued", 400))?;
+                let mut answer = message("answer", "queued", 450);
+                answer["questionId"] = "question".into();
+                db.put_message(&answer)?;
+                db.put_message(&message("after", "queued", 700))?;
+
+                let run = db.run("run")?.unwrap();
+                return_unsent(db, "chat", &run)?;
+                let status = |id: &str| -> Result<MessageStatus> {
+                    Ok(find_message(db, "chat", id)?.unwrap().status)
+                };
+                assert_eq!(status("delivered")?, MessageStatus::Delivered);
+                assert_eq!(status("turn")?, MessageStatus::Cancelled);
+                assert_eq!(status("follow-up")?, MessageStatus::Cancelled);
+                // Answers are not returned, and a message written since starts the next turn.
+                assert_eq!(status("answer")?, MessageStatus::Queued);
+                assert_eq!(status("after")?, MessageStatus::Queued);
+                assert!(!conversation(db, "chat")?.paused);
+                assert!(unsent(db, "chat", &run)?.is_empty());
+
+                // The composer that restores a returned message withdraws it.
+                edit(db, "chat", "turn", None)?;
+                assert!(find_message(db, "chat", "turn")?.is_none());
                 Ok(())
             })
             .await

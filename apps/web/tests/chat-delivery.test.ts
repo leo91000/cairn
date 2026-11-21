@@ -129,11 +129,14 @@ describe('chat delivery presentation', () => {
     expect(result.sending.map(item => [item.message.id, item.label])).toEqual([['steer', 'Sending to agent…']])
     expect(result.queued.map(item => item.id)).toEqual(['next'])
   })
-  it('does not present paused or failed-chat messages as an ongoing send', () => {
-    for (const detail of [chat([message('next')], null, true), chat([message('next')], { status: 'failed' })]) {
-      expect(chatDelivery(detail, []).sending).toEqual([])
-      expect(chatDelivery(detail, []).queued).toHaveLength(1)
-    }
+  it('does not present paused messages as an ongoing send', () => {
+    const detail = chat([message('next')], null, true)
+    expect(chatDelivery(detail, []).sending).toEqual([])
+    expect(chatDelivery(detail, []).queued).toHaveLength(1)
+  })
+  it('starts the next turn with a message written after a failed or stopped one', () => {
+    for (const status of ['failed', 'interrupted', 'cancelled'] as const)
+      expect(chatDelivery(chat([message('next')], { status }), []).sending[0].message.id).toBe('next')
   })
   it('moves the next waiting follow-up into the transcript when the previous reply finishes', () => {
     expect(chatDelivery(chat([message('next')], { status: 'succeeded' }), []).sending[0].message.id).toBe('next')

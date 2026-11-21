@@ -104,7 +104,7 @@ internal fun conversationError(chat: Chat?): String? {
 
     val run = chat?.run?.takeIf { it.status == "failed" } ?: return null
     return run.error?.trim()?.ifEmpty { null }
-        ?: "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer."
+        ?: "La réponse s’est arrêtée avant la fin. Envoyez un message pour continuer."
 }
 
 /** The conversation already shows a failed run's reason as its failure notice. */
@@ -158,11 +158,9 @@ internal fun chatDelivery(
         chat?.messages.orEmpty().filter { it.status in setOf("queued", "sending") }.toMutableList()
     if (outgoing != null && messages.none { it.id == outgoing.id }) messages.add(outgoing)
     val active = chat?.run?.active == true
-    // A scheduled wait resumes the task before queued follow-ups start.
-    val canStart =
-        chat?.paused != true &&
-            (chat?.run == null || chat.run.status == "succeeded") &&
-            scheduledWakeup(chat) == null
+    // A scheduled wait resumes the task before queued follow-ups start. After a turn that failed
+    // or stopped, the next message starts a new one: what it never delivered came back unsent.
+    val canStart = chat?.paused != true && !active && scheduledWakeup(chat) == null
     val sending = mutableListOf<SendingMessage>()
     val queued = mutableListOf<ChatMessage>()
     messages.forEachIndexed { index, message ->

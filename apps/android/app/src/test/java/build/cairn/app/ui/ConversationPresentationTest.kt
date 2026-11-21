@@ -476,24 +476,20 @@ class ConversationPresentationTest {
     }
 
     @Test
-    fun `paused and failed runs keep messages waiting`() {
-        listOf(
-                Chat(id = "chat", paused = true),
-                Chat(
-                    id = "chat",
-                    run =
-                        Run(
-                            id = "r",
-                            status = "failed",
-                            taskId = "",
-                        ),
-                ),
-            )
-            .forEach {
-                val result = chatDelivery(it.copy(messages = listOf(first)), emptyList())
-                assertTrue(result.sending.isEmpty())
-                assertEquals(first, result.queued.single())
-            }
+    fun `a paused conversation keeps messages waiting`() {
+        val result =
+            chatDelivery(Chat(id = "chat", paused = true, messages = listOf(first)), emptyList())
+        assertTrue(result.sending.isEmpty())
+        assertEquals(first, result.queued.single())
+    }
+
+    @Test
+    fun `a message written after a failed or stopped turn starts the next one`() {
+        listOf("failed", "interrupted", "cancelled").forEach {
+            val run = Run(id = "r", status = it, taskId = "")
+            val chat = Chat(id = "chat", run = run, messages = listOf(first))
+            assertEquals(first, chatDelivery(chat, emptyList()).sending.single().message)
+        }
     }
 
     @Test
@@ -647,7 +643,7 @@ class ConversationPresentationTest {
                 taskId = "",
             )
         assertEquals(
-            "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer.",
+            "La réponse s’est arrêtée avant la fin. Envoyez un message pour continuer.",
             conversationError(Chat(id = "chat", run = run)),
         )
         assertEquals(

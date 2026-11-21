@@ -79,7 +79,6 @@ import ConversationSharing from '../components/ConversationSharing.vue'
 import ConversationSummary from '../components/ConversationSummary.vue'
 import Icon from '../components/Icon.vue'
 import MenuButton from '../components/MenuButton.vue'
-import MessageAttachments from '../components/MessageAttachments.vue'
 import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
 import PlanBar from '../components/PlanBar.vue'
@@ -98,6 +97,7 @@ import {
   Check,
   ChevronDown,
   ChevronLeft,
+  Clock,
   CornerDownRight,
   FolderGit2,
   Hourglass,
@@ -119,7 +119,6 @@ import {
   Trash2,
   TriangleAlert,
   X,
-  Zap,
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
 import { modelCatalogs } from '../models'
@@ -398,7 +397,7 @@ const visibleError = computed(() => {
   if (quota.value && (!chatError || isQuotaMessage(chatError) || chatError === quota.value.message))
     return ''
   const failedRun = detail.value?.run?.status === 'failed' ? detail.value.run : null
-  return chatError || (failedRun ? failedRun.error || (readOnly.value ? 'The response stopped before finishing.' : 'The response stopped before finishing. Resume the conversation to continue.') : '')
+  return chatError || (failedRun ? failedRun.error || (readOnly.value ? 'The response stopped before finishing.' : 'The response stopped before finishing. Send a message to continue.') : '')
 })
 const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('OpenCode Go requires Global regions for this model.'))
 // The conversation already shows a failed run's reason as its failure card.
@@ -645,6 +644,21 @@ const planUnavailableMessage = computed(() => planEnabled.value ? 'Plan requires
 const canSend = computed(() => !readOnly.value && !noAgent.value && !planBlocked.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 // A plan request cannot join a turn that can already change files.
 const steerBlocked = computed(() => planRequested.value && !detail.value?.run?.chatExecution?.plan)
+// The running turn keeps its coding agent, model, reasoning and speed: a message changing them
+// waits for the next turn, as the server requires.
+const changesRunningAgent = computed(() => {
+  const agent = detail.value?.run?.snapshot.agent
+  if (!agent)
+    return false
+  const differs = (value: string, current = '') => !!value && value !== current
+  return switchingProvider.value || differs(model.value, agent.model) || differs(reasoning.value, agent.reasoning) || (!!speed.value && speed.value !== (agent.speed || 'standard'))
+})
+// While the agent works, a message joins its turn unless it must wait for the next one.
+const steers = computed(() => active.value && !changesRunningAgent.value && !steerBlocked.value)
+// Stopping or a failed turn pauses an empty queue, which the next message resumes. A queue paused
+// on purpose, or holding messages, keeps holding what is added to it.
+const resumesOnSend = computed(() => !!detail.value?.paused && !pending.value.length && ['failed', 'interrupted', 'cancelled'].includes(detail.value.run?.status ?? ''))
+const held = computed(() => !!detail.value?.paused && !resumesOnSend.value)
 const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)
 const inheritConversation = computed(() => chosenProvider.value === conversationAssistant.value?.provider)
 const inheritedAssistant = computed(() => {
@@ -823,7 +837,8 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
   const origin = chatId.value
   const generation = compositionGeneration
   const currentComposition = () => generation === compositionGeneration && chatId.value === origin
-  const direct = !editing.value && ((mode === 'steer' && !detail.value?.paused) || (!responding.value && !detail.value?.paused && !pending.value.length))
+  const direct = !editing.value && !held.value && (mode === 'steer' || (!responding.value && !pending.value.length))
+  const resumes = !editing.value && resumesOnSend.value
   busy.value = true
   error.value = ''
   try {
@@ -902,6 +917,8 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
       await editChatMessage(api, { chatId: chat.id, messageId: editingMessage, message: submission.message })
     else
       await sendChatMessage(api, { chatId: chat.id, message: submission.message })
+    if (resumes)
+      await setChatPaused(api, { chatId: chat.id, paused: false })
     // Another conversation was opened meanwhile; its composer is not this message's.
     if (!currentComposition())
       return
@@ -1318,6 +1335,25 @@ function edit(message: ChatMessage) {
   textarea.value?.focus()
 }
 
+// A turn that failed or stopped returns the messages it never delivered: they come back to the
+// composer, ahead of any draft, and leave the conversation so no other device restores them again.
+const restored = new Set<string>()
+watch(() => detail.value?.messages, (messages) => {
+  const chat = detail.value
+  if (!chat || readOnly.value || inactive.value || editing.value)
+    return
+  const returned = (messages ?? []).filter(message => message.status === 'cancelled' && !message.questionId && !restored.has(message.id))
+  if (!returned.length)
+    return
+  for (const message of returned)
+    restored.add(message.id)
+  draft.value = [...returned.map(message => message.text.trim()), draft.value.trim()].filter(Boolean).join('\n\n')
+  const kept = new Set(attachments.value.map(attachment => attachment.id))
+  attachments.value = [...attachments.value, ...returned.flatMap(message => message.attachments ?? []).filter(attachment => !kept.has(attachment.id))]
+  void Promise.all(returned.map(message => deleteChatMessage(api, { chatId: chat.id, messageId: message.id })))
+    .catch((e: Error) => error.value = e.message)
+}, { immediate: true })
+
 // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation,
 // with the agent's usual permissions.
 async function implementPlan(sourceId: string) {
@@ -1374,7 +1410,7 @@ function key(event: KeyboardEvent) {
   if (window.matchMedia('(pointer: coarse)').matches && !event.ctrlKey && !event.metaKey)
     return
   event.preventDefault()
-  void send(event.altKey && active.value && !switchingProvider.value ? 'steer' : 'queue')
+  void send(steers.value && !event.altKey ? 'steer' : 'queue')
 }
 </script>
 
@@ -2013,22 +2049,8 @@ function key(event: KeyboardEvent) {
               </UiButton>
             </div>
             <p v-if="detail?.sessionRestartRequested && !readOnly" class="mb-3 text-sm text-muted">
-              Ready for a fresh session. Write a new message, then resume the queue.
+              Ready for a fresh session. Your next message starts it.
             </p>
-            <details v-if="detail?.messages.some(message => message.status === 'cancelled')" class="mb-3 rounded-lg border border-line p-3 text-xs">
-              <summary class="cursor-pointer text-muted">
-                Cancelled messages
-              </summary>
-              <div v-for="message in detail.messages.filter(message => message.status === 'cancelled')" :key="message.id" class="mt-3">
-                <p class="whitespace-pre-wrap wrap-anywhere">
-                  {{ message.text }}
-                </p>
-                <MessageAttachments v-if="message.attachments?.length" :attachments="message.attachments" class="mt-2 items-start!" />
-                <button v-if="!readOnly" class="mt-2 text-accent" @click="draft = message.text; textarea?.focus()">
-                  Copy to message
-                </button>
-              </div>
-            </details>
             <PlanBar v-if="currentPlan" :plan="currentPlan" />
             <SubagentBar
               v-if="subagentBar"
@@ -2039,7 +2061,7 @@ function key(event: KeyboardEvent) {
             />
             <form
               class="chat-composer relative rounded-[26px] border border-line bg-surface p-1 focus-within:border-accent/50"
-              @submit.prevent="send()"
+              @submit.prevent="send(steers ? 'steer' : 'queue')"
               @dragenter.prevent="dragging++"
               @dragover.prevent
               @dragleave.prevent="dragging = Math.max(0, dragging - 1)"
@@ -2047,7 +2069,8 @@ function key(event: KeyboardEvent) {
               @paste="pasteFiles"
             >
               <!-- Queued follow-ups open the composer itself, sharing its border and corners, as on Android. -->
-              <template v-if="pending.length || detail?.paused">
+              <!-- A pause that holds the queue keeps its Resume; after a Stop or failure the next message resumes instead. -->
+              <template v-if="pending.length || held">
                 <QueueStrip
                   :read-only="readOnly"
                   :pending="pending"
@@ -2099,7 +2122,7 @@ function key(event: KeyboardEvent) {
                   :skills="skills"
                   aria-label="Message"
                   :disabled="readOnly || noAgent"
-                  :placeholder="readOnly || noAgent ? 'Only people with access to this agent can write here' : planRequested ? 'Describe what to plan… The agent proposes without changing anything' : liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :placeholder="readOnly || noAgent ? 'Only people with access to this agent can write here' : planRequested ? 'Describe what to plan… The agent proposes without changing anything' : liveWait?.wakeup ? (held ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : steers ? 'Message the agent while it works…' : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
@@ -2141,26 +2164,27 @@ function key(event: KeyboardEvent) {
                       <Icon :name="NotebookPen" :size="15" />Plan
                     </button>
                   </div>
-                  <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send.
-                       Without access a leftover draft cannot be sent, so stopping stays offered. -->
+                  <!-- As on Android: during a reply, sending joins the agent's turn and the clock queues
+                       the message for the next one; stop when the field is empty. Without access a
+                       leftover draft cannot be sent, so stopping stays offered. -->
                   <div class="flex shrink-0 items-center gap-1">
                     <button
-                      v-if="active && !editing && hasDraft && !readOnly"
+                      v-if="steers && !editing && hasDraft && !readOnly"
                       type="button"
                       class="round-action bg-soft text-accent"
-                      aria-label="Steer now"
-                      title="Send into the current turn (Alt + Enter)"
-                      :disabled="busy || !canSend || switchingProvider || steerBlocked"
-                      @click="send('steer')"
+                      aria-label="Send after this turn"
+                      title="Send after this turn (Alt + Enter)"
+                      :disabled="busy || !canSend"
+                      @click="send('queue')"
                     >
-                      <Icon :name="Zap" :size="16" />
+                      <Icon :name="Clock" :size="16" />
                     </button>
                     <button
                       v-if="(active || detail?.wakeup) && !editing && (!hasDraft || readOnly)"
                       type="button"
                       class="round-action border border-line text-coral"
                       :aria-label="scheduled ? 'Cancel scheduled wait' : 'Stop response'"
-                      :title="scheduled ? 'Cancel wakeup and pause queue' : 'Stop response and pause queue'"
+                      :title="scheduled ? 'Cancel scheduled wait' : 'Stop response'"
                       :disabled="busy"
                       @click="action('stop')"
                     >
@@ -2171,8 +2195,8 @@ function key(event: KeyboardEvent) {
                       type="submit"
                       class="round-action"
                       :class="canSend && !busy ? 'bg-accent text-surface' : 'bg-ink/10 text-ink/40'"
-                      :aria-label="submitting ? 'Sending…' : editing ? 'Save' : responding || detail?.paused ? 'Queue' : 'Send'"
-                      :title="editing ? 'Save' : responding || detail?.paused ? 'Add to the queue' : 'Send'"
+                      :aria-label="submitting ? 'Sending…' : editing ? 'Save' : steers ? 'Send now' : responding || held ? 'Queue' : 'Send'"
+                      :title="editing ? 'Save' : steers ? 'Send now: the agent reads it during its turn' : responding || held ? 'Add to the queue' : 'Send'"
                       :disabled="busy || !canSend"
                     >
                       <Icon
@@ -2181,7 +2205,7 @@ function key(event: KeyboardEvent) {
                         :size="18"
                         class="animate-spin"
                       />
-                      <Icon v-else :name="editing ? Check : responding || detail?.paused ? Plus : ArrowUp" :size="18" />
+                      <Icon v-else :name="editing ? Check : !steers && (responding || held) ? Plus : ArrowUp" :size="18" />
                     </button>
                   </div>
                 </div>

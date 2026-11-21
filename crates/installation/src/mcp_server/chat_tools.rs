@@ -425,19 +425,26 @@ pub(crate) async fn invoke(
                     if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
                         return Err(Error::conflict("This conversation has been deleted."));
                     }
+                    let waiting = db.conversation_messages(&chat_id)?.iter().any(|message| {
+                        message.status == cairn_contracts::MessageStatus::Queued
+                            && message.question_id.is_none()
+                    });
                     Ok((
                         chat.clone(),
                         match chat.run_id.as_deref() {
                             Some(run) => Some(required(db.run_state(run)?, "Run not found")?),
                             None => None,
                         },
+                        waiting,
                     ))
                 }
             })
             .await?;
+        // A message written since the turn stopped starts the next turn instead of a replay.
         if !paused
             && !record.0.cancelled_by_deletion
             && !record.0.session_restart_requested
+            && !record.2
             && let Some(run) = record.1.filter(|run| run.status.is_resumable())
         {
             s.worker

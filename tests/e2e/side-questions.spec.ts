@@ -150,7 +150,7 @@ test('asks side questions about a running reply without steering, queuing or rec
   const header = message.locator('p').first()
   const running = (await header.boundingBox())!.height
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('finish now')
-  await page.getByRole('button', { name: 'Steer now' }).click()
+  await page.getByRole('button', { name: 'Send now' }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   await expect(message.getByRole('button', { name: 'Ask about this reply' })).toHaveCount(0)
   // The action leaving does not move the conversation, which keeps following its end.

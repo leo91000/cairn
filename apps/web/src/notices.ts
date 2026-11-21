@@ -21,7 +21,7 @@ const statusTitles: Record<string, string> = {
 const failureTitles: Record<NonNullable<TimelineNotice['origin']>, string> = {
   turn: 'The agent ran into an error',
   run: 'Run failed',
-  engine: 'Worker reported an error',
+  engine: 'Cairn couldn’t run the agent',
   runner: 'Runner failed',
 }
 
