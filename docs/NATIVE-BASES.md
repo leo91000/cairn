@@ -8,12 +8,14 @@ contents. File ownership, links and xattrs are preserved. The cache shares no
 mutable working-file inodes with conversations.
 
 The copy does not fsync each file. After the checksum verification, one `syncfs`
-of the data pool is the durability barrier; the copy is renamed and its format
-published only after that barrier succeeds. Its descriptor is opened before the
-copy starts, so a writeback error during the copy fails the barrier even when
-another environment's `syncfs` observed that error first. A crash before it
-leaves a partial private tree that initialization retries from the pinned
-source. Per-file fsync cost one host journal commit per file on a loop-backed
+of the data pool flushes the copy; it is renamed and its format published only
+after that barrier succeeds. The barrier's descriptor is opened before the copy
+starts, so a writeback error during the copy fails it even when another
+environment's `syncfs` observed that error first. Recent ext4 kernels can return
+success from `syncfs` after a shutdown during the flush itself; the rename,
+directory fsyncs and format publication that follow then fail with an I/O error,
+so nothing is published. A crash before publication leaves a partial private
+tree that initialization retries from the pinned source. Per-file fsync cost one host journal commit per file on a loop-backed
 pool: on a 32-thread i9-14900K host, the 5,201-entry / 113 MiB cairn base took
 66.7 s with per-file fsync and 2.0 s without it (0.2 s copy, 0.1 s verification,
 1.7 s `syncfs`). These are local measurements at load average 2–5; `syncfs` also
