@@ -304,7 +304,8 @@ for (const entry of ['command', 'workspace link', 'search draft'] as const) {
   test(`new conversation through ${entry} clears an uncertain submission with identical content`, async ({ page, workspace }) => {
     await useRelayForHttpMocks(page)
     const attempts: { id: string, chatId: string }[] = []
-    await page.route(/\/chats\/([^/]+)\/messages$/, async (route) => {
+    const messagePath = /\/chats\/[^/]+\/messages$/
+    await page.route(messagePath, async (route) => {
       if (route.request().method() !== 'POST')
         return route.continue()
       attempts.push({
@@ -323,7 +324,9 @@ for (const entry of ['command', 'workspace link', 'search draft'] as const) {
     await authenticateWorkspace(page)
     const composer = page.getByRole('textbox', { name: 'Message', exact: true })
     await composer.fill('Same content, separate conversation')
+    const lostAcknowledgement = page.waitForEvent('requestfailed', request => request.method() === 'POST' && messagePath.test(request.url()))
     await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await lostAcknowledgement
     await expect(page.getByText('Connection unavailable. Please try again.', { exact: true })).toBeVisible()
     await expect(page).toHaveURL(workspacePath('/chats'))
     if (entry === 'workspace link') {
@@ -2271,8 +2274,8 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await expect(page.locator('.task-focus-detail')).toBeVisible()
   await page.goto(workspacePath('/projects'))
   await page.getByRole('link', { name: 'Start chat' }).first().click()
-  await expect(page.getByRole('combobox', { name: 'Chat agent' })).toHaveValue('Main agent')
-  await expect(page.getByRole('combobox', { name: 'Chat project' })).toHaveValue('Design system')
+  await expect(page.getByRole('group', { name: 'Agent', exact: true }).getByRole('radio', { name: 'Main agent', exact: true })).toBeChecked()
+  await expect(page.getByRole('group', { name: 'Project', exact: true }).getByRole('radio', { name: 'Design system', exact: true })).toBeChecked()
   await page.setViewportSize({ width: 1440, height: 1000 })
   await expectSingleScroll(page)
   await page.screenshot({ path: test.info().outputPath('chat-new-desktop-light.png'), animations: 'disabled' })
@@ -2322,7 +2325,7 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await expect(page.locator('.activity-message').filter({ hasText: 'Add a regression test for keyboard navigation' }).last()).toBeVisible()
   await page.goto(workspacePath('/agents'))
   await page.locator('article').filter({ has: page.getByRole('heading', { name: 'Release engineer', exact: true }) }).getByRole('link', { name: 'Start chat' }).click()
-  await expect(page.getByRole('combobox', { name: 'Chat agent' })).toHaveValue('Release engineer')
+  await expect(page.getByRole('group', { name: 'Agent', exact: true }).getByRole('radio', { name: 'Release engineer', exact: true })).toBeChecked()
 })
 
 test('withdraws an obsolete question without sending an answer on desktop and mobile', async ({ page, workspace }) => {
