@@ -209,6 +209,7 @@ describe('application image tool versions', () => {
     ['a prerelease', { version: '2.2.0-beta.1' }, `Claude Code ${claudeVersion} channel is not a stable release.`],
     ['missing', new Error(`Request to ${claudeRelease} failed: HTTP 404`), 'failed: HTTP 404'],
     ['malformed', { name: '@anthropic-ai/claude-code' }, `Claude Code ${claudeVersion} channel is not a stable release.`],
+    ['a different release', { version: '2.1.323' }, `Claude Code resolved 2.1.323 instead of pinned version ${claudeVersion}.`],
     ['deprecated', { version: claudeVersion, deprecated: 'Use 2.1.323' }, `Claude Code ${claudeVersion} on the ${claudeVersion} channel is deprecated.`],
   ])('fails when the pinned Claude Code release is %s', async (_, response, message) => {
     await expect(buildVersions({ request: fixture({ [claudeRelease]: response }) })).rejects.toThrow(message)

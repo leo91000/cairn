@@ -58,6 +58,8 @@ async function engineVersion(engine, { request }) {
   const version = release?.version
   if (typeof version !== 'string' || !stable.test(version))
     throw new Error(`${engine.name} ${engine.channel} channel is not a stable release.`)
+  if (stable.test(engine.channel) && version !== engine.channel)
+    throw new Error(`${engine.name} resolved ${version} instead of pinned version ${engine.channel}.`)
   if (release.deprecated)
     throw new Error(`${engine.name} ${version} on the ${engine.channel} channel is deprecated.`)
   if (engine.minimum && newer(engine.minimum, version))
