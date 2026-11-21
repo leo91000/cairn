@@ -4,19 +4,18 @@ import process from 'node:process'
 const stable = /^\d+\.\d+\.\d+$/
 const registry = 'https://registry.npmjs.org'
 
-// Coding engines installed from their official npm packages. Each build takes the
-// version currently published on the vendor's named release channel (an npm
-// dist-tag), like Codex; CI then runs it through its adapter before an image can
-// be validated. `legacy` is the release images shipped before the engine was
-// resolved; their configuration records no version. See docs/CLI-UPDATES.md.
+// Coding engines installed from their official npm packages. Builds resolve an
+// npm dist-tag or an exact version, then qualify it through its CI adapter.
+// `legacy` is the release shipped by images without recorded engine versions.
+// See docs/CLI-UPDATES.md.
 export const engines = {
   codex: { name: 'Codex', package: '@openai/codex', channel: 'latest' },
-  // Anthropic's documented stable channel: about a week old, skipping releases
-  // with major regressions. Its `latest` channel is not used.
   claude: {
     name: 'Claude Code',
     package: '@anthropic-ai/claude-code',
-    channel: 'stable',
+    // Claude Code 2.1.323 puts the bundle over the installed supervisors' limit.
+    // Restore `stable` after qualifying a bundle that fits their limits.
+    channel: '2.1.311',
     legacy: '2.1.280',
   },
   opencode: {

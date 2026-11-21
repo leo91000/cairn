@@ -12,19 +12,19 @@ import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 import { buildVersions, engines } from '../cli-updates.mjs'
 
-// Registry responses as observed on 2026-10-24: Claude Code's stable channel
-// trails its latest channel, and OpenCode publishes dev snapshots between releases.
+const claudeVersion = '2.1.311'
+const claudeRelease = `https://registry.npmjs.org/@anthropic-ai/claude-code/${claudeVersion}`
 const registry = {
   'https://registry.npmjs.org/@openai/codex/latest': { version: '0.159.0' },
-  'https://registry.npmjs.org/@anthropic-ai/claude-code/stable': { version: '2.1.308' },
-  'https://registry.npmjs.org/@anthropic-ai/claude-code/latest': { version: '2.1.310' },
+  [claudeRelease]: { version: claudeVersion },
+  'https://registry.npmjs.org/@anthropic-ai/claude-code/stable': { version: '2.1.323' },
   'https://registry.npmjs.org/opencode-ai/latest': { version: '1.19.4' },
   'https://api.github.com/repos/cli/cli/releases/latest': { tag_name: 'v2.101.0', draft: false, prerelease: false },
 }
 const resolved = {
   codex: '0.159.0',
   gh: '2.101.0',
-  claude: '2.1.308',
+  claude: claudeVersion,
   opencode: '1.19.4',
 }
 
@@ -56,10 +56,9 @@ describe('application image tool versions', () => {
     expect(dockerfile).toContain('test "$(opencode --version)" = "$OPENCODE_VERSION"')
   })
 
-  it('follows Claude Code\'s stable channel, never its newer latest channel', async () => {
+  it('pins the Claude Code release that fits in the native tool bundle', async () => {
     const versions = await buildVersions({ request: fixture() })
-    expect(versions.claude).toBe('2.1.308')
-    expect(engines.claude).toMatchObject({ package: '@anthropic-ai/claude-code', channel: 'stable' })
+    expect(versions.claude).toBe(claudeVersion)
   })
 
   it('shares the oldest OpenCode release its adapter supports', () => {
@@ -184,7 +183,7 @@ describe('application image tool versions', () => {
     })
     expect(requests).toEqual(expect.arrayContaining([
       { url: 'https://registry.npmjs.org/@openai/codex/latest', options: undefined },
-      { url: 'https://registry.npmjs.org/@anthropic-ai/claude-code/stable', options: undefined },
+      { url: claudeRelease, options: undefined },
       { url: 'https://registry.npmjs.org/opencode-ai/latest', options: undefined },
       {
         url: 'https://api.github.com/repos/cli/cli/releases/latest',
@@ -207,23 +206,23 @@ describe('application image tool versions', () => {
   })
 
   it.each([
-    ['a prerelease', { version: '2.2.0-beta.1' }, 'Claude Code stable channel is not a stable release.'],
-    ['missing', new Error('Request to https://registry.npmjs.org/@anthropic-ai/claude-code/stable failed: HTTP 404'), 'failed: HTTP 404'],
-    ['malformed', { name: '@anthropic-ai/claude-code' }, 'Claude Code stable channel is not a stable release.'],
-    ['deprecated', { version: '2.1.308', deprecated: 'Use 2.1.309' }, 'Claude Code 2.1.308 on the stable channel is deprecated.'],
-  ])('fails when the Claude Code stable channel is %s', async (_, response, message) => {
-    await expect(buildVersions({ request: fixture({ 'https://registry.npmjs.org/@anthropic-ai/claude-code/stable': response }) })).rejects.toThrow(message)
+    ['a prerelease', { version: '2.2.0-beta.1' }, `Claude Code ${claudeVersion} channel is not a stable release.`],
+    ['missing', new Error(`Request to ${claudeRelease} failed: HTTP 404`), 'failed: HTTP 404'],
+    ['malformed', { name: '@anthropic-ai/claude-code' }, `Claude Code ${claudeVersion} channel is not a stable release.`],
+    ['deprecated', { version: claudeVersion, deprecated: 'Use 2.1.323' }, `Claude Code ${claudeVersion} on the ${claudeVersion} channel is deprecated.`],
+  ])('fails when the pinned Claude Code release is %s', async (_, response, message) => {
+    await expect(buildVersions({ request: fixture({ [claudeRelease]: response }) })).rejects.toThrow(message)
   })
 
-  it('follows each engine\'s channel into new minor and major releases like Codex', async () => {
+  it('follows the Codex and OpenCode channels into new major and minor releases', async () => {
     const versions = await buildVersions({
       request: fixture({
-        'https://registry.npmjs.org/@anthropic-ai/claude-code/stable': { version: '3.0.0' },
+        'https://registry.npmjs.org/@openai/codex/latest': { version: '1.0.0' },
         'https://registry.npmjs.org/opencode-ai/latest': { version: '1.20.0' },
       }),
     })
     // Only channel releases are built; the package lists are never consulted.
-    expect(versions).toMatchObject({ claude: '3.0.0', opencode: '1.20.0' })
+    expect(versions).toMatchObject({ codex: '1.0.0', opencode: '1.20.0' })
   })
 
   it('fails when OpenCode latest moves below the oldest release its adapter supports', async () => {
@@ -251,7 +250,7 @@ describe('build-versions command', () => {
       expect(result.status).toBe(0)
       expect(result.stderr).toBe('')
       expect(JSON.parse(result.stdout)).toEqual(resolved)
-      expect(readFileSync(output, 'utf8')).toBe('existing=value\ncodex=0.159.0\ngh=2.101.0\nclaude=2.1.308\nopencode=1.19.4\n')
+      expect(readFileSync(output, 'utf8')).toBe(`existing=value\ncodex=0.159.0\ngh=2.101.0\nclaude=${claudeVersion}\nopencode=1.19.4\n`)
     }
     finally {
       rmSync(directory, { recursive: true, force: true })
@@ -263,13 +262,12 @@ describe('build-versions command', () => {
     try {
       const output = path.join(directory, 'outputs')
       writeFileSync(output, 'existing=value\n')
-      const stable = 'https://registry.npmjs.org/@anthropic-ai/claude-code/stable'
       for (const [failure, message] of [
-        ['new Response("unavailable", { status: 503 })', `Request to ${stable} failed: HTTP 503`],
-        ['Promise.reject(new TypeError("fetch failed"))', `Request to ${stable} failed: fetch failed`],
-        ['new Response("<html>proxy</html>")', `Request to ${stable} failed: Unexpected token '<', "<html>proxy</html>" is not valid JSON`],
+        ['new Response("unavailable", { status: 503 })', `Request to ${claudeRelease} failed: HTTP 503`],
+        ['Promise.reject(new TypeError("fetch failed"))', `Request to ${claudeRelease} failed: fetch failed`],
+        ['new Response("<html>proxy</html>")', `Request to ${claudeRelease} failed: Unexpected token '<', "<html>proxy</html>" is not valid JSON`],
       ]) {
-        const result = run(['build-versions'], { GITHUB_OUTPUT: output }, `globalThis.fetch = async (url) => url === ${JSON.stringify(stable)} ? ${failure} : Response.json(${JSON.stringify(registry)}[url]);`)
+        const result = run(['build-versions'], { GITHUB_OUTPUT: output }, `globalThis.fetch = async (url) => url === ${JSON.stringify(claudeRelease)} ? ${failure} : Response.json(${JSON.stringify(registry)}[url]);`)
         expect(result.status).toBe(1)
         expect(result.stdout).toBe('')
         // The failing source is named so an operator knows which registry to check.
