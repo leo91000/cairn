@@ -304,7 +304,8 @@ for (const entry of ['command', 'workspace link', 'search draft'] as const) {
   test(`new conversation through ${entry} clears an uncertain submission with identical content`, async ({ page, workspace }) => {
     await useRelayForHttpMocks(page)
     const attempts: { id: string, chatId: string }[] = []
-    await page.route(/\/chats\/([^/]+)\/messages$/, async (route) => {
+    const messagePath = /\/chats\/[^/]+\/messages$/
+    await page.route(messagePath, async (route) => {
       if (route.request().method() !== 'POST')
         return route.continue()
       attempts.push({
@@ -323,7 +324,9 @@ for (const entry of ['command', 'workspace link', 'search draft'] as const) {
     await authenticateWorkspace(page)
     const composer = page.getByRole('textbox', { name: 'Message', exact: true })
     await composer.fill('Same content, separate conversation')
+    const lostAcknowledgement = page.waitForEvent('requestfailed', request => request.method() === 'POST' && messagePath.test(request.url()))
     await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await lostAcknowledgement
     await expect(page.getByText('Connection unavailable. Please try again.', { exact: true })).toBeVisible()
     await expect(page).toHaveURL(workspacePath('/chats'))
     if (entry === 'workspace link') {
