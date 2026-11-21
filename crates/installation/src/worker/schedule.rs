@@ -783,8 +783,13 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                                         && current.terminal_code.is_none()
                                         && (!shutdown.is_cancelled() || code.is_some())
                                     {
-                                        current
-                                            .record_controller_result(db, &id, &attempt, code)?;
+                                        record_recovery_result(
+                                            db,
+                                            &id,
+                                            &attempt,
+                                            &mut current,
+                                            code,
+                                        )?;
                                     }
                                 }
                             }
@@ -946,6 +951,53 @@ fn recovery_observation_limit(deadline: Option<i64>) -> Duration {
     })
 }
 
+fn record_recovery_result(
+    db: &Db<'_>,
+    id: &str,
+    attempt: &str,
+    checkpoint: &mut RunCheckpoint,
+    result: Option<crate::runner::ControllerResult>,
+) -> Result<()> {
+    let confirmed_stop = result.as_ref().is_some_and(|result| {
+        result.code == crate::runner::STOPPED
+            && result.physical_finalized
+            && !result.finalization_failed
+    });
+    checkpoint.record_controller_result(db, id, attempt, result)?;
+    if !confirmed_stop
+        || !checkpoint.completed()
+        || checkpoint.provider_failed()
+        || checkpoint.turn_pending == Some(true)
+    {
+        return Ok(());
+    }
+    let run = db
+        .run_record(id)?
+        .ok_or_else(|| Error::not_found("Run not found"))?;
+    if run.state.trigger != "chat"
+        && run.wakeup.is_some()
+        && run.state.session_id.is_some()
+        && run.state.cancel_requested_at.is_none()
+    {
+        // The provider already completed the turn that requested this wait.
+        // Keep its outcome through a second restart while fencing or releasing leases.
+        checkpoint.settled = Some(Some(Settled {
+            status: RunStatus::Waiting,
+            summary: Some(recovered_completion_summary(checkpoint).to_owned()),
+            error: None,
+            finished_at: None,
+        }));
+    }
+    Ok(())
+}
+
+fn recovered_completion_summary(checkpoint: &RunCheckpoint) -> &str {
+    match checkpoint.last_message() {
+        "" => "Conversation completed before worker restart. See Activity for the recorded result.",
+        message => message,
+    }
+}
+
 /// Cancellation and the final recovery state commit together. In particular,
 /// a completed provider turn must never restore a wait cancellation removed.
 pub(super) fn finish_recovery(
@@ -961,6 +1013,7 @@ pub(super) fn finish_recovery(
         cancel_recovery(db, id, current)?;
         return Ok(false);
     }
+    let waiting = current.trigger != "chat" && record.wakeup.is_some();
     if let Some(checkpoint) = checkpoint {
         // A controller can report a failed physical close only during DELETE,
         // after the provider outcome was tentatively settled. Preserve explicit
@@ -975,7 +1028,9 @@ pub(super) fn finish_recovery(
             db.change_run(id, patch)?;
             return Ok(false);
         }
-        if let Some(settled) = checkpoint.settled() {
+        if let Some(settled) = checkpoint.settled()
+            && (settled.status != RunStatus::Waiting || waiting)
+        {
             let mut patch = settled.run_changes();
             if settled.status == RunStatus::Waiting {
                 patch.resume_available = Some(true);
@@ -1043,13 +1098,7 @@ pub(super) fn finish_recovery(
         if (checkpoint.terminal_code() == Some(0) && !checkpoint.provider_failed())
             || checkpoint.completed()
         {
-            let summary = match checkpoint.last_message() {
-                "" => {
-                    "Conversation completed before worker restart. See Activity for the recorded result."
-                }
-                message => message,
-            };
-            let waiting = current.trigger != "chat" && record.wakeup.is_some();
+            let summary = recovered_completion_summary(checkpoint);
             let fresh_wait = record.boundary["environmentState"] == "expired"
                 && record.boundary["sessionHandoff"].is_string();
             if waiting && current.session_id.is_none() && !fresh_wait {
@@ -3253,6 +3302,203 @@ mod tests {
             .await
             .unwrap();
         service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn deployment_restart_recovers_a_completed_mission_wait_after_confirmed_close() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::AtomicUsize;
+
+        for (label, planned, cancel, result, expected) in [
+            (
+                "planned stop",
+                true,
+                false,
+                json!({"StatusCode":143,"PhysicalFinalized":true}),
+                RunStatus::Waiting,
+            ),
+            (
+                "legacy exit",
+                true,
+                false,
+                json!({"StatusCode":143}),
+                RunStatus::Failed,
+            ),
+            (
+                "failed flush",
+                true,
+                false,
+                json!({"StatusCode":70,"FinalizationFailed":true}),
+                RunStatus::Failed,
+            ),
+            (
+                "unconfirmed interruption",
+                false,
+                false,
+                json!({"StatusCode":75,"PhysicalFinalized":true}),
+                RunStatus::Failed,
+            ),
+            (
+                "user cancellation",
+                true,
+                true,
+                json!({"StatusCode":143,"PhysicalFinalized":true}),
+                RunStatus::Cancelled,
+            ),
+        ] {
+            let observations = Arc::new(AtomicUsize::new(0));
+            let observed = observations.clone();
+            let fences = Arc::new(AtomicUsize::new(0));
+            let retry_fence = expected == RunStatus::Waiting;
+            let app = Router::new().fallback(any(move |request: Request| {
+                let result = result.clone();
+                let observed = observed.clone();
+                let fences = fences.clone();
+                async move {
+                    match (request.method().as_str(), request.uri().path()) {
+                        ("POST", "/runs/old-attempt/wait") => {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            axum::Json(result).into_response()
+                        }
+                        ("DELETE", "/runs/old-attempt") => {
+                            if retry_fence && fences.fetch_add(1, Ordering::SeqCst) == 0 {
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
+                            } else {
+                                axum::http::StatusCode::NO_CONTENT.into_response()
+                            }
+                        }
+                        _ => axum::http::StatusCode::NOT_FOUND.into_response(),
+                    }
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let runner_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (_root, service, _chat, run, workspace) = fixture_with_runner(runner_url).await;
+            let wake_at = now() + 3_600_000;
+            service
+                .store
+                .transaction({
+                    let run = run.clone();
+                    move |db| {
+                        let wakeup = serde_json::from_value(json!({
+                            "id": "saved-wait",
+                            "messageId": null,
+                            "reason": "Wait for delivery checks",
+                            "seconds": 3600,
+                            "createdAt": now(),
+                            "wakeAt": wake_at,
+                        }))?;
+                        db.change_run(
+                            &run,
+                            crate::runs::RunChanges {
+                                status: Some(RunStatus::Running),
+                                trigger: Some("schedule".into()),
+                                session_id: Some(Some("saved-session".into())),
+                                wakeup: Some(Some(wakeup)),
+                                ..Default::default()
+                            },
+                        )?;
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+            let saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "firecracker", "isolated": true },
+                "runnerId": "old-attempt",
+                "launched": true,
+                "completed": true,
+                "remainingMs": null,
+            }))
+            .unwrap();
+            saved.store(&service.store, &run).await.unwrap();
+            if planned {
+                let checkpoint = super::super::checkpoint::Checkpoint::new(
+                    service.store.clone(),
+                    run.clone(),
+                    saved,
+                );
+                service.shutdown.cancel();
+                super::super::execution::record_failure_fixture(
+                    &service,
+                    &checkpoint,
+                    &CancellationToken::new(),
+                    &Error::conflict("Worker is restarting"),
+                    &[],
+                )
+                .await
+                .unwrap();
+            }
+            let mut restarted = Service::new(service.config.clone()).await.unwrap();
+            restarted
+                .store
+                .transaction({
+                    let run = run.clone();
+                    move |db| {
+                        super::super::restore_after_restart(db)?;
+                        if cancel {
+                            db.change_run(
+                                &run,
+                                crate::runs::RunChanges {
+                                    cancel_requested_at: Some(Some(now())),
+                                    ..Default::default()
+                                },
+                            )?;
+                        }
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+
+            if retry_fence {
+                assert!(
+                    recover(&restarted, &restarted.store.run(&run).await.unwrap())
+                        .await
+                        .is_err()
+                );
+                let record = restarted.store.run_record(&run).await.unwrap();
+                assert_eq!(record.state.status, RunStatus::Queued);
+                assert!(record.state.recovery_pending);
+                assert_eq!(record.wakeup.unwrap().id, "saved-wait");
+                restarted.shutdown.cancel();
+                restarted = Service::new(service.config.clone()).await.unwrap();
+            }
+            for _ in 0..2 {
+                assert!(
+                    !recover(&restarted, &restarted.store.run(&run).await.unwrap())
+                        .await
+                        .unwrap()
+                );
+                let record = restarted.store.run_record(&run).await.unwrap();
+                assert_eq!(record.state.status, expected, "{label}");
+                assert_eq!(record.state.session_id.as_deref(), Some("saved-session"));
+                if expected == RunStatus::Waiting {
+                    let wakeup = record.wakeup.unwrap();
+                    assert_eq!(wakeup.id, "saved-wait");
+                    assert_eq!(wakeup.wake_at, wake_at);
+                    assert!(!record.state.recovery_pending);
+                    assert!(record.state.error.is_none());
+                } else {
+                    assert!(record.wakeup.is_none(), "{label}");
+                }
+            }
+            assert_eq!(
+                observations.load(Ordering::SeqCst),
+                usize::from(!cancel),
+                "{label}"
+            );
+            assert_eq!(
+                tokio::fs::read_to_string(workspace.join("work.txt"))
+                    .await
+                    .unwrap(),
+                "Private work"
+            );
+            restarted.shutdown.cancel();
+            service.shutdown.cancel();
+            server.abort();
+        }
     }
 
     #[tokio::test]

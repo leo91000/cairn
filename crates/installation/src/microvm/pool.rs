@@ -972,8 +972,11 @@ impl Reservation {
     ) -> Result<i32> {
         let stop = attempt_stop.execution.clone();
         if stop.is_cancelled() {
-            self.finish().await;
-            return Ok(143);
+            return Ok(if self.finish().await {
+                crate::runner::STOPPED
+            } else {
+                crate::runner::FINALIZATION_FAILED_SENTINEL
+            });
         }
         let execution_budget = self.pool.budget().await;
         let operation = async {
