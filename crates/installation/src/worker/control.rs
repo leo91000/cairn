@@ -380,7 +380,7 @@ pub(crate) fn requeue(
     });
     if replay_refused {
         return Err(Error::conflict(
-            "Send a new message and resume the conversation queue to continue; cancelled work will not replay.",
+            "Send a new message to continue; cancelled work will not replay.",
         ));
     }
     let checkpoint = RunCheckpoint::load_in(db, id)?;

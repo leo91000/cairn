@@ -459,6 +459,13 @@
           "default": "",
           "type": "string"
         },
+        "returnedTo": {
+          "description": "The person a failed or stopped turn returned this unsent message to. Only their\ncomposer restores it; messages from rules and agents are returned to nobody.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "revision": {
           "default": "",
           "type": "string"

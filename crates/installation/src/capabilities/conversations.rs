@@ -108,7 +108,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "send_chat_message",
         scope: "run",
-        description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed or stopped turn, a new message starts the next turn; messages that turn never delivered are returned as cancelled.",
+        description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed turn, a new message starts the next turn; after a stop, call set_chat_paused(false) as well. Ordinary messages a failed or stopped turn never delivered are cancelled and returned to the person who wrote them (returnedTo).",
     },
     ChatOperation {
         name: "edit_chat_message",

@@ -1150,10 +1150,18 @@ fn needs_attention(chat: &Conversation, run: Option<&Value>) -> bool {
 }
 
 /// Ordinary messages a turn that did not succeed never delivered: its own message and
-/// those written before it ended. Messages written since start the next turn.
+/// those written before it ended, or before Stop was pressed. Messages written since start
+/// the next turn. A compaction carries no message: what waited for it simply follows.
 fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Vec<Message>> {
-    let turn = run["chatExecution"]["messageId"].as_str();
-    let ended_at = run["finishedAt"].as_i64().unwrap_or(0);
+    let execution = &run["chatExecution"];
+    if !execution["operation"].is_null() {
+        return Ok(Vec::new());
+    }
+    let turn = execution["messageId"].as_str();
+    let ended_at = run["cancelRequestedAt"]
+        .as_i64()
+        .or_else(|| run["finishedAt"].as_i64())
+        .unwrap_or(0);
     Ok(db
         .conversation_messages(chat_id)?
         .into_iter()
@@ -1167,28 +1175,52 @@ fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Vec<Message>> {
         .collect())
 }
 
-/// A resumed turn replays its own message, which a failure returned to its author.
+/// A resumed turn replays its own message, which a failure returned to its author. Once
+/// their composer took it back, the turn cannot replay it behind their draft.
 pub(crate) fn take_back_returned(db: &Db<'_>, run: &Value) -> Result<()> {
-    let Some(turn) = run["chatExecution"]["messageId"].as_str() else {
+    let execution = &run["chatExecution"];
+    let Some(turn) = execution["messageId"].as_str() else {
         return Ok(());
     };
+    if !execution["operation"].is_null() {
+        return Ok(());
+    }
     let Some(chat) = db.conversation_for_run(text(run, "id"))? else {
         return Ok(());
     };
-    if let Some(mut message) = find_message(db, &chat.id, turn)?
-        && message.status == MessageStatus::Cancelled
-        && message.question_id.is_none()
-    {
-        message.status = MessageStatus::Sending;
-        db.save_message(&message)?;
+    let key = format!("turn-returned:{}", text(run, "id"));
+    let returned = db.kv(&key)?.is_some_and(|value| value == turn);
+    match find_message(db, &chat.id, turn)? {
+        Some(mut message)
+            if message.status == MessageStatus::Cancelled && message.question_id.is_none() =>
+        {
+            message.status = MessageStatus::Sending;
+            db.save_message(&message)?;
+        }
+        None if returned => {
+            return Err(Error::conflict(
+                "This message came back to your composer. Send it again to continue.",
+            ));
+        }
+        _ => {}
     }
+    db.delete(&key)?;
     Ok(())
 }
 
 /// Returns unsent messages to their author instead of replaying them after a failure.
 /// Clients put them back in the composer; nothing waits for a resumption.
 fn return_unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<()> {
+    let turn = run["chatExecution"]["messageId"].as_str();
     for mut message in unsent(db, chat_id, run)? {
+        // A manual resume of this turn must not replay a message its author took back.
+        if Some(message.id.as_str()) == turn {
+            db.set(
+                &format!("turn-returned:{}", text(run, "id")),
+                &message.id.clone().into(),
+                None,
+            )?;
+        }
         message.status = MessageStatus::Cancelled;
         db.save_message(&message)?;
     }
@@ -1294,7 +1326,10 @@ fn continue_run(
     let run_id = text(run, "id");
     let mut checkpoint = match RunCheckpoint::load_in(db, run_id)? {
         Some(value) => value,
-        None if chat.cancelled_by_deletion => RunCheckpoint::default(),
+        // A turn stopped or failed before its execution saved anything starts afresh.
+        None if chat.cancelled_by_deletion || run["status"] != RunStatus::Succeeded => {
+            RunCheckpoint::default()
+        }
         None => return Err(Error::conflict("Run checkpoint not found")),
     };
     let provider = Provider::of_run(snapshot)?;
@@ -1494,6 +1529,7 @@ fn launch_turn(
         chat.run_id = Some(text(&snapshot, "id").to_owned());
         text(&snapshot, "id").to_owned()
     };
+    db.delete(&format!("turn-returned:{run_id}"))?;
     match &launched_by {
         Some(message) => crate::conversation_writers::record_turn(db, &run_id, message)?,
         None => crate::conversation_writers::record_relaunch(db, &run_id, &chat.id)?,
@@ -1941,10 +1977,12 @@ impl Service {
                     .store
                     .read(move |db| {
                         let returning = unsent(db, &chat_id, &ended)?;
+                        // Answers are never returned: they continue like any later message.
                         let waiting = db.conversation_messages(&chat_id)?.iter().any(|message| {
-                            message.status == MessageStatus::Queued
-                                && message.question_id.is_none()
-                                && returning.iter().all(|returned| returned.id != message.id)
+                            matches!(
+                                message.status,
+                                MessageStatus::Queued | MessageStatus::Sending
+                            ) && returning.iter().all(|returned| returned.id != message.id)
                         });
                         Ok((!returning.is_empty(), waiting))
                     })
@@ -2356,23 +2394,33 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
 
     #[tokio::test]
     async fn a_failed_turn_returns_what_it_never_delivered() {
+        use crate::conversation_writers::{EntryWriter, record_message};
+
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
-                db.add_run_fixture(
+                // Stopped before its execution saved a checkpoint.
+                let run = db.add_run_fixture(
                     &json!({
                         "id": "run",
                         "taskId": "chat",
                         "createdAt": 0,
-                        "status": "failed",
-                        "finishedAt": 500,
+                        "status": "cancelled",
+                        "cancelRequestedAt": 500,
+                        "finishedAt": 900,
                         "chatExecution": { "messageId": "turn", "text": "Turn", "attachments": [], "recovery": false },
                         "snapshot": { "agent": { "provider": "codex" } },
                     }),
                     None,
                 )?;
-                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                let profile = serde_json::from_value(run["snapshot"]["agent"].clone())?;
+                db.save_agent(&profile)?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                }))?;
                 let message = |id: &str, status: &str, created_at: i64| {
                     json!({ "id": id, "chatId": "chat", "text": id, "status": status, "createdAt": created_at })
                 };
@@ -2380,12 +2428,17 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 // The turn's own message, never acknowledged, was written before others.
                 db.put_message(&message("turn", "sending", 600))?;
                 db.put_message(&message("follow-up", "queued", 400))?;
+                db.put_message(&message("from-rule", "queued", 420))?;
                 let mut answer = message("answer", "queued", 450);
                 answer["questionId"] = "question".into();
                 db.put_message(&answer)?;
+                // Written after Stop was pressed: it starts the next turn.
                 db.put_message(&message("after", "queued", 700))?;
+                for id in ["turn", "follow-up"] {
+                    record_message(db, "chat", id, &EntryWriter::Person("alice".into()))?;
+                }
+                record_message(db, "chat", "from-rule", &EntryWriter::Rule("rule".into()))?;
 
-                let run = db.run("run")?.unwrap();
                 return_unsent(db, "chat", &run)?;
                 let status = |id: &str| -> Result<MessageStatus> {
                     Ok(find_message(db, "chat", id)?.unwrap().status)
@@ -2393,15 +2446,72 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 assert_eq!(status("delivered")?, MessageStatus::Delivered);
                 assert_eq!(status("turn")?, MessageStatus::Cancelled);
                 assert_eq!(status("follow-up")?, MessageStatus::Cancelled);
+                assert_eq!(status("from-rule")?, MessageStatus::Cancelled);
                 // Answers are not returned, and a message written since starts the next turn.
                 assert_eq!(status("answer")?, MessageStatus::Queued);
                 assert_eq!(status("after")?, MessageStatus::Queued);
                 assert!(!conversation(db, "chat")?.paused);
                 assert!(unsent(db, "chat", &run)?.is_empty());
 
-                // The composer that restores a returned message withdraws it.
+                // Only the person who wrote a message gets it back.
+                let returned_to = |id: &str| -> Result<Value> {
+                    Ok(db
+                        .messages("chat")?
+                        .into_iter()
+                        .find(|message| message["id"] == id)
+                        .unwrap()["returnedTo"]
+                        .clone())
+                };
+                assert_eq!(returned_to("turn")?, "alice");
+                assert_eq!(returned_to("follow-up")?, "alice");
+                assert!(returned_to("from-rule")?.is_null());
+                assert!(returned_to("after")?.is_null());
+
+                // A manual resume takes back a returned turn message to replay it...
+                take_back_returned(db, &run)?;
+                assert_eq!(status("turn")?, MessageStatus::Sending);
+                return_unsent(db, "chat", &run)?;
+                // ...but not once the composer withdrew it.
                 edit(db, "chat", "turn", None)?;
                 assert!(find_message(db, "chat", "turn")?.is_none());
+                let refused = take_back_returned(db, &run).unwrap_err();
+                assert!(refused.message.contains("composer"), "{}", refused.message);
+
+                // The next message starts a turn although the stopped one saved no checkpoint.
+                let after = db.messages("chat")?.into_iter().find(|message| message["id"] == "after").unwrap();
+                launch_turn(db, "chat", Some(run.clone()), after, run.clone())?;
+                let launched = db.run("run")?.unwrap();
+                assert_eq!(launched["status"], "queued");
+                assert_eq!(launched["chatExecution"]["messageId"], "after");
+                assert_eq!(status("after")?, MessageStatus::Sending);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_compaction_returns_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "status": "failed",
+                        "finishedAt": 900,
+                        "chatExecution": { "messageId": "first", "text": "", "attachments": [], "recovery": false, "operation": COMPACT },
+                        "snapshot": { "agent": { "provider": "codex" } },
+                    }),
+                    None,
+                )?;
+                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                db.put_message(&json!({ "id": "waiting", "chatId": "chat", "text": "Next", "status": "queued", "createdAt": 100 }))?;
+                assert!(unsent(db, "chat", &run)?.is_empty());
+                take_back_returned(db, &run)?;
                 Ok(())
             })
             .await

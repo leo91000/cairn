@@ -78,6 +78,7 @@ import build.cairn.contracts.stopChat
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
 @Composable
@@ -759,6 +760,8 @@ internal fun ChatPage(
             pending.isEmpty() &&
             chat.run?.status in setOf("failed", "interrupted", "cancelled")
     val held = chat?.paused == true && !resumesOnSend
+    // Saving an edit keeps the queued message where it was.
+    val editedMode = pending.find { it.id == editing }?.mode ?: "queue"
     val questions = chat?.questions.orEmpty().filter { it.status == "pending" }
     // Files over the limits stay visible as refused cards; the others join the draft.
     fun attach(
@@ -966,17 +969,25 @@ internal fun ChatPage(
         speed = message.speed
         attachments = message.attachments.map { DraftAttachment(it) }
     }
-    // A turn that failed or stopped returns the messages it never delivered: they come back to
-    // the composer, ahead of any draft, and leave the conversation so no other device restores
-    // them again.
+    // A turn that failed or stopped returns the messages it never delivered to the person who
+    // wrote them: they come back to their composer, ahead of any draft, and leave the
+    // conversation so no other device restores them again. Restoring waits for an edit or a
+    // send to finish.
     val restored = remember(id) { mutableSetOf<String>() }
+    val me = state.session.account?.id
     val returned =
         chat?.messages.orEmpty().filter {
-            it.status == "cancelled" && it.questionId == null && it.id !in restored
+            it.status == "cancelled" && me != null && it.returnedTo == me && it.id !in restored
         }
-    LaunchedEffect(returned.map { it.id }, readOnly, editing) {
+    LaunchedEffect(returned.map { it.id }, readOnly, editing, state.busy) {
         val current = chat ?: return@LaunchedEffect
-        if (returned.isEmpty() || readOnly || editing != null || current.lifecycle != "active")
+        if (
+            returned.isEmpty() ||
+                readOnly ||
+                editing != null ||
+                state.busy ||
+                current.lifecycle != "active"
+        )
             return@LaunchedEffect
         returned.forEach { restored += it.id }
         composer.setTextAndPlaceCursorAtEnd(
@@ -991,15 +1002,17 @@ internal fun ChatPage(
                     .flatMap { it.attachments }
                     .filter { it.id !in kept }
                     .map { DraftAttachment(it) }
-        try {
-            returned.forEach {
-                vm.api.deleteChatMessage(
-                    ChatMessageReference(chatId = current.id, messageId = it.id)
-                )
+        // Restoring recomposes this screen and restarts the effect: the withdrawal must finish.
+        withContext(kotlinx.coroutines.NonCancellable) {
+            try {
+                returned.forEach {
+                    vm.api.deleteChatMessage(
+                        ChatMessageReference(chatId = current.id, messageId = it.id)
+                    )
+                }
+            } catch (e: Exception) {
+                vm.report(e)
             }
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            vm.report(e)
         }
     }
     // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation, with
@@ -2243,7 +2256,10 @@ internal fun ChatPage(
                                         else
                                             IconButton(
                                                 onClick = {
-                                                    send(if (steers) "steer" else "queue")
+                                                    send(
+                                                        if (editing != null) editedMode
+                                                        else if (steers) "steer" else "queue"
+                                                    )
                                                 },
                                                 enabled = canSend,
                                                 modifier =

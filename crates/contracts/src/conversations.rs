@@ -277,6 +277,11 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub question_id: Option<String>,
+    /// The person a failed or stopped turn returned this unsent message to. Only their
+    /// composer restores it; messages from rules and agents are returned to nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub returned_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -851,7 +856,7 @@ pub struct DeleteChatMessageOutput {
 )]
 pub enum ChatMessagePage {
     Complete {
-        message: ChatMessage,
+        message: Box<ChatMessage>,
     },
     Truncated {
         preview: ChatMessagePreview,

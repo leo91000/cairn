@@ -117,7 +117,9 @@ fn detail(db: &Db<'_>, args: &Value) -> Result<Value> {
         let message: cairn_contracts::ChatMessage = serde_json::from_value(value.clone())?;
         let size = serde_json::to_vec(&message)?.len();
         let item = if size <= PAGE_BYTES {
-            ChatMessagePage::Complete { message }
+            ChatMessagePage::Complete {
+                message: Box::new(message),
+            }
         } else {
             ChatMessagePage::Truncated {
                 preview: ChatMessagePreview {

@@ -2296,6 +2296,9 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Add a regression test for keyboard navigation')
   await page.getByRole('button', { name: 'Save', exact: true }).click()
+  // Saving an edit while the agent works keeps the message queued for the next turn.
+  await expect(page.getByTestId('queued-message')).toContainText('Add a regression test for keyboard navigation')
+  await expect.poll(() => workspace.service.chats.detail(workspace.service.store.list('chats')[0].id).messages.find(message => message.text === 'Add a regression test for keyboard navigation')?.mode).toBe('queue')
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Focus on accessibility first.')
   await page.getByRole('button', { name: 'Send now' }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Focus on accessibility first.' }).first()).toBeVisible()

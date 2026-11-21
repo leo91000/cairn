@@ -582,7 +582,8 @@ impl Db<'_> {
         } else {
             "chat_id=?1 AND ?2 IS NULL"
         };
-        let mut statement = self.0.prepare_cached(&format!("SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,NULL,plan FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"))?;
+        // A cancelled ordinary message goes back to the person who wrote it.
+        let mut statement = self.0.prepare_cached(&format!("SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,NULL,plan,CASE WHEN status='cancelled' AND question_id IS NULL THEN (SELECT w.account_id FROM conversation_entry_writers w WHERE w.message_id=chat_messages.id AND w.chat_id=chat_messages.chat_id AND w.writer='person') END FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"))?;
         let rows = statement
             .query_map(params![chat, message], |r| {
                 Ok((
@@ -601,6 +602,7 @@ impl Db<'_> {
                         question_id: r.get(11)?,
                         attachments: Vec::new(),
                         plan: r.get(13)?,
+                        returned_to: r.get(14)?,
                     },
                     decode::<std::collections::BTreeMap<String, MessageAnswer>>(r, 12)?,
                 ))

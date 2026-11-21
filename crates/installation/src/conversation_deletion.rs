@@ -453,9 +453,13 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     }
     db.delete_checkpoint(run)?;
     crate::environment_expiration::forget_in(db, run)?;
-    for key in [format!("turn-speed:{run}"), format!("chat-error:{cid}")]
-        .into_iter()
-        .chain(crate::chat_titles::keys(cid))
+    for key in [
+        format!("turn-speed:{run}"),
+        format!("turn-returned:{run}"),
+        format!("chat-error:{cid}"),
+    ]
+    .into_iter()
+    .chain(crate::chat_titles::keys(cid))
     {
         db.delete(&key)?;
     }
@@ -608,6 +612,7 @@ mod tests {
                 db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
                 let keys = [
                     "turn-speed:run",
+                    "turn-returned:run",
                     "chat-error:chat",
                     "chat-title-pending:chat",
                     "chat-title-checked:chat",

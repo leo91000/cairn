@@ -655,6 +655,8 @@ const changesRunningAgent = computed(() => {
 })
 // While the agent works, a message joins its turn unless it must wait for the next one.
 const steers = computed(() => active.value && !changesRunningAgent.value && !steerBlocked.value)
+// Saving an edit keeps the queued message where it was.
+const editedMode = computed(() => pending.value.find(message => message.id === editing.value)?.mode ?? 'queue')
 // Stopping or a failed turn pauses an empty queue, which the next message resumes. A queue paused
 // on purpose, or holding messages, keeps holding what is added to it.
 const resumesOnSend = computed(() => !!detail.value?.paused && !pending.value.length && ['failed', 'interrupted', 'cancelled'].includes(detail.value.run?.status ?? ''))
@@ -1335,14 +1337,15 @@ function edit(message: ChatMessage) {
   textarea.value?.focus()
 }
 
-// A turn that failed or stopped returns the messages it never delivered: they come back to the
-// composer, ahead of any draft, and leave the conversation so no other device restores them again.
+// A turn that failed or stopped returns the messages it never delivered to the person who wrote
+// them: they come back to their composer, ahead of any draft, and leave the conversation so no
+// other device restores them again. Restoring waits for an edit or a send to finish.
 const restored = new Set<string>()
-watch(() => detail.value?.messages, (messages) => {
+watch([() => detail.value?.messages, readOnly, inactive, editing, busy], ([messages]) => {
   const chat = detail.value
-  if (!chat || readOnly.value || inactive.value || editing.value)
+  if (!chat || !state.accountId || readOnly.value || inactive.value || editing.value || busy.value)
     return
-  const returned = (messages ?? []).filter(message => message.status === 'cancelled' && !message.questionId && !restored.has(message.id))
+  const returned = (messages ?? []).filter(message => message.status === 'cancelled' && message.returnedTo === state.accountId && !restored.has(message.id))
   if (!returned.length)
     return
   for (const message of returned)
@@ -1410,7 +1413,7 @@ function key(event: KeyboardEvent) {
   if (window.matchMedia('(pointer: coarse)').matches && !event.ctrlKey && !event.metaKey)
     return
   event.preventDefault()
-  void send(steers.value && !event.altKey ? 'steer' : 'queue')
+  void send(editing.value ? editedMode.value : steers.value && !event.altKey ? 'steer' : 'queue')
 }
 </script>
 
@@ -2061,7 +2064,7 @@ function key(event: KeyboardEvent) {
             />
             <form
               class="chat-composer relative rounded-[26px] border border-line bg-surface p-1 focus-within:border-accent/50"
-              @submit.prevent="send(steers ? 'steer' : 'queue')"
+              @submit.prevent="send(editing ? editedMode : steers ? 'steer' : 'queue')"
               @dragenter.prevent="dragging++"
               @dragover.prevent
               @dragleave.prevent="dragging = Math.max(0, dragging - 1)"
