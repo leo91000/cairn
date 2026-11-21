@@ -2768,10 +2768,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("DELETE", ["runs", id]) => {
             controller.stop_attempt(id).await?;
-            match tokio::fs::read(controller.file(id, "exit")).await {
-                Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({})),
-                Err(_) => json!({}),
-            }
+            controller.stopped_result(id).await
         }
         ("POST", ["runs", id, "wait"]) => {
             uuid(id)?;

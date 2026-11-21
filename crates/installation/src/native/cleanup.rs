@@ -84,11 +84,13 @@ impl<W> Drop for Retained<W> {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct Registry(Arc<Mutex<Workers>>);
+pub(super) struct Registry {
+    workers: Arc<Mutex<Workers>>,
+    tickets: Arc<Mutex<HashMap<String, Ticket>>>,
+}
 
 #[derive(Default)]
 struct Workers {
-    entries: HashMap<String, Ticket>,
     queued: VecDeque<Job>,
     running: usize,
 }
@@ -212,26 +214,57 @@ pub(super) fn quarantine(state: &Path, run: &str, attempt: &str) -> Result<()> {
 }
 
 impl Registry {
+    pub(super) async fn retired(&self, state: &Path, run: &str) -> bool {
+        if !tokio::fs::symlink_metadata(directory(state))
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+            || !matches!(
+                tokio::fs::symlink_metadata(marker(state, run)).await,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        {
+            return false;
+        }
+
+        // A live worker unlinks quarantine before syncing the directory and
+        // dropping its leases. Observe its completion after checking the path.
+        self.tickets.lock().is_ok_and(|tickets| {
+            tickets
+                .get(run)
+                .is_none_or(|ticket| matches!(*ticket.0.borrow(), Outcome::Complete))
+        })
+    }
+
     pub fn start(&self, state: &Path, run: &str, attempt: &str, work: impl Work) -> Result<Ticket> {
         uuid(run)?;
         uuid(attempt)?;
         let work = Retained(Some(Box::new(work) as Box<dyn Work>));
-        let mut workers = self.0.lock().map_err(Error::internal)?;
-        let entries = &mut workers.entries;
-        if let Some(ticket) = entries.get(run)
-            && !matches!(*ticket.0.borrow(), Outcome::Complete)
+        let mut workers = self.workers.lock().map_err(Error::internal)?;
+        let (sender, receiver) = watch::channel(Outcome::Pending(
+            "Native disk cleanup registration is in progress.".into(),
+        ));
+        let ticket = Ticket(receiver);
         {
-            return Err(Error::conflict(
-                "This native disk already has a cleanup worker; retained ownership cannot be replaced.",
-            ));
+            let mut tickets = self.tickets.lock().map_err(Error::internal)?;
+            if let Some(ticket) = tickets.get(run)
+                && !matches!(*ticket.0.borrow(), Outcome::Complete)
+            {
+                return Err(Error::conflict(
+                    "This native disk already has a cleanup worker; retained ownership cannot be replaced.",
+                ));
+            }
+            tickets.retain(|_, ticket| !matches!(*ticket.0.borrow(), Outcome::Complete));
+            tickets.insert(run.into(), ticket.clone());
         }
-        entries.retain(|_, ticket| !matches!(*ticket.0.borrow(), Outcome::Complete));
+
+        // Retirement checks must see this registration without waiting for
+        // its filesystem writes or other runs' worker dispatch.
+        // A publication error retains the work's leases, so its ticket also
+        // remains pending until controller restart.
         let record = publish(state, run, attempt)?;
+        sender.send_replace(Outcome::Pending(record.message.clone()));
         let root = directory(state);
         let path = marker(state, run);
-        let (sender, receiver) = watch::channel(Outcome::Pending(record.message.clone()));
-        let ticket = Ticket(receiver);
-        entries.insert(run.into(), ticket.clone());
         workers.queued.push_back(Job {
             root,
             path,
@@ -245,7 +278,7 @@ impl Registry {
     }
 
     fn dispatch(&self) {
-        let Ok(mut workers) = self.0.lock() else {
+        let Ok(mut workers) = self.workers.lock() else {
             return;
         };
         while workers.running < MAX_WORKERS {
@@ -274,7 +307,7 @@ impl Registry {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         sender.send_replace(Outcome::Pending(error.to_string()));
-                        if let Ok(mut workers) = registry.0.lock() {
+                        if let Ok(mut workers) = registry.workers.lock() {
                             workers.running -= 1;
                         }
                         registry.dispatch();
@@ -319,7 +352,7 @@ impl Registry {
                 });
                 // Physical retirement is complete. A journal maintenance
                 // retry must not reserve a physical cleanup worker slot.
-                if let Ok(mut workers) = registry.0.lock() {
+                if let Ok(mut workers) = registry.workers.lock() {
                     workers.running -= 1;
                 }
                 registry.dispatch();
@@ -476,7 +509,7 @@ mod tests {
     async fn queued_cleanup_retains_ownership_and_is_admitted_after_capacity_returns() {
         let state = tempfile::tempdir().unwrap();
         let registry = Registry::default();
-        registry.0.lock().unwrap().running = MAX_WORKERS;
+        registry.workers.lock().unwrap().running = MAX_WORKERS;
         let run = crate::config::id();
         let lock = state.path().join("physical.lock");
         let (entered, received) = mpsc::channel();
@@ -497,7 +530,7 @@ mod tests {
         assert!(received.try_recv().is_err());
         assert!(check(state.path(), &run).is_err());
         assert!(crate::file_lock::exclusive(&lock, "busy").is_err());
-        registry.0.lock().unwrap().running -= 1;
+        registry.workers.lock().unwrap().running -= 1;
         registry.dispatch();
         received.recv_timeout(Duration::from_secs(3)).unwrap();
         release.send(()).unwrap();
@@ -524,7 +557,7 @@ mod tests {
         }
         let state = tempfile::tempdir().unwrap();
         let registry = Registry::default();
-        registry.0.lock().unwrap().running = MAX_WORKERS - 1;
+        registry.workers.lock().unwrap().running = MAX_WORKERS - 1;
         let (release, wait) = tokio::sync::oneshot::channel();
         let mut first = registry
             .start(
@@ -549,6 +582,80 @@ mod tests {
         let next = next.wait(Duration::from_secs(3)).await;
         let _ = release.send(());
         assert!(matches!(next, Outcome::Complete));
+    }
+
+    #[tokio::test]
+    async fn a_missing_quarantine_does_not_override_a_live_cleanup_worker() {
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::default();
+        let run = crate::config::id();
+        let lock = state.path().join("physical.lock");
+        let (entered, received) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let mut ticket = registry
+            .start(
+                state.path(),
+                &run,
+                &crate::config::id(),
+                Blocking {
+                    _owner: crate::file_lock::exclusive(&lock, "busy").unwrap(),
+                    entered,
+                    release: released,
+                    calls: Arc::new(AtomicUsize::new(0)),
+                },
+            )
+            .unwrap();
+        received.recv_timeout(Duration::from_secs(3)).unwrap();
+        // Reproduce the observable state between quarantine unlink and lease release.
+        std::fs::remove_file(marker(state.path(), &run)).unwrap();
+        assert!(crate::file_lock::exclusive(&lock, "busy").is_err());
+        assert!(!registry.retired(state.path(), &run).await);
+        release.send(()).unwrap();
+        assert!(matches!(
+            ticket.wait(Duration::from_secs(3)).await,
+            Outcome::Complete
+        ));
+        assert!(crate::file_lock::exclusive(&lock, "busy").is_ok());
+    }
+
+    #[tokio::test]
+    async fn cleanup_registration_cannot_hide_another_runs_retirement() {
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::default();
+        let run = crate::config::id();
+        std::fs::create_dir(directory(state.path())).unwrap();
+        let (entered, received) = tokio::sync::oneshot::channel();
+        let (release, released) = mpsc::channel();
+        let registering = registry.clone();
+        let registration = tokio::task::spawn_blocking(move || {
+            let _workers = registering.workers.lock().unwrap();
+            entered.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        received.await.unwrap();
+        let retired = registry.retired(state.path(), &run).await;
+        release.send(()).unwrap();
+        registration.await.unwrap();
+        assert!(retired);
+    }
+
+    #[tokio::test]
+    async fn retirement_requires_an_intact_quarantine_directory() {
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::default();
+        let run = crate::config::id();
+        let root = directory(state.path());
+        assert!(!registry.retired(state.path(), &run).await);
+
+        let target = state.path().join("different-directory");
+        std::os::unix::fs::symlink(&target, &root).unwrap();
+        assert!(!registry.retired(state.path(), &run).await);
+        std::fs::create_dir(&target).unwrap();
+        assert!(!registry.retired(state.path(), &run).await);
+
+        std::fs::remove_file(&root).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        assert!(registry.retired(state.path(), &run).await);
     }
 
     #[tokio::test(flavor = "current_thread")]
