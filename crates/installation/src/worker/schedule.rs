@@ -722,8 +722,9 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         && saved.managed()
         && saved.start_rejected != Some(true)
         && saved.settled().is_none()
-        && saved.terminal_code.is_none()
-        && !matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
+        && (saved.cleanup_observation_pending()
+            || (saved.terminal_code.is_none()
+                && !matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))))
         && let Some(attempt) = saved.runner_id().map(str::to_owned)
     {
         let cancel = CancellationToken::new();
@@ -734,6 +735,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
             node.as_deref(),
             &cancel,
             recovery_observation_limit(recovery_deadline),
+            saved.cleanup_observation_pending(),
             |action| {
                 let id = run_id.to_owned();
                 let attempt = attempt.clone();
@@ -783,8 +785,18 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                                         && current.terminal_code.is_none()
                                         && (!shutdown.is_cancelled() || code.is_some())
                                     {
-                                        current
-                                            .record_controller_result(db, &id, &attempt, code)?;
+                                        current.record_controller_observation(
+                                            db, &id, &attempt, code,
+                                        )?;
+                                    }
+                                }
+                                recovery::ObservationAction::PublishCleanup(result) => {
+                                    if state.cancel_requested_at.is_none()
+                                        && !shutdown.is_cancelled()
+                                    {
+                                        current.publish_cleanup_observation(
+                                            db, &id, &attempt, result,
+                                        )?;
                                     }
                                 }
                             }
@@ -3897,6 +3909,220 @@ mod tests {
                 assert_eq!(recovered["summary"], "Last reply");
                 assert_eq!(recovered["finishedAt"], 500);
                 assert_eq!(recovered["outcome"], outcome);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_commits_the_fenced_failure_before_requesting_optional_retirement() {
+        check_cleanup_observation(false, false).await;
+        check_cleanup_observation(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_during_cleanup_probe_keeps_the_receipt_for_restart() {
+        check_cleanup_observation(false, true).await;
+    }
+
+    async fn check_cleanup_observation(
+        restart_before_publication: bool,
+        shutdown_during_probe: bool,
+    ) {
+        use crate::run_fixture::DbRunFixture;
+        use axum::{
+            Json, Router,
+            http::Uri,
+            routing::{delete, post},
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let attempt = crate::config::id();
+        let evidence = Arc::new(tokio::sync::OnceCell::<(Arc<Service>, String)>::new());
+        let probed = Arc::new(AtomicBool::new(false));
+        let stopped = json!({
+            "StatusCode": 70,
+            "FinalizationFailed": true,
+            "NativeCleanup": {
+                "attemptId": attempt,
+                "workloadFenced": true,
+                "message": "Legacy stop still reports conversation cleanup pending."
+            }
+        });
+        let app = Router::new()
+            .route(
+                "/runs/{attempt}",
+                delete(move || async move { Json(stopped) }),
+            )
+            .route(
+                "/runs/{attempt}/wait",
+                post({
+                    let (attempt, evidence, probed) =
+                        (attempt.clone(), evidence.clone(), probed.clone());
+                    move |uri: Uri| {
+                        let (attempt, evidence, probed) =
+                            (attempt.clone(), evidence.clone(), probed.clone());
+                        async move {
+                            let mut receipt = json!({
+                                "StatusCode": 70,
+                                "FinalizationFailed": true,
+                                "NativeCleanup": {
+                                    "attemptId": attempt,
+                                    "workloadFenced": true,
+                                    "message": "Native cleanup was pending."
+                                }
+                            });
+                            if uri.query() == Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY) {
+                                let (service, run) = evidence.get().unwrap();
+                                let store = &service.store;
+                                let saved = RunCheckpoint::load(store, run).await.unwrap().unwrap();
+                                assert_eq!(
+                                    saved.finalization_failure_attempt.as_deref(),
+                                    Some(attempt.as_str())
+                                );
+                                assert_eq!(
+                                    saved.finalization_error(),
+                                    Some("Native cleanup was pending.")
+                                );
+                                let run = run.clone();
+                                let events = store
+                                    .read(move |db| db.events_fixture(&run, 0, 100))
+                                    .await
+                                    .unwrap();
+                                assert!(events.iter().all(|event| event["type"] != "error"));
+                                probed.store(true, Ordering::Release);
+                                if shutdown_during_probe {
+                                    service.shutdown.cancel();
+                                }
+                                receipt["NativeCleanup"]["retired"] = true.into();
+                            }
+                            Json(receipt)
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) = fixture_with_runner(url).await;
+        assert!(evidence.set((service.clone(), run.clone())).is_ok());
+        let mut saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": attempt,
+            "remainingMs": restart_before_publication.then_some(0)
+        }))
+        .unwrap();
+        if restart_before_publication {
+            let id = run.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    saved.record_controller_observation(
+                        db,
+                        &id,
+                        &attempt,
+                        Some(crate::runner::ControllerResult {
+                            code: crate::runner::CONTROLLER_FAILED,
+                            finalization_failed: true,
+                            physical_finalized: false,
+                            terminal_reason: None,
+                            native_cleanup: Some("Native cleanup was pending.".into()),
+                        }),
+                    )?;
+                    assert!(saved.cleanup_observation_pending());
+                    saved.store_in(db, &id)
+                })
+                .await
+                .unwrap();
+        } else {
+            saved.store(&service.store, &run).await.unwrap();
+        }
+
+        let snapshot = service.store.run(&run).await.unwrap();
+        let recovered = recover(&service, &snapshot).await;
+        assert!(probed.load(Ordering::Acquire));
+        if shutdown_during_probe {
+            assert_eq!(recovered.unwrap_err().message, "Worker is restarting.");
+            let saved = RunCheckpoint::load(&service.store, &run)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(saved.cleanup_observation_pending());
+            assert_eq!(
+                saved.finalization_error(),
+                Some("Native cleanup was pending.")
+            );
+            let events = service
+                .store
+                .read(move |db| db.events_fixture(&run, 0, 100))
+                .await
+                .unwrap();
+            assert!(events.iter().all(|event| event["type"] != "error"));
+            server.abort();
+            return;
+        }
+        assert!(!recovered.unwrap());
+        assert_eq!(service.store.run(&run).await.unwrap()["status"], "failed");
+        let saved = RunCheckpoint::load(&service.store, &run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved.cleanup_observation_pending());
+        assert!(
+            saved
+                .finalization_error()
+                .unwrap()
+                .contains("Native disk cleanup completed")
+        );
+        let events = service
+            .store
+            .read(move |db| db.events_fixture(&run, 0, 100))
+            .await
+            .unwrap();
+        let errors = events
+            .iter()
+            .filter(|event| event["type"] == "error")
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Native disk cleanup completed")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn first_wait_after_native_cleanup_retirement_cannot_replay_an_incomplete_turn() {
+        let (_root, service, _chat_id, run_id, _workspace) = fixture().await;
+        let attempt = crate::config::id();
+        let result = crate::native::retired_cleanup_completion(&attempt).await;
+        assert_eq!(result.code, crate::runner::CONTROLLER_FAILED);
+        assert!(result.physical_finalized);
+        assert!(!result.finalization_failed);
+        let message = result.native_cleanup.clone().unwrap();
+        assert!(message.contains("Native disk cleanup completed"));
+        service
+            .store
+            .transaction(move |db| {
+                let mut saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": "native", "isolated": true },
+                    "runnerId": attempt,
+                    "remainingMs": null
+                }))?;
+                assert!(!saved.completed());
+                saved.record_controller_result(db, &run_id, &attempt, Some(result))?;
+                saved.store_in(db, &run_id)?;
+
+                let saved = RunCheckpoint::load_in(db, &run_id)?.unwrap();
+                let state = db.run_state(&run_id)?.unwrap();
+                let run = db.run(&run_id)?.unwrap();
+                assert_eq!(saved.finalization_error(), Some(message.as_str()));
+                assert!(recovery_cannot_replay(Some(&saved), None, &state, &run));
+                assert!(!finish_recovery(db, &run_id, Some(&saved))?);
+                assert_eq!(db.run(&run_id)?.unwrap()["status"], "failed");
                 Ok(())
             })
             .await
