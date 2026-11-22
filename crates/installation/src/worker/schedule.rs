@@ -1323,6 +1323,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_resume_resets_the_budget_but_still_fences_the_old_attempt() {
+        use axum::{Router, http::StatusCode, routing::delete};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let fail = Arc::new(AtomicBool::new(true));
+        let app = Router::new().route(
+            "/runs/old-attempt",
+            delete({
+                let fail = fail.clone();
+                move || async move {
+                    if fail.swap(false, Ordering::SeqCst) {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        for (minutes, budget) in [(0, None), (10, Some(600_000))] {
+            fail.store(true, Ordering::SeqCst);
+            let (_root, service, _chat, run, workspace) =
+                fixture_with_runner(format!("http://{address}")).await;
+            service
+                .store
+                .transaction({
+                    let run = run.clone();
+                    move |db| {
+                        crate::run_fixture::change_run_fixture(
+                            db,
+                            &run,
+                            &json!({
+                                "status": RunStatus::Failed,
+                                "trigger": "chat",
+                                "sessionId": "saved-session",
+                                "resumeAvailable": true,
+                                "snapshot": {
+                                    "agent": {
+                                        "id": crate::config::MAIN_AGENT_ID,
+                                        "provider": "codex",
+                                        "timeoutMinutes": minutes,
+                                    }
+                                },
+                                "chatExecution": { "messageId": "original-message" },
+                            }),
+                        )?;
+                        let checkpoint = RunCheckpoint::from_value(json!({
+                            "launched": true,
+                            "prepared": { "backend": "native", "isolated": true },
+                            "runnerId": "old-attempt",
+                            "remainingMs": 0,
+                            "heldEnvironment": {
+                                "attempt": "old-attempt",
+                                "generation": "old-generation",
+                                "expiresAt": now() - 1,
+                            },
+                        }))?;
+                        checkpoint.store_in(db, &run)?;
+                        db.0.execute(
+                            "INSERT INTO background_jobs(request_id,run_id,attempt_id,payload_hash,outcome) VALUES
+                            ('pending',?1,'old-attempt','hash',NULL),
+                            ('running',?1,'old-attempt','hash',json_object('state','running')),
+                            ('finished',?1,'old-attempt','hash',json_object('state','finished')),
+                            ('unrelated',?1,'another-attempt','hash',json_object('state','running'))",
+                            [&run],
+                        )?;
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+
+            let resumed = service.worker.resume(&service, &run).await.unwrap();
+            assert!(recover(&service, &resumed).await.is_err());
+            let blocked = RunCheckpoint::load(&service.store, &run)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(blocked.held_environment.is_none());
+            assert_eq!(blocked.runner_id(), Some("old-attempt"));
+            assert_eq!(blocked.remaining_ms, Some(budget));
+            assert!(
+                service
+                    .store
+                    .run_state(&run)
+                    .await
+                    .unwrap()
+                    .recovery_pending
+            );
+
+            assert!(recover(&service, &resumed).await.unwrap());
+            let saved = RunCheckpoint::load(&service.store, &run)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(saved.held_environment.is_none());
+            assert_eq!(saved.remaining_ms, Some(budget));
+            assert_eq!(saved.runner_id(), Some("old-attempt"));
+            let checkpoint = super::super::checkpoint::Checkpoint::new(
+                service.store.clone(),
+                run.clone(),
+                saved,
+            );
+            assert!(!checkpoint.expired());
+            let outcomes = service
+                .store
+                .read({
+                    let run = run.clone();
+                    move |db| {
+                        Ok(db
+                            .0
+                            .prepare(
+                                "SELECT json_extract(outcome,'$.state') FROM background_jobs
+                         WHERE run_id=? ORDER BY request_id",
+                            )?
+                            .query_map([run], |row| row.get::<_, String>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()?)
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(outcomes, ["finished", "unknown", "unknown", "running"]);
+            let state = service.store.run_state(&run).await.unwrap();
+            assert_eq!(state.session_id.as_deref(), Some("saved-session"));
+            assert!(!state.recovery_pending);
+            assert_eq!(
+                tokio::fs::read_to_string(workspace.join("work.txt"))
+                    .await
+                    .unwrap(),
+                "Private work"
+            );
+            service.shutdown.cancel();
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn shutdown_during_active_observation_keeps_pending_checkpoint() {
         use axum::{Router, routing::any};
         let entered = Arc::new(tokio::sync::Notify::new());

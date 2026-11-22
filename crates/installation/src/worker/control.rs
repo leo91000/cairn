@@ -452,6 +452,18 @@ pub(crate) fn requeue(
         crate::chats::coding_agent::cancel_in(db, id)?;
     }
     if let Some(mut checkpoint) = checkpoint {
+        // Manual Resume relinquishes reuse of the retained environment.
+        // Keep its runner identity so recovery still fences it before launch.
+        if let Some(held) = checkpoint.held_environment.take()
+            && checkpoint.runner_id() == Some(held.attempt.as_str())
+        {
+            super::jobs::unknown(
+                db,
+                id,
+                &held.attempt,
+                "The previous environment will be stopped for manual resume; background completion is unknown.",
+            )?;
+        }
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
         checkpoint.controller_recoveries = None;
         checkpoint.controller_recovery_reservation = None;
