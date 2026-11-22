@@ -107,7 +107,7 @@ internal fun conversationError(chat: Chat?): String? {
         run.error?.trim()?.ifEmpty { null }
             ?: "La réponse s’est arrêtée avant la fin. Envoyez un message pour continuer."
     // A held queue is resumed: a message written now would wait behind it (ADR-0090).
-    val held = chat.paused && chat.messages.any { it.status == "queued" && it.questionId == null }
+    val held = chat.paused && chat.messages.any { it.status == "queued" }
     if (!held) return reason
     return reason.removeSuffix("Envoyez un message pour continuer.").trimEnd() +
         " Reprenez la file pour continuer."

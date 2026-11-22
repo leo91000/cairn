@@ -1212,21 +1212,25 @@ pub(crate) fn skips_replay(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bo
     }
     let turn = run["chatExecution"]["messageId"].as_str();
     let ended_at = turn_end(run);
-    let messages = db.conversation_messages(chat_id)?;
-    let turn_held = messages.iter().any(|message| {
-        Some(message.id.as_str()) == turn
-            && matches!(
-                message.status,
-                MessageStatus::Queued | MessageStatus::Sending
-            )
-    });
-    let written_since = messages.iter().any(|message| {
+    let written_since = db.conversation_messages(chat_id)?.iter().any(|message| {
         message.status == MessageStatus::Queued
             && message.question_id.is_none()
             && message.created_at > ended_at
             && Some(message.id.as_str()) != turn
     });
-    Ok(written_since && !turn_held)
+    Ok(written_since && !turn_held(db, chat_id, run)?)
+}
+
+/// The stopped turn's own message still waits to be sent: only a replay recovers it.
+pub(crate) fn turn_held(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bool> {
+    let turn = run["chatExecution"]["messageId"].as_str();
+    Ok(db.conversation_messages(chat_id)?.iter().any(|message| {
+        Some(message.id.as_str()) == turn
+            && matches!(
+                message.status,
+                MessageStatus::Queued | MessageStatus::Sending
+            )
+    }))
 }
 
 /// A turn whose agent never received its message: no attempt launched a process for this
@@ -1318,8 +1322,10 @@ fn settle_turn(db: &Db<'_>, chat_id: &str, ended: &Value) -> Result<()> {
             db.save_message(&message)?;
         }
     }
-    // A cancelled turn pauses as Stop does; a person's next message lifts it.
-    let cancelled = run["status"] == RunStatus::Cancelled;
+    // A cancelled turn pauses as Stop does, unless the conversation moved on since: a
+    // message written or a resumption after the cancellation is not undone.
+    let untouched = conversation(db, chat_id)?.updated_at <= turn_end(&run);
+    let cancelled = run["status"] == RunStatus::Cancelled && untouched;
     if (held || cancelled) && !conversation(db, chat_id)?.paused {
         pause_in(db, chat_id, true)?;
     }
@@ -2826,10 +2832,20 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     }),
                     None,
                 )?;
-                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent", "updatedAt": 100 }))?;
                 settle_turn(db, "chat", &run)?;
                 assert!(conversation(db, "chat")?.paused);
                 assert!(settled(db, &run)?);
+
+                // A person who resumed or wrote after the cancellation is not paused again by a
+                // settle that ran late.
+                db.delete(&settled_key(&run))?;
+                let mut chat = conversation(db, "chat")?;
+                chat.paused = false;
+                chat.updated_at = 1_000;
+                db.save_conversation(&chat)?;
+                settle_turn(db, "chat", &run)?;
+                assert!(!conversation(db, "chat")?.paused);
                 Ok(())
             })
             .await

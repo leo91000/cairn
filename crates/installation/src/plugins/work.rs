@@ -465,25 +465,24 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
         Ok(chat_id) => chat_id,
         Err(receipt) => return Ok(receipt),
     };
-    // Follow Cairn's resume path for a stopped run; merely clearing `paused` would
-    // make chat_tick pause it again. Resume also restores the checkpoint budget.
+    // A stopped turn whose own message is still held is recovered by Cairn's resume path,
+    // which also restores the checkpoint budget. Otherwise the plugin's message starts the
+    // next turn, as a person's does (ADR-0090).
     let chat = s.conversation_boundary(&chat_id).await?;
     if let Some(run_id) = chat["runId"].as_str() {
         let run = s.store.run(run_id).await?;
-        // A turn whose message went back to its author is over: the plugin's message starts
-        // the next turn instead (ADR-0090).
-        let returned = s
+        let held = s
             .store
             .read({
-                let run_id = run_id.to_owned();
-                move |db| crate::chats::turn_returned(db, &run_id)
+                let (chat_id, run) = (chat_id.clone(), run.clone());
+                move |db| crate::chats::turn_held(db, &chat_id, &run)
             })
             .await?;
         if crate::run_status::RunStatus::of(&run)
             .is_some_and(crate::run_status::RunStatus::is_resumable)
             && chat["cancelledByDeletion"] != true
             && chat["sessionRestartRequested"] != true
-            && !returned
+            && held
         {
             let expected = expected.clone();
             let event = event.clone();

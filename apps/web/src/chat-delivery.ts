@@ -97,6 +97,6 @@ export function resumesOnSend(chat: ChatDetail | null | undefined, queued: numbe
  * message written now would wait behind it (ADR-0090).
  */
 export function failureReason(chat: ChatDetail | null | undefined, reason: string) {
-  const held = !!chat?.paused && chat.messages.some(message => message.status === 'queued' && !message.questionId)
+  const held = !!chat?.paused && chat.messages.some(message => message.status === 'queued')
   return held ? `${reason.replace(/\s*Send a message to continue\.$/, '')} Resume the queue to continue.` : reason
 }
