@@ -44,6 +44,11 @@ export interface Chat {
   readAt?: number | null
   sessionRestartRequested: boolean
   canRequestNewSession: boolean
+  /**
+   * The last turn's own message went back to its author: that turn cannot be resumed,
+   * and sending the message again continues the conversation (ADR-0090).
+   */
+  turnReturned?: boolean
   unread: boolean
   lifecycleError?: string | null
   environmentState?: ConversationEnvironmentState | null

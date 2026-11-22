@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.InputTransformation
@@ -22,6 +23,7 @@ import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.maxLength
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -518,13 +520,7 @@ internal fun ChatPage(
     }
     val timelineKeys = remember(id) { TimelineKeys() }
     // A turn whose message went back to the composer is over: sending it again is the way on.
-    val returnedTurn =
-        chat?.run?.let { run ->
-            val turn = run.chatExecution?.messageId
-            turn != null &&
-                run.status in setOf("failed", "interrupted", "cancelled") &&
-                chat.messages.none { it.id == turn && it.status != "cancelled" }
-        } == true
+    val returnedTurn = chat?.turnReturned == true
     val quota =
         remember(chat?.run, live.entries, returnedTurn) {
             if (returnedTurn) null else chatQuota(chat?.run, live.entries)
@@ -767,10 +763,7 @@ internal fun ChatPage(
     val steers = active && chat?.paused != true && !changesRunningAgent && !steerBlocked
     // Stopping or a failed turn pauses an empty queue, which the next message resumes. A queue
     // paused on purpose, or holding messages, keeps holding what is added to it.
-    val resumesOnSend =
-        chat?.paused == true &&
-            pending.isEmpty() &&
-            chat.run?.status in setOf("failed", "interrupted", "cancelled")
+    val resumesOnSend = resumesOnSend(chat, pending.size)
     val held = chat?.paused == true && !resumesOnSend
     // Saving an edit keeps the queued message where it was.
     val editedMode = pending.find { it.id == editing }?.mode ?: "queue"
@@ -987,10 +980,7 @@ internal fun ChatPage(
     // send to finish.
     val restored = remember(id) { mutableSetOf<String>() }
     val me = state.session.account?.id
-    val returned =
-        chat?.messages.orEmpty().filter {
-            it.status == "cancelled" && me != null && it.returnedTo == me && it.id !in restored
-        }
+    val returned = returnedMessages(chat, me, restored)
     LaunchedEffect(returned.map { it.id }, readOnly, editing, state.busy) {
         val current = chat ?: return@LaunchedEffect
         if (
@@ -1002,18 +992,18 @@ internal fun ChatPage(
         )
             return@LaunchedEffect
         returned.forEach { restored += it.id }
-        composer.setTextAndPlaceCursorAtEnd(
-            (returned.map { it.text.trim() } + draft.trim())
-                .filter { it.isNotEmpty() }
-                .joinToString("\n\n")
-        )
+        // The message comes back as written: its plan request and agent choices included.
+        val restoredDraft = restoredComposer(returned, draft)
+        composer.setTextAndPlaceCursorAtEnd(restoredDraft.text)
         val kept = attachments.map { it.attachment.id }.toSet()
         attachments =
             attachments +
-                returned
-                    .flatMap { it.attachments }
-                    .filter { it.id !in kept }
-                    .map { DraftAttachment(it) }
+                restoredDraft.attachments.filter { it.id !in kept }.map { DraftAttachment(it) }
+        provider = restoredDraft.provider.ifBlank { currentProvider }
+        model = restoredDraft.model
+        reasoning = restoredDraft.reasoning
+        speed = restoredDraft.speed
+        planning = restoredDraft.plan
         // Restoring recomposes this screen and restarts the effect: the withdrawal must finish.
         withContext(kotlinx.coroutines.NonCancellable) {
             try {

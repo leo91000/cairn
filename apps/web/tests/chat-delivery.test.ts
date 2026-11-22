@@ -2,7 +2,14 @@ import type { ChatDetail, ChatMessage } from '../../../packages/contracts/chats'
 import type { Run } from '../../../packages/contracts/contracts'
 import type { TimelineEntry } from '../../../packages/contracts/live'
 import { describe, expect, it } from 'vitest'
-import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../src/chat-delivery'
+import {
+  chatDelivery,
+  chatWaitNotice,
+  restoredComposer,
+  resumesOnSend,
+  returnedMessages,
+  scheduledWakeup,
+} from '../src/chat-delivery'
 
 function message(id: string, overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -193,5 +200,47 @@ describe('chat delivery presentation', () => {
       status: 'sending',
     })
     expect(chatDelivery(chat([answer], running), [])).toEqual({ sending: [], queued: [] })
+  })
+})
+
+describe('returned messages', () => {
+  const returned = [
+    message('plan', {
+      status: 'cancelled',
+      returnedTo: 'alice',
+      plan: true,
+      provider: 'claude',
+      model: 'opus',
+      reasoning: 'high',
+      speed: 'priority',
+      createdAt: 1,
+    }),
+    message('follow-up', { status: 'cancelled', returnedTo: 'alice', createdAt: 2 }),
+  ]
+
+  it('belong only to the person they went back to, once', () => {
+    const detail = chat([...returned, message('other', { status: 'cancelled', returnedTo: 'bob' }), message('deleted', { status: 'cancelled' })], { status: 'failed' })
+    expect(returnedMessages(detail, 'alice').map(item => item.id)).toEqual(['plan', 'follow-up'])
+    expect(returnedMessages(detail, 'alice', new Set(['plan'])).map(item => item.id)).toEqual(['follow-up'])
+    expect(returnedMessages(detail, '')).toEqual([])
+  })
+
+  it('come back ahead of the draft with their plan request and agent choices', () => {
+    expect(restoredComposer(returned, ' my draft ')).toMatchObject({
+      text: 'plan\n\nfollow-up\n\nmy draft',
+      provider: 'claude',
+      model: 'opus',
+      reasoning: 'high',
+      speed: 'priority',
+      plan: true,
+    })
+  })
+
+  it('let the next message resume only an empty queue paused by a Stop or failure', () => {
+    for (const status of ['failed', 'interrupted', 'cancelled'] as const)
+      expect(resumesOnSend(chat([], { status }, true), 0)).toBe(true)
+    expect(resumesOnSend(chat([], { status: 'failed' }, true), 1)).toBe(false)
+    expect(resumesOnSend(chat([], { status: 'succeeded' }, true), 0)).toBe(false)
+    expect(resumesOnSend(chat([], { status: 'failed' }, false), 0)).toBe(false)
   })
 })

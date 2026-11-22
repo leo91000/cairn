@@ -264,6 +264,10 @@ fn conversation_view_with_run(
     let mut view = Chat {
         next_selection: None,
         can_request_new_session: crate::conversation_lifecycle::can_request_new_session(&chat, run),
+        turn_returned: run
+            .map(|run| turn_returned(db, text(run, "id")))
+            .transpose()?
+            .unwrap_or(false),
         finished_at: serde_json::from_value(run_field("finishedAt"))?,
         read_at: question_at.max(run_field("finishedAt").as_i64()),
         context_usage: serde_json::from_value(run_field("contextUsage"))?,
@@ -998,7 +1002,6 @@ pub(crate) fn edit_as(
             | crate::native::policy::Origin::PublicAccount(account) => {
                 author.is_none_or(|author| author == account.as_str())
             }
-            crate::native::policy::Origin::Unknown => true,
             _ => author.is_none(),
         };
         if !allowed {
@@ -1205,25 +1208,19 @@ pub(crate) fn written_since_turn(db: &Db<'_>, chat_id: &str, run: &Value) -> Res
     }))
 }
 
-/// A turn whose agent process never received its message: no process launched for this
-/// turn, it was refused at startup, or it failed before any turn was submitted. Otherwise
-/// the agent may have it. Checkpoints saved before turns were recorded only know whether
-/// the run ever launched.
+/// A turn whose agent never received its message: no attempt launched a process for this
+/// turn, for example when admission or the controller refused it. Once any attempt launched
+/// one, the agent may have it, whatever later attempts reported. Checkpoints saved before
+/// turns were recorded only know whether the run ever launched.
 fn never_received(db: &Db<'_>, run: &Value) -> Result<bool> {
     let Some(checkpoint) = RunCheckpoint::load_in(db, text(run, "id"))? else {
         return Ok(run["startedAt"].is_null());
     };
     let turn = run["chatExecution"]["messageId"].as_str();
-    let launched = match &checkpoint.launched_turn {
-        Some(launched) => Some(launched.as_str()) == turn,
-        None => checkpoint.launched(),
-    };
-    let startup = checkpoint
-        .retry_cause
-        .as_ref()
-        .and_then(Option::as_ref)
-        .is_some_and(|cause| cause.startup);
-    Ok(!launched || checkpoint.start_rejected == Some(true) || startup)
+    Ok(match &checkpoint.launched_turn {
+        Some(launched) => Some(launched.as_str()) != turn,
+        None => !checkpoint.launched(),
+    })
 }
 
 fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
@@ -1443,8 +1440,9 @@ fn continue_run(
         run["environmentExpiredAt"].is_number() && !run["sessionId"].is_string();
     // A turn that handed the conversation over failed before its session existed: the
     // next message hands it over again rather than starting without its history.
-    let unfinished_handoff =
-        run["chatExecution"]["context"].is_string() && !run["sessionId"].is_string();
+    let unfinished_handoff = run["status"] != RunStatus::Succeeded
+        && run["chatExecution"]["context"].is_string()
+        && !run["sessionId"].is_string();
     let restart_requested = expired
         || fresh_environment_without_session
         || unfinished_handoff
@@ -2081,13 +2079,7 @@ impl Service {
                 let (chat_id, ended) = (id.clone(), run.clone());
                 let settling = self
                     .store
-                    .read(move |db| {
-                        if !db.has_pending_messages(&chat_id)? || settled(db, &ended)? {
-                            return Ok(false);
-                        }
-                        let unsent = unsent(db, &chat_id, &ended)?;
-                        Ok(!unsent.returning.is_empty() || !unsent.held.is_empty())
-                    })
+                    .read(move |db| Ok(db.has_pending_messages(&chat_id)? && !settled(db, &ended)?))
                     .await?;
                 if settling {
                     // The next tick dispatches what remains, unless a pause holds it.
@@ -2583,7 +2575,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 assert!(refused.message.contains("composer"), "{}", refused.message);
 
                 // The composer that restores a returned message withdraws it and its mark.
-                edit(db, "chat", "turn", None)?;
+                edit_as(db, "chat", "turn", None, &crate::native::policy::Origin::Human("alice".into()))?;
                 assert!(find_message(db, "chat", "turn")?.is_none());
                 assert!(db.kv(&returned_key("turn"))?.is_none());
 

@@ -62,3 +62,32 @@ export function chatDelivery(chat: ChatDetail | null, cards: TimelineEntry[], ou
 
   return { sending, queued }
 }
+
+/** Messages a failed or stopped turn returned to this person, oldest first, not yet restored. */
+export function returnedMessages(chat: ChatDetail | null | undefined, account: string, restored: ReadonlySet<string> = new Set()) {
+  if (!chat || !account)
+    return []
+  return chat.messages.filter(message => message.status === 'cancelled' && message.returnedTo === account && !restored.has(message.id))
+}
+
+/**
+ * The composer state a set of returned messages restores: their text ahead of the draft, and the
+ * choices of the oldest one. A plan request stays one, so a returned plan never changes files.
+ */
+export function restoredComposer(returned: ChatMessage[], draft: string) {
+  const first = returned[0]
+  return {
+    text: [...returned.map(message => message.text.trim()), draft.trim()].filter(Boolean).join('\n\n'),
+    attachments: returned.flatMap(message => message.attachments ?? []),
+    provider: first?.provider ?? '',
+    model: first?.model ?? '',
+    reasoning: first?.reasoning ?? '',
+    speed: first?.speed ?? '',
+    plan: returned.some(message => message.plan === true),
+  }
+}
+
+/** After a Stop or a failed turn, the next message resumes an empty paused queue. */
+export function resumesOnSend(chat: ChatDetail | null | undefined, queued: number) {
+  return !!chat?.paused && !queued && ['failed', 'interrupted', 'cancelled'].includes(chat.run?.status ?? '')
+}

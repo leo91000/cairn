@@ -118,7 +118,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "delete_chat_message",
         scope: "run",
-        description: "Remove a queued ordinary message before delivery, or a cancelled one, such as a message a failed turn returned unsent. Submitted questionnaire answers cannot be removed; send a new message to correct them.",
+        description: "Remove a queued ordinary message before delivery, or a cancelled one. A message a failed turn returned unsent (returnedTo) can be removed only by the person it was returned to. Submitted questionnaire answers cannot be removed; send a new message to correct them.",
     },
     ChatOperation {
         name: "rename_chat",

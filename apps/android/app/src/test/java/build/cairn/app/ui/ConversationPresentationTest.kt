@@ -484,6 +484,68 @@ class ConversationPresentationTest {
     }
 
     @Test
+    fun `returned messages come back only to their author with their choices`() {
+        val plan =
+            ChatMessage(
+                id = "plan",
+                text = "Plan it",
+                status = "cancelled",
+                returnedTo = "alice",
+                plan = true,
+                provider = "claude",
+                model = "opus",
+                reasoning = "high",
+                speed = "priority",
+            )
+        val followUp =
+            ChatMessage(
+                id = "follow",
+                text = "Then this",
+                status = "cancelled",
+                returnedTo = "alice",
+            )
+        val chat =
+            Chat(
+                id = "chat",
+                messages =
+                    listOf(
+                        plan,
+                        followUp,
+                        ChatMessage(
+                            id = "bob",
+                            text = "Bob",
+                            status = "cancelled",
+                            returnedTo = "bob",
+                        ),
+                        ChatMessage(id = "deleted", text = "Gone", status = "cancelled"),
+                    ),
+            )
+        assertEquals(listOf("plan", "follow"), returnedMessages(chat, "alice").map { it.id })
+        assertEquals(listOf("follow"), returnedMessages(chat, "alice", setOf("plan")).map { it.id })
+        assertTrue(returnedMessages(chat, null).isEmpty())
+        val restored = restoredComposer(listOf(plan, followUp), " brouillon ")
+        assertEquals("Plan it\n\nThen this\n\nbrouillon", restored.text)
+        assertEquals("claude", restored.provider)
+        assertEquals("opus", restored.model)
+        assertEquals("high", restored.reasoning)
+        assertEquals("priority", restored.speed)
+        assertTrue(restored.plan)
+    }
+
+    @Test
+    fun `the next message resumes only an empty queue paused by a stop or failure`() {
+        listOf("failed", "interrupted", "cancelled").forEach {
+            val chat =
+                Chat(id = "chat", paused = true, run = Run(id = "r", status = it, taskId = ""))
+            assertTrue(resumesOnSend(chat, 0))
+            assertFalse(resumesOnSend(chat, 1))
+        }
+        val succeeded =
+            Chat(id = "chat", paused = true, run = Run(id = "r", status = "succeeded", taskId = ""))
+        assertFalse(resumesOnSend(succeeded, 0))
+    }
+
+    @Test
     fun `a message written after a failed or stopped turn starts the next one`() {
         listOf("failed", "interrupted", "cancelled").forEach {
             val run = Run(id = "r", status = it, taskId = "")

@@ -690,10 +690,14 @@ fn native_result(
                 .ok_or_else(|| Error::not_found("The target run no longer exists."))?;
             let status = RunStatus::of(&target)
                 .ok_or_else(|| Error::bad_gateway("Unknown target run state."))?;
-            if status == RunStatus::Succeeded
+            // A conversation continues while input waits: after a success, or after a
+            // failure that no longer pauses it (ADR-0090).
+            if !status.is_active()
                 && target["trigger"] == "chat"
                 && let Some(chat) = db.conversation_for_run(run_id)?
-                && (chat.wakeup.is_some() || continuation::has_pending_input(db, &chat)?)
+                && (chat.wakeup.is_some()
+                    || ((status == RunStatus::Succeeded || !chat.paused)
+                        && continuation::has_pending_input(db, &chat)?))
             {
                 return Ok(None);
             }

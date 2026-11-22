@@ -55,7 +55,14 @@ import {
   MAX_MESSAGE_SIZE,
   validateSelection,
 } from '../attachments'
-import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
+import {
+  chatDelivery,
+  chatWaitNotice,
+  restoredComposer,
+  resumesOnSend as resumesOnSendFor,
+  returnedMessages,
+  scheduledWakeup,
+} from '../chat-delivery'
 import {
   chatListCarried,
   chatPlanEnabled,
@@ -390,12 +397,8 @@ function switcherAnchor() {
 const readOnly = computed(() => !!detail.value && !canDirectChat(state.usableAgents, detail.value, chats.value))
 const error = ref('')
 const dismissedError = ref(false)
-// A turn whose message went back to the composer is over: sending it again is the way on.
-const returnedTurn = computed(() => {
-  const run = detail.value?.run
-  const turn = run?.chatExecution?.messageId
-  return !!run && !!turn && ['failed', 'interrupted', 'cancelled'].includes(run.status) && !detail.value?.messages.some(message => message.id === turn && message.status !== 'cancelled')
-})
+// A turn whose message went back to its author is over: sending it again is the way on.
+const returnedTurn = computed(() => !!detail.value?.turnReturned)
 const quota = computed(() => returnedTurn.value ? null : chatQuota(detail.value?.run, timeline.value))
 const visibleError = computed(() => {
   if (error.value)
@@ -666,7 +669,7 @@ const steers = computed(() => active.value && !detail.value?.paused && !changesR
 const editedMode = computed(() => pending.value.find(message => message.id === editing.value)?.mode ?? 'queue')
 // Stopping or a failed turn pauses an empty queue, which the next message resumes. A queue paused
 // on purpose, or holding messages, keeps holding what is added to it.
-const resumesOnSend = computed(() => !!detail.value?.paused && !pending.value.length && ['failed', 'interrupted', 'cancelled'].includes(detail.value.run?.status ?? ''))
+const resumesOnSend = computed(() => resumesOnSendFor(detail.value, pending.value.length))
 const held = computed(() => !!detail.value?.paused && !resumesOnSend.value)
 const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)
 const inheritConversation = computed(() => chosenProvider.value === conversationAssistant.value?.provider)
@@ -1353,14 +1356,21 @@ watch([() => detail.value?.messages, readOnly, inactive, editing, busy], ([messa
   // While switching conversations the previous one is still loaded: its messages are not this draft's.
   if (!chat || chat.id !== selectedChatId.value || !state.accountId || readOnly.value || inactive.value || editing.value || busy.value)
     return
-  const returned = (messages ?? []).filter(message => message.status === 'cancelled' && message.returnedTo === state.accountId && !restored.has(message.id))
+  const returned = returnedMessages({ ...chat, messages: messages ?? [] }, state.accountId, restored)
   if (!returned.length)
     return
   for (const message of returned)
     restored.add(message.id)
-  draft.value = [...returned.map(message => message.text.trim()), draft.value.trim()].filter(Boolean).join('\n\n')
+  // The message comes back as written: its plan request and agent choices included.
+  const composer = restoredComposer(returned, draft.value)
+  draft.value = composer.text
   const kept = new Set(attachments.value.map(attachment => attachment.id))
-  attachments.value = [...attachments.value, ...returned.flatMap(message => message.attachments ?? []).filter(attachment => !kept.has(attachment.id))]
+  attachments.value = [...attachments.value, ...composer.attachments.filter(attachment => !kept.has(attachment.id))]
+  provider.value = composer.provider || currentProvider.value
+  model.value = composer.model
+  reasoning.value = composer.reasoning
+  speed.value = composer.speed
+  planning.value = composer.plan
   // Another device of the same person may have restored and withdrawn it first.
   void Promise.all(returned.map(message => deleteChatMessage(api, { chatId: chat.id, messageId: message.id })
     .catch((e: unknown) => {

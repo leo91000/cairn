@@ -15,9 +15,10 @@ this as a conversation they must repair rather than one they can keep writing in
 
 The dispatcher settles a turn that failed, was interrupted or was stopped once.
 It returns the ordinary messages a person wrote that the agent certainly never
-received: the turn's own message when the turn never launched, was refused at
-startup or failed before submitting it, and messages written before the turn
-ended or before Stop was pressed. They become `cancelled` and name the person
+received: the turn's own message when no attempt launched a process for that turn
+(for example, admission or the controller refused it), and queued messages written
+before the turn ended or before Stop was pressed. Steering messages already being
+sent may have reached the running turn. They become `cancelled` and name the person
 they go back to (`returnedTo`). Everything else is held behind a pause, queued
 again, as every failure did before: messages from rules and agents, which have no
 composer to go back to, questionnaire answers, and a turn message the agent may
@@ -28,16 +29,18 @@ once per turn, so a person's later resumption is never undone.
 
 Web and Android restore returned messages only in the composer of the person they
 name, in the conversation shown, ahead of any draft, with their attachments, and
-withdraw them so another device does not restore them again. Withdrawal of a
-returned message is accepted for that reason, including through public MCP and
-`cairn_installation` (`delete_chat_message`). A restored draft is as durable as any
-other draft.
+withdraw them so another device does not restore them again. They keep the message's plan
+request and agent choices. Only the person a message was returned to may withdraw
+it (`delete_chat_message`), from the apps or the public MCP they authorized; agents
+cannot. A restored draft is as durable as any other draft. Conversation views carry
+`turnReturned`, which the apps use to stop offering recovery for that turn.
 
 A turn whose own message was returned is over: resuming or retrying it is
 refused, unpausing does not replay it, and its coding agent is no longer offered
 for a switch, because that would deliver a message that is back in its author's
 composer. A turn whose message the agent may have received can still be resumed as
-before. Unpausing replays a stopped turn unless a message was written after it
+before, from the run view in the apps or through `set_chat_paused` and
+`resume_chat`. Unpausing replays a stopped turn unless a message was written after it
 ended, which is sent instead.
 
 Explicit pauses keep their meaning: a person's pause, Stop, a rule's cancellation
@@ -50,7 +53,9 @@ resumes it. A queue paused after a successful turn, or holding messages, keeps
 holding what is added to it.
 
 Conversation failure messages say to send a message to continue; missions keep
-their resume wording.
+their resume wording. A preparation failure, which happens before any turn exists
+(reduced agent access, an invalid configuration), still pauses the conversation
+and keeps its message: it needs a repair, which resending would not provide.
 
 While the agent works, the composer sends into its turn (steer) by default.
 Queueing for the next turn is the secondary action (Alt+Enter on web). A message

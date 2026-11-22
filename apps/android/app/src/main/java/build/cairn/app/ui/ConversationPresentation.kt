@@ -407,3 +407,51 @@ internal fun DetailSheet(
         Box(Modifier.fillMaxHeight(0.85f)) { Page(content = content) }
     }
 }
+
+/** Messages a failed or stopped turn returned to this person, oldest first, not yet restored. */
+internal fun returnedMessages(
+    chat: Chat?,
+    account: String?,
+    restored: Set<String> = emptySet(),
+): List<ChatMessage> =
+    if (chat == null || account.isNullOrEmpty()) emptyList()
+    else
+        chat.messages.filter {
+            it.status == "cancelled" && it.returnedTo == account && it.id !in restored
+        }
+
+internal data class RestoredComposer(
+    val text: String,
+    val attachments: List<build.cairn.contracts.ChatAttachment>,
+    val provider: String,
+    val model: String,
+    val reasoning: String,
+    val speed: String,
+    val plan: Boolean,
+)
+
+/**
+ * The composer state returned messages restore: their text ahead of the draft, and the choices of
+ * the oldest one. A plan request stays one, so a returned plan never changes files.
+ */
+internal fun restoredComposer(returned: List<ChatMessage>, draft: String): RestoredComposer {
+    val first = returned.firstOrNull()
+    return RestoredComposer(
+        text =
+            (returned.map { it.text.trim() } + draft.trim())
+                .filter { it.isNotEmpty() }
+                .joinToString("\n\n"),
+        attachments = returned.flatMap { it.attachments },
+        provider = first?.provider.orEmpty(),
+        model = first?.model.orEmpty(),
+        reasoning = first?.reasoning.orEmpty(),
+        speed = first?.speed.orEmpty(),
+        plan = returned.any { it.plan == true },
+    )
+}
+
+/** After a Stop or a failed turn, the next message resumes an empty paused queue. */
+internal fun resumesOnSend(chat: Chat?, queued: Int): Boolean =
+    chat?.paused == true &&
+        queued == 0 &&
+        chat.run?.status in setOf("failed", "interrupted", "cancelled")
