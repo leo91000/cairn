@@ -6,7 +6,7 @@
 //   fixture:agy-tools         list_dir, run_command and write_file calls, each through the hooks
 //   fixture:agy-slow=<ms>     the response waits <ms> after its user step
 //   fixture:agy-429           a quota failure (AGY_ERROR with RESOURCE_EXHAUSTED)
-//   fixture:agy-command       a long command in the process group, its pid in $HOME/agy-command.pid
+//   fixture:agy-command       a long command in its own session, its pid in $HOME/agy-command.pid
 //   fixture:agy-expired       a Google access token that expires during the turn (once per token)
 // Environment:
 //   CAIRN_AGY_FIXTURE_LOG     JSON-lines record of what each process received (default $HOME/agy-fixture.jsonl)
@@ -406,7 +406,8 @@ async function print() {
 
     if (content.includes('fixture:agy-command')) {
       // A command `agy` started, in its process group, that only a group kill stops.
-      const command = spawn('sleep', ['300'], { stdio: 'ignore' })
+      // Like agy 1.5.14, each command runs in its own session.
+      const command = spawn('sleep', ['300'], { stdio: 'ignore', detached: true })
       writeFileSync(path.join(home, 'agy-command.pid'), String(command.pid))
     }
 

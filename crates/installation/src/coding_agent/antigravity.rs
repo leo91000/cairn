@@ -158,19 +158,15 @@ impl ExecutionAdapter for Antigravity {
         };
         let record = s.accounts.account(s, &account.account_id).await?;
         let kind = record.model_provider.as_deref().unwrap_or_default();
-        let model = text(plan, "model").to_owned();
-        let catalog = s.antigravity.models(s).await?;
-        let model = if model.is_empty() {
-            catalog["models"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|m| m["isDefault"] == true)
-                .map(|m| text(m, "model").to_owned())
-                .unwrap_or_default()
-        } else {
-            model
-        };
+        let mut model = text(plan, "model").to_owned();
+        // Each account kind has its own catalog: the leased account's default applies.
+        if model.is_empty() {
+            model = s
+                .antigravity
+                .default_model(s, kind)
+                .await?
+                .unwrap_or_default();
+        }
         let slug = s
             .antigravity
             .resolve(s, kind, &model, text(plan, "reasoning"))

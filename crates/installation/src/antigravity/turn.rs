@@ -210,21 +210,21 @@ pub(super) fn args(plan: &Value, credentials: &Value, mode: Mode) -> Result<Vec<
     if let Some(sandbox) = native["enableTerminalSandbox"].as_bool() {
         settings["enableTerminalSandbox"] = sandbox.into();
     }
-    for list in ["deny", "ask"] {
-        let added = native["permissions"][list]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        if added.iter().any(|rule| !rule.is_string()) {
-            return Err(Error::bad("Invalid Antigravity native permissions."));
-        }
-        let mut rules = settings["permissions"][list]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        rules.extend(added);
-        settings["permissions"][list] = rules.into();
+    // Only deny rules: ask rules do not restrict `agy` 1.5.14 under
+    // --dangerously-skip-permissions, and validation refuses them.
+    let added = native["permissions"]["deny"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if added.iter().any(|rule| !rule.is_string()) {
+        return Err(Error::bad("Invalid Antigravity native permissions."));
     }
+    let mut rules = settings["permissions"]["deny"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    rules.extend(added);
+    settings["permissions"]["deny"] = rules.into();
     if credentials["kind"] == super::GEMINI {
         settings["modelProvider"] = super::GEMINI.into();
     }
@@ -304,8 +304,10 @@ pub(super) async fn spawn(
         .map_err(|_| Error::unavailable("Unable to start the Antigravity CLI."))
 }
 
-/// Kills a native process group when its owner ends, including when a cancelled
+/// Kills a native process tree when its owner ends, including when a cancelled
 /// execution future is dropped: commands `agy` started must not outlive the turn.
+/// `agy` 1.5.14 runs each command in its own session and leaves it running when it
+/// is interrupted, so its own process group is not enough.
 pub(super) struct Group(Option<u32>);
 
 impl Group {
@@ -317,10 +319,62 @@ impl Group {
 impl Drop for Group {
     fn drop(&mut self) {
         if let Some(pid) = self.0 {
-            // SAFETY: signals only the process group this execution created.
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            }
+            kill_tree(pid);
+        }
+    }
+}
+
+/// Each process's parent and process group, from `/proc`.
+fn processes() -> Vec<(i32, i32, i32)> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| {
+            let pid: i32 = entry.ok()?.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            // Fields after the command name: state, parent, process group.
+            let mut fields = stat.rsplit_once(')')?.1.split_whitespace().skip(1);
+            let parent = fields.next()?.parse().ok()?;
+            let group = fields.next()?.parse().ok()?;
+            Some((pid, parent, group))
+        })
+        .collect()
+}
+
+/// The process groups of `root` and every live descendant, root first.
+fn tree_groups(root: i32, processes: &[(i32, i32, i32)]) -> Vec<i32> {
+    let mut members = vec![root];
+    let mut index = 0;
+    while index < members.len() {
+        let parent = members[index];
+        let children = processes
+            .iter()
+            .filter(|(pid, ppid, _)| *ppid == parent && !members.contains(pid))
+            .map(|(pid, _, _)| *pid)
+            .collect::<Vec<_>>();
+        members.extend(children);
+        index += 1;
+    }
+    let mut groups = vec![root];
+    for member in &members {
+        if let Some((_, _, group)) = processes.iter().find(|(pid, _, _)| pid == member)
+            && *group > 1
+            && !groups.contains(group)
+        {
+            groups.push(*group);
+        }
+    }
+    groups
+}
+
+fn kill_tree(root: u32) {
+    let root = root as i32;
+    // Descendants are found while `agy` is still their parent, then stopped together.
+    for group in tree_groups(root, &processes()) {
+        // SAFETY: signals only groups led by this execution's processes.
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
         }
     }
 }
@@ -686,7 +740,20 @@ async fn execute(
         };
         let _group = Group::of(&child);
         let stdin = child.stdin.take().unwrap();
+        // A line read is not cancellation safe: a separate task keeps partial lines
+        // while the turn's loop also polls the inbox and timers.
+        let (line_tx, mut lines) = mpsc::channel::<Result<String>>(64);
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let reader = tokio::spawn(async move {
+            loop {
+                let line = read_line(&mut stdout).await.transpose();
+                let Some(line) = line else { break };
+                let failed = line.is_err();
+                if line_tx.send(line).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
         let stderr = child.stderr.take().unwrap();
         // The last provider error `agy` reported, which explains a failed result.
         let (error_tx, mut error_rx) = mpsc::channel::<Value>(8);
@@ -719,7 +786,7 @@ async fn execute(
         };
         // Messages acknowledged before an interruption are already in the native history.
         let outcome = match turn.submit(initial, &message, &attachments).await {
-            Ok(()) => drive(&mut turn, &mut child, &mut stdout, &mut error_rx, &cancel).await,
+            Ok(()) => drive(&mut turn, &mut child, &mut lines, &mut error_rx, &cancel).await,
             Err(error) => Err(error),
         };
         turn.sides.stop();
@@ -738,6 +805,7 @@ async fn execute(
             let _ = child.wait().await;
         }
         drain.abort();
+        reader.abort();
         match outcome? {
             Outcome::Complete => return Ok(()),
             Outcome::Renew if renewal < RENEWALS && !conversation.is_empty() => {
@@ -757,7 +825,7 @@ async fn execute(
 async fn drive(
     turn: &mut Turn<'_>,
     child: &mut Child,
-    stdout: &mut BufReader<tokio::process::ChildStdout>,
+    lines: &mut mpsc::Receiver<Result<String>>,
     errors: &mut mpsc::Receiver<Value>,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
@@ -771,8 +839,8 @@ async fn drive(
                 turn.sides.settle().await?;
             }
             Some(error) = errors.recv() => last_error = Some(error),
-            line = read_line(stdout) => {
-                let Some(line) = line? else {
+            line = lines.recv() => {
+                let Some(line) = line.transpose()? else {
                     let status = child.wait().await?;
                     while let Ok(error) = errors.try_recv() { last_error = Some(error); }
                     return Err(match &last_error {
@@ -858,6 +926,21 @@ mod tests {
     }
 
     #[test]
+    fn process_trees_include_commands_in_their_own_sessions() {
+        // agy 10 runs a shell 20 in its own group, which starts 21 in that group;
+        // 30 belongs to another tree.
+        let processes = [
+            (10, 1, 10),
+            (20, 10, 20),
+            (21, 20, 20),
+            (30, 1, 30),
+            (31, 30, 31),
+        ];
+        assert_eq!(tree_groups(10, &processes), [10, 20]);
+        assert_eq!(tree_groups(30, &processes), [30, 31]);
+    }
+
+    #[test]
     fn only_an_expired_access_token_is_renewed() {
         let reported = parse_agy_error(
             r#"AGY_ERROR: {"short_error":"request failed: oauth2: token expired and refresh token is not set"}"#,
@@ -916,7 +999,8 @@ mod tests {
         assert_eq!(settings["enableTerminalSandbox"], true);
         let deny = settings["permissions"]["deny"].as_array().unwrap();
         assert!(deny.contains(&json!("command(*)")) && deny.contains(&json!("command(rm)")));
-        assert_eq!(settings["permissions"]["ask"], json!(["write_file(/etc)"]));
+        // An ask rule would not restrict anything: it never reaches the native settings.
+        assert!(settings["permissions"].get("ask").is_none());
         assert!(args(&json!({ "antigravityModel": "bad slug" }), &key, Mode::Turn).is_err());
     }
 }

@@ -668,7 +668,7 @@ fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
         Provider::Antigravity => {
             entries.push((
                 "permissions.allow / toolPermission / agentMode",
-                "Cairn's hook and launch settings are the limit. Native settings may add deny or ask rules, never allow more.",
+                "Cairn's hook and launch settings are the limit. Native settings may add deny rules, never allow more.",
             ));
             entries.push((
                 "modelProvider / model",
@@ -972,20 +972,21 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Antigravity settings may only restrict: deny and ask rules and its terminal sandbox.
-/// Headless `agy` treats an ask rule as a refusal.
+/// Antigravity settings may only restrict: deny rules and its terminal sandbox. Under
+/// Cairn's launch flags `agy` 1.5.14 runs an `ask` rule's tool anyway (measured), so
+/// an ask rule would look like a restriction without being one.
 fn validate_antigravity(value: &Value) -> Result<()> {
     for (key, setting) in value.as_object().into_iter().flatten() {
         match key.as_str() {
             "enableTerminalSandbox" if setting.is_boolean() => {}
             "permissions" => {
                 let rules = setting.as_object().ok_or_else(|| {
-                    Error::bad("Antigravity permissions must be an object of deny and ask rules.")
+                    Error::bad("Antigravity permissions must be an object of deny rules.")
                 })?;
                 for (list, entries) in rules {
-                    if !matches!(list.as_str(), "deny" | "ask") {
+                    if list != "deny" {
                         return Err(Error::bad(
-                            "Antigravity permissions may only add deny or ask rules. Change access on the Cairn agent page.",
+                            "Antigravity permissions may only add deny rules. Ask rules do not stop a tool in Cairn's managed execution. Change access on the Cairn agent page.",
                         ));
                     }
                     let valid = entries.as_array().is_some_and(|entries| {
@@ -1011,7 +1012,7 @@ fn validate_antigravity(value: &Value) -> Result<()> {
             }
             _ => {
                 return Err(Error::bad(format!(
-                    "{key} is managed by Cairn or not supported for Antigravity. Supported settings are permissions.deny, permissions.ask and enableTerminalSandbox."
+                    "{key} is managed by Cairn or not supported for Antigravity. Supported settings are permissions.deny and enableTerminalSandbox."
                 )));
             }
         }

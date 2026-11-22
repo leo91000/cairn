@@ -350,8 +350,10 @@ impl Driver for Antigravity {
             .await
     }
 
-    async fn initialize(&self, _s: &Service) -> Result<()> {
-        Ok(())
+    /// Removes credential copies an interrupted catalog listing or renewal left behind.
+    async fn initialize(&self, s: &Service) -> Result<()> {
+        super::remove_directory(&s.config.data_dir.join("antigravity-catalog")).await?;
+        super::remove_directory(&s.config.data_dir.join("antigravity-accounts")).await
     }
 
     async fn managed(&self, _s: &Service) -> Result<bool> {

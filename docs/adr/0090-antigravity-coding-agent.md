@@ -21,7 +21,9 @@ Les mesures suivantes ont été faites sur 1.5.14 avec un faux serveur Gemini lo
   shell et `write_file` écrire dans l'espace de travail ; le sandbox refuse
   seulement l'accès direct par IP. La règle `deny` `command` n'a aucun effet,
   `command(*)` refuse le shell. Les règles `deny` s'appliquent même en
-  `always-proceed`.
+  `always-proceed` ; une règle `ask` n'arrête rien dans ce mode : l'outil s'exécute.
+- Les commandes passent par bash, chacune dans sa propre session. Interrompu (y
+  compris par SIGTERM), `agy` les laisse tourner.
 - Un hook `PreToolUse` reçoit le nom et les arguments de chaque outil, y compris
   `call_mcp_tool` (`ServerName`, `ToolName`). Un hook qui échoue, dépasse son délai
   ou répond un JSON invalide refuse l'outil.
@@ -34,8 +36,9 @@ Enregistrer `antigravity` comme agent de code avec un adaptateur `stream-json` :
 un processus natif par exécution, réutilisé pour les messages qui rejoignent le
 tour. Les messages sont attribués dans l'ordre des étapes `user_input`, et chaque
 `result` termine le message suivant de la file. Un reçu durable rejoue un tour
-terminé sans nouvelle requête au modèle. L'annulation termine le groupe de
-processus. La session native est l'identifiant de conversation (UUID) ; la reprise
+terminé sans nouvelle requête au modèle. L'annulation et la fin de l'exécution
+arrêtent l'arbre de processus d'`agy` : Cairn retrouve dans `/proc` ses descendants,
+dont les sessions de ses commandes, et tue leurs groupes. La session native est l'identifiant de conversation (UUID) ; la reprise
 exige le même répertoire de travail et `--conversation`.
 
 L'état natif vit dans le HOME privé du run (`home/.antigravity`), passé comme
@@ -81,7 +84,9 @@ contexte enregistré jusqu'à la dernière étape terminée, pas l'étape en cou
   Android l'affichent avant la connexion, et le propriétaire en accepte le risque.
 
 Les secrets restent dans le coffre chiffré et ne passent que par le courtier
-existant du run. Mesuré avec un compte de test : sans D-Bus, `agy` écrit le jeton
+existant du run. Les identifiants Google Cloud sont fournis tels quels au run : un
+fichier `authorized_user` contient donc son refresh token, choisi par l'utilisateur.
+Le manager liste les modèles dans un répertoire privé temporaire, supprimé ensuite. Mesuré avec un compte de test : sans D-Bus, `agy` écrit le jeton
 OAuth (format `oauth2.Token` : `access_token`, `refresh_token`, `expiry`) dans
 `~/.gemini/antigravity-cli/antigravity-oauth-token`, et fonctionne avec le seul jeton
 d'accès. **Le refresh token reste sur le manager** : un run reçoit un fichier sans
@@ -99,8 +104,10 @@ partagé ; le compte redevient éligible après cinq minutes.
 
 **Catalogue.** `agy models` liste des identifiants qui incluent le niveau
 (`gemini-4-neon-high`). Cairn les regroupe en un modèle et ses niveaux de
-raisonnement, et lance `--model gemini-4-neon --effort high`. Le catalogue dépend
-du type de compte ; un compte n'accepte que les modèles de son type.
+raisonnement. Au lancement, Cairn résout le modèle et le niveau choisis dans le
+catalogue du type de compte loué et passe l'identifiant natif
+(`--model gemini-4-neon-high`). Le catalogue dépend du type de compte ; un agent
+sans modèle prend le premier modèle du type de compte loué.
 
 **Accès.** Comme OpenCode, Antigravity exige l'accès YOLO : son sandbox ne
 correspond ni à la lecture seule ni à l'écriture dans l'espace de travail de Cairn.

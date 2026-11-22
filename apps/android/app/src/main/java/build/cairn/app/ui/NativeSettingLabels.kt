@@ -100,7 +100,7 @@ internal fun nativeManagedReason(path: String): String =
         "compaction.auto" ->
             "La compaction automatique d’OpenCode n’est pas compatible avec la reprise des sessions dans Cairn."
         "permissions.allow / toolPermission / agentMode" ->
-            "Le hook et les réglages de lancement de Cairn sont la limite. Les réglages natifs peuvent ajouter des règles deny ou ask, jamais autoriser davantage."
+            "Le hook et les réglages de lancement de Cairn sont la limite. Les réglages natifs peuvent ajouter des règles deny, jamais autoriser davantage."
         "modelProvider / model" ->
             "Le type de compte et le modèle de l’agent Cairn choisissent le modèle natif."
         "hooks / plugins / MCP" ->

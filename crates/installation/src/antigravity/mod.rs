@@ -347,11 +347,19 @@ struct CatalogCache {
 
 impl Catalog {
     async fn list(s: &Service, credentials: &Value) -> Result<Vec<Value>> {
+        // A private directory per listing: credential files never stay on the manager.
         let home = s
             .config
             .data_dir
             .join("antigravity-catalog")
-            .join(text(credentials, "kind"));
+            .join(crate::config::id());
+        let listed = Self::list_in(s, &home, credentials).await;
+        let _ = crate::accounts::remove_directory(&home).await;
+        listed
+    }
+
+    async fn list_in(s: &Service, home: &Path, credentials: &Value) -> Result<Vec<Value>> {
+        let home = home.to_owned();
         prepare_native_home(&s.config, &home, Some(credentials)).await?;
         let settings_dir = home.join(".gemini/antigravity-cli");
         private_dir(&settings_dir).await?;
@@ -536,6 +544,16 @@ impl Catalog {
         Ok(self
             .cached_kind(kind)
             .and_then(|models| slug(&models, model, reasoning)))
+    }
+
+    /// The model an account of `kind` runs for an agent without one: its kind's first.
+    pub async fn default_model(&self, s: &Service, kind: &str) -> Result<Option<String>> {
+        if self.cached_kind(kind).is_none() {
+            self.models(s).await?;
+        }
+        Ok(self
+            .cached_kind(kind)
+            .and_then(|models| models.first().map(|m| text(m, "model").to_owned())))
     }
 
     /// Whether an account of `kind` offers `model`, without waiting for discovery.

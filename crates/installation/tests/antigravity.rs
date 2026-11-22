@@ -571,7 +571,7 @@ async fn plan_turns_refuse_shell_and_writes_in_the_hook_and_native_rules() {
     // Native settings from the agent's configuration only add restrictions.
     input["antigravitySettings"] = json!({
         "enableTerminalSandbox": true,
-        "permissions": { "deny": ["command(rm)"], "ask": ["write_file(/etc)"] },
+        "permissions": { "deny": ["command(rm)"] },
     });
     let (result, events) = run(&s, input).await;
     result.unwrap();
@@ -613,10 +613,6 @@ async fn plan_turns_refuse_shell_and_writes_in_the_hook_and_native_rules() {
     ] {
         assert!(deny.contains(&json!(rule)), "{rule} in {deny:?}");
     }
-    assert_eq!(
-        launch["settings"]["permissions"]["ask"],
-        json!(["write_file(/etc)"])
-    );
     assert_eq!(launch["settings"]["enableTerminalSandbox"], true);
     let message = text(&records(&home, "message")[0], "content").to_owned();
     assert!(message.starts_with("Shell commands, file changes and subagents are unavailable"));
@@ -636,7 +632,7 @@ async fn native_configuration_adds_rules_to_ordinary_turns() {
         None,
         &json!({
             "enableTerminalSandbox": true,
-            "permissions": { "deny": ["command(rm)"], "ask": ["write_file(/etc)"] },
+            "permissions": { "deny": ["command(rm)"] },
         })
         .to_string(),
     )
@@ -645,14 +641,14 @@ async fn native_configuration_adds_rules_to_ordinary_turns() {
     let mut input = plan(&root, "gemini-4-neon-high", "Build the status panel");
     input["antigravitySettings"] = json!({
         "enableTerminalSandbox": true,
-        "permissions": { "deny": ["command(rm)"], "ask": ["write_file(/etc)"] },
+        "permissions": { "deny": ["command(rm)"] },
     });
     let (result, _) = run(&s, input.clone()).await;
     result.unwrap();
     let launch = &records(&native_home(&s), "launch")[0];
     assert_eq!(
         launch["settings"]["permissions"],
-        json!({ "deny": ["command(rm)"], "ask": ["write_file(/etc)"] })
+        json!({ "deny": ["command(rm)"] })
     );
     assert_eq!(launch["settings"]["enableTerminalSandbox"], true);
 
