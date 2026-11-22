@@ -1537,7 +1537,7 @@ fn continue_run(
     checkpoint.controller_recoveries = None;
     checkpoint.controller_recovery_reservation = None;
     checkpoint.provider_failure_attempt = None;
-    checkpoint.finalization_failure_attempt = None;
+    checkpoint.reset_finalization_observation();
     checkpoint.move_recovery_reservation = None;
     checkpoint.provider_retry_reservation = None;
     checkpoint.pending_paid_admission = None;
@@ -1552,7 +1552,7 @@ fn continue_run(
             db,
             run_id,
             &held.attempt,
-            "The previous environment will be stopped for the next turn; background completion is unknown.",
+            "The previous environment will be stopped before continuing; background completion is unknown.",
         )?;
     }
     if checkpoint.held_environment.is_none() {

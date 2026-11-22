@@ -56,10 +56,13 @@ Explicit pauses keep their meaning: a person's pause, Stop, a rule's cancellatio
 and a requested fresh session still pause the conversation, and rules still cannot
 lift them. After a failed or interrupted turn, rules also wait: they can steer or
 answer again once its next turn starts, which a person does by writing or by
-resuming it. Cancelling a conversation's run pauses it in the same transaction, as Stop
-does, whether it was stopped from the conversation or its run was cancelled; a
-person's next message lifts that pause. Agents with
-control access can continue it as they could resume it before. When the last turn
+resuming it. Cancelling a conversation's run or its scheduled wakeup pauses it in the
+same transaction, as Stop does, whether from the conversation or through `cancel_run`.
+In the apps, a person's next message lifts that pause; public MCP and agent callers send
+the message, then call `set_chat_paused(false)`. Without a pause, any caller who may send
+continues the conversation, after a failure as after a success. The launch of a turn is
+recorded once its process starts: a manager crash in between can return a message the
+process already read. When the last turn
 failed or was stopped and the queue is empty, the next message a person sends
 resumes it. A queue paused after a successful turn, or holding messages, keeps
 holding what is added to it.

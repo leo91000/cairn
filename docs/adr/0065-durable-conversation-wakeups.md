@@ -1,6 +1,6 @@
 > Statut : Mise à jour par [ADR-0083](0083-local-conversation-disks-without-s3.md) : après un changement de node, une attente planifiée est conservée et reprend sur la destination à son échéance, dans un environnement vide et une nouvelle session.
 >
-> Statut : Mise à jour par [ADR-0090](0090-failed-turns-return-unsent-messages.md) : un échec terminal efface toujours l'attente, mais ne met plus la conversation en pause ; les messages qu'une personne a écrits et que l'agent n'a jamais reçus lui reviennent.
+> Statut : Mise à jour par [ADR-0090](0090-failed-turns-return-unsent-messages.md) : un échec terminal efface toujours l'attente, mais ne met plus la conversation en pause, sauf si elle retient des messages ; les messages qu'une personne a écrits et que l'agent n'a jamais reçus lui reviennent.
 
 # Durable conversation wakeups
 
