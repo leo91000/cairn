@@ -173,11 +173,11 @@ pub(super) async fn apply_budget(budget: &crate::microvm::budget::Budget) -> Res
             "Shared native RAM budget is below current usage.",
         ));
     }
+    let pool = super::workspace::data_root(&super::state_dir());
+    bound_pool_writeback(&pool).await;
+
     let mut properties = budget_properties(budget);
-    properties.extend(io_properties(
-        &super::workspace::data_root(&super::state_dir()),
-        256 * 1_048_576,
-    )?);
+    properties.extend(io_properties(&pool, 256 * 1_048_576)?);
     let mut args = vec!["set-property", "--runtime", &slice];
     args.extend(properties.iter().map(String::as_str));
     if !output("/usr/bin/systemctl", &args).await?.status.success() {
@@ -226,6 +226,53 @@ pub(super) async fn wait_started(
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }).await.map_err(|_| Error::timeout("Native workload startup was not confirmed."))?
+}
+
+/// Each attempt's read/write ceiling on the shared data pool.
+const ATTEMPT_IO_BYTES_PER_SECOND: u64 = 64 * 1_048_576;
+
+/// Dirty pages the data pool may hold: about four seconds of one attempt's
+/// write ceiling.
+const POOL_DIRTY_BYTES: u64 = 4 * ATTEMPT_IO_BYTES_PER_SECOND;
+
+/// Close, recovery and base seeding call syncfs on the whole shared pool. That
+/// call waits for every attempt's dirty pages, written back at the owning
+/// attempt's capped rate: gigabytes left by one build stalled other
+/// conversations for minutes. A strict per-device bound instead throttles the
+/// writer itself, at the rate it is already capped to.
+async fn bound_pool_writeback(pool: &Path) {
+    use std::os::unix::fs::MetadataExt;
+
+    let device = match tokio::fs::metadata(pool).await {
+        Ok(metadata) => metadata.dev(),
+        Err(error) => {
+            tracing::warn!(%error, "Native data pool writeback remains unbounded");
+            return;
+        }
+    };
+    if let Err(error) = bound_writeback_in(Path::new("/sys"), device, POOL_DIRTY_BYTES).await {
+        tracing::warn!(%error, "Native data pool writeback remains unbounded");
+    }
+}
+
+async fn bound_writeback_in(sys: &Path, device: u64, bytes: u64) -> std::io::Result<()> {
+    let block =
+        sys.join("dev/block")
+            .join(format!("{}:{}", libc::major(device), libc::minor(device)));
+
+    // A partition shares its disk's writeback state with its siblings, which
+    // can include the host root filesystem. Leave that device to its owner.
+    if tokio::fs::try_exists(block.join("partition")).await? {
+        return Err(std::io::Error::other(
+            "the pool is a partition whose disk writeback is shared",
+        ));
+    }
+
+    // max_bytes (Linux 6.2+) only binds when strict_limit is set; otherwise the
+    // global dirty threshold applies first.
+    let bdi = block.join("bdi");
+    tokio::fs::write(bdi.join("max_bytes"), bytes.to_string()).await?;
+    tokio::fs::write(bdi.join("strict_limit"), "1").await
 }
 
 /// Apply rate caps to the actual backing filesystem, including buffered ext4
@@ -517,7 +564,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     ));
     property(format!("CPUQuota={}%", cpu * 100));
     property(format!("MemoryMax={}M", memory));
-    for limit in io_properties(launch.workspace, 64 * 1_048_576)? {
+    for limit in io_properties(launch.workspace, ATTEMPT_IO_BYTES_PER_SECOND)? {
         property(limit);
     }
     property(format!("Slice={}", workload_slice()?));
@@ -892,6 +939,52 @@ mod tests {
         assert!(properties.contains(&format!("MemoryMax={}", 32768_u64 * 1_048_576)));
         assert!(properties.contains(&"MemorySwapMax=0".into()));
         assert!(workload_slice().unwrap().ends_with("-workloads.slice"));
+    }
+
+    #[tokio::test]
+    async fn pool_writeback_is_bounded_only_on_its_own_device() {
+        let sys = tempfile::tempdir().unwrap();
+        let loop_device = libc::makedev(7, 1);
+        let bdi = sys.path().join("dev/block/7:1/bdi");
+        tokio::fs::create_dir_all(&bdi).await.unwrap();
+        tokio::fs::write(bdi.join("max_bytes"), b"23879987200")
+            .await
+            .unwrap();
+        tokio::fs::write(bdi.join("strict_limit"), b"0")
+            .await
+            .unwrap();
+
+        bound_writeback_in(sys.path(), loop_device, POOL_DIRTY_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(bdi.join("max_bytes"))
+                .await
+                .unwrap(),
+            "268435456"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(bdi.join("strict_limit"))
+                .await
+                .unwrap(),
+            "1"
+        );
+
+        let partition = sys.path().join("dev/block/259:2");
+        tokio::fs::create_dir_all(partition.join("bdi"))
+            .await
+            .unwrap();
+        tokio::fs::write(partition.join("partition"), b"2")
+            .await
+            .unwrap();
+        bound_writeback_in(sys.path(), libc::makedev(259, 2), POOL_DIRTY_BYTES)
+            .await
+            .unwrap_err();
+        assert!(
+            !tokio::fs::try_exists(partition.join("bdi/strict_limit"))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
