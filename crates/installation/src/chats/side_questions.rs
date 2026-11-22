@@ -276,7 +276,7 @@ pub(crate) fn unavailable(run: Option<&Value>) -> Option<SideQuestionUnavailable
         return Some(SideQuestionUnavailable::BetweenReplies);
     };
     match Provider::of_run(run) {
-        Ok(Provider::Claude) => {}
+        Ok(Provider::Claude | Provider::Antigravity) => {}
         Ok(Provider::Codex) => return Some(SideQuestionUnavailable::Codex),
         Ok(Provider::Opencode) => return Some(SideQuestionUnavailable::Opencode),
         Err(_) => return Some(SideQuestionUnavailable::UnknownAgent),
@@ -488,7 +488,10 @@ fn cancel(db: &Db<'_>, chat_id: &str, id: &str) -> Result<ChatSideQuestion> {
 pub(crate) fn deliveries(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Vec<Value>> {
     let announced = run["sideQuestions"] == true
         && RunStatus::of(run) == Some(RunStatus::Running)
-        && matches!(Provider::of_run(run), Ok(Provider::Claude));
+        && matches!(
+            Provider::of_run(run),
+            Ok(Provider::Claude | Provider::Antigravity)
+        );
     if !announced {
         return Ok(Vec::new());
     }

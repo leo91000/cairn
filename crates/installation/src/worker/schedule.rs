@@ -1284,6 +1284,7 @@ mod tests {
             claude_bin: "unused".into(),
             opencode_bin: "unused".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            antigravity_bin: "agy".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,

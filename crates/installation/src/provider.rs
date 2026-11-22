@@ -9,10 +9,16 @@ pub enum Provider {
     Codex,
     Claude,
     Opencode,
+    Antigravity,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 3] = [Provider::Codex, Provider::Claude, Provider::Opencode];
+    pub const ALL: [Provider; 4] = [
+        Provider::Codex,
+        Provider::Claude,
+        Provider::Opencode,
+        Provider::Antigravity,
+    ];
 
     /// Current agent and run records explicitly select their coding engine.
     pub fn of_agent(agent: &Value) -> Result<Self> {
@@ -36,6 +42,7 @@ impl Provider {
             "codex" => Ok(Self::Codex),
             "claude" => Ok(Self::Claude),
             "opencode" => Ok(Self::Opencode),
+            "antigravity" => Ok(Self::Antigravity),
             _ => Err(Error::bad("Choose a supported coding agent.")),
         }
     }
@@ -45,11 +52,13 @@ impl Provider {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Opencode => "opencode",
+            Self::Antigravity => "antigravity",
         }
     }
 
     /// Whether the coding agent can compact its native context on request. OpenCode runs
-    /// with automatic compaction disabled and exposes no compaction control to Cairn.
+    /// with automatic compaction disabled; neither it nor Antigravity exposes a
+    /// compaction control to Cairn.
     pub fn compacts_context(self) -> bool {
         matches!(self, Self::Codex | Self::Claude)
     }
@@ -59,6 +68,7 @@ impl Provider {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
             Self::Opencode => "OpenCode",
+            Self::Antigravity => "Antigravity",
         }
     }
 }
@@ -69,6 +79,7 @@ impl From<Provider> for cairn_contracts::AgentProvider {
             Provider::Codex => Self::Codex,
             Provider::Claude => Self::Claude,
             Provider::Opencode => Self::Opencode,
+            Provider::Antigravity => Self::Antigravity,
         }
     }
 }
@@ -79,6 +90,7 @@ impl From<cairn_contracts::AgentProvider> for Provider {
             cairn_contracts::AgentProvider::Codex => Self::Codex,
             cairn_contracts::AgentProvider::Claude => Self::Claude,
             cairn_contracts::AgentProvider::Opencode => Self::Opencode,
+            cairn_contracts::AgentProvider::Antigravity => Self::Antigravity,
         }
     }
 }

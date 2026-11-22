@@ -185,7 +185,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "reasoning": {
@@ -753,7 +753,7 @@
           "type": "string"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "revision": {
@@ -2016,7 +2016,7 @@
     },
     "accountRequired": {
       "default": null,
-      "pattern": "^(codex|claude|opencode)$",
+      "pattern": "^(codex|claude|opencode|antigravity)$",
       "type": [
         "string",
         "null"
@@ -2211,7 +2211,7 @@
     },
     "provider": {
       "default": null,
-      "pattern": "^(codex|claude|opencode)$",
+      "pattern": "^(codex|claude|opencode|antigravity)$",
       "type": [
         "string",
         "null"

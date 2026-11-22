@@ -257,7 +257,7 @@ fn task_message(input: &DelegateTaskInput) -> Result<Value> {
     chats::parse_message(json!({
         "id": id(),
         "text": input.task,
-        "provider": input.provider.as_ref().map(|p| match p { cairn_contracts::AgentProvider::Codex=>"codex",cairn_contracts::AgentProvider::Claude=>"claude",cairn_contracts::AgentProvider::Opencode=>"opencode" }).unwrap_or_default(),
+        "provider": input.provider.as_ref().map(|p| match p { cairn_contracts::AgentProvider::Codex=>"codex",cairn_contracts::AgentProvider::Claude=>"claude",cairn_contracts::AgentProvider::Opencode=>"opencode",cairn_contracts::AgentProvider::Antigravity=>"antigravity" }).unwrap_or_default(),
         "model": input.model.as_deref().unwrap_or_default(),
         "reasoning": input.reasoning.as_deref().unwrap_or_default(),
     }))

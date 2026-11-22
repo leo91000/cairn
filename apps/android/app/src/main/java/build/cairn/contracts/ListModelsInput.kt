@@ -7,6 +7,6 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ListModelsInput(val provider: String = "codex") {
     init {
-        require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+        require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
     }
 }

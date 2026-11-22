@@ -10,6 +10,6 @@ data class CodingAgentChoice(
     val provider: String,
 ) {
     init {
-        require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+        require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
     }
 }

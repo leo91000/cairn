@@ -29,7 +29,7 @@ pub enum AccountStatus {
 #[serde(default, rename_all = "camelCase")]
 pub struct CodingAgentAccount {
     pub id: String,
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     pub name: String,
     #[serde(default = "account_enabled")]
@@ -92,7 +92,7 @@ pub enum SignInPhase {
 #[serde(default, rename_all = "camelCase")]
 pub struct AccountSignIn {
     pub account_id: String,
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     #[schemars(with = "String", pattern("^(pending|complete|failed|cancelled)$"))]
     pub state: SignInState,
@@ -111,7 +111,10 @@ pub struct AccountSignIn {
 pub struct CodingAgentAccounts {
     pub accounts: Vec<CodingAgentAccount>,
     pub sign_in: Option<AccountSignIn>,
-    #[schemars(with = "Vec<String>", inner(pattern("^(codex|claude|opencode)$")))]
+    #[schemars(
+        with = "Vec<String>",
+        inner(pattern("^(codex|claude|opencode|antigravity)$"))
+    )]
     pub required: Vec<AgentProvider>,
 }
 
@@ -160,7 +163,7 @@ pub struct ReplaceAccountInput {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OrderAccountsInput {
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     #[schemars(with = "Vec<Uuid>", length(max = 10))]
     pub ids: Vec<String>,
@@ -169,7 +172,7 @@ pub struct OrderAccountsInput {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConnectAccountInput {
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     #[schemars(length(min = 1, max = 100))]
     pub name: String,
@@ -215,7 +218,7 @@ pub enum OrderAccountsOutput {
         overview: CodingAgentAccounts,
     },
     Unsupported {
-        #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+        #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
         provider: AgentProvider,
         capability: String,
         message: String,
@@ -227,7 +230,7 @@ pub enum OrderAccountsOutput {
 #[serde(rename_all = "camelCase")]
 pub struct AccountSignInProgress {
     pub account_id: String,
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     #[schemars(with = "String", pattern("^(pending|complete|failed|cancelled)$"))]
     pub state: SignInState,
@@ -248,7 +251,7 @@ pub enum AccountProvidersOutput {
         providers: Vec<ApiKeyProvider>,
     },
     Unsupported {
-        #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+        #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
         provider: AgentProvider,
         capability: String,
         message: String,
@@ -280,7 +283,7 @@ pub enum ConnectAccountOutput {
         path: String,
     },
     Unsupported {
-        #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+        #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
         provider: AgentProvider,
         capability: String,
         message: String,
@@ -290,7 +293,7 @@ pub enum ConnectAccountOutput {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountProviderInput {
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
 }
 

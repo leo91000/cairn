@@ -74,7 +74,10 @@ impl Db<'_> {
         // Called in the conversation writer transaction. Retain earlier idempotency
         // receipts while making exactly one request current for this conversation.
         if value.provider.is_empty()
-            || !matches!(value.provider.as_str(), "codex" | "claude" | "opencode")
+            || !matches!(
+                value.provider.as_str(),
+                "codex" | "claude" | "opencode" | "antigravity"
+            )
             || value.turn_id.is_empty()
             || value.turn_id.chars().count() > 200
         {

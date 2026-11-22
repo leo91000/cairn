@@ -73,7 +73,7 @@ pub struct ModelCatalog {
 #[serde(deny_unknown_fields)]
 pub struct ListModelsInput {
     #[serde(default)]
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
 }
 
