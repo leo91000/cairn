@@ -752,7 +752,7 @@ internal fun ChatPage(
                 (reasoning.isNotEmpty() && reasoning != runningAgent.reasoning) ||
                 (speed.isNotEmpty() && speed != runningAgent.speed.ifEmpty { "standard" }))
     // While the agent works, a message joins its turn unless it must wait for the next one.
-    val steers = active && !changesRunningAgent && !steerBlocked
+    val steers = active && chat?.paused != true && !changesRunningAgent && !steerBlocked
     // Stopping or a failed turn pauses an empty queue, which the next message resumes. A queue
     // paused on purpose, or holding messages, keeps holding what is added to it.
     val resumesOnSend =
@@ -1006,9 +1006,14 @@ internal fun ChatPage(
         withContext(kotlinx.coroutines.NonCancellable) {
             try {
                 returned.forEach {
-                    vm.api.deleteChatMessage(
-                        ChatMessageReference(chatId = current.id, messageId = it.id)
-                    )
+                    try {
+                        vm.api.deleteChatMessage(
+                            ChatMessageReference(chatId = current.id, messageId = it.id)
+                        )
+                    } catch (e: build.cairn.app.data.ApiException) {
+                        // Another device of the same person restored and withdrew it first.
+                        if (e.status != 404) throw e
+                    }
                 }
             } catch (e: Exception) {
                 vm.report(e)

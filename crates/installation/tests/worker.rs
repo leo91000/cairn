@@ -4046,53 +4046,69 @@ async fn failed_provider_startup_can_retry_without_replaying_an_uncertain_launch
                     .any(|event| text(event, "text").contains("fixture-private-token"))
             );
         }
-        // The failed message comes back to its author; the conversation is not paused.
         fixture
             .until_chat(&chat_id, async |chat| {
-                chat["paused"] == false && chat["messages"][1]["status"] == "cancelled"
+                chat["paused"] == true && chat["messages"][1]["status"] == "queued"
             })
             .await;
 
-        // Writing again starts the next turn in the same workspace, never replaying the
-        // uncertain launch.
         failing.store(false, Ordering::SeqCst);
-        let mut again = message("Continue the same work.");
-        again["provider"] = provider.into();
-        s.chat_send(&chat_id, again.clone()).await.unwrap();
-        let completed = fixture
-            .until(&run_id, |run| {
-                run["status"] == RunStatus::Succeeded
-                    && run["chatExecution"]["messageId"] == again["id"]
-            })
-            .await;
-        assert_eq!(completed["workspace"], first["workspace"]);
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "completed work");
-
-        let chat = s.chat_detail(&chat_id).await.unwrap();
-        assert_eq!(chat["messages"][1]["status"], "cancelled");
-        assert_eq!(chat["messages"][2]["id"], again["id"]);
-        assert_eq!(chat["messages"][2]["status"], "delivered");
-
-        let plans = controller.plans.lock().await;
-        let accepted = |id: &Value| {
-            plans
-                .iter()
-                .filter(|plan| &plan["chat"]["execution"]["messageId"] == id)
-                .count()
-        };
-        assert_eq!(accepted(&next["id"]), usize::from(!rejected));
-        assert_eq!(accepted(&again["id"]), 1);
-        let retried = plans.last().unwrap();
-        assert_eq!(retried["chat"]["sessionId"].is_null(), new_session);
-        if new_session {
-            assert!(
-                retried["chat"]["execution"]["context"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Keep the existing workspace")
+        let router = common::relay_fixture::router(s.clone()).await.unwrap();
+        let session = common::RelayContext::new(&common::relay_fixture::context(&s).await);
+        let request = session
+            .authorize(common::request(
+                "POST",
+                &format!("/api/chats/{chat_id}/pause"),
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "paused": false }).to_string()))
+            .unwrap();
+        let response = common::send(&router, request).await;
+        if new_session && !rejected {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(s.chat_detail(&chat_id).await.unwrap()["paused"], true);
+        } else {
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{}",
+                common::read_json(response).await
             );
+            let completed = fixture
+                .until(&run_id, |run| {
+                    run["status"] == RunStatus::Succeeded
+                        && run["chatExecution"]["messageId"] == next["id"]
+                })
+                .await;
+            assert_eq!(completed["workspace"], first["workspace"]);
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "completed work");
+
+            let chat = s.chat_detail(&chat_id).await.unwrap();
+            assert_eq!(chat["messages"].as_array().unwrap().len(), 2);
+            assert_eq!(chat["messages"][1]["id"], next["id"]);
+            assert_eq!(chat["messages"][1]["status"], "delivered");
+
+            let plans = controller.plans.lock().await;
+            let accepted_attempts = plans
+                .iter()
+                .filter(|plan| plan["chat"]["execution"]["messageId"] == next["id"])
+                .count();
+            assert_eq!(
+                accepted_attempts, 1,
+                "The interrupted message must be accepted exactly once",
+            );
+            let retried = plans.last().unwrap();
+            assert_eq!(retried["chat"]["sessionId"].is_null(), new_session);
+            assert_eq!(retried["chat"]["execution"]["recovery"], !new_session);
+            if new_session {
+                assert!(
+                    retried["chat"]["execution"]["context"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Keep the existing workspace")
+                );
+            }
         }
-        drop(plans);
         fixture.stop(false).await;
         server.abort();
     }

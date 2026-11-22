@@ -471,6 +471,9 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
         }
     }
     db.revoke_mcp_run(run)?;
+    for message in db.conversation_messages(cid)? {
+        db.delete(&crate::chats::returned_key(&message.id))?;
+    }
     db.0.execute("DELETE FROM chat_messages WHERE chat_id=?", [cid])?;
     db.0.execute("DELETE FROM runs WHERE id=?", [run])?;
     db.remove_conversation(cid)?;

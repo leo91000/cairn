@@ -448,8 +448,11 @@ pub(crate) fn requeue(
     // A manual resume may arrive before chat_tick observes the terminal turn.
     // Its scheduled continuation must not survive into the resumed execution.
     crate::chats::continuation::cancel_for_run(db, id)?;
-    // Resuming replays the turn's message: it is no longer returned to its author.
-    crate::chats::take_back_returned(db, &run)?;
+    if crate::chats::turn_returned(db, id)? {
+        return Err(Error::conflict(
+            "This message went back to your composer. Send it again to continue.",
+        ));
+    }
     if pending_switch && selection.is_some() {
         crate::chats::coding_agent::cancel_in(db, id)?;
     }

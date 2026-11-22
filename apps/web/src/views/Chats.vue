@@ -654,7 +654,9 @@ const changesRunningAgent = computed(() => {
   return switchingProvider.value || differs(model.value, agent.model) || differs(reasoning.value, agent.reasoning) || (!!speed.value && speed.value !== (agent.speed || 'standard'))
 })
 // While the agent works, a message joins its turn unless it must wait for the next one.
-const steers = computed(() => active.value && !changesRunningAgent.value && !steerBlocked.value)
+const steers = computed(() => active.value && !detail.value?.paused && !changesRunningAgent.value && !steerBlocked.value)
+// The failed turn's message is still the server's to replay, rather than back in a composer.
+const turnPending = computed(() => detail.value?.messages.some(message => message.id === detail.value?.run?.chatExecution?.messageId && message.status !== 'cancelled') ?? false)
 // Saving an edit keeps the queued message where it was.
 const editedMode = computed(() => pending.value.find(message => message.id === editing.value)?.mode ?? 'queue')
 // Stopping or a failed turn pauses an empty queue, which the next message resumes. A queue paused
@@ -1343,7 +1345,8 @@ function edit(message: ChatMessage) {
 const restored = new Set<string>()
 watch([() => detail.value?.messages, readOnly, inactive, editing, busy], ([messages]) => {
   const chat = detail.value
-  if (!chat || !state.accountId || readOnly.value || inactive.value || editing.value || busy.value)
+  // While switching conversations the previous one is still loaded: its messages are not this draft's.
+  if (!chat || chat.id !== selectedChatId.value || !state.accountId || readOnly.value || inactive.value || editing.value || busy.value)
     return
   const returned = (messages ?? []).filter(message => message.status === 'cancelled' && message.returnedTo === state.accountId && !restored.has(message.id))
   if (!returned.length)
@@ -1353,7 +1356,12 @@ watch([() => detail.value?.messages, readOnly, inactive, editing, busy], ([messa
   draft.value = [...returned.map(message => message.text.trim()), draft.value.trim()].filter(Boolean).join('\n\n')
   const kept = new Set(attachments.value.map(attachment => attachment.id))
   attachments.value = [...attachments.value, ...returned.flatMap(message => message.attachments ?? []).filter(attachment => !kept.has(attachment.id))]
-  void Promise.all(returned.map(message => deleteChatMessage(api, { chatId: chat.id, messageId: message.id })))
+  // Another device of the same person may have restored and withdrawn it first.
+  void Promise.all(returned.map(message => deleteChatMessage(api, { chatId: chat.id, messageId: message.id })
+    .catch((e: unknown) => {
+      if (!(e instanceof ApiError && e.status === 404))
+        throw e
+    })))
     .catch((e: Error) => error.value = e.message)
 }, { immediate: true })
 
@@ -1991,8 +1999,9 @@ function key(event: KeyboardEvent) {
                   rel="noopener noreferrer"
                   class="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-accent px-3 text-xs font-semibold text-surface"
                 >OpenCode settings<Icon :name="ArrowUpRight" :size="14" /></a>
+                <!-- A message that went back to the composer is retried by sending it again. -->
                 <UiButton
-                  v-if="!readOnly"
+                  v-if="!readOnly && turnPending"
                   size="small"
                   :disabled="busy"
                   @click="action('pause', { paused: false })"

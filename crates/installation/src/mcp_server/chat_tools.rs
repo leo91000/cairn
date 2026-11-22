@@ -427,10 +427,21 @@ pub(crate) async fn invoke(
                     if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
                         return Err(Error::conflict("This conversation has been deleted."));
                     }
-                    let waiting = db.conversation_messages(&chat_id)?.iter().any(|message| {
-                        message.status == cairn_contracts::MessageStatus::Queued
-                            && message.question_id.is_none()
-                    });
+                    // A message written since the turn stopped starts the next turn, and a
+                    // returned turn is not replayed: its message is back with its author.
+                    let waiting = match chat
+                        .run_id
+                        .as_deref()
+                        .map(|run| db.run(run))
+                        .transpose()?
+                        .flatten()
+                    {
+                        Some(run) => {
+                            chats::written_since_turn(db, &chat_id, &run)?
+                                || chats::turn_returned(db, text(&run, "id"))?
+                        }
+                        None => false,
+                    };
                     Ok((
                         chat.clone(),
                         match chat.run_id.as_deref() {

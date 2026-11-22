@@ -582,8 +582,8 @@ impl Db<'_> {
         } else {
             "chat_id=?1 AND ?2 IS NULL"
         };
-        // A cancelled ordinary message goes back to the person who wrote it.
-        let mut statement = self.0.prepare_cached(&format!("SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,NULL,plan,CASE WHEN status='cancelled' AND question_id IS NULL THEN (SELECT w.account_id FROM conversation_entry_writers w WHERE w.message_id=chat_messages.id AND w.chat_id=chat_messages.chat_id AND w.writer='person') END FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"))?;
+        // A message a failed or stopped turn returned names the person it went back to.
+        let mut statement = self.0.prepare_cached(&format!("SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,NULL,plan,CASE WHEN status='cancelled' THEN (SELECT json_extract(data,'$') FROM kv WHERE key='message-returned:'||chat_messages.id) END FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"))?;
         let rows = statement
             .query_map(params![chat, message], |r| {
                 Ok((

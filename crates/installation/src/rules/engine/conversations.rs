@@ -760,6 +760,25 @@ fn steer(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
             "This conversation is paused. Rules can steer it again once a person resumes it.",
         ));
     }
+    // A failed turn no longer pauses the conversation; it still waits for a person before
+    // rules continue it. A stop pauses it, which the check above already covers.
+    let ended = chat
+        .run_id
+        .as_deref()
+        .map(|run| db.run_state(run))
+        .transpose()?
+        .flatten()
+        .is_some_and(|run| {
+            matches!(
+                run.status,
+                crate::run_status::RunStatus::Failed | crate::run_status::RunStatus::Interrupted
+            )
+        });
+    if ended {
+        return Err(Error::conflict(
+            "This conversation's last turn failed. Rules can steer it again once a person writes in it or resumes it.",
+        ));
+    }
     let id = id();
     crate::chats::send_as_in(db, &chat.id, json!({ "id": id, "text": message }), &origin)?;
     record_rule_input(db, &chat.id, &id, acting.row, acting.depth)?;

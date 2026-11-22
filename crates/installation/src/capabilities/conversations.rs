@@ -108,7 +108,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "send_chat_message",
         scope: "run",
-        description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed turn, a new message starts the next turn; after a stop, call set_chat_paused(false) as well. Ordinary messages a failed or stopped turn never delivered are cancelled and returned to the person who wrote them (returnedTo).",
+        description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed turn, a new message starts the next turn; after a stop, call set_chat_paused(false) as well. Ordinary messages a person wrote that a failed or stopped turn never delivered are cancelled and returned to them (returnedTo); others stay queued behind a pause.",
     },
     ChatOperation {
         name: "edit_chat_message",
@@ -128,12 +128,12 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "set_chat_paused",
         scope: "run",
-        description: "Pause or resume the follow-up queue. Pausing lets the current turn finish; resuming permits queued agent work. Use stop_chat to interrupt the current turn.",
+        description: "Pause or resume the follow-up queue. Pausing lets the current turn finish; resuming permits queued agent work. Resuming a stopped or failed turn replays it, unless a message is waiting (it is sent instead) or the turn's message was returned to its author. Use stop_chat to interrupt the current turn.",
     },
     ChatOperation {
         name: "stop_chat",
         scope: "run",
-        description: "Stop the current turn or pending automatic retry, cancel a scheduled wakeup and pause follow-ups. Queued messages remain available for later resumption.",
+        description: "Stop the current turn or pending automatic retry, cancel a scheduled wakeup and pause follow-ups. Messages a person wrote that the turn never delivered are cancelled and returned to them (returnedTo); messages from rules and agents stay queued, held by the pause.",
     },
     ChatOperation {
         name: "compact_chat",
