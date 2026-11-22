@@ -43,8 +43,11 @@ exige le même répertoire de travail et `--conversation`.
 
 L'état natif vit dans le HOME privé du run (`home/.antigravity`), passé comme
 `HOME` au seul processus `agy` : les autres outils gardent le HOME du shell. Cairn
-écrit les réglages de chaque lancement par `--settings` (`modelProvider`,
-permissions, mise à jour automatique et télémétrie désactivées), la configuration
+écrit les réglages de chaque lancement par `--settings` (`modelProvider`, règles
+`deny`) et remet à zéro le `settings.json` natif ; `AGY_CLI_DISABLE_AUTO_UPDATE`
+empêche les mises à jour. Le mode sans terminal de 1.5.14 n'a aucun réglage pour
+couper la télémétrie (seul `agy acp --disable-telemetry` existe) : les conditions de
+Google s'appliquent aux interactions. Cairn écrit aussi la configuration
 MCP dans `~/.gemini/config/mcp_config.json` et ses hooks dans
 `~/.gemini/config/hooks.json`. Les réglages du projet (`.agents/`) restent ceux du
 dépôt, comme pour les autres moteurs.

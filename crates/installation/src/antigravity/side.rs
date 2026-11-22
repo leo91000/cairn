@@ -3,7 +3,7 @@
 //! refused, then the copy is deleted. The running turn and its history are untouched.
 use super::{
     hook::Mode,
-    turn::{Group, args, configure, emit, policy, read_line, signal_group, spawn},
+    turn::{Group, args, configure, emit, policy, read_line, spawn},
 };
 use crate::{
     config::Config,
@@ -247,8 +247,13 @@ impl Task {
         ]);
         let cwd = PathBuf::from(text(&self.plan, "cwd"));
         let mut child = spawn(&self.config, &home, &cwd, &launch, &self.credentials).await?;
-        let _group = Group::of(&child);
+        let mut group = Group::of(&child);
         let mut stdin = child.stdin.take().unwrap();
+        // An undrained stderr pipe would block `agy` once it fills.
+        let mut stderr = child.stderr.take().unwrap();
+        let drain = tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+        });
         let message = json!({
             "event": "user",
             "message": {
@@ -284,8 +289,9 @@ impl Task {
             ))
         }
         .await;
-        signal_group(&child, libc::SIGKILL);
+        group.stop();
         let _ = child.wait().await;
+        drain.abort();
         outcome
     }
 

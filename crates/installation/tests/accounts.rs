@@ -172,10 +172,10 @@ async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skip
     let list = common::account_fixture::account_values(s.accounts.list(&s).await.unwrap());
     assert_eq!(status(&list, &ids[0]), "next");
     assert_eq!(status(&list, &ids[1]), "paused");
-    // OpenCode requires a managed API-key account even before one is connected.
+    // OpenCode and Antigravity require a managed account even before one is connected.
     assert_eq!(
         serde_json::to_value(s.accounts.overview(&s).await.unwrap()).unwrap()["required"],
-        json!(["opencode"])
+        json!(["opencode", "antigravity"])
     );
     // Once every Claude account is paused, Claude runs wait for the user.
     common::account_fixture::update_account_fixture(&s, &ids[2], &json!({ "enabled": false }))
@@ -183,7 +183,7 @@ async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skip
         .unwrap();
     assert_eq!(
         serde_json::to_value(s.accounts.overview(&s).await.unwrap()).unwrap()["required"],
-        json!(["claude", "opencode"])
+        json!(["claude", "opencode", "antigravity"])
     );
     assert!(
         common::account_fixture::update_account_fixture(&s, &ids[0], &json!({ "name": "" }))

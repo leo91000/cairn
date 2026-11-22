@@ -273,6 +273,11 @@ pub(super) async fn configure(home: &Path, plan: &Value, policy: &Policy) -> Res
     )
     .await?;
     policy.save(home).await?;
+    // Settings an earlier YOLO turn may have written never outlive it: each launch
+    // passes its own with --settings.
+    let native = home.join(".gemini/antigravity-cli");
+    private_dir(&native).await?;
+    atomic_write(&native.join("settings.json"), b"{}").await?;
     // Cairn's instructions are the user rules of every launch.
     atomic_write(
         &home.join(".gemini/GEMINI.md"),
@@ -304,23 +309,61 @@ pub(super) async fn spawn(
         .map_err(|_| Error::unavailable("Unable to start the Antigravity CLI."))
 }
 
-/// Kills a native process tree when its owner ends, including when a cancelled
+/// Stops a native process tree when its owner ends, including when a cancelled
 /// execution future is dropped: commands `agy` started must not outlive the turn.
 /// `agy` 1.5.14 runs each command in its own session and leaves it running when it
-/// is interrupted, so its own process group is not enough.
-pub(super) struct Group(Option<u32>);
+/// is interrupted, so its own process group is not enough. Once `agy` has exited its
+/// commands belong to init, so the groups seen while it ran are remembered.
+pub(super) struct Group {
+    root: Option<i32>,
+    seen: Vec<i32>,
+}
 
 impl Group {
     pub(super) fn of(child: &Child) -> Self {
-        Self(child.id())
+        Self {
+            root: child.id().map(|pid| pid as i32),
+            seen: Vec::new(),
+        }
+    }
+
+    /// Records the groups of the commands `agy` is running now.
+    pub(super) fn refresh(&mut self) {
+        let Some(root) = self.root else { return };
+        for group in tree_groups(root, &processes()) {
+            if group != root && !self.seen.contains(&group) {
+                self.seen.push(group);
+            }
+        }
+    }
+
+    /// Kills `agy` and every command it started; call before reaping it.
+    pub(super) fn stop(&mut self) {
+        if let Some(root) = self.root {
+            self.refresh();
+            kill_group(root);
+        }
+        self.finish();
+    }
+
+    /// `agy` exited and was reaped: its identifier must not be signalled again.
+    pub(super) fn exited(&mut self) {
+        self.root = None;
+    }
+
+    /// After `agy` exited: kills the commands it left behind. The tree is gone, and
+    /// the reaped identifier is never signalled again.
+    pub(super) fn finish(&mut self) {
+        self.root = None;
+        for group in std::mem::take(&mut self.seen) {
+            kill_group(group);
+        }
     }
 }
 
 impl Drop for Group {
     fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            kill_tree(pid);
-        }
+        self.stop();
     }
 }
 
@@ -368,23 +411,14 @@ fn tree_groups(root: i32, processes: &[(i32, i32, i32)]) -> Vec<i32> {
     groups
 }
 
-fn kill_tree(root: u32) {
-    let root = root as i32;
-    // Descendants are found while `agy` is still their parent, then stopped together.
-    for group in tree_groups(root, &processes()) {
-        // SAFETY: signals only groups led by this execution's processes.
-        unsafe {
-            libc::kill(-group, libc::SIGKILL);
-        }
+fn kill_group(group: i32) {
+    // SAFETY: getpgrp has no preconditions. Never signal Cairn's own group or init's.
+    if group <= 1 || group == unsafe { libc::getpgrp() } {
+        return;
     }
-}
-
-pub(super) fn signal_group(child: &Child, signal: libc::c_int) {
-    if let Some(pid) = child.id() {
-        // SAFETY: signals only the process group this execution created.
-        unsafe {
-            libc::kill(-(pid as i32), signal);
-        }
+    // SAFETY: signals only groups led by this execution's processes.
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
     }
 }
 
@@ -428,6 +462,9 @@ struct Turn<'a> {
     /// This launch uses a Google account's access token, renewed by relaunching.
     google: bool,
     renew: bool,
+    /// Messages a failed launch never recorded, sent again after renewal.
+    resend: Vec<String>,
+    group: Group,
 }
 
 enum Outcome {
@@ -602,10 +639,18 @@ impl Turn<'_> {
                 "Antigravity answered a message Cairn did not send.",
             ));
         };
-        // A turn that never reached its user step was still consumed by this result.
+        let renew = self.google
+            && text(result, "status") != "SUCCESS"
+            && expired_token(stderr_error, text(result, "error"));
+        // A turn that never reached its user step was still consumed by this result,
+        // unless it failed before reaching the model: a renewed launch sends it again.
         if let Some(position) = self.unconfirmed.iter().position(|pending| *pending == id) {
             self.unconfirmed.remove(position);
-            self.deliver(&id).await?;
+            if renew {
+                self.resend.push(id.clone());
+            } else {
+                self.deliver(&id).await?;
+            }
         }
         match text(result, "status") {
             "SUCCESS" => {}
@@ -614,7 +659,7 @@ impl Turn<'_> {
                     "Antigravity stopped to wait for an approval Cairn cannot give. Working files were preserved.",
                 ));
             }
-            _ if self.google && expired_token(stderr_error, text(result, "error")) => {
+            _ if renew => {
                 self.renew = true;
                 return Ok(false);
             }
@@ -673,7 +718,7 @@ pub(super) async fn credentials(config: &Config) -> Result<(PathBuf, Value)> {
         super::GEMINI | super::GOOGLE_CLOUD | super::GOOGLE
     ) {
         return Err(Error::bad(
-            "Replace this Antigravity account's credentials in Connections.",
+            "Reconnect this Antigravity account, or replace its credentials, in Connections.",
         ));
     }
     Ok((home, credentials))
@@ -738,7 +783,7 @@ async fn execute(
             result = spawn(config, &home, &cwd, &launch, &credentials) => result?,
             () = cancel.cancelled() => return Err(Error::bad_gateway(STOPPED)),
         };
-        let _group = Group::of(&child);
+        let group = Group::of(&child);
         let stdin = child.stdin.take().unwrap();
         // A line read is not cancellation safe: a separate task keeps partial lines
         // while the turn's loop also polls the inbox and timers.
@@ -783,6 +828,8 @@ async fn execute(
             sides: Sides::new(config, &home, &plan, &credentials, events.clone()),
             google: credentials["kind"] == super::GOOGLE,
             renew: false,
+            resend: Vec::new(),
+            group,
         };
         // Messages acknowledged before an interruption are already in the native history.
         let outcome = match turn.submit(initial, &message, &attachments).await {
@@ -792,25 +839,37 @@ async fn execute(
         turn.sides.stop();
         receipt = std::mem::take(&mut turn.receipt);
         conversation = std::mem::take(&mut turn.conversation);
-        drop(turn.stdin);
+        let resend = std::mem::take(&mut turn.resend);
+        let Turn {
+            stdin, mut group, ..
+        } = turn;
         if !matches!(outcome, Ok(Outcome::Complete)) || cancel.is_cancelled() {
-            signal_group(&child, libc::SIGKILL);
+            // Stop the tree while `agy` is still the parent of its commands.
+            group.stop();
+        } else {
+            group.refresh();
         }
         // stdin is closed: `agy` exits after its last turn.
+        drop(stdin);
         if tokio::time::timeout(Duration::from_secs(30), child.wait())
             .await
             .is_err()
         {
-            signal_group(&child, libc::SIGKILL);
+            group.stop();
             let _ = child.wait().await;
         }
+        group.finish();
         drain.abort();
         reader.abort();
         match outcome? {
             Outcome::Complete => return Ok(()),
             Outcome::Renew if renewal < RENEWALS && !conversation.is_empty() => {
-                message = RENEWED.into();
-                attachments = json!([]);
+                // The first message reaches the model with its own text when the
+                // failed launch never recorded it; later ones come back from the inbox.
+                if !resend.iter().any(|id| id == initial) {
+                    message = RENEWED.into();
+                    attachments = json!([]);
+                }
             }
             Outcome::Renew => {
                 return Err(Error::bad_gateway(
@@ -835,6 +894,7 @@ async fn drive(
         tokio::select! {
             () = cancel.cancelled() => return Err(Error::bad_gateway(STOPPED)),
             _ = timer.tick() => {
+                turn.group.refresh();
                 turn.poll_inbox().await?;
                 turn.sides.settle().await?;
             }
@@ -842,6 +902,7 @@ async fn drive(
             line = lines.recv() => {
                 let Some(line) = line.transpose()? else {
                     let status = child.wait().await?;
+                    turn.group.exited();
                     while let Ok(error) = errors.try_recv() { last_error = Some(error); }
                     return Err(match &last_error {
                         Some(error) => native_error(Some(error), text(error, "short_error")),

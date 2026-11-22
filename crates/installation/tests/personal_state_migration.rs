@@ -24,7 +24,14 @@ fn snapshot(db: &Connection) -> Snapshot {
     let tables = db
         .prepare("SELECT name,sql FROM sqlite_schema WHERE type='table' ORDER BY name")
         .unwrap()
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        // Version 37 only adds Antigravity to coding-agent constraints; earlier
+        // upgrades are compared without it.
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?.replace(",'antigravity'", ""),
+            ))
+        })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
@@ -235,7 +242,7 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        36
+        37
     );
 
     // The real service serves each account its own preserved outcomes.
@@ -343,7 +350,7 @@ async fn v17_upgrade_preserves_legacy_paid_retry_and_checkpoint() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        36
+        37
     );
 }
 
@@ -384,6 +391,6 @@ fn malformed_previous_read_state_rolls_back_schema_data_and_version() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        36
+        37
     );
 }
