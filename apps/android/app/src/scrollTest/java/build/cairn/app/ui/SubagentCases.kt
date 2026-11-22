@@ -61,8 +61,13 @@ abstract class SubagentCases {
             compose.onAllNodesWithTag("queued-message").fetchSemanticsNodes().isNotEmpty()
         }
         activityButton.performTouchInput { up() }
-        compose.onNodeWithTag("subagent-sheet").assertIsDisplayed()
+        compose.waitUntil(5000) {
+            compose.onAllNodesWithTag("subagent-sheet").fetchSemanticsNodes().isNotEmpty()
+        }
         compose.onNodeWithContentDescription("Fermer l’activité du sous-agent").performClick()
+        compose.waitUntil(5000) {
+            compose.onAllNodesWithTag("subagent-sheet").fetchSemanticsNodes().isEmpty()
+        }
 
         compose.onNodeWithContentDescription("Options de la conversation").performClick()
         compose.onNodeWithText("Plein écran").performClick()

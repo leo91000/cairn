@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import type { ActivityArtifact } from '../activity'
+import type { Box } from '../press'
 import {
   computed,
   inject,
   onBeforeUnmount,
   ref,
 } from 'vue'
+import { releasedOnControl, visibleBox } from '../press'
 import {
   delegatedChatsKey,
   subagentDots as dots,
@@ -28,33 +30,65 @@ const state = (agent: ActivityArtifact) => subagentState(agent, props.active, de
 const running = computed(() => props.agents.filter(agent => state(agent) === 'running'))
 const first = computed(() => running.value[0] ?? props.agents[0])
 
-let mousePress: { button: HTMLButtonElement, x: number, y: number } | undefined
+// A queued message can appear between press and release and move these buttons. The browser
+// then sends the click to whatever moved under the pointer, so pointer presses open on release.
+let press: { button: HTMLButtonElement, pointerId: number, box: Box } | undefined
+let stopIgnoringClick: (() => void) | undefined
+onBeforeUnmount(() => stopIgnoringClick?.())
 
-function retainMousePress(event: PointerEvent) {
+function shownBox(button: HTMLButtonElement) {
+  return visibleBox(button.getBoundingClientRect(), button.parentElement?.getBoundingClientRect())
+}
+
+function holdPress(event: PointerEvent) {
   if (!event.isPrimary || event.button !== 0)
     return
 
   const button = event.currentTarget as HTMLButtonElement
-  mousePress = event.pointerType === 'mouse' ? { button, x: event.clientX, y: event.clientY } : undefined
-  // The queue can move the button between mouse-down and mouse-up.
-  if (mousePress)
-    button.setPointerCapture(event.pointerId)
+  press = { button, pointerId: event.pointerId, box: shownBox(button) }
+  button.setPointerCapture(event.pointerId)
 }
 
-function openActivity(id: string, event: MouseEvent) {
+function releasePress(id: string, event: PointerEvent) {
   const button = event.currentTarget as HTMLButtonElement
-  const press = mousePress
-  mousePress = undefined
-
-  // A stationary press still counts when the button moves. A drag must
-  // finish over the visible button because capture also retargets outside it.
-  if (event.detail && press?.button === button
-    && (event.clientX !== press.x || event.clientY !== press.y)
-    && !button.contains(document.elementFromPoint(event.clientX, event.clientY))) {
+  const held = press
+  press = undefined
+  if (held?.button !== button || held.pointerId !== event.pointerId)
     return
+
+  ignoreNextClick()
+  if (releasedOnControl(held.box, shownBox(button), event.clientX, event.clientY))
+    emit('open', id, button)
+}
+
+function cancelPress() {
+  press = undefined
+}
+
+// The release decided; the click that follows may target another control.
+function ignoreNextClick() {
+  stopIgnoringClick?.()
+  const ignore = (event: MouseEvent) => {
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    stop()
   }
 
-  emit('open', id, button)
+  const timer = setTimeout(stop, 1000)
+
+  function stop() {
+    clearTimeout(timer)
+    window.removeEventListener('click', ignore, true)
+    stopIgnoringClick = undefined
+  }
+
+  window.addEventListener('click', ignore, true)
+  stopIgnoringClick = stop
+}
+
+// Keyboard and assistive activation; pointer presses have already been handled on release.
+function openFromClick(id: string, event: MouseEvent) {
+  emit('open', id, event.currentTarget as HTMLElement)
 }
 </script>
 
@@ -70,8 +104,10 @@ function openActivity(id: string, event: MouseEvent) {
         :aria-label="`${agent.title}, ${subagentLabels[state(agent)]}. Open its activity`"
         :aria-pressed="selected === agent.id"
         data-testid="subagent-chip"
-        @pointerdown="retainMousePress"
-        @click="openActivity(agent.id, $event)"
+        @pointerdown="holdPress"
+        @pointerup="releasePress(agent.id, $event)"
+        @pointercancel="cancelPress"
+        @click="openFromClick(agent.id, $event)"
       >
         <SubagentMark :agent="agent" :size="20" />
         <span class="max-w-40 truncate">{{ agent.title }}</span>
@@ -84,8 +120,10 @@ function openActivity(id: string, event: MouseEvent) {
       v-if="first"
       class="hidden min-h-11 min-w-0 flex-1 items-center gap-2 text-left phone:flex"
       :aria-label="`${running.length === 1 ? '1 subagent' : `${running.length} subagents`} working. Open their activity`"
-      @pointerdown="retainMousePress"
-      @click="openActivity(first.id, $event)"
+      @pointerdown="holdPress"
+      @pointerup="releasePress(first.id, $event)"
+      @pointercancel="cancelPress"
+      @click="openFromClick(first.id, $event)"
     >
       <span class="flex shrink-0 -space-x-1.5">
         <SubagentMark

@@ -873,10 +873,6 @@ test('working subagents stay in sight beside the composer and open as a drawer o
   await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
   const submission = Promise.withResolvers<void>()
-  await page.route(`**/api/chats/${chat.id}/messages`, async (route) => {
-    await submission.promise
-    await route.continue()
-  })
   try {
     await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
       id: randomUUID(),
@@ -934,17 +930,27 @@ test('working subagents stay in sight beside the composer and open as a drawer o
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeFocused()
     const followUp = 'Keep going while I check the panel.'
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill(followUp)
+    // Hold the queued submission so its row appears while the activity button is pressed.
+    // The hold has its own bound: a test timeout skips the finally below.
+    await page.route(`**/api/chats/${chat.id}/messages`, async (route) => {
+      await Promise.race([submission.promise, new Promise(resolve => setTimeout(resolve, 20000))])
+      await route.continue()
+    })
     await page.getByRole('button', { name: 'Queue', exact: true }).click()
     await expect(bar).toContainText('2 running')
     const phoneButton = bar.getByRole('button', { name: /2 subagents working/ })
     await expect(phoneButton).toBeInViewport()
     const buttonBounds = (await phoneButton.boundingBox())!
-    await page.mouse.move(buttonBounds.x + buttonBounds.width / 2, buttonBounds.y + buttonBounds.height / 2)
+    const pressX = buttonBounds.x + buttonBounds.width / 2
+    const pressY = buttonBounds.y + buttonBounds.height / 2
+    await page.mouse.move(pressX, pressY)
     await page.mouse.down()
-    // The queue appears after the press and before the release at the same point.
     submission.resolve()
     try {
       await expect(page.getByTestId('queued-message').getByText(followUp, { exact: true })).toBeVisible()
+      // The queue moved the button away from the press before the release.
+      await expect.poll(async () => Math.abs((await phoneButton.boundingBox())!.y - buttonBounds.y)).toBeGreaterThan(10)
+      await page.mouse.move(pressX + 1, pressY + 1)
     }
     finally {
       await page.mouse.up()
