@@ -1154,9 +1154,10 @@ fn needs_attention(chat: &Conversation, run: Option<&Value>) -> bool {
 
 /// What a turn that did not succeed never delivered: its own message and ordinary messages
 /// written before it ended, or before Stop was pressed. Messages written since start the
-/// next turn. A person's messages go back to them (`returning`); messages from rules and
-/// agents have no composer to go back to, so they are `held` behind a pause, as before. A
-/// compaction carries no message: what waited for it simply follows.
+/// next turn. A person's messages certainly never delivered go back to them (`returning`).
+/// Everything else is `held` behind a pause, as every failure did before: messages from
+/// rules and agents, which have no composer to go back to, questionnaire answers, and a turn
+/// message the agent may have received. A compaction carries no message.
 #[derive(Default)]
 struct Unsent {
     returning: Vec<(Message, String)>,
@@ -1184,6 +1185,20 @@ pub(crate) fn written_since_turn(db: &Db<'_>, chat_id: &str, run: &Value) -> Res
     }))
 }
 
+/// A turn whose agent process never received its message: never launched, refused at
+/// startup, or failed before any turn was submitted. Otherwise the agent may have it.
+fn never_received(db: &Db<'_>, run: &Value) -> Result<bool> {
+    let Some(checkpoint) = RunCheckpoint::load_in(db, text(run, "id"))? else {
+        return Ok(run["startedAt"].is_null());
+    };
+    let startup = checkpoint
+        .retry_cause
+        .as_ref()
+        .and_then(Option::as_ref)
+        .is_some_and(|cause| cause.startup);
+    Ok(!checkpoint.launched() || checkpoint.start_rejected == Some(true) || startup)
+}
+
 fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
     let execution = &run["chatExecution"];
     if !execution["operation"].is_null() {
@@ -1192,16 +1207,23 @@ fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
     let turn = execution["messageId"].as_str();
     let ended_at = turn_end(run);
     let mut unsent = Unsent::default();
+    let mut received = None;
     for message in db.conversation_messages(chat_id)? {
         let pending = matches!(
             message.status,
             MessageStatus::Queued | MessageStatus::Sending
         );
-        let before_end = message.created_at <= ended_at || Some(message.id.as_str()) == turn;
-        if !pending || message.question_id.is_some() || !before_end {
+        let own = Some(message.id.as_str()) == turn;
+        if !pending || (message.created_at > ended_at && !own) {
             continue;
         }
-        match crate::conversation_writers::person(db, chat_id, &message.id)? {
+        let uncertain = own && *received.get_or_insert(!never_received(db, run)?);
+        let author = if message.question_id.is_some() || uncertain {
+            None
+        } else {
+            crate::conversation_writers::person(db, chat_id, &message.id)?
+        };
+        match author {
             Some(author) => unsent.returning.push((message, author)),
             None => unsent.held.push(message),
         }
@@ -1209,30 +1231,45 @@ fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
     Ok(unsent)
 }
 
-/// Returns unsent messages to their author instead of replaying them after a failure.
-/// Clients put them back in the composer; nothing waits for a resumption. The run is read
-/// again here: a manual resume since the tick read it keeps its message.
-fn return_unsent(db: &Db<'_>, chat_id: &str, ended: &Value) -> Result<()> {
+/// The tick settles a turn that did not succeed once: later ticks leave a person's
+/// resumption alone. A run continues across turns; its end time names this one.
+fn settled_key(run: &Value) -> String {
+    format!("turn-settled:{}", text(run, "id"))
+}
+
+fn settled(db: &Db<'_>, run: &Value) -> Result<bool> {
+    Ok(db
+        .kv(&settled_key(run))?
+        .is_some_and(|ended| ended == run["finishedAt"]))
+}
+
+/// Returns a person's unsent messages to them instead of replaying them, and holds the rest
+/// behind a pause, queued again. The run is read again here: a manual resume since the
+/// tick read it keeps its message.
+fn settle_turn(db: &Db<'_>, chat_id: &str, ended: &Value) -> Result<()> {
     let Some(run) = db.run(text(ended, "id"))? else {
         return Ok(());
     };
     if run["status"] != ended["status"]
         || run["finishedAt"] != ended["finishedAt"]
         || run["chatExecution"]["messageId"] != ended["chatExecution"]["messageId"]
+        || settled(db, &run)?
     {
         return Ok(());
     }
+    db.set(&settled_key(&run), &run["finishedAt"], None)?;
     let turn = run["chatExecution"]["messageId"].as_str();
     let unsent = unsent(db, chat_id, &run)?;
-    // Held messages wait, queued again, for someone to resume, as every failure did before.
-    if !unsent.held.is_empty() && !conversation(db, chat_id)?.paused {
+    if !unsent.held.is_empty() {
         for mut message in unsent.held {
             if message.status == MessageStatus::Sending {
                 message.status = MessageStatus::Queued;
                 db.save_message(&message)?;
             }
         }
-        pause_in(db, chat_id, true)?;
+        if !conversation(db, chat_id)?.paused {
+            pause_in(db, chat_id, true)?;
+        }
     }
     for (mut message, author) in unsent.returning {
         // This turn cannot be replayed once its message went back to its author.
@@ -1438,8 +1475,6 @@ fn continue_run(
     }
     checkpoint.last_message = None;
     checkpoint.settled = None;
-    // A new turn after a failure starts a new automatic retry budget.
-    checkpoint.retry_cause = Some(None);
     checkpoint.store_in(db, run_id)?;
     let compaction = execution.operation.as_deref() == Some(COMPACT);
     let mut patch = crate::runs::RunChanges {
@@ -1568,6 +1603,7 @@ fn launch_turn(
         text(&snapshot, "id").to_owned()
     };
     db.delete(&format!("turn-returned:{run_id}"))?;
+    db.delete(&format!("turn-settled:{run_id}"))?;
     match &launched_by {
         Some(message) => crate::conversation_writers::record_turn(db, &run_id, message)?,
         None => crate::conversation_writers::record_relaunch(db, &run_id, &chat.id)?,
@@ -2011,41 +2047,25 @@ impl Service {
                 self.chat_cancel_wait(&id).await?;
                 // Read first: an idle failed conversation needs no writer on each tick.
                 let (chat_id, ended) = (id.clone(), run.clone());
-                let paused = chat.paused;
-                let (settling, waiting) = self
+                let settling = self
                     .store
                     .read(move |db| {
+                        if settled(db, &ended)? {
+                            return Ok(false);
+                        }
                         let unsent = unsent(db, &chat_id, &ended)?;
-                        // Answers and messages written since the turn ended continue.
-                        let waiting = db.conversation_messages(&chat_id)?.iter().any(|message| {
-                            matches!(
-                                message.status,
-                                MessageStatus::Queued | MessageStatus::Sending
-                            ) && unsent
-                                .returning
-                                .iter()
-                                .all(|(returned, _)| returned.id != message.id)
-                        });
-                        let holding = !unsent.held.is_empty() && !paused;
-                        Ok((!unsent.returning.is_empty() || holding, waiting))
+                        Ok(!unsent.returning.is_empty() || !unsent.held.is_empty())
                     })
                     .await?;
                 if settling {
+                    // The next tick dispatches what remains, unless a pause holds it.
                     let (chat_id, ended) = (id.clone(), run.clone());
                     self.store
-                        .transaction(move |db| return_unsent(db, &chat_id, &ended))
+                        .transaction(move |db| settle_turn(db, &chat_id, &ended))
                         .await?;
+                    continue;
                 }
-                // A message written since the turn ended starts the next one, unless held.
-                let paused = if settling {
-                    let chat_id = id.clone();
-                    self.store
-                        .read(move |db| Ok(conversation(db, &chat_id)?.paused))
-                        .await?
-                } else {
-                    chat.paused
-                };
-                if paused || !waiting {
+                if chat.paused {
                     continue;
                 }
             }
@@ -2490,7 +2510,13 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 }
                 record_message(db, "chat", "from-rule", &EntryWriter::Rule("rule".into()))?;
 
-                return_unsent(db, "chat", &run)?;
+                settle_turn(db, "chat", &run)?;
+                // A turn is settled once: a person's later resumption is left alone.
+                assert!(settled(db, &run)?);
+                pause_in(db, "chat", false)?;
+                settle_turn(db, "chat", &run)?;
+                assert!(!conversation(db, "chat")?.paused);
+                pause_in(db, "chat", true)?;
                 let status = |id: &str| -> Result<MessageStatus> {
                     Ok(find_message(db, "chat", id)?.unwrap().status)
                 };
@@ -2588,6 +2614,51 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn uncertain_launches_and_answers_are_held_not_returned() {
+        use crate::conversation_writers::{EntryWriter, record_message};
+
+        for (launched, answer) in [(true, false), (false, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            store
+                .transaction(move |db| {
+                    let run = db.add_run_fixture(
+                        &json!({
+                            "id": "run",
+                            "taskId": "chat",
+                            "createdAt": 0,
+                            "startedAt": 1,
+                            "status": "failed",
+                            "finishedAt": 900,
+                            "chatExecution": { "messageId": "turn", "text": "Turn", "attachments": [], "recovery": false },
+                            "snapshot": { "agent": { "provider": "codex" } },
+                        }),
+                        None,
+                    )?;
+                    db.save_checkpoint_boundary("run", &json!({ "launched": launched }))?;
+                    db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                    let mut turn = json!({ "id": "turn", "chatId": "chat", "text": "turn", "status": "sending", "createdAt": 600 });
+                    if answer {
+                        turn["questionId"] = "question".into();
+                    }
+                    db.put_message(&turn)?;
+                    record_message(db, "chat", "turn", &EntryWriter::Person("alice".into()))?;
+
+                    // The agent may have the message, or an answer cannot go back to a
+                    // composer: either waits, queued again, behind a pause as before.
+                    settle_turn(db, "chat", &run)?;
+                    let turn = find_message(db, "chat", "turn")?.unwrap();
+                    assert_eq!(turn.status, MessageStatus::Queued, "launched {launched}");
+                    assert!(conversation(db, "chat")?.paused);
+                    assert!(!turn_returned(db, "run")?);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]

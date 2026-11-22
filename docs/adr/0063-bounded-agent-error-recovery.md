@@ -1,3 +1,5 @@
+> Statut : Mise à jour par [ADR-0090](0090-failed-turns-return-unsent-messages.md) : après l'épuisement des nouvelles tentatives, une conversation n'est plus mise en pause ; un nouveau message démarre un tour avec un nouveau budget. La reprise manuelle d'un tour dont le message est revenu à son auteur est refusée.
+
 # Bounded recovery after transient agent failures
 
 Date: 2026-10-06.

@@ -1,4 +1,6 @@
 > Statut : Mise à jour par [ADR-0083](0083-local-conversation-disks-without-s3.md) : après un changement de node, une attente planifiée est conservée et reprend sur la destination à son échéance, dans un environnement vide et une nouvelle session.
+>
+> Statut : Mise à jour par [ADR-0090](0090-failed-turns-return-unsent-messages.md) : un échec terminal efface toujours l'attente, mais ne met plus la conversation en pause ; les messages qu'une personne a écrits et que l'agent n'a jamais reçus lui reviennent.
 
 # Durable conversation wakeups
 
@@ -33,9 +35,8 @@ fencing, publication protection and bounded recovery retain their contracts.
 A new user message cancels the wakeup; earlier queued follow-ups then start in
 order. A wakeup that can no longer resume does not hold them. Queue pause holds
 the original deadline; resume makes an overdue wakeup eligible. Stop, run
-cancellation, deletion and a fresh session cancel it. A terminal failure clears
-its wakeup; [ADR-0090](0090-failed-turns-return-unsent-messages.md) replaced the
-pause it used to apply. Restart reloads the persisted deadline,
+cancellation, deletion and a fresh session cancel it. A terminal failure pauses
+the chat and clears its wakeup. Restart reloads the persisted deadline,
 including overdue waits, without resetting it or relying on guest timers. Resumption is no earlier than the
 deadline and depends on available capacity.
 

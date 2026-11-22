@@ -13,37 +13,44 @@ this as a conversation they must repair rather than one they can keep writing in
 
 ## Decision
 
-A turn that failed, was interrupted or was stopped no longer pauses its
-conversation on failure. The dispatcher returns the ordinary messages a person
-wrote that the turn never delivered: its own message when the agent never
-acknowledged it, and messages written before the turn ended or before Stop was
-pressed. They become `cancelled` and name the person they go back to
-(`returnedTo`). Questionnaire answers are never returned. Messages written by rules
-or agents have no composer to return to: when a failure leaves any, the
-conversation pauses as every failure did before, and they wait for someone to
-resume it. A failed compaction returns nothing. Messages written
-after the turn ended start the next turn on the same run, session and workspace,
-with a new automatic retry budget.
+The dispatcher settles a turn that failed, was interrupted or was stopped once.
+It returns the ordinary messages a person wrote that the agent certainly never
+received: the turn's own message when the turn never launched, was refused at
+startup or failed before submitting it, and messages written before the turn
+ended or before Stop was pressed. They become `cancelled` and name the person
+they go back to (`returnedTo`). Everything else is held behind a pause, queued
+again, as every failure did before: messages from rules and agents, which have no
+composer to go back to, questionnaire answers, and a turn message the agent may
+have received. A failed compaction returns nothing. When nothing is held, the
+conversation is not paused, and the next message starts a new turn on the same
+run, session and workspace with a new automatic retry budget. Settling happens
+once per turn, so a person's later resumption is never undone.
 
 Web and Android restore returned messages only in the composer of the person they
-name, ahead of any draft, with their attachments, and withdraw them so another
-device does not restore them again. Withdrawal of a returned message is accepted
-for that reason, including through public MCP and `cairn_installation`
-(`delete_chat_message`).
+name, in the conversation shown, ahead of any draft, with their attachments, and
+withdraw them so another device does not restore them again. Withdrawal of a
+returned message is accepted for that reason, including through public MCP and
+`cairn_installation` (`delete_chat_message`). A restored draft is as durable as any
+other draft.
 
-A turn whose own message was returned is over: resuming it, retrying it, unpausing
-to replay it or switching its coding agent is refused or skipped, because that
-would deliver a message that is back in its author's composer. A turn whose
-message the agent acknowledged can still be resumed as before.
+A turn whose own message was returned is over: resuming or retrying it is
+refused, unpausing does not replay it, and its coding agent is no longer offered
+for a switch, because that would deliver a message that is back in its author's
+composer. A turn whose message the agent may have received can still be resumed as
+before. Unpausing replays a stopped turn unless a message was written after it
+ended, which is sent instead.
 
 Explicit pauses keep their meaning: a person's pause, Stop, a rule's cancellation
 and a requested fresh session still pause the conversation, and rules still cannot
-lift them. Rules also wait after a turn that failed or stopped: they can steer the
-conversation again once a person writes in it. When the last turn failed or was
-stopped and the queue is empty, the next message a person sends resumes it. A
-queue paused after a successful turn, or holding messages, keeps holding what is
-added to it. When a message is waiting, resuming sends it rather than replaying
-the stopped turn.
+lift them. After a failed or interrupted turn, rules also wait: they can steer or
+answer again once a person writes in the conversation or resumes it. Agents with
+control access can continue it as they could resume it before. When the last turn
+failed or was stopped and the queue is empty, the next message a person sends
+resumes it. A queue paused after a successful turn, or holding messages, keeps
+holding what is added to it.
+
+Conversation failure messages say to send a message to continue; missions keep
+their resume wording.
 
 While the agent works, the composer sends into its turn (steer) by default.
 Queueing for the next turn is the secondary action (Alt+Enter on web). A message

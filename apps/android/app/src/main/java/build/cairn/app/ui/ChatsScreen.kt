@@ -762,6 +762,11 @@ internal fun ChatPage(
     val held = chat?.paused == true && !resumesOnSend
     // Saving an edit keeps the queued message where it was.
     val editedMode = pending.find { it.id == editing }?.mode ?: "queue"
+    // The failed turn's message is still the server's to replay, rather than back in a composer.
+    val turnPending =
+        chat?.messages.orEmpty().any {
+            it.id == chat?.run?.chatExecution?.messageId && it.status != "cancelled"
+        }
     val questions = chat?.questions.orEmpty().filter { it.status == "pending" }
     // Files over the limits stay visible as refused cards; the others join the draft.
     fun attach(
@@ -1486,8 +1491,10 @@ internal fun ChatPage(
                 if (error != null && !errorDismissed && isOpenCodePrivacyError(error))
                     OpenCodePrivacyNotice(
                         enabled = !state.busy,
+                        // A message that went back to the composer is retried by sending it again.
                         retry =
-                            if (readOnly) null else ({ if (chat != null) setPaused(chat, false) }),
+                            if (readOnly || !turnPending) null
+                            else ({ if (chat != null) setPaused(chat, false) }),
                         create = if (readOnly) null else create,
                         dismiss = { errorDismissed = true },
                     )

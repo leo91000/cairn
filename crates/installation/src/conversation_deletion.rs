@@ -456,6 +456,7 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     for key in [
         format!("turn-speed:{run}"),
         format!("turn-returned:{run}"),
+        format!("turn-settled:{run}"),
         format!("chat-error:{cid}"),
     ]
     .into_iter()
@@ -616,6 +617,7 @@ mod tests {
                 let keys = [
                     "turn-speed:run",
                     "turn-returned:run",
+                    "turn-settled:run",
                     "chat-error:chat",
                     "chat-title-pending:chat",
                     "chat-title-checked:chat",
