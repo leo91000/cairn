@@ -9,7 +9,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.dp
@@ -18,6 +20,7 @@ import java.io.File
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -157,6 +160,50 @@ class SubagentViewsTest {
             .onNodeWithContentDescription("1 sous-agent au travail. Ouvrir leur activité")
             .performClick()
         assertEquals(team.first().id, opened)
+    }
+
+    @Test
+    fun `a press on the bar opens once even when a queued message moves it before release`() {
+        val opened = mutableListOf<String>()
+        var queued by mutableStateOf(false)
+        compose.setContent {
+            CairnTheme("light") {
+                Column(
+                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+                    verticalArrangement = Arrangement.Bottom,
+                ) {
+                    SubagentBar(team, active = true) { opened += it }
+                    // The queue strip opens the composer below the bar and pushes it up.
+                    if (queued) Spacer(Modifier.height(72.dp))
+                    Spacer(Modifier.height(56.dp))
+                }
+            }
+        }
+        val button =
+            compose.onNodeWithContentDescription("1 sous-agent au travail. Ouvrir leur activité")
+        button.performClick()
+        button.performSemanticsAction(SemanticsActions.OnClick)
+        assertEquals(listOf(team.first().id, team.first().id), opened)
+
+        val pressedTop = button.getBoundsInRoot().top
+        button.performTouchInput { down(center) }
+        queued = true
+        compose.waitForIdle()
+        assertNotEquals(pressedTop, button.getBoundsInRoot().top)
+        // The finger jitters where the button was, then lifts.
+        button.performTouchInput {
+            moveBy(Offset(0f, 2f))
+            up()
+        }
+        assertEquals(3, opened.size)
+
+        // A press dragged away from both positions opens nothing.
+        button.performTouchInput {
+            down(center)
+            moveBy(Offset(0f, -height * 4f))
+            up()
+        }
+        assertEquals(3, opened.size)
     }
 
     @Test

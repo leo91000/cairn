@@ -82,17 +82,22 @@ function ignoreNextClick() {
       stop()
   }
 
+  // A new press always comes after this press's own mouse events and click, which some
+  // browsers skip entirely.
+  const next = () => stop()
   const timer = setTimeout(stop, 1000)
 
   function stop() {
     clearTimeout(timer)
     for (const type of ignoredEvents)
       window.removeEventListener(type, ignore, true)
+    window.removeEventListener('pointerdown', next, true)
     stopIgnoringClick = undefined
   }
 
   for (const type of ignoredEvents)
     window.addEventListener(type, ignore, true)
+  window.addEventListener('pointerdown', next, true)
   stopIgnoringClick = stop
 }
 

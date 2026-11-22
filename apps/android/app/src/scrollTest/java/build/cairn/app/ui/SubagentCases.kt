@@ -64,7 +64,11 @@ abstract class SubagentCases {
         }
         // The queued message moved the button before the release.
         assertNotEquals(pressedTop, activityButton.getBoundsInRoot().top)
-        activityButton.performTouchInput { up() }
+        // The finger jitters where the button was, then lifts.
+        activityButton.performTouchInput {
+            moveBy(androidx.compose.ui.geometry.Offset(0f, 2f))
+            up()
+        }
         compose.waitUntil(5000) {
             compose.onAllNodesWithTag("subagent-sheet").fetchSemanticsNodes().isNotEmpty()
         }
