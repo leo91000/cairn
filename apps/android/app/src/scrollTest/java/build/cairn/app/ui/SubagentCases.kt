@@ -51,7 +51,8 @@ abstract class SubagentCases {
 
         val activityButton =
             compose.onNodeWithContentDescription("2 sous-agents au travail. Ouvrir leur activité")
-        val pressedTop = activityButton.getUnclippedBoundsInRoot().top
+        val pressed = activityButton.getUnclippedBoundsInRoot()
+        val finger = (pressed.top + pressed.bottom) / 2
         activityButton.performTouchInput { down(center) }
         current.updateAndGet { chat ->
             chat.copy(
@@ -61,11 +62,17 @@ abstract class SubagentCases {
         compose.waitUntil(10000) {
             compose.onAllNodesWithTag("queued-message").fetchSemanticsNodes().isNotEmpty()
         }
-        // The queue moves the control under the held finger.
-        check(activityButton.getUnclippedBoundsInRoot().top != pressedTop)
+        // The queue moves the control from under the held finger.
+        val moved = activityButton.getUnclippedBoundsInRoot()
+        check(finger < moved.top || finger > moved.bottom)
         activityButton.performTouchInput { up() }
-        compose.onNodeWithTag("subagent-sheet").assertIsDisplayed()
+        compose.waitUntil(5000) {
+            compose.onAllNodesWithTag("subagent-sheet").fetchSemanticsNodes().isNotEmpty()
+        }
         compose.onNodeWithContentDescription("Fermer l’activité du sous-agent").performClick()
+        compose.waitUntil(5000) {
+            compose.onAllNodesWithTag("subagent-sheet").fetchSemanticsNodes().isEmpty()
+        }
 
         compose.onNodeWithContentDescription("Options de la conversation").performClick()
         compose.onNodeWithText("Plein écran").performClick()

@@ -28,31 +28,66 @@ const state = (agent: ActivityArtifact) => subagentState(agent, props.active, de
 const running = computed(() => props.agents.filter(agent => state(agent) === 'running'))
 const first = computed(() => running.value[0] ?? props.agents[0])
 
-// Pointer travel, in CSS pixels, that still counts as a press rather than a drag.
+// The queue can move a button between press and release, and the browser then sends the
+// click elsewhere. A pointer press therefore opens on its release, which reaches the button:
+// mouse and pen presses are captured here, touch presses implicitly by the browser.
+// The slop is the pointer travel, in CSS pixels, that still counts as a press rather than a drag.
 const pressSlop = 4
-let mousePress: { button: HTMLButtonElement, x: number, y: number } | undefined
+let press: {
+  button: HTMLButtonElement
+  pointerId: number
+  x: number
+  y: number
+} | undefined
+let released: HTMLButtonElement | undefined
 
-function retainMousePress(event: PointerEvent) {
+function hold(event: PointerEvent) {
+  released = undefined
+  press = undefined
   if (!event.isPrimary || event.button !== 0)
     return
 
   const button = event.currentTarget as HTMLButtonElement
-  mousePress = event.pointerType === 'mouse' ? { button, x: event.clientX, y: event.clientY } : undefined
-  // The queue can move the button between mouse-down and mouse-up.
-  if (mousePress)
+  press = {
+    button,
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+  }
+  if (event.pointerType !== 'touch')
     button.setPointerCapture(event.pointerId)
 }
 
+function release(id: string, event: PointerEvent) {
+  const button = event.currentTarget as HTMLButtonElement
+  const held = press
+  press = undefined
+  if (held?.button !== button || held.pointerId !== event.pointerId)
+    return
+
+  released = button
+  // A drag must finish over the visible button because capture also retargets outside it.
+  if (Math.hypot(event.clientX - held.x, event.clientY - held.y) > pressSlop
+    && !button.contains(document.elementFromPoint(event.clientX, event.clientY))) {
+    return
+  }
+
+  emit('open', id, button)
+}
+
+// The release decided; a tap's click would otherwise land on whatever now lies under it.
+function dropTapClick(event: TouchEvent) {
+  if (released === event.currentTarget && event.cancelable) {
+    event.preventDefault()
+    released = undefined
+  }
+}
+
+// Keyboard and assistive clicks have no press of their own.
 function openActivity(id: string, event: MouseEvent) {
   const button = event.currentTarget as HTMLButtonElement
-  const press = mousePress
-  mousePress = undefined
-
-  // A press that barely moves still counts when the button moves. A drag must
-  // finish over the visible button because capture also retargets outside it.
-  if (event.detail && press?.button === button
-    && Math.hypot(event.clientX - press.x, event.clientY - press.y) > pressSlop
-    && !button.contains(document.elementFromPoint(event.clientX, event.clientY))) {
+  if (event.detail && released === button) {
+    released = undefined
     return
   }
 
@@ -72,7 +107,9 @@ function openActivity(id: string, event: MouseEvent) {
         :aria-label="`${agent.title}, ${subagentLabels[state(agent)]}. Open its activity`"
         :aria-pressed="selected === agent.id"
         data-testid="subagent-chip"
-        @pointerdown="retainMousePress"
+        @pointerdown="hold"
+        @pointerup="release(agent.id, $event)"
+        @touchend="dropTapClick"
         @click="openActivity(agent.id, $event)"
       >
         <SubagentMark :agent="agent" :size="20" />
@@ -86,7 +123,9 @@ function openActivity(id: string, event: MouseEvent) {
       v-if="first"
       class="hidden min-h-11 min-w-0 flex-1 items-center gap-2 text-left phone:flex"
       :aria-label="`${running.length === 1 ? '1 subagent' : `${running.length} subagents`} working. Open their activity`"
-      @pointerdown="retainMousePress"
+      @pointerdown="hold"
+      @pointerup="release(first.id, $event)"
+      @touchend="dropTapClick"
       @click="openActivity(first.id, $event)"
     >
       <span class="flex shrink-0 -space-x-1.5">

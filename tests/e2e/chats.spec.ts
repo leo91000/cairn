@@ -868,7 +868,7 @@ test('subagents show as a team with their own steps and report', async ({ page, 
   }
 })
 
-test('working subagents stay in sight beside the composer and open as a drawer on phones', async ({ page, workspace }) => {
+test('working subagents stay in sight beside the composer and open as a drawer on phones', async ({ page, workspace, browserName }) => {
   test.setTimeout(60000)
   await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -966,6 +966,29 @@ test('working subagents stay in sight beside the composer and open as a drawer o
 
     await phoneButton.press('Enter')
     await expect(drawer).toBeVisible()
+
+    // Only Chromium lets Playwright hold a touch; WebKit covers the mouse press above.
+    if (browserName === 'chromium') {
+      await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
+      await expect(drawer).toHaveCount(0)
+      const touch = await page.context().newCDPSession(page)
+      const touched = { x: movedBounds.x + movedBounds.width / 2, y: movedBounds.y + movedBounds.height / 2 }
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touched] })
+      try {
+        // Removing the queued message moves the button under the finger.
+        const queued = (await workspace.api(`/api/chats/${chat.id}`)).messages.find((message: { text: string }) => message.text === followUp)
+        await workspace.api(`/api/chats/${chat.id}/messages/${queued.id}`, 'DELETE')
+        await expect(page.getByTestId('queued-message')).toHaveCount(0)
+        const shiftedBounds = (await phoneButton.boundingBox())!
+        expect(touched.y < shiftedBounds.y || touched.y > shiftedBounds.y + shiftedBounds.height).toBe(true)
+      }
+      finally {
+        await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+      }
+
+      await expect(drawer).toBeVisible()
+      await expect(page.getByTestId('queued-message')).toHaveCount(0)
+    }
   }
   finally {
     submission.resolve()
