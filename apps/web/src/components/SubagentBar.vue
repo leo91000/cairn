@@ -56,7 +56,7 @@ function releasePress(id: string, event: PointerEvent) {
   if (held?.button !== button || held.pointerId !== event.pointerId)
     return
 
-  ignoreNextClick()
+  ignoreNextClick(button)
   if (releasedOnControl(held.box, shownBox(button), event.clientX, event.clientY))
     emit('open', id, button)
 }
@@ -69,11 +69,15 @@ const ignoredEvents = ['mousedown', 'mouseup', 'click'] as const
 
 // The release decided; the compatibility mouse events and click that follow may target
 // another control, or move focus inside the activity that just opened.
-function ignoreNextClick() {
+function ignoreNextClick(button: HTMLButtonElement) {
   stopIgnoringClick?.()
   const ignore = (event: MouseEvent) => {
     // Keyboard and assistive activation report no click count.
     if (event.detail === 0)
+      return
+
+    // A touch's mouse-down on the unmoved button still focuses it, as before.
+    if (event.type === 'mousedown' && button.contains(event.target as Node))
       return
 
     event.preventDefault()
@@ -122,6 +126,7 @@ function openFromClick(id: string, event: MouseEvent) {
         @pointerdown="holdPress"
         @pointerup="releasePress(agent.id, $event)"
         @pointercancel="cancelPress"
+        @lostpointercapture="cancelPress"
         @contextmenu="cancelPress"
         @click="openFromClick(agent.id, $event)"
       >
@@ -139,6 +144,7 @@ function openFromClick(id: string, event: MouseEvent) {
       @pointerdown="holdPress"
       @pointerup="releasePress(first.id, $event)"
       @pointercancel="cancelPress"
+      @lostpointercapture="cancelPress"
       @contextmenu="cancelPress"
       @click="openFromClick(first.id, $event)"
     >

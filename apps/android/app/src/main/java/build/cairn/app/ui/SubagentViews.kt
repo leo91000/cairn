@@ -382,7 +382,12 @@ internal fun SubagentBar(agents: List<Subagent>, active: Boolean, open: (String)
                                     },
                             ) {
                                 Row(
-                                    Modifier.pressSurvivingMoves(interactions) { open(agent.id) }
+                                    Modifier.pressSurvivingMoves(
+                                            interactions,
+                                            inScrollingRow = true,
+                                        ) {
+                                            open(agent.id)
+                                        }
                                         .heightIn(min = 40.dp)
                                         .padding(start = 4.dp, end = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,

@@ -207,6 +207,25 @@ class SubagentViewsTest {
     }
 
     @Test
+    @Config(qualifiers = "w720dp-h900dp-xhdpi")
+    fun `a chip opens from the edge of its minimum touch target`() {
+        val opened = mutableListOf<String>()
+        compose.setContent {
+            CairnTheme("light") {
+                Column(Modifier.background(MaterialTheme.colorScheme.background)) {
+                    SubagentBar(team, active = true) { opened += it }
+                }
+            }
+        }
+        // The chip draws 40dp tall inside the 48dp touch target its Surface reserves.
+        val chip = compose.onAllNodesWithTag("subagent-chip")[0]
+        val band = with(compose.density) { 2.dp.toPx() }
+        chip.performTouchInput { click(Offset(centerX, -band)) }
+        chip.performTouchInput { click(Offset(centerX, height + band)) }
+        assertEquals(2, opened.size)
+    }
+
+    @Test
     fun `an older teammate preserves a collapsed team's scroll anchor and fold choice`() {
         val older =
             listOf(

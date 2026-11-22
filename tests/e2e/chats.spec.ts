@@ -1031,7 +1031,9 @@ test('a touch on working subagents opens them even when the queue moves the butt
 
     // A later tap on the queued message still opens it.
     const queued = (await page.getByTestId('queued-message').getByRole('button').first().boundingBox())!
-    await page.touchscreen.tap(queued.x + queued.width / 2, queued.y + queued.height / 2)
+    const tap = { x: queued.x + queued.width / 2, y: queued.y + queued.height / 2 }
+    await input.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [tap] })
+    await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
     await expect(page.getByTestId('queued-message-sheet')).toBeVisible()
   }
   finally {

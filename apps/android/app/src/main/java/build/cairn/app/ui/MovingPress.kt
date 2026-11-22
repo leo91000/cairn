@@ -1,5 +1,6 @@
 package build.cairn.app.ui
 
+import android.view.ViewConfiguration
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -18,6 +19,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -32,6 +34,7 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun Modifier.pressSurvivingMoves(
     interactions: MutableInteractionSource,
+    inScrollingRow: Boolean = false,
     onClick: () -> Unit,
 ): Modifier {
     val click by rememberUpdatedState(onClick)
@@ -39,32 +42,52 @@ internal fun Modifier.pressSurvivingMoves(
     val scope = rememberCoroutineScope()
     val layout = remember { arrayOfNulls<LayoutCoordinates>(1) }
     return onGloballyPositioned { layout[0] = it }
-        .pointerInput(Unit) {
+        .pointerInput(inScrollingRow) {
             awaitEachGesture {
                 val down = awaitFirstDown()
                 val pressedLayout = layout[0]?.takeIf { it.isAttached } ?: return@awaitEachGesture
+                // The Surface keeps the taps on its minimum touch target around this content.
+                val position = down.position
+                if (
+                    position.x !in 0f..size.width.toFloat() ||
+                        position.y !in 0f..size.height.toFloat()
+                )
+                    return@awaitEachGesture
+
                 down.consume()
                 val pressed = pressedLayout.boundsInRoot()
-                val press = PressInteraction.Press(down.position)
+                val press = PressInteraction.Press(position)
                 val pressSource = source
-                scope.launch { pressSource.emit(press) }
-
-                val up = releaseOrCancel()
-                val current = layout[0]?.takeIf { it.isAttached }
-                val released =
-                    up != null &&
-                        current != null &&
-                        current.localToRoot(up.position).let {
-                            it in pressed || it in current.boundsInRoot()
-                        }
-                scope.launch {
-                    pressSource.emit(
-                        if (up != null) PressInteraction.Release(press)
-                        else PressInteraction.Cancel(press)
-                    )
+                var shown = false
+                // Like Compose's clickable, a scrolling row shows the press once it is not a
+                // scroll.
+                val showing = scope.launch {
+                    if (inScrollingRow) delay(ViewConfiguration.getTapTimeout().toLong())
+                    pressSource.emit(press)
+                    shown = true
                 }
-                if (released && up != null) {
-                    up.consume()
+
+                var up: PointerInputChange? = null
+                try {
+                    up = releaseOrCancel()
+                } finally {
+                    showing.cancel()
+                    val released = up != null
+                    scope.launch {
+                        if (released) {
+                            if (!shown) pressSource.emit(press)
+                            pressSource.emit(PressInteraction.Release(press))
+                        } else if (shown) {
+                            pressSource.emit(PressInteraction.Cancel(press))
+                        }
+                    }
+                }
+
+                val release = up ?: return@awaitEachGesture
+                val current = layout[0]?.takeIf { it.isAttached } ?: return@awaitEachGesture
+                val point = current.localToRoot(release.position)
+                if (point in pressed || point in current.boundsInRoot()) {
+                    release.consume()
                     click()
                 }
             }
