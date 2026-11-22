@@ -442,11 +442,10 @@ internal data class RestoredComposer(
  */
 internal fun restoredComposer(returned: List<ChatMessage>, draft: String): RestoredComposer {
     val first = returned.firstOrNull()
+    // A restore repeated after a reload does not add text the draft already holds.
+    val texts = returned.map { it.text.trim() }.filter { it.isNotEmpty() && it !in draft }
     return RestoredComposer(
-        text =
-            (returned.map { it.text.trim() } + draft.trim())
-                .filter { it.isNotEmpty() }
-                .joinToString("\n\n"),
+        text = (texts + draft.trim()).filter { it.isNotEmpty() }.joinToString("\n\n"),
         attachments = returned.flatMap { it.attachments },
         provider = first?.provider.orEmpty(),
         model = first?.model.orEmpty(),

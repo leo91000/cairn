@@ -838,7 +838,7 @@ async fn shell_environment_failure_stops_before_success_and_does_not_save_a_rece
         let (result, events) = run_to_end(&c, plan(&root, prompt)).await;
         let error = result.unwrap_err();
         assert!(error.message.contains("session environment"));
-        assert!(error.message.contains("resume"));
+        assert!(error.message.contains("fresh process"));
         assert!(!error.message.contains("never-return-this-secret"));
         let mut failed = false;
         for event in &events {

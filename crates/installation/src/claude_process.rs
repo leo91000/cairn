@@ -52,7 +52,7 @@ const PLAN_MISSING: &str = "No plan reached the user: write your plan to the pla
 
 const SANDBOX_UNAVAILABLE: &str = "Plan turns need Claude Code's sandbox, which is unavailable on this node (it requires bubblewrap and socat). Nothing was changed.";
 
-const SHELL_ENVIRONMENT_ERROR: &str = "Claude Code's session environment contains NUL bytes, so shell commands cannot start. Repair the affected .sh file in the Claude session-env directory, then resume this conversation to start a fresh process. The conversation and workspace have been preserved.";
+const SHELL_ENVIRONMENT_ERROR: &str = "Claude Code's session environment contains NUL bytes, so shell commands cannot start. Repair the affected .sh file in the Claude session-env directory; the next turn starts a fresh process. The conversation and workspace have been preserved.";
 
 async fn validate_session_environment(directory: &Path, session: &str) -> Result<()> {
     crate::validation::uuid(session)?;

@@ -530,6 +530,10 @@ class ConversationPresentationTest {
         assertEquals("high", restored.reasoning)
         assertEquals("priority", restored.speed)
         assertTrue(restored.plan)
+        assertEquals(
+            "Plan it\n\nThen this",
+            restoredComposer(listOf(plan, followUp), "Plan it\n\nThen this").text,
+        )
     }
 
     @Test

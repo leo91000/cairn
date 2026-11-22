@@ -235,6 +235,7 @@ describe('returned messages', () => {
       speed: 'priority',
       plan: true,
     })
+    expect(restoredComposer(returned, 'plan\n\nfollow-up').text).toBe('plan\n\nfollow-up')
   })
 
   it('let the next message resume only an empty queue paused by a Stop or failure', () => {

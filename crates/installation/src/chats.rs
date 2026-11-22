@@ -1487,7 +1487,11 @@ fn continue_run(
         checkpoint.fresh_session = Some(false);
         execution.context = Some(handoff_context(db, run_id)?);
         checkpoint.launched = Some(false);
-        checkpoint.launched_turn = None;
+        // The same turn relaunched with another coding agent keeps its earlier launch: the
+        // first agent may already have its message.
+        if checkpoint.launched_turn.as_deref() != Some(execution.message_id.as_str()) {
+            checkpoint.launched_turn = None;
+        }
         checkpoint.controller_recoveries = None;
         db.change_run(
             run_id,

@@ -108,7 +108,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "send_chat_message",
         scope: "run",
-        description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed turn, a new message starts the next turn; after a stop, call set_chat_paused(false) as well. Ordinary messages a person wrote that a failed or stopped turn never delivered are cancelled and returned to them (returnedTo); others stay queued behind a pause.",
+        description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed turn, a new message starts the next turn; after a stop, send the message first, then call set_chat_paused(false), which then sends it rather than replaying the stopped turn. Ordinary messages a person wrote that a failed or stopped turn never delivered are cancelled and returned to them (returnedTo); others stay queued behind a pause.",
     },
     ChatOperation {
         name: "edit_chat_message",
@@ -128,7 +128,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "set_chat_paused",
         scope: "run",
-        description: "Pause or resume the follow-up queue. Pausing lets the current turn finish; resuming permits queued agent work. Resuming a stopped or failed turn replays it while a message from before it ended is held; otherwise a message written since is sent instead, and a turn whose message was returned to its author is never replayed. Use stop_chat to interrupt the current turn.",
+        description: "Pause or resume the follow-up queue. Pausing lets the current turn finish; resuming permits queued agent work. Resuming a stopped or failed turn replays it, unless its message was returned to its author, or a message was written since it ended while nothing from before it is held: that message is sent instead. Use stop_chat to interrupt the current turn.",
     },
     ChatOperation {
         name: "stop_chat",
