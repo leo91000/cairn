@@ -2077,7 +2077,7 @@ function key(event: KeyboardEvent) {
               </UiButton>
             </div>
             <p v-if="detail?.sessionRestartRequested && !readOnly" class="mb-3 text-sm text-muted">
-              Ready for a fresh session. Your next message starts it.
+              Ready for a fresh session. {{ held ? 'Resume the queue to start it.' : 'Your next message starts it.' }}
             </p>
             <!-- Cancelled by a deletion and restored from the trash: returned messages go to their author's composer instead. -->
             <details v-if="detail?.messages.some(message => message.status === 'cancelled' && !message.returnedTo)" class="mb-3 rounded-lg border border-line p-3 text-xs">

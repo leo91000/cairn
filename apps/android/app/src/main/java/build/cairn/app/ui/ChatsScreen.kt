@@ -981,10 +981,12 @@ internal fun ChatPage(
     val restored = remember(id) { mutableSetOf<String>() }
     val me = state.session.account?.id
     val returned = returnedMessages(chat, me, restored)
-    LaunchedEffect(returned.map { it.id }, readOnly, editing, state.busy) {
+    LaunchedEffect(returned.map { it.id }, readOnly, editing, state.busy, selected) {
         val current = chat ?: return@LaunchedEffect
+        // Only the conversation shown restores: a neighbouring page shows a cached copy.
         if (
-            returned.isEmpty() ||
+            !selected ||
+                returned.isEmpty() ||
                 readOnly ||
                 editing != null ||
                 state.busy ||
@@ -1609,7 +1611,8 @@ internal fun ChatPage(
                             }
                         if (chat?.sessionRestartRequested == true && !readOnly)
                             Text(
-                                "Votre prochain message démarre la nouvelle session.",
+                                if (held) "Reprenez la file pour démarrer la nouvelle session."
+                                else "Votre prochain message démarre la nouvelle session.",
                                 Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,

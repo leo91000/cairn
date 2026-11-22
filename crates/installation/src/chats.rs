@@ -1251,9 +1251,9 @@ fn never_received(db: &Db<'_>, run: &Value) -> Result<bool> {
 
 fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
     let execution = &run["chatExecution"];
-    if !execution["operation"].is_null() {
-        return Ok(Unsent::default());
-    }
+    // A compaction carries no message: a person's messages written meanwhile follow it,
+    // while those of rules and agents wait for a person, as after any failure.
+    let operation = !execution["operation"].is_null();
     let turn = execution["messageId"].as_str();
     let ended_at = turn_end(run);
     let mut unsent = Unsent::default();
@@ -1263,8 +1263,14 @@ fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
             message.status,
             MessageStatus::Queued | MessageStatus::Sending
         );
-        let own = Some(message.id.as_str()) == turn;
+        let own = !operation && Some(message.id.as_str()) == turn;
         if !pending || (message.created_at > ended_at && !own) {
+            continue;
+        }
+        if operation {
+            if crate::conversation_writers::person(db, chat_id, &message.id)?.is_none() {
+                unsent.held.push(message);
+            }
             continue;
         }
         // The turn's own message, and steering being sent to it, reached the agent only if a
@@ -2668,7 +2674,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
     }
 
     #[tokio::test]
-    async fn a_failed_compaction_returns_nothing() {
+    async fn a_failed_compaction_returns_nothing_and_holds_rule_messages() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
         store
@@ -2686,9 +2692,21 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     None,
                 )?;
                 db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
-                db.put_message(&json!({ "id": "waiting", "chatId": "chat", "text": "Next", "status": "queued", "createdAt": 100 }))?;
+                db.put_message(&json!({ "id": "person", "chatId": "chat", "text": "Next", "status": "queued", "createdAt": 100 }))?;
+                crate::conversation_writers::record_message(
+                    db,
+                    "chat",
+                    "person",
+                    &crate::conversation_writers::EntryWriter::Person("alice".into()),
+                )?;
+                db.put_message(&json!({ "id": "rule", "chatId": "chat", "text": "From a rule", "status": "queued", "createdAt": 200 }))?;
+                // Nothing is returned: a person's message follows the compaction, while a
+                // rule's waits behind a pause for a person, as after any failure.
                 let unsent = unsent(db, "chat", &run)?;
-                assert!(unsent.returning.is_empty() && unsent.held.is_empty());
+                assert!(unsent.returning.is_empty());
+                assert_eq!(unsent.held.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(), ["rule"]);
+                settle_turn(db, "chat", &run)?;
+                assert!(conversation(db, "chat")?.paused);
                 Ok(())
             })
             .await

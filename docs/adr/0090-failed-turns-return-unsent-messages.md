@@ -25,7 +25,8 @@ message that waited behind it. They become `cancelled` and name the person
 they go back to (`returnedTo`). Everything else is held behind a pause, queued
 again, as every failure did before: messages from rules and agents, which have no
 composer to go back to, questionnaire answers, and a turn message the agent may
-have received. A failed compaction returns nothing. When nothing is held, the
+have received. A failed compaction returns nothing: a person's messages written meanwhile follow it,
+and those of rules and agents are held. When nothing is held, the
 conversation is not paused, and the next message starts a new turn on the same
 run, session and workspace with a new automatic retry budget. Settling happens
 once per turn, so a person's later resumption is never undone.

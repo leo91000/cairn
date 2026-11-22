@@ -76,8 +76,9 @@ export function returnedMessages(chat: ChatDetail | null | undefined, account: s
  */
 export function restoredComposer(returned: ChatMessage[], draft: string) {
   const first = returned[0]
-  // A restore repeated after a reload does not add text the draft already holds.
-  const texts = returned.map(message => message.text.trim()).filter(text => text && !draft.includes(text))
+  // A restore repeated after a reload does not add a block the draft already holds whole.
+  const blocks = new Set(draft.split('\n\n').map(block => block.trim()))
+  const texts = returned.map(message => message.text.trim()).filter(text => text && !blocks.has(text))
   return {
     text: [...texts, draft.trim()].filter(Boolean).join('\n\n'),
     attachments: returned.flatMap(message => message.attachments ?? []),

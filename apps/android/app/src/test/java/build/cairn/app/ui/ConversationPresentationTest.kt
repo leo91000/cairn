@@ -534,6 +534,11 @@ class ConversationPresentationTest {
             "Plan it\n\nThen this",
             restoredComposer(listOf(plan, followUp), "Plan it\n\nThen this").text,
         )
+        // Only whole blocks count: a short message inside another word still comes back.
+        assertEquals(
+            "ok\n\nTokens look wrong",
+            restoredComposer(listOf(followUp.copy(text = "ok")), "Tokens look wrong").text,
+        )
     }
 
     @Test

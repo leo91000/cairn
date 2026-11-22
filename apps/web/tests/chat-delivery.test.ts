@@ -236,6 +236,8 @@ describe('returned messages', () => {
       plan: true,
     })
     expect(restoredComposer(returned, 'plan\n\nfollow-up').text).toBe('plan\n\nfollow-up')
+    // Only whole blocks count: a short message inside another word still comes back.
+    expect(restoredComposer([message('ok', { text: 'ok' })], 'Tokens look wrong').text).toBe('ok\n\nTokens look wrong')
   })
 
   it('let the next message resume only an empty queue paused by a Stop or failure', () => {

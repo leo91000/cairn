@@ -695,7 +695,7 @@ fn native_result(
             if !status.is_active()
                 && target["trigger"] == "chat"
                 && let Some(chat) = db.conversation_for_run(run_id)?
-                && (chat.wakeup.is_some()
+                && ((status == RunStatus::Succeeded && chat.wakeup.is_some())
                     || ((status == RunStatus::Succeeded || !chat.paused)
                         && continuation::has_pending_input(db, &chat)?))
             {
