@@ -90,9 +90,10 @@ export function restoredComposer(returned: ChatMessage[], draft: string) {
   }
 }
 
-/** After a Stop or a failed turn, the next message resumes an empty paused queue. */
+/** After a Stop, even one still settling, or a failed turn, the next message resumes an empty paused queue. */
 export function resumesOnSend(chat: ChatDetail | null | undefined, queued: number) {
-  return !!chat?.paused && !queued && ['failed', 'interrupted', 'cancelled'].includes(chat.run?.status ?? '')
+  const stopped = ['failed', 'interrupted', 'cancelled'].includes(chat?.run?.status ?? '') || !!chat?.run?.cancelRequestedAt
+  return !!chat?.paused && !queued && stopped
 }
 
 /**

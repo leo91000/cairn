@@ -245,6 +245,8 @@ describe('returned messages', () => {
       expect(resumesOnSend(chat([], { status }, true), 0)).toBe(true)
     expect(resumesOnSend(chat([], { status: 'failed' }, true), 1)).toBe(false)
     expect(resumesOnSend(chat([], { status: 'succeeded' }, true), 0)).toBe(false)
+    // A Stop still settling: the run has not ended yet.
+    expect(resumesOnSend(chat([], { status: 'running', cancelRequestedAt: 1 }, true), 0)).toBe(true)
     expect(resumesOnSend(chat([], { status: 'failed' }, false), 0)).toBe(false)
   })
 })

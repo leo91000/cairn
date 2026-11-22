@@ -452,8 +452,9 @@ and Android Signal journey.
 For a manual stopped-chat resume, both clients keep an untouched blank model as
 inherited, including when only speed changes. `preserveModel` distinguishes that
 request from the existing empty-model request that resolves to the catalog
-default. A failed turn that stopped before any process launched returns its
-message to its author instead (ADR-0090); resuming it is refused. Web keeps its picker dialog; Android uses a Material
+default. A failed turn that stopped before any process launched returns a
+person's message to them instead (ADR-0090), and resuming it is refused; messages
+from rules, agents and plugins are held behind a pause. Web keeps its picker dialog; Android uses a Material
 bottom sheet.
 
 ## Feature map

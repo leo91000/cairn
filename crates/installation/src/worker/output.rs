@@ -356,7 +356,8 @@ pub(super) async fn record(
                     // Persist retry intent before fencing can fail. Settlement
                     // and every subsequent launch still require a successful fence.
                     c.launched = Some(false);
-                    c.launched_turn = None;
+                    // Only this attempt's launch is undone.
+                    c.launched_turn = c.launched_turn_before.take();
                 }
             })
             .await?;

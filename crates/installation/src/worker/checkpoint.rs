@@ -35,6 +35,10 @@ pub struct RunCheckpoint {
     /// agent never received goes back to its author (ADR-0090).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launched_turn: Option<String>,
+    /// `launched_turn` before the current attempt's launch, put back if the controller
+    /// rejects that start: an earlier agent may still have the message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launched_turn_before: Option<String>,
     /// Small durable row, loaded separately from the retained workspace.
     #[serde(skip)]
     pub progress: Option<super::progress::Progress>,

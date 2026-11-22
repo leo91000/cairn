@@ -576,6 +576,14 @@ class ConversationPresentationTest {
         val succeeded =
             Chat(id = "chat", paused = true, run = Run(id = "r", status = "succeeded", taskId = ""))
         assertFalse(resumesOnSend(succeeded, 0))
+        // A Stop still settling: the run has not ended yet.
+        val stopping =
+            Chat(
+                id = "chat",
+                paused = true,
+                run = Run(id = "r", status = "running", taskId = "", cancelRequestedAt = 1),
+            )
+        assertTrue(resumesOnSend(stopping, 0))
     }
 
     @Test

@@ -988,11 +988,31 @@ internal fun ChatPage(
             !selected ||
                 returned.isEmpty() ||
                 readOnly ||
-                editing != null ||
                 state.busy ||
                 current.lifecycle != "active"
         )
             return@LaunchedEffect
+        // The message being edited came back: the edit becomes an ordinary draft, which
+        // already holds it, so only the returned copy is withdrawn.
+        returned
+            .find { it.id == editing }
+            ?.let { edited ->
+                restored += edited.id
+                editing = null
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    try {
+                        vm.api.deleteChatMessage(
+                            ChatMessageReference(chatId = current.id, messageId = edited.id)
+                        )
+                    } catch (e: build.cairn.app.data.ApiException) {
+                        if (e.status != 404) vm.report(e)
+                    } catch (e: Exception) {
+                        vm.report(e)
+                    }
+                }
+                return@LaunchedEffect
+            }
+        if (editing != null) return@LaunchedEffect
         returned.forEach { restored += it.id }
         // The message comes back as written: its plan request and agent choices included.
         val restoredDraft = restoredComposer(returned, draft)

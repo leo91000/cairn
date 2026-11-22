@@ -1715,6 +1715,7 @@ impl Execution<'_> {
                 c.turn_pending = None;
                 c.recovery_deadline_ms = None;
                 c.launched = Some(true);
+                c.launched_turn_before = c.launched_turn.take();
                 c.launched_turn = launched_turn.clone();
                 c.start_rejected = Some(false);
                 c.output_interrupted = None;

@@ -1355,7 +1355,21 @@ const restored = new Set<string>()
 watch([() => detail.value?.messages, readOnly, inactive, editing, busy], ([messages]) => {
   const chat = detail.value
   // While switching conversations the previous one is still loaded: its messages are not this draft's.
-  if (!chat || chat.id !== selectedChatId.value || !state.accountId || readOnly.value || inactive.value || editing.value || busy.value)
+  if (!chat || chat.id !== selectedChatId.value || !state.accountId || readOnly.value || inactive.value || busy.value)
+    return
+  // The message being edited came back: the edit becomes an ordinary draft, which already
+  // holds it, so only the returned copy is withdrawn.
+  const edited = returnedMessages({ ...chat, messages: messages ?? [] }, state.accountId, restored).find(message => message.id === editing.value)
+  if (edited) {
+    restored.add(edited.id)
+    editing.value = null
+    void deleteChatMessage(api, { chatId: chat.id, messageId: edited.id }).catch((e: unknown) => {
+      if (!(e instanceof ApiError && e.status === 404))
+        error.value = (e as Error).message
+    })
+  }
+
+  if (editing.value)
     return
   const returned = returnedMessages({ ...chat, messages: messages ?? [] }, state.accountId, restored)
   if (!returned.length)
