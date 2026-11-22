@@ -58,6 +58,11 @@ function hold(event: PointerEvent) {
     button.setPointerCapture(event.pointerId)
 }
 
+// A scroll or system gesture took the press over.
+function cancel() {
+  press = undefined
+}
+
 function release(id: string, event: PointerEvent) {
   const button = event.currentTarget as HTMLButtonElement
   const held = press
@@ -109,6 +114,7 @@ function openActivity(id: string, event: MouseEvent) {
         data-testid="subagent-chip"
         @pointerdown="hold"
         @pointerup="release(agent.id, $event)"
+        @pointercancel="cancel"
         @touchend="dropTapClick"
         @click="openActivity(agent.id, $event)"
       >
@@ -125,6 +131,7 @@ function openActivity(id: string, event: MouseEvent) {
       :aria-label="`${running.length === 1 ? '1 subagent' : `${running.length} subagents`} working. Open their activity`"
       @pointerdown="hold"
       @pointerup="release(first.id, $event)"
+      @pointercancel="cancel"
       @touchend="dropTapClick"
       @click="openActivity(first.id, $event)"
     >

@@ -983,11 +983,19 @@ test('working subagents stay in sight beside the composer and open as a drawer o
         expect(touched.y < shiftedBounds.y || touched.y > shiftedBounds.y + shiftedBounds.height).toBe(true)
       }
       finally {
+        await page.evaluate(() => {
+          const counted = window as Window & { clicks?: number }
+          counted.clicks = 0
+          document.addEventListener('click', () => counted.clicks! += 1, { capture: true })
+        })
         await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
       }
 
       await expect(drawer).toBeVisible()
-      await expect(page.getByTestId('queued-message')).toHaveCount(0)
+      // Input stays ordered, so the tap's own click would arrive before this one and land on
+      // whatever replaced the button under the finger.
+      await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
+      expect(await page.evaluate(() => (window as Window & { clicks?: number }).clicks)).toBe(1)
     }
   }
   finally {
