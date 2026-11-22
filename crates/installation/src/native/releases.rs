@@ -16,6 +16,11 @@ use tokio::{io::AsyncReadExt, sync::OnceCell};
 
 static BINARY: OnceCell<(String, u64)> = OnceCell::const_new();
 static TOOLS: OnceCell<(String, u64)> = OnceCell::const_new();
+/// The second tool bundle (Antigravity's `agy`), outside the first bundle's budget
+/// that installed supervisors enforce. Images without it serve no extra tools.
+static EXTRA_TOOLS: OnceCell<Option<(String, u64)>> = OnceCell::const_new();
+const EXTRA_TOOLS_FILE: &str = "/opt/cairn-native-extra-tools.zip";
+const EXTRA_TOOLS_PATH: &str = "/internal/nodes/native-extra-tools";
 
 async fn artifact_digest(path: &str, maximum: u64) -> Result<(String, u64)> {
     let mut file = tokio::fs::File::open(path).await?;
@@ -44,13 +49,30 @@ pub async fn metadata() -> Result<Value> {
     let tools = TOOLS
         .get_or_try_init(|| artifact_digest("/opt/cairn-native-tools.zip", 512 * 1024 * 1024))
         .await?;
-    Ok(json!({
+    let extra = EXTRA_TOOLS
+        .get_or_try_init(|| async {
+            if !tokio::fs::try_exists(EXTRA_TOOLS_FILE).await? {
+                return Ok::<_, Error>(None);
+            }
+            artifact_digest(EXTRA_TOOLS_FILE, 256 * 1024 * 1024)
+                .await
+                .map(Some)
+        })
+        .await?;
+    let mut release = json!({
         "sha256": digest, "size": size, "version": env!("CARGO_PKG_VERSION"),
         "os": "linux", "arch": "x86_64", "nativeHostProtocol": 2, "executionProtocol": 2,
         "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
         "binaryPath": "/internal/nodes/native-binary",
         "toolsPath": "/internal/nodes/native-tools", "toolsSha256": tools.0, "toolsSize": tools.1
-    }))
+    });
+    // Older supervisors ignore these fields and install no Antigravity CLI.
+    if let Some((digest, size)) = extra {
+        release["extraToolsPath"] = EXTRA_TOOLS_PATH.into();
+        release["extraToolsSha256"] = digest.as_str().into();
+        release["extraToolsSize"] = (*size).into();
+    }
+    Ok(release)
 }
 
 pub async fn download(State(app): State<App>, request: Request) -> Result<Response> {
@@ -81,16 +103,22 @@ pub async fn download(State(app): State<App>, request: Request) -> Result<Respon
     if path.ends_with("native-release") {
         return Ok(Json(release).into_response());
     }
-    if path.ends_with("native-binary") || path.ends_with("native-tools") {
-        let tools = path.ends_with("native-tools");
-        let size = &release[if tools { "toolsSize" } else { "size" }];
-        let digest = text(&release, if tools { "toolsSha256" } else { "sha256" });
-        let file = tokio::fs::File::open(if tools {
-            "/opt/cairn-native-tools.zip"
-        } else {
-            "/proc/self/exe"
-        })
-        .await?;
+    let artifact = if path == EXTRA_TOOLS_PATH {
+        if release["extraToolsSha256"].is_null() {
+            return Err(Error::not_found("This release has no extra native tools."));
+        }
+        Some(("extraToolsSize", "extraToolsSha256", EXTRA_TOOLS_FILE))
+    } else if path.ends_with("native-tools") {
+        Some(("toolsSize", "toolsSha256", "/opt/cairn-native-tools.zip"))
+    } else if path.ends_with("native-binary") {
+        Some(("size", "sha256", "/proc/self/exe"))
+    } else {
+        None
+    };
+    if let Some((size, digest, file)) = artifact {
+        let size = &release[size];
+        let digest = text(&release, digest);
+        let file = tokio::fs::File::open(file).await?;
         return Ok((
             [
                 ("content-type", "application/octet-stream".to_owned()),

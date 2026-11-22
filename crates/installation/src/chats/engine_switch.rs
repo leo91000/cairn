@@ -29,7 +29,7 @@ CREATE TABLE conversation_engine_switches(
     request_id TEXT NOT NULL,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     turn_id TEXT NOT NULL CHECK(length(turn_id) BETWEEN 1 AND 200),
-    provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode')),
+    provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode','antigravity')),
     model TEXT NOT NULL,
     pending INTEGER NOT NULL CHECK(pending IN (0,1)),
     error TEXT,

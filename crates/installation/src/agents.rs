@@ -13,7 +13,7 @@ pub(crate) const SCHEMA: &str = "
 CREATE TABLE agents(
  id TEXT PRIMARY KEY NOT NULL,
  name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100),
- provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode')),
+ provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode','antigravity')),
  description TEXT NOT NULL CHECK(length(description)<=500),
  model TEXT NOT NULL CHECK(length(model)<=100),
  reasoning TEXT NOT NULL CHECK(length(reasoning)<=40),

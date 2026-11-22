@@ -4,7 +4,15 @@ import type { AccountsState } from '../accounts'
 import { computed, ref, watch } from 'vue'
 import { providers } from '../../../../packages/contracts/accounts'
 import { listCodingAgentAccountProviders } from '../../../../packages/contracts/generated/listCodingAgentAccountProviders'
-import { brands } from '../accounts'
+import {
+  antigravityTermsWarning,
+  brands,
+  connectsWithKey,
+  credentialsProject,
+  googleAccount,
+  googleCloudKey,
+  needsTermsConfirmation,
+} from '../accounts'
 import { api, notify } from '../api'
 import {
   ArrowUpRight,
@@ -30,7 +38,28 @@ const modelProvider = ref(props.account?.modelProvider ?? 'opencode')
 const keyProviders = ref<ApiKeyProvider[]>([])
 const providerError = ref('')
 const loadingProviders = ref(false)
-const usesKey = computed(() => providers[chosen.value].connection === 'apiKey')
+// Antigravity offers a Gemini API key, Google Cloud credentials or a Google account sign-in.
+const offersChoice = computed(() => providers[chosen.value].connection === 'choice')
+const choices = computed(() => offersChoice.value
+  ? [
+      ...keyProviders.value.map(item => ({
+        id: item.id,
+        name: item.id === 'google-cloud' ? 'Google Cloud credentials' : item.id === 'gemini' ? 'Gemini API key' : item.name,
+        description: item.id === 'google-cloud' ? 'Service account or authorized-user JSON, with a project and region.' : 'Recommended. A key from Google AI Studio.',
+      })),
+      { id: googleAccount, name: 'Google account', description: 'Sign in on Google’s page. Not allowed by Google’s terms for third-party apps.' },
+    ]
+  : [])
+const usesKey = computed(() => connectsWithKey(chosen.value, offersChoice.value ? modelProvider.value : null))
+const usesCredentials = computed(() => offersChoice.value && modelProvider.value === 'google-cloud')
+const confirmsTerms = computed(() => needsTermsConfirmation(chosen.value, modelProvider.value))
+const acceptedTerms = ref(false)
+const credentials = ref('')
+const project = ref('')
+const location = ref('')
+const credentialsError = ref('')
+const detectedProject = computed(() => credentialsProject(credentials.value))
+const keyReady = computed(() => usesCredentials.value ? !!credentials.value.trim() : !!apiKey.value.trim())
 const code = ref('')
 const submitted = ref(false)
 const copied = ref(false)
@@ -38,17 +67,23 @@ const copyError = ref('')
 const flow = computed(() => props.accounts.signIn.value?.state === 'pending' || props.accounts.signIn.value?.state === 'failed' ? props.accounts.signIn.value : null)
 const busy = computed(() => props.accounts.busy.value)
 const title = computed(() => {
-  if (!flow.value)
-    return props.account ? 'Replace API key' : 'Add an account'
+  if (!flow.value) {
+    if (!props.account)
+      return 'Add an account'
+    return confirmsTerms.value ? 'Reconnect Google account' : usesCredentials.value ? 'Replace credentials' : 'Replace API key'
+  }
+
   if (flow.value.state === 'failed')
     return 'Let’s try that again'
-  return `Connect your ${providers[flow.value.provider].subscription}`
+  return `Connect your ${flow.value.provider === 'antigravity' ? 'Google account' : providers[flow.value.provider].subscription}`
 })
+// The vendor whose page signs in and shows the authorization code to paste.
+const codeVendor = computed(() => flow.value?.provider === 'antigravity' ? { page: 'Google', name: 'Google' } : { page: 'Anthropic', name: 'Claude' })
 watch(chosen, async (value, _previous, onCleanup) => {
   apiKey.value = ''
   providerError.value = ''
   keyProviders.value = []
-  if (providers[value].connection !== 'apiKey')
+  if (providers[value].connection === 'oauth')
     return
   let current = true
   onCleanup(() => {
@@ -62,7 +97,8 @@ watch(chosen, async (value, _previous, onCleanup) => {
     const values = result.providers
     if (current) {
       keyProviders.value = values
-      if (!values.some(item => item.id === modelProvider.value))
+      const signsIn = providers[value].connection === 'choice' && modelProvider.value === googleAccount
+      if (!signsIn && !values.some(item => item.id === modelProvider.value))
         modelProvider.value = values[0]?.id ?? ''
     }
   }
@@ -77,6 +113,11 @@ watch(chosen, async (value, _previous, onCleanup) => {
 }, { immediate: true })
 watch(modelProvider, () => {
   apiKey.value = ''
+  credentials.value = ''
+  project.value = ''
+  location.value = ''
+  credentialsError.value = ''
+  acceptedTerms.value = false
 })
 watch(() => props.accounts.signIn.value?.state, (state) => {
   if (state === 'complete')
@@ -89,15 +130,40 @@ watch([() => flow.value?.code, () => flow.value?.state], () => {
   submitted.value = false
 })
 
+async function readCredentials(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (!file)
+    return
+  credentials.value = await file.text()
+  credentialsError.value = ''
+}
+
 async function add() {
   const accountName = name.value.trim() || `${providers[chosen.value].label} account`
+  if (confirmsTerms.value && !acceptedTerms.value)
+    return
   if (usesKey.value) {
-    const saved = await props.accounts.connectKey(chosen.value, accountName, modelProvider.value, apiKey.value, props.account?.id)
+    let key = apiKey.value
+    if (usesCredentials.value) {
+      try {
+        key = googleCloudKey({ credentials: credentials.value, project: project.value, location: location.value })
+      }
+      catch (error) {
+        credentialsError.value = (error as Error).message
+        return
+      }
+    }
+
+    const saved = await props.accounts.connectKey(chosen.value, accountName, modelProvider.value, key, props.account?.id)
     if (saved) {
       apiKey.value = ''
-      notify(`${saved.name} API key saved`)
+      credentials.value = ''
+      notify(`${saved.name} ${usesCredentials.value ? 'credentials' : 'API key'} saved`)
       emit('close')
     }
+  }
+  else if (props.account) {
+    await props.accounts.reconnect(props.account.id)
   }
   else {
     await props.accounts.add(chosen.value, accountName)
@@ -147,7 +213,7 @@ async function close() {
       <form v-if="!flow" class="grid gap-5" @submit.prevent="add">
         <div
           v-if="!account"
-          class="grid grid-cols-3 gap-2.5 phone:grid-cols-1"
+          class="grid grid-cols-2 gap-2.5 phone:grid-cols-1"
           role="radiogroup"
           aria-label="Coding agent"
         >
@@ -178,11 +244,88 @@ async function close() {
             :disabled="busy || !!account"
           >
         </label>
-        <template v-if="usesKey">
+        <template v-if="offersChoice">
           <UiAlert v-if="providerError">
             {{ providerError }}
           </UiAlert>
+          <div class="grid gap-2" role="radiogroup" aria-label="Connection">
+            <button
+              v-for="item in choices"
+              :key="item.id"
+              type="button"
+              role="radio"
+              :aria-checked="modelProvider === item.id"
+              class="flex flex-col rounded-xl border px-3.5 py-2.5 text-left transition-[border-color,background] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
+              :class="modelProvider === item.id ? 'border-accent bg-soft' : 'border-line hover:bg-hover/40'"
+              :disabled="busy || loadingProviders || (!!account && modelProvider !== item.id)"
+              @click="modelProvider = item.id"
+            >
+              <span class="text-sm font-semibold">{{ item.name }}</span>
+              <span class="text-2xs text-muted">{{ item.description }}</span>
+            </button>
+          </div>
+        </template>
+        <template v-if="usesCredentials">
           <label class="gap-1.5 text-sm text-ink">
+            Credentials JSON
+            <textarea
+              v-model="credentials"
+              rows="5"
+              spellcheck="false"
+              autocomplete="off"
+              required
+              class="font-mono text-xs"
+              placeholder="Paste a service-account or authorized-user JSON file"
+              :disabled="busy || loadingProviders"
+              @input="credentialsError = ''"
+            />
+          </label>
+          <label class="gap-1.5 text-sm text-ink">
+            Or choose the file
+            <input
+              type="file"
+              accept="application/json,.json"
+              :disabled="busy || loadingProviders"
+              @change="readCredentials"
+            >
+          </label>
+          <div class="grid grid-cols-2 gap-3 phone:grid-cols-1">
+            <label class="gap-1.5 text-sm text-ink">
+              Project
+              <input
+                v-model="project"
+                maxlength="100"
+                autocomplete="off"
+                spellcheck="false"
+                :placeholder="detectedProject || 'Project ID'"
+                :disabled="busy || loadingProviders"
+                @input="credentialsError = ''"
+              >
+            </label>
+            <label class="gap-1.5 text-sm text-ink">
+              Region
+              <input
+                v-model="location"
+                maxlength="100"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="global"
+                :disabled="busy || loadingProviders"
+              >
+            </label>
+          </div>
+          <p v-if="credentialsError" role="alert" class="text-sm text-danger">
+            {{ credentialsError }}
+          </p>
+          <p class="text-xs text-muted">
+            The credentials are encrypted on your installation and used only for Antigravity runs. Antigravity doesn’t report usage.
+          </p>
+        </template>
+        <template v-else-if="usesKey">
+          <UiAlert v-if="providerError && !offersChoice">
+            {{ providerError }}
+          </UiAlert>
+          <label v-if="!offersChoice" class="gap-1.5 text-sm text-ink">
             Model provider
             <select v-model="modelProvider" :disabled="busy || loadingProviders || !!account">
               <option v-for="item in keyProviders" :key="item.id" :value="item.id">{{ item.name }}</option>
@@ -203,17 +346,36 @@ async function close() {
           </label>
           <p class="text-xs text-muted">
             The key is encrypted on your installation and used only for this model provider.
-            {{ modelProvider === 'opencode-go' ? 'OpenCode Go usage is checked automatically.' : 'Provider usage isn’t reported here.' }}
+            {{ modelProvider === 'opencode-go' ? 'OpenCode Go usage is checked automatically.' : chosen === 'antigravity' ? 'Antigravity doesn’t report usage.' : 'Provider usage isn’t reported here.' }}
           </p>
           <p class="text-xs text-muted">
             Model access is checked when you send a message. Your provider’s plan, balance and Privacy settings still apply.
           </p>
         </template>
-        <p v-else class="text-xs text-muted">
-          You sign in on {{ providers[chosen].vendor }}’s page. Your password stays there.
-        </p>
-        <UiButton type="submit" variant="primary" :disabled="busy || (usesKey && (loadingProviders || !keyProviders.length || !apiKey.trim()))">
-          <template v-if="usesKey">
+        <template v-else>
+          <div v-if="confirmsTerms" class="grid gap-3 rounded-xl border border-warning/40 bg-warning/8 px-3.5 py-3" role="alert">
+            <p class="text-sm text-ink">
+              {{ antigravityTermsWarning }}
+            </p>
+            <label class="flex-row items-start gap-2.5 text-sm text-ink">
+              <input
+                v-model="acceptedTerms"
+                type="checkbox"
+                class="mt-0.5"
+                :disabled="busy"
+              >
+              <span>I understand that Google may suspend this account and want to sign in anyway.</span>
+            </label>
+          </div>
+          <p class="text-xs text-muted">
+            You sign in on {{ providers[chosen].vendor }}’s page. Your password stays there.
+          </p>
+        </template>
+        <UiButton type="submit" variant="primary" :disabled="busy || (usesKey && (loadingProviders || !keyProviders.length || !keyReady)) || (confirmsTerms && !acceptedTerms)">
+          <template v-if="usesCredentials">
+            {{ account ? 'Replace credentials' : 'Save credentials' }}
+          </template>
+          <template v-else-if="usesKey">
             {{ account ? 'Replace API key' : 'Save API key' }}
           </template>
           <template v-else>
@@ -294,7 +456,7 @@ async function close() {
               /></span>
               <div class="min-w-0 flex-1 pt-1">
                 <p class="text-sm font-semibold">
-                  {{ flow.url ? 'Sign in on Anthropic’s page' : 'Preparing your secure sign-in link…' }}
+                  {{ flow.url ? `Sign in on ${codeVendor.page}’s page` : 'Preparing your secure sign-in link…' }}
                 </p>
                 <a
                   v-if="flow.url && flow.phase !== 'verifying'"
@@ -303,14 +465,14 @@ async function close() {
                   rel="noopener noreferrer"
                   class="mt-2.5"
                   :class="[buttonBase, buttonVariants.default, buttonSizes.small]"
-                >Open Claude sign-in<Icon :name="ArrowUpRight" :size="14" /></a>
+                >Open {{ codeVendor.name }} sign-in<Icon :name="ArrowUpRight" :size="14" /></a>
               </div>
             </li>
             <li class="flex gap-3">
               <span class="step-number" :class="flow.acceptsCode ? 'current' : flow.phase === 'verifying' ? 'done' : ''">2</span>
               <form class="min-w-0 flex-1 pt-1" @submit.prevent="submit">
                 <label class="grid gap-2 text-sm font-semibold">
-                  Paste the code Anthropic shows
+                  Paste the code {{ codeVendor.page }} shows
                   <input
                     v-model="code"
                     type="password"
@@ -318,7 +480,7 @@ async function close() {
                     spellcheck="false"
                     placeholder="Authorization code"
                     :disabled="busy || !flow.acceptsCode || submitted"
-                    aria-label="Claude authorization code"
+                    :aria-label="`${codeVendor.name} authorization code`"
                   >
                 </label>
                 <UiButton

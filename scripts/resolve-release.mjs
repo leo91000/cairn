@@ -125,6 +125,7 @@ if (import.meta.main) {
     gh: process.env.GH_VERSION,
     claude: process.env.CLAUDE_VERSION,
     opencode: process.env.OPENCODE_VERSION,
+    antigravity: process.env.ANTIGRAVITY_VERSION,
   }
   if (Object.values(tools).some(version => !version))
     throw new Error('Missing resolved stable tool versions')

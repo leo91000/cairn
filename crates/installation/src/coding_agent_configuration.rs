@@ -19,7 +19,7 @@ mod tests;
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS coding_agent_configurations(
  scope TEXT NOT NULL,
- provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode')),
+ provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode','antigravity')),
  agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
  document TEXT NOT NULL,
  presentation TEXT NOT NULL,

@@ -814,7 +814,7 @@ internal fun ChatPage(
         if (readOnly || noAgent) return
         vm.perform {
             require(!plan || (planAllowed && planAvailable)) {
-                "Le mode Plan nécessite Codex ou Claude Code. Désactivez Plan pour une demande ordinaire."
+                "Le mode Plan nécessite Codex, Claude Code ou Antigravity. Désactivez Plan pour une demande ordinaire."
             }
             val chatId =
                 id
@@ -1987,7 +1987,7 @@ internal fun ChatPage(
                                     if (planBlocked)
                                         Text(
                                             if (planAllowed)
-                                                "Le mode Plan nécessite Codex ou Claude Code. Choisissez un assistant compatible ou désactivez Plan pour une demande ordinaire."
+                                                "Le mode Plan nécessite Codex, Claude Code ou Antigravity. Choisissez un assistant compatible ou désactivez Plan pour une demande ordinaire."
                                             else
                                                 "Plan est désactivé pour cette installation. Activez-le dans les paramètres ou désactivez Plan pour une demande ordinaire.",
                                             Modifier.padding(horizontal = 12.dp, vertical = 6.dp)

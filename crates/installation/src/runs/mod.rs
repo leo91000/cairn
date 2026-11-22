@@ -133,7 +133,7 @@ pub(crate) const SCHEMA: &str = concat!(
   account_id TEXT,
   account_name TEXT,
   account_wait_reason TEXT,
-  account_required TEXT CHECK(account_required IN ('codex','claude','opencode')),
+  account_required TEXT CHECK(account_required IN ('codex','claude','opencode','antigravity')),
   capacity_wait_until INTEGER CHECK(capacity_wait_until BETWEEN 0 AND 9007199254740991),
   retry_attempt INTEGER CHECK(retry_attempt BETWEEN 1 AND 5),
   retry_limit INTEGER CHECK(retry_limit=5),

@@ -351,7 +351,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
           <h3 :id="`${id}-agent`" class="section-label">
             Coding agent
           </h3>
-          <div class="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Coding agent">
+          <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Coding agent">
             <button
               v-for="item in providers"
               :key="item.value"
@@ -388,6 +388,17 @@ onBeforeUnmount(() => removeEventListener('resize', place))
               </p>
               <p class="mt-1 text-muted">
                 Access depends on your provider’s plan, balance and Privacy settings. A listed model may still be blocked when you use it.
+              </p>
+            </div>
+          </div>
+          <div v-else-if="provider === 'antigravity'" class="flex gap-2.5 rounded-xl border border-line bg-surface px-3 py-2.5 text-2xs">
+            <Icon :name="Info" :size="15" class="mt-0.5 shrink-0 text-accent" />
+            <div>
+              <p class="font-semibold text-ink">
+                Models from your Antigravity connections
+              </p>
+              <p class="mt-1 text-muted">
+                Each model runs only on connections of the kind that offers it: Gemini API key, Google Cloud or Google account.
               </p>
             </div>
           </div>

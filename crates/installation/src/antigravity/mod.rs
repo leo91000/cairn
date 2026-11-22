@@ -184,7 +184,11 @@ pub(crate) async fn check_version(config: &Config, env: &Environment) -> Result<
         4096,
     )
     .await
-    .map_err(|_| Error::unavailable("The Antigravity CLI is not installed."))?;
+    .map_err(|_| {
+        Error::unavailable(
+            "The Antigravity CLI is not installed on this execution node. On a native node, rerun the native installer to update its supervisor, then restart cairn-native-node.",
+        )
+    })?;
     if !output.success || !supported_version(&output.stdout) {
         return Err(Error::unavailable(format!(
             "This Antigravity CLI release is not supported. Install {MINIMUM} or later."

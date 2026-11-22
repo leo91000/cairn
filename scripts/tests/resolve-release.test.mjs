@@ -20,6 +20,7 @@ const config = {
     gh: '2.101.0',
     claude: '2.1.308',
     opencode: '1.19.4',
+    antigravity: '1.5.14',
   },
   // The engine releases production serves, which rollbacks were qualified against.
   served: { claude: '2.1.280', opencode: '1.19.0' },
@@ -186,6 +187,9 @@ describe('release validation reuse', () => {
       { ...config.tools, gh: '2.100.0' },
       { ...config.tools, claude: '2.1.280' },
       { ...config.tools, opencode: '1.19.0' },
+      { ...config.tools, antigravity: '1.5.15' },
+      // Evidence recorded before Antigravity was resolved never vouches for it.
+      { ...config.tools, antigravity: undefined },
     ]) {
       expect(await resolveRelease(config, {
         gh: github({ runs: () => [mainRun], evidence: { [mainRun.id]: evidenceFor(mainRun, config.commit, { tools }) } }),

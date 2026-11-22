@@ -14,7 +14,7 @@ use rusqlite::{OptionalExtension, params};
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE coding_agent_accounts(
  id TEXT PRIMARY KEY NOT NULL,
- provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode')),
+ provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode','antigravity')),
  name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100),
  enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
  email TEXT, plan TEXT, identity TEXT,
@@ -65,7 +65,7 @@ CREATE TABLE account_exhaustion(
 CREATE TABLE account_leases(
  run_id TEXT PRIMARY KEY NOT NULL,
  account_id TEXT NOT NULL REFERENCES coding_agent_accounts(id) ON DELETE RESTRICT,
- provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode')),
+ provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode','antigravity')),
  model TEXT NOT NULL, home TEXT NOT NULL
 );
 CREATE INDEX account_leases_account ON account_leases(account_id,run_id);
@@ -81,6 +81,7 @@ fn account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
         provider: match provider.as_str() {
             "codex" => Provider::Codex,
             "claude" => Provider::Claude,
+            "antigravity" => Provider::Antigravity,
             _ => Provider::Opencode,
         },
         name: row.get(2)?,
@@ -116,6 +117,7 @@ fn lease_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Lease> {
         provider: match provider.as_str() {
             "codex" => Provider::Codex,
             "claude" => Provider::Claude,
+            "antigravity" => Provider::Antigravity,
             _ => Provider::Opencode,
         },
         model: row.get(3)?,

@@ -9,6 +9,7 @@ import type {
 import type { AccountMutationOutput } from '../../../packages/contracts/generated/typescript/AccountMutationOutput'
 import type { IconName } from './icons'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { providers } from '../../../packages/contracts/accounts'
 import { cancelCodingAgentAccountSignIn } from '../../../packages/contracts/generated/cancelCodingAgentAccountSignIn'
 import { connectCodingAgentAccount } from '../../../packages/contracts/generated/connectCodingAgentAccount'
 import { deleteCodingAgentAccount } from '../../../packages/contracts/generated/deleteCodingAgentAccount'
@@ -20,7 +21,12 @@ import { replaceCodingAgentAccount } from '../../../packages/contracts/generated
 import { replaceCodingAgentAccountKey } from '../../../packages/contracts/generated/replaceCodingAgentAccountKey'
 import { submitCodingAgentAccountCode } from '../../../packages/contracts/generated/submitCodingAgentAccountCode'
 import { api, notify } from './api'
-import { BrandClaude, BrandOpenAI, BrandOpenCode } from './icons'
+import {
+  BrandClaude,
+  BrandGemini,
+  BrandOpenAI,
+  BrandOpenCode,
+} from './icons'
 
 /** Each coding agent's brand mark and colors. */
 export const brands: Record<Provider, {
@@ -47,6 +53,79 @@ export const brands: Record<Provider, {
     tile: 'bg-ink text-canvas',
     chosen: 'border-accent bg-accent/8 shadow-[0_0_0_1px_var(--color-accent)]',
   },
+  antigravity: {
+    icon: BrandGemini,
+    text: 'text-gemini',
+    tile: 'bg-gemini text-white',
+    chosen: 'border-gemini bg-gemini/8 shadow-[0_0_0_1px_var(--color-gemini)]',
+  },
+}
+
+/** The model provider of an Antigravity account signed in with a Google account. */
+export const googleAccount = 'google'
+
+/** Shown, and confirmed, before any Antigravity sign-in with a Google account. */
+export const antigravityTermsWarning = 'Google’s Antigravity terms prohibit signing in with a consumer Google account from third-party applications such as Cairn; Google may suspend the account. Prefer a Gemini API key or Google Cloud credentials.'
+
+/** How an account connects: a provider key or credentials, or a sign-in on the vendor's page. */
+export function connectsWithKey(provider: Provider, modelProvider: string | null | undefined) {
+  const { connection } = providers[provider]
+  if (connection === 'choice')
+    return !!modelProvider && modelProvider !== googleAccount
+  return connection === 'apiKey'
+}
+
+/** A sign-in that Google's Antigravity terms forbid from third-party applications. */
+export function needsTermsConfirmation(provider: Provider, modelProvider: string | null | undefined) {
+  return provider === 'antigravity' && modelProvider === googleAccount
+}
+
+/** What reconnecting this account does: replace its key, or sign in again. */
+export function reconnectLabel(account: Pick<Account, 'provider' | 'modelProvider' | 'state'>) {
+  if (connectsWithKey(account.provider, account.modelProvider))
+    return account.modelProvider === 'google-cloud' ? 'Replace credentials' : 'Replace API key'
+  return account.state === 'pending' ? 'Sign in' : 'Reconnect'
+}
+
+/** The project a Google Cloud credentials file names, if any. */
+export function credentialsProject(credentials: string) {
+  try {
+    const value = JSON.parse(credentials) as Record<string, unknown>
+    const project = value?.project_id ?? value?.quota_project_id
+    return typeof project === 'string' ? project : ''
+  }
+  catch {
+    return ''
+  }
+}
+
+/**
+ * The key Antigravity stores for Google Cloud: the credentials file (service account or
+ * `authorized_user`) with its project and region. Empty fields keep the file's project and
+ * the `global` region.
+ */
+export function googleCloudKey(input: { credentials: string, project: string, location: string }) {
+  let credentials: unknown
+  try {
+    credentials = JSON.parse(input.credentials)
+  }
+  catch {
+    throw new Error('Paste the credentials JSON file from Google Cloud.')
+  }
+
+  if (!credentials || typeof credentials !== 'object' || Array.isArray(credentials))
+    throw new Error('Paste the credentials JSON file from Google Cloud.')
+
+  const project = input.project.trim()
+  const location = input.location.trim()
+  if (!project && !credentialsProject(input.credentials))
+    throw new Error('Enter the Google Cloud project: the credentials file does not name one.')
+
+  return JSON.stringify({
+    credentials,
+    ...(project ? { project } : {}),
+    ...(location ? { location } : {}),
+  })
 }
 
 /** Short status shown beside an account. Ready accounts need no label. */

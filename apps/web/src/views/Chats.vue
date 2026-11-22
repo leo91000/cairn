@@ -199,7 +199,7 @@ function resumeDiagnosticRunStatus(status?: string): ResumeDiagnosticRunStatus {
 }
 
 function resumeDiagnosticProvider(provider: string): Provider | 'other' {
-  if (provider === 'codex' || provider === 'claude' || provider === 'opencode')
+  if (provider === 'codex' || provider === 'claude' || provider === 'opencode' || provider === 'antigravity')
     return provider
   return 'other'
 }

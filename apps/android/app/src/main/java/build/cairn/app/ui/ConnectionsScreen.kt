@@ -31,6 +31,8 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
     var adding by remember { mutableStateOf<String?>(null) }
     var addingAny by remember { mutableStateOf(false) }
     var replacing by remember { mutableStateOf<Account?>(null) }
+    // An Antigravity Google account signs in again only after the terms warning.
+    var resigning by remember { mutableStateOf<Account?>(null) }
     fun show(next: AccountsView) {
         val previous = view?.signIn
         if (previous?.state == "pending" && next.signIn?.state == "complete") {
@@ -46,6 +48,10 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
         val next = vm.api.listCodingAgentAccounts(ListAccountsInput())
         // The sheets are separate windows: their state changes on the main thread only.
         withContext(Dispatchers.Main) { show(next) }
+    }
+    fun reconnect(account: Account) = vm.perform {
+        api.reconnectCodingAgentAccount(AccountInput(account.id)).requireConnection()
+        load()
     }
     val signingIn = view?.signIn?.state == "pending"
     Poll("accounts", if (signingIn) 1500 else 4000) {
@@ -154,21 +160,23 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
                 openRun,
                 reconnect = {
                     opened = null
-                    if (codingAgent(account.provider).apiKeys) {
+                    if (replacesKey(account)) {
                         replacing = account
                         adding = account.provider
-                    } else {
-                        vm.perform {
-                            api.reconnectCodingAgentAccount(AccountInput(account.id))
-                                .requireConnection()
-                            load()
-                        }
-                    }
+                    } else if (codingAgent(account.provider).accountSignIn) {
+                        resigning = account
+                    } else reconnect(account)
                 },
                 changed = { load() },
                 close = { opened = null },
             )
         }
+    resigning?.let { account ->
+        GoogleSignInWarningDialog(dismiss = { resigning = null }) {
+            resigning = null
+            reconnect(account)
+        }
+    }
     // A sign-in that is still pending or failed reopens its sheet, including after a restart.
     val flow = view?.signIn?.takeIf { it.state == "pending" || it.state == "failed" }
     if (addingAny || adding != null || flow != null)

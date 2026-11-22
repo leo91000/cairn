@@ -305,6 +305,67 @@ class ModelPickerTest : ModelPickerCases() {
     }
 
     @Test
+    fun antigravityChoosesAModelWithReasoningAndNoSpeed() {
+        val efforts =
+            listOf("low", "medium", "high", "xhigh").map { ReasoningOption(reasoningEffort = it) }
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "gemini-4-neon",
+                            displayName = "Gemini 4 Neon",
+                            description = "Via Gemini API, Google Cloud",
+                            isDefault = true,
+                            defaultReasoningEffort = "high",
+                            supportedReasoningEfforts = efforts,
+                        ),
+                        CodingAgentModel(
+                            model = "gemini-4-flare",
+                            displayName = "Gemini 4 Flare",
+                            description = "Via Gemini API",
+                            defaultReasoningEffort = "low",
+                            supportedReasoningEfforts = efforts.take(2),
+                        ),
+                    )
+            )
+        var chosen = "" to ""
+        compose.setContent {
+            var model by remember { mutableStateOf("") }
+            var reasoning by remember { mutableStateOf("") }
+            CairnTheme("light") {
+                Surface(Modifier.fillMaxSize()) {
+                    ModelPicker(
+                        catalog,
+                        model,
+                        reasoning,
+                        provider = "antigravity",
+                        changeSpeed = {},
+                    ) { m, r ->
+                        model = m
+                        reasoning = r
+                        chosen = m to r
+                    }
+                }
+            }
+        }
+        // Antigravity needs a model: the catalog's default is chosen instead of an empty one.
+        compose.waitForIdle()
+        assert(chosen == ("gemini-4-neon" to "")) { chosen.toString() }
+        compose.onNodeWithTag("model-picker").performClick()
+        compose.onNodeWithText("Via Gemini API, Google Cloud").assertExists()
+        compose.onNodeWithText("Défaut du fournisseur").assertExists()
+        compose
+            .onNodeWithText("clé API Gemini, Google Cloud ou compte Google", substring = true)
+            .assertExists()
+        compose.onNodeWithTag("speed-options").assertDoesNotExist()
+        capture("antigravity-models")
+        compose.onNodeWithText("Gemini 4 Flare").performClick()
+        compose.waitForIdle()
+        assert(chosen == ("gemini-4-flare" to "")) { chosen.toString() }
+    }
+
+    @Test
     fun speedIsKeptAcrossModelsAndOnlyClaimedWhereCodexOffersIt() {
         val fast =
             ServiceTier(id = "priority", name = "Fast", description = "2x speed, increased usage")

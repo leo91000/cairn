@@ -22,6 +22,8 @@ const note = computed(() => {
     return ''
   if (usage?.error)
     return 'Usage unavailable'
+  if (props.account.provider === 'antigravity')
+    return 'Usage not reported by Antigravity'
   return props.account.modelProvider && props.account.modelProvider !== 'opencode-go' ? 'Usage not reported by provider' : 'Usage not reported yet'
 })
 </script>
