@@ -32,37 +32,57 @@ const first = computed(() => running.value[0] ?? props.agents[0])
 
 // A queued message can appear between press and release and move these buttons. The browser
 // then sends the click to whatever moved under the pointer, so pointer presses open on release.
-let press: { button: HTMLButtonElement, pointerId: number, box: Box } | undefined
+let press: {
+  id: string
+  button: HTMLButtonElement
+  pointerId: number
+  box: Box
+} | undefined
 // Not cleared on unmount: opening can navigate away before the browser's click arrives.
 let stopIgnoringClick: (() => void) | undefined
+onBeforeUnmount(() => cancelPress())
 
 function shownBox(button: HTMLButtonElement) {
   return visibleBox(button.getBoundingClientRect(), button.parentElement?.getBoundingClientRect())
 }
 
-function holdPress(event: PointerEvent) {
+function holdPress(id: string, event: PointerEvent) {
   if (!event.isPrimary || event.button !== 0)
     return
 
+  cancelPress()
   const button = event.currentTarget as HTMLButtonElement
-  press = { button, pointerId: event.pointerId, box: shownBox(button) }
+  press = {
+    id,
+    button,
+    pointerId: event.pointerId,
+    box: shownBox(button),
+  }
   button.setPointerCapture(event.pointerId)
+  // WebKit can send a touch release to what moved under the finger despite the capture.
+  window.addEventListener('pointerup', releasePress, true)
 }
 
-function releasePress(id: string, event: PointerEvent) {
-  const button = event.currentTarget as HTMLButtonElement
+function releasePress(event: PointerEvent) {
   const held = press
-  press = undefined
-  if (held?.button !== button || held.pointerId !== event.pointerId)
+  if (held?.pointerId !== event.pointerId)
     return
 
+  cancelPress()
+  const { id, button } = held
   ignoreNextClick(button)
-  if (releasedOnControl(held.box, shownBox(button), event.clientX, event.clientY))
-    emit('open', id, button)
+  if (!releasedOnControl(held.box, shownBox(button), event.clientX, event.clientY))
+    return
+
+  // The browser's own mouse-down may land beside a button that moved, so focus it here.
+  if (event.pointerType !== 'mouse')
+    button.focus({ preventScroll: true })
+  emit('open', id, button)
 }
 
 function cancelPress() {
   press = undefined
+  window.removeEventListener('pointerup', releasePress, true)
 }
 
 const ignoredEvents = ['mousedown', 'mouseup', 'click'] as const
@@ -123,8 +143,7 @@ function openFromClick(id: string, event: MouseEvent) {
         :aria-label="`${agent.title}, ${subagentLabels[state(agent)]}. Open its activity`"
         :aria-pressed="selected === agent.id"
         data-testid="subagent-chip"
-        @pointerdown="holdPress"
-        @pointerup="releasePress(agent.id, $event)"
+        @pointerdown="holdPress(agent.id, $event)"
         @pointercancel="cancelPress"
         @lostpointercapture="cancelPress"
         @contextmenu="cancelPress"
@@ -141,8 +160,7 @@ function openFromClick(id: string, event: MouseEvent) {
       v-if="first"
       class="hidden min-h-11 min-w-0 flex-1 items-center gap-2 text-left phone:flex"
       :aria-label="`${running.length === 1 ? '1 subagent' : `${running.length} subagents`} working. Open their activity`"
-      @pointerdown="holdPress"
-      @pointerup="releasePress(first.id, $event)"
+      @pointerdown="holdPress(first.id, $event)"
       @pointercancel="cancelPress"
       @lostpointercapture="cancelPress"
       @contextmenu="cancelPress"
