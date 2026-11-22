@@ -99,6 +99,25 @@ it('preserves genuine application errors without starting recovery', async () =>
   expect(vi.getTimerCount()).toBe(0)
 })
 
+it.each(['', '<h1>Too many requests</h1>'])('retries a plugin status read with an unparsable 429 body %j', async (body) => {
+  const { pluginRequest } = await import('../src/plugin-operations')
+  const page = { items: [], nextPage: null }
+  request
+    .mockResolvedValueOnce(json({ operation: 'job' }, 202))
+    .mockResolvedValueOnce(new Response(body, { status: 429 }))
+    .mockResolvedValueOnce(json({ state: 'completed', result: { kind: 'resourcePage', page } }))
+
+  const result = pluginRequest('/resource', { method: 'POST' })
+  await Promise.all([expect(result).resolves.toEqual(page), vi.advanceTimersByTimeAsync(1000)])
+
+  expect(request.mock.calls.map(([url, options]) => [url, options.method])).toEqual([
+    ['/api/installations/first/api/resource', 'POST'],
+    ['/api/installations/first/api/plugins/packages/operations/job', 'GET'],
+    ['/api/installations/first/api/plugins/packages/operations/job', 'GET'],
+  ])
+  expect(client.state.connectionLost).toBe(false)
+})
+
 it('cancels a pending read immediately while the shared connection probe can continue', async () => {
   request.mockResolvedValueOnce(json({ error: 'Installation unavailable' }, 503))
   request.mockImplementation((url: string) => successful(url))
