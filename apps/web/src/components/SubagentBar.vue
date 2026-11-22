@@ -36,6 +36,7 @@ const first = computed(() => running.value[0] ?? props.agents[0])
       <button
         v-for="agent in agents"
         :key="agent.id"
+        type="button"
         class="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-[10px] border py-1 pr-2 pl-1 text-xs hover:bg-hover"
         :class="selected === agent.id ? 'border-accent bg-soft' : 'border-line bg-inset'"
         :aria-label="`${agent.title}, ${subagentLabels[state(agent)]}. Open its activity`"
@@ -52,6 +53,7 @@ const first = computed(() => running.value[0] ?? props.agents[0])
     <span class="shrink-0 pr-1 text-2xs text-muted phone:hidden">{{ running.length === 1 ? '1 running' : `${running.length} running` }}</span>
     <button
       v-if="first"
+      type="button"
       class="hidden min-h-11 min-w-0 flex-1 items-center gap-2 text-left phone:flex"
       :aria-label="`${running.length === 1 ? '1 subagent' : `${running.length} subagents`} working. Open their activity`"
       @click="emit('open', first.id, $event.currentTarget as HTMLElement)"

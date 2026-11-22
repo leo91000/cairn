@@ -870,7 +870,13 @@ test('subagents show as a team with their own steps and report', async ({ page, 
 
 test('working subagents stay in sight beside the composer and open as a drawer on phones', async ({ page, workspace }) => {
   test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
+  const submission = Promise.withResolvers<void>()
+  await page.route(`**/api/chats/${chat.id}/messages`, async (route) => {
+    await submission.promise
+    await route.continue()
+  })
   try {
     await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
       id: randomUUID(),
@@ -926,13 +932,28 @@ test('working subagents stay in sight beside the composer and open as a drawer o
     await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
     await expect(drawer).toHaveCount(0)
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeFocused()
-    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep going while I check the panel.')
+    const followUp = 'Keep going while I check the panel.'
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill(followUp)
     await page.getByRole('button', { name: 'Queue', exact: true }).click()
     await expect(bar).toContainText('2 running')
-    await bar.getByRole('button', { name: /2 subagents working/ }).click()
-    await expect(page.getByRole('dialog', { name: 'Subagent activity' })).toBeVisible()
+    const phoneButton = bar.getByRole('button', { name: /2 subagents working/ })
+    await expect(phoneButton).toBeInViewport()
+    const buttonBounds = (await phoneButton.boundingBox())!
+    await page.mouse.move(buttonBounds.x + buttonBounds.width / 2, buttonBounds.y + buttonBounds.height / 2)
+    await page.mouse.down()
+    // The queue appears after the press and before the release at the same point.
+    submission.resolve()
+    try {
+      await expect(page.getByTestId('queued-message').getByText(followUp, { exact: true })).toBeVisible()
+    }
+    finally {
+      await page.mouse.up()
+    }
+
+    await expect(drawer).toBeVisible()
   }
   finally {
+    submission.resolve()
     await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).not.toBe('running')
   }
