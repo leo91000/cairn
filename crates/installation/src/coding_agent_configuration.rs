@@ -1171,7 +1171,7 @@ fn settings(
         Provider::Antigravity => &[(
             "/enableTerminalSandbox",
             "Terminal sandbox",
-            "Run shell commands in Antigravity's terminal sandbox, without network access by default.",
+            "Run shell commands in Antigravity's own terminal sandbox. It is not a network or workspace boundary: Antigravity 1.5.14 refuses only direct IP access there.",
             "Workspace",
             "boolean",
             &[],

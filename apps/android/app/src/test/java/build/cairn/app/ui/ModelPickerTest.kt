@@ -349,9 +349,9 @@ class ModelPickerTest : ModelPickerCases() {
                 }
             }
         }
-        // Antigravity needs a model: the catalog's default is chosen instead of an empty one.
+        // Like the web, an Antigravity agent may keep no model: the account kind's default runs.
         compose.waitForIdle()
-        assert(chosen == ("gemini-4-neon" to "")) { chosen.toString() }
+        assert(chosen == ("" to "")) { chosen.toString() }
         compose.onNodeWithTag("model-picker").performClick()
         compose.onNodeWithText("Via Gemini API, Google Cloud").assertExists()
         compose.onNodeWithText("Défaut du fournisseur").assertExists()

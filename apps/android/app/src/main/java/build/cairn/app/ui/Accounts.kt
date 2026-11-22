@@ -244,7 +244,7 @@ internal fun AccountRow(account: Account, open: () -> Unit) {
                         AccountBadge(account)
                     }
                     Text(
-                        account.modelProviderName ?: account.email ?: "Pas encore connecté",
+                        account.email ?: account.modelProviderName ?: "Pas encore connecté",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,

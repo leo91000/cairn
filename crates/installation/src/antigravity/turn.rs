@@ -717,7 +717,8 @@ pub(super) async fn credentials(config: &Config) -> Result<(PathBuf, Value)> {
     let credentials = broker::request(
         &broker::socket(&home),
         &broker::Request::default(),
-        Duration::from_secs(10),
+        // A Google account's token may be renewed on the manager first.
+        Duration::from_secs(40),
     )
     .await?;
     if !matches!(

@@ -42,7 +42,7 @@ internal fun CodingAgentSetting.inFrench(): CodingAgentSetting {
                 "Agent natif" to "Nom d’un agent OpenCode disponible dans l’exécution."
             "/enableTerminalSandbox" ->
                 "Sandbox du terminal" to
-                    "Exécuter les commandes shell dans le sandbox du terminal d’Antigravity, sans accès réseau par défaut."
+                    "Exécuter les commandes shell dans le sandbox du terminal d’Antigravity. Ce n’est pas une limite réseau ni d’espace de travail : Antigravity 1.5.14 n’y refuse que l’accès direct par IP."
             "/model" -> "Modèle" to "Même valeur que dans les réglages de l’agent Cairn."
             "/model_reasoning_effort",
             "/effortLevel" ->

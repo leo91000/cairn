@@ -25,13 +25,15 @@ const MAX_RESULT_BYTES: usize = 1_000_000;
 const MAX_AUTH_REQUEST_BYTES: usize = 32768;
 const SEED_BUDGET_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
-/// The provider's configuration directory inside the conversation home.
+/// The provider's configuration directory inside the conversation home, where its
+/// credential broker listens. Each coding agent's adapter names it, as for microVMs.
 pub(crate) fn provider_home(plan: &Value) -> &'static str {
-    match plan["chat"]["provider"].as_str() {
-        Some("claude") => ".claude",
-        Some("opencode") => ".opencode",
-        _ => ".codex",
-    }
+    plan["chat"]["provider"]
+        .as_str()
+        .and_then(|provider| crate::provider::Provider::parse(provider).ok())
+        .unwrap_or(crate::provider::Provider::Codex)
+        .adapter()
+        .state_directory()
 }
 
 async fn authorize(s: &Service, node: &str, attempt: &str) -> Result<(Value, Value)> {
@@ -953,4 +955,26 @@ async fn install_runtime_files(source: &Path, target: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod provider_home_tests {
+    use super::provider_home;
+    use serde_json::json;
+
+    #[test]
+    fn each_coding_agent_relays_credentials_from_its_own_state_directory() {
+        for (provider, home) in [
+            ("codex", ".codex"),
+            ("claude", ".claude"),
+            ("opencode", ".opencode"),
+            ("antigravity", ".antigravity"),
+        ] {
+            assert_eq!(
+                provider_home(&json!({ "chat": { "provider": provider } })),
+                home
+            );
+        }
+        assert_eq!(provider_home(&json!({})), ".codex");
+    }
 }

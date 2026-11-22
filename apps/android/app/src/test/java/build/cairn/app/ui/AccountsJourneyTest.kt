@@ -585,21 +585,21 @@ class AccountsJourneyTest {
                 when ("${request.method} ${request.path}") {
                     "POST /api/installations/fixture/api/accounts" -> {
                         server.signIn =
-                            """{"accountId":"google","provider":"antigravity","state":"pending","phase":"authorizing","url":"https://accounts.google.com/o/oauth2/auth?fixture=1","acceptsCode":true}"""
+                            """{"accountId":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","state":"pending","phase":"authorizing","url":"https://accounts.google.com/o/oauth2/auth?fixture=1","acceptsCode":true}"""
                         server.accounts +=
-                            """{"id":"google","provider":"antigravity","name":"Perso","state":"pending","status":"signIn"}"""
+                            """{"id":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","name":"Perso","state":"pending","status":"signIn"}"""
                         """{"kind":"signIn","signIn":${server.signIn}}"""
                     }
                     "POST /api/installations/fixture/api/accounts/sign-in/code" -> {
                         server.signIn =
-                            """{"accountId":"google","provider":"antigravity","state":"complete","phase":"verifying"}"""
+                            """{"accountId":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","state":"complete","phase":"verifying"}"""
                         server.accounts[0] =
-                            """{"id":"google","provider":"antigravity","name":"Perso","email":"perso@example.test","modelProvider":"google","modelProviderName":"Google account","state":"ready","status":"next"}"""
+                            """{"id":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","name":"Perso","email":"perso@example.test","modelProvider":"google","modelProviderName":"Google account","state":"ready","status":"next"}"""
                         """{"kind":"completed","done":true}"""
                     }
-                    "POST /api/installations/fixture/api/accounts/google/sign-in" -> {
+                    "POST /api/installations/fixture/api/accounts/00000000-0000-4000-8000-00000000a6c1/sign-in" -> {
                         server.signIn =
-                            """{"accountId":"google","provider":"antigravity","state":"pending","phase":"authorizing","url":"https://accounts.google.com/o/oauth2/auth?fixture=2","acceptsCode":true}"""
+                            """{"accountId":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","state":"pending","phase":"authorizing","url":"https://accounts.google.com/o/oauth2/auth?fixture=2","acceptsCode":true}"""
                         """{"kind":"signIn","signIn":${server.signIn}}"""
                     }
                     else -> null
@@ -645,7 +645,8 @@ class AccountsJourneyTest {
             compose.onNodeWithText("J’accepte le risque, continuer").performClick()
             compose.waitUntil(15000) {
                 server.requests.any {
-                    it.first == "POST /api/installations/fixture/api/accounts/google/sign-in"
+                    it.first ==
+                        "POST /api/installations/fixture/api/accounts/00000000-0000-4000-8000-00000000a6c1/sign-in"
                 }
             }
         }
