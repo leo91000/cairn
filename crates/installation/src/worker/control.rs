@@ -318,6 +318,14 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
             ..Default::default()
         },
     )?;
+    // Cancelling a conversation's run pauses it as Stop does, in the same transaction: no
+    // rule or later writer slips in before a person continues it (ADR-0090).
+    if let Some(chat) = db.conversation_for_run(id)?
+        && !chat.paused
+        && chat.lifecycle == cairn_contracts::ConversationLifecycle::Active
+    {
+        crate::chats::pause_in(db, &chat.id, true)?;
+    }
     // Waiting means the agent process already exited. Release may still hold
     // its in-memory slot; cancellation must settle this wait even in that gap.
     // Executing or recovering runs are settled by their worker once stopped.
@@ -1037,6 +1045,26 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_conversation_run_pauses_it_at_once() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({"id":"run", "taskId":"chat", "status":"running", "trigger":"chat", "createdAt": 0}),
+                    None,
+                )?;
+                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
+                // As from the run view or cancel_run: no rule can write before it pauses.
+                request_cancel(db, "run", true)?;
+                assert_eq!(db.conversation_boundary("chat")?.unwrap()["paused"], true);
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

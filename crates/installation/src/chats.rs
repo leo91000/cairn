@@ -1221,15 +1221,16 @@ pub(crate) fn skips_replay(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bo
     Ok(written_since && !turn_held(db, chat_id, run)?)
 }
 
-/// The stopped turn's own message still waits to be sent: only a replay recovers it.
+/// The stopped turn still holds a message from before it ended, its own or steering the
+/// agent may have read: only a replay recovers it, telling the agent to check what it did.
 pub(crate) fn turn_held(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bool> {
     let turn = run["chatExecution"]["messageId"].as_str();
+    let ended_at = turn_end(run);
     Ok(db.conversation_messages(chat_id)?.iter().any(|message| {
-        Some(message.id.as_str()) == turn
-            && matches!(
-                message.status,
-                MessageStatus::Queued | MessageStatus::Sending
-            )
+        matches!(
+            message.status,
+            MessageStatus::Queued | MessageStatus::Sending
+        ) && (Some(message.id.as_str()) == turn || message.created_at <= ended_at)
     }))
 }
 
@@ -1315,6 +1316,7 @@ fn settle_turn(db: &Db<'_>, chat_id: &str, ended: &Value) -> Result<()> {
     db.set(&settled_key(&run), &run["finishedAt"], None)?;
     let turn = run["chatExecution"]["messageId"].as_str();
     let unsent = unsent(db, chat_id, &run)?;
+    // A cancellation already paused the conversation when it was requested.
     let held = !unsent.held.is_empty();
     for mut message in unsent.held {
         if message.status == MessageStatus::Sending {
@@ -1322,11 +1324,7 @@ fn settle_turn(db: &Db<'_>, chat_id: &str, ended: &Value) -> Result<()> {
             db.save_message(&message)?;
         }
     }
-    // A cancelled turn pauses as Stop does, unless the conversation moved on since: a
-    // message written or a resumption after the cancellation is not undone.
-    let untouched = conversation(db, chat_id)?.updated_at <= turn_end(&run);
-    let cancelled = run["status"] == RunStatus::Cancelled && untouched;
-    if (held || cancelled) && !conversation(db, chat_id)?.paused {
+    if held && !conversation(db, chat_id)?.paused {
         pause_in(db, chat_id, true)?;
     }
     for (mut message, author) in unsent.returning {
@@ -2109,14 +2107,9 @@ impl Service {
                 self.chat_cancel_wait(&id).await?;
                 // Read first: an idle failed conversation needs no writer on each tick.
                 let (chat_id, ended) = (id.clone(), run.clone());
-                // A cancellation pauses as Stop does, whichever way the turn was cancelled.
-                let cancelled = run["status"] == RunStatus::Cancelled && !chat.paused;
                 let settling = self
                     .store
-                    .read(move |db| {
-                        Ok((cancelled || db.has_pending_messages(&chat_id)?)
-                            && !settled(db, &ended)?)
-                    })
+                    .read(move |db| Ok(db.has_pending_messages(&chat_id)? && !settled(db, &ended)?))
                     .await?;
                 if settling {
                     // The next tick dispatches what remains, unless a pause holds it.
@@ -2799,53 +2792,14 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 assert!(skips_replay(db, "chat", &run)?);
                 assert_eq!(find_message(db, "chat", "second")?.unwrap().status, MessageStatus::Cancelled);
                 assert_eq!(find_message(db, "chat", "steering")?.unwrap().status, MessageStatus::Cancelled);
-                // A cancelled turn pauses as Stop does; the person's next message lifts it.
-                assert!(conversation(db, "chat")?.paused);
+                // Nothing is held: the cancellation itself paused the conversation, not this.
+                assert!(!conversation(db, "chat")?.paused);
 
                 // Only the author of a returned message takes it back.
                 let refused = edit_as(db, "chat", "second", None, &Origin::Human("bob".into())).unwrap_err();
                 assert!(refused.message.contains("person who wrote it"), "{}", refused.message);
                 edit_as(db, "chat", "second", None, &Origin::Human("alice".into()))?;
                 assert!(find_message(db, "chat", "second")?.is_none());
-                Ok(())
-            })
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_cancelled_turn_pauses_as_stop_does() {
-        let root = tempfile::tempdir().unwrap();
-        let store = crate::store::Store::open(root.path()).unwrap();
-        store
-            .transaction(|db| {
-                // Cancelled through cancel_run, which does not pause the conversation itself.
-                let run = db.add_run_fixture(
-                    &json!({
-                        "id": "run",
-                        "taskId": "chat",
-                        "createdAt": 0,
-                        "status": "cancelled",
-                        "finishedAt": 900,
-                        "chatExecution": { "messageId": "turn", "text": "Turn", "attachments": [], "recovery": false },
-                        "snapshot": { "agent": { "provider": "codex" } },
-                    }),
-                    None,
-                )?;
-                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent", "updatedAt": 100 }))?;
-                settle_turn(db, "chat", &run)?;
-                assert!(conversation(db, "chat")?.paused);
-                assert!(settled(db, &run)?);
-
-                // A person who resumed or wrote after the cancellation is not paused again by a
-                // settle that ran late.
-                db.delete(&settled_key(&run))?;
-                let mut chat = conversation(db, "chat")?;
-                chat.paused = false;
-                chat.updated_at = 1_000;
-                db.save_conversation(&chat)?;
-                settle_turn(db, "chat", &run)?;
-                assert!(!conversation(db, "chat")?.paused);
                 Ok(())
             })
             .await
