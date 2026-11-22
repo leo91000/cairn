@@ -61,6 +61,8 @@ function holdPress(id: string, event: PointerEvent) {
   button.setPointerCapture(event.pointerId)
   // WebKit can send a touch release to what moved under the finger despite the capture.
   window.addEventListener('pointerup', releasePress, true)
+  // A later press means this one ended without a release this bar saw.
+  window.addEventListener('pointerdown', cancelPress, true)
 }
 
 function releasePress(event: PointerEvent) {
@@ -76,13 +78,14 @@ function releasePress(event: PointerEvent) {
 
   // The browser's own mouse-down may land beside a button that moved, so focus it here.
   if (event.pointerType !== 'mouse')
-    button.focus({ preventScroll: true })
+    button.focus({ preventScroll: true, focusVisible: false })
   emit('open', id, button)
 }
 
 function cancelPress() {
   press = undefined
   window.removeEventListener('pointerup', releasePress, true)
+  window.removeEventListener('pointerdown', cancelPress, true)
 }
 
 const ignoredEvents = ['mousedown', 'mouseup', 'click'] as const
