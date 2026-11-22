@@ -48,9 +48,23 @@ fn token_home(s: &Service, id: &str) -> PathBuf {
 /// Lets `agy` renew a Google account's access token on the manager: it refreshes a
 /// saved token it considers expired and rewrites its token file. Cairn never needs
 /// the CLI's OAuth client secret.
-async fn renew(s: &Service, id: &str, saved: &Value) -> Result<Value> {
-    static RENEWING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _renewing = RENEWING.lock().await;
+async fn renew(s: &Service, id: &str) -> Result<Value> {
+    static RENEWING: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let lock = RENEWING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(id.to_owned())
+        .or_default()
+        .clone();
+    let _renewing = lock.lock().await;
+    // Another request may have renewed the token while this one waited.
+    let saved = stored_credentials(s, id).await?;
+    if expiry(&saved["token"]["token"]) - now() >= RENEW_BEFORE_MS {
+        return Ok(saved);
+    }
+    let saved = &saved;
     let home = token_home(s, id);
     let mut file = saved["token"].clone();
     file["token"]["expiry"] = "2000-01-01T00:00:00Z".into();
@@ -101,7 +115,7 @@ pub(crate) async fn credentials(s: &Service, id: &str) -> Result<Value> {
         return Ok(credential);
     }
     if expiry(&credential["token"]["token"]) - now() < RENEW_BEFORE_MS {
-        credential = renew(s, id, &credential).await?;
+        credential = renew(s, id).await?;
     }
     if let Some(token) = credential["token"]["token"].as_object_mut() {
         token.remove("refresh_token");
@@ -228,18 +242,45 @@ pub(crate) fn credential(kind: &str, secret: &str) -> Result<(Value, String)> {
 fn secrets(credential: &Value) -> Vec<String> {
     let file = &credential["credentials"];
     let token = &credential["token"]["token"];
-    [
+    let mut values = Vec::new();
+    for value in [
         text(credential, "key"),
         text(token, "access_token"),
         text(token, "refresh_token"),
         text(file, "private_key"),
         text(file, "refresh_token"),
         text(file, "client_secret"),
-    ]
-    .into_iter()
-    .filter(|value| !value.is_empty())
-    .map(str::to_owned)
-    .collect()
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        values.push(value.to_owned());
+        // A multi-line key also appears JSON-escaped, as in the credential file.
+        let escaped = serde_json::to_string(value).unwrap_or_default();
+        let escaped = escaped.trim_matches('"');
+        if escaped != value {
+            values.push(escaped.to_owned());
+        }
+        // Each line of a private key is secret on its own when output is wrapped.
+        if value.contains('\n') {
+            values.extend(
+                value
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| line.len() >= 16 && !line.starts_with("-----"))
+                    .map(str::to_owned),
+            );
+        }
+    }
+    values
+}
+
+/// The credentials a broker response hands to a run, as the run can print them.
+pub(crate) fn delivered_redactions(response: &Value) -> Vec<String> {
+    if !matches!(text(response, "kind"), GEMINI | GOOGLE_CLOUD | GOOGLE) {
+        return Vec::new();
+    }
+    secrets(response)
 }
 
 #[async_trait::async_trait]
@@ -427,8 +468,11 @@ impl Driver for Antigravity {
         super::save(s, &account).await
     }
 
+    /// A Google account is also checked periodically: renewing its token is how a revoked
+    /// sign-in is found before a run needs it.
     async fn due(&self, _s: &Service, account: &Account, attempted: i64) -> Result<bool> {
-        Ok(account.exhausted.is_some() && now() - attempted >= self.fresh_for())
+        let google = account.model_provider.as_deref() == Some(GOOGLE);
+        Ok((google || account.exhausted.is_some()) && now() - attempted >= self.fresh_for())
     }
 
     fn fresh_for(&self) -> i64 {
@@ -480,6 +524,8 @@ impl Driver for Antigravity {
     }
 
     async fn clear(&self, home: &Path) -> Result<()> {
+        // Side-question copies hold the run's credentials too.
+        super::remove_directory(&home.join(crate::antigravity::SIDE_QUESTIONS)).await?;
         remove_file(&home.join(ADC_FILE)).await?;
         remove_file(&home.join(TOKEN_FILE)).await
     }
@@ -550,6 +596,14 @@ mod tests {
     fn access_tokens_and_refresh_tokens_are_redacted() {
         let google = json!({ "kind": GOOGLE, "token": { "token": { "access_token": "ya29.a", "refresh_token": "1//r" } } });
         assert_eq!(secrets(&google), ["ya29.a", "1//r"]);
+        // A delivered Google Cloud key is redacted raw, JSON-escaped and line by line.
+        let key = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----\n";
+        let cloud = json!({ "kind": GOOGLE_CLOUD, "credentials": { "private_key": key } });
+        let values = delivered_redactions(&cloud);
+        assert!(values.contains(&key.to_owned()));
+        assert!(values.iter().any(|v| v.contains("\\n")));
+        assert!(values.contains(&"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC".to_owned()));
+        assert!(delivered_redactions(&json!({ "accessToken": "codex" })).is_empty());
     }
 
     #[test]

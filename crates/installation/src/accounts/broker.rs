@@ -193,7 +193,7 @@ async fn respond(
         }
     }
     let _delivery: Option<Delivery> = scope
-        .map(|scope| scope.admit(lease, super::codex::delivered_redactions(&response)))
+        .map(|scope| scope.admit(lease, delivered_redactions(&response)))
         .transpose()?;
     let mut bytes = serde_json::to_vec(&response)?;
     bytes.push(b'\n');
@@ -284,3 +284,11 @@ pub fn socket(home: &Path) -> PathBuf {
 #[cfg(test)]
 #[path = "broker_tests.rs"]
 pub(crate) mod tests;
+
+/// Credentials a broker response hands to a run, to redact from its output: Codex
+/// access tokens and Antigravity's Google access tokens.
+fn delivered_redactions(response: &serde_json::Value) -> Vec<String> {
+    let mut values = super::codex::delivered_redactions(response);
+    values.extend(super::antigravity::delivered_redactions(response));
+    values
+}

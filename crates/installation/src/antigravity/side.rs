@@ -3,7 +3,7 @@
 //! refused, then the copy is deleted. The running turn and its history are untouched.
 use super::{
     hook::Mode,
-    turn::{args, configure, emit, policy, read_line, signal_group, spawn},
+    turn::{Group, args, configure, emit, policy, read_line, signal_group, spawn},
 };
 use crate::{
     config::Config,
@@ -151,8 +151,21 @@ impl Sides {
     }
 }
 
+impl Drop for Sides {
+    /// A cancelled turn drops its side questions: their `agy` processes and the
+    /// private copies holding credentials go with it.
+    fn drop(&mut self) {
+        for (_, handle) in self.running.drain() {
+            handle.abort();
+        }
+        let _ = std::fs::remove_dir_all(self.home.join(SIDE_QUESTIONS));
+    }
+}
+
+pub(crate) const SIDE_QUESTIONS: &str = "side-questions";
+
 fn side_home(home: &Path, id: &str) -> PathBuf {
-    home.join("side-questions").join(
+    home.join(SIDE_QUESTIONS).join(
         id.chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
             .collect::<String>(),
@@ -234,6 +247,7 @@ impl Task {
         ]);
         let cwd = PathBuf::from(text(&self.plan, "cwd"));
         let mut child = spawn(&self.config, &home, &cwd, &launch, &self.credentials).await?;
+        let _group = Group::of(&child);
         let mut stdin = child.stdin.take().unwrap();
         let message = json!({
             "event": "user",

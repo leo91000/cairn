@@ -39,6 +39,7 @@ describe('antigravity coding agent', () => {
 
   it('requires the terms confirmation only before a Google account sign-in', () => {
     expect(needsTermsConfirmation('antigravity', googleAccount)).toBe(true)
+    expect(needsTermsConfirmation('antigravity', null)).toBe(true)
     expect(needsTermsConfirmation('antigravity', 'gemini')).toBe(false)
     expect(needsTermsConfirmation('antigravity', 'google-cloud')).toBe(false)
     expect(needsTermsConfirmation('claude', googleAccount)).toBe(false)

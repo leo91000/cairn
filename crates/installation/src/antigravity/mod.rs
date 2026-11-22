@@ -3,6 +3,9 @@
 //! HOME; shell commands it starts get the shell's HOME back through `BASH_ENV`.
 pub mod hook;
 mod side;
+
+pub(crate) use side::SIDE_QUESTIONS;
+
 mod turn;
 
 pub use turn::run;
@@ -398,7 +401,7 @@ impl Catalog {
                 "models": [],
                 "checkedAt": null,
                 "stale": false,
-                "error": "Connect a Gemini API key or Google Cloud credentials for Antigravity in Connections to choose a model.",
+                "error": "Connect an Antigravity account (Gemini API key, Google Cloud credentials or Google account) in Connections to choose a model.",
             }));
         }
         let fingerprint = accounts
@@ -419,7 +422,15 @@ impl Catalog {
             if kinds.iter().any(|(k, _)| *k == kind) {
                 continue;
             }
-            let credentials = crate::accounts::antigravity::credentials(s, &account.id).await?;
+            // A revoked Google sign-in must not hide the models of healthy accounts.
+            let credentials = match crate::accounts::antigravity::credentials(s, &account.id).await
+            {
+                Ok(credentials) => credentials,
+                Err(error) => {
+                    failure = Some(error);
+                    continue;
+                }
+            };
             match Self::list(s, &credentials).await {
                 Ok(models) => kinds.push((kind, models)),
                 Err(error) => failure = Some(error),

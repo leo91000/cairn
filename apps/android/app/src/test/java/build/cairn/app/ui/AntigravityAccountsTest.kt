@@ -63,7 +63,7 @@ class AntigravityAccountsTest {
         val agent = codingAgent("antigravity")
         assertEquals("Antigravity", agent.label)
         assertTrue(agent.apiKeys && agent.accountSignIn && agent.ordered && agent.planTurns)
-        assertTrue(agent.requiresModel)
+        assertFalse(agent.requiresModel)
         assertFalse(codingAgent("opencode").planTurns)
     }
 }

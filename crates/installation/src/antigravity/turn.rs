@@ -167,7 +167,6 @@ pub(super) fn native_error(error: Option<&Value>, message: &str) -> Error {
     let text = if code == Some(429)
         || status == "RESOURCE_EXHAUSTED"
         || lower.contains("resource_exhausted")
-        || lower.contains("quota")
     {
         "Usage limit reached for Antigravity. Check this account's quota or connect another account."
     } else if matches!(code, Some(401 | 403))
@@ -303,6 +302,27 @@ pub(super) async fn spawn(
     command
         .spawn()
         .map_err(|_| Error::unavailable("Unable to start the Antigravity CLI."))
+}
+
+/// Kills a native process group when its owner ends, including when a cancelled
+/// execution future is dropped: commands `agy` started must not outlive the turn.
+pub(super) struct Group(Option<u32>);
+
+impl Group {
+    pub(super) fn of(child: &Child) -> Self {
+        Self(child.id())
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // SAFETY: signals only the process group this execution created.
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+    }
 }
 
 pub(super) fn signal_group(child: &Child, signal: libc::c_int) {
@@ -664,6 +684,7 @@ async fn execute(
             result = spawn(config, &home, &cwd, &launch, &credentials) => result?,
             () = cancel.cancelled() => return Err(Error::bad_gateway(STOPPED)),
         };
+        let _group = Group::of(&child);
         let stdin = child.stdin.take().unwrap();
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let stderr = child.stderr.take().unwrap();

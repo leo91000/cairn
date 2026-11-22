@@ -105,8 +105,8 @@ du type de compte ; un compte n'accepte que les modèles de son type.
 **Accès.** Comme OpenCode, Antigravity exige l'accès YOLO : son sandbox ne
 correspond ni à la lecture seule ni à l'écriture dans l'espace de travail de Cairn.
 
-**Version.** Chaque build résout la version courante des manifestes officiels
-`linux_amd64` et `linux_arm64`, vérifie leur SHA-512 et installe exactement cette
+**Version.** Chaque build résout la version courante du manifeste officiel
+`linux_amd64` (l'image est x86_64 uniquement), vérifie son SHA-512 et installe exactement cette
 version ; `AGY_CLI_DISABLE_AUTO_UPDATE=true` empêche toute mise à jour. La
 qualification CI exécute le binaire résolu contre un faux serveur Gemini.
 
@@ -117,6 +117,8 @@ qualification CI exécute le binaire résolu contre un faux serveur Gemini.
   livré dans un second bundle natif qui ne contient que `agy`, avec son propre
   budget ; un superviseur antérieur ne le connaît pas et ses nodes refusent
   Antigravity.
-- Le format du fichier de jetons n'est pas documenté par Google : la qualification
-  CI vérifie qu'un jeton synthétique sans refresh token est lu tel quel.
+- Le format du fichier de jetons n'est pas documenté par Google. Il a été mesuré sur
+  1.5.14 avec un compte de test ; la fixture de Cairn le reproduit. La qualification CI
+  ne peut pas le vérifier sans compte Google : une nouvelle version d'`agy` qui le
+  changerait ferait échouer les comptes Google (« Reconnect »), pas les autres.
 - Pas de compaction demandée par Cairn ni de vitesse.

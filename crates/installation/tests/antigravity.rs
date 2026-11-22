@@ -204,7 +204,7 @@ async fn gemini_keys_stay_private_and_catalogs_group_levels_across_account_kinds
     );
     let empty = s.antigravity.models(&s).await.unwrap();
     assert_eq!(empty["models"], json!([]));
-    assert!(text(&empty, "error").contains("Connect a Gemini API key"));
+    assert!(text(&empty, "error").contains("Connect an Antigravity account"));
 
     let account = connect(&s, "gemini", KEY).await;
     assert_eq!(account["modelProvider"], "gemini");
@@ -726,6 +726,66 @@ async fn side_questions_answer_from_a_copy_without_touching_the_conversation() {
             .all(|(_, content)| !content.contains("What did I ask for?"))
     );
     assert!(!home.join("side-questions/side-1").exists());
+}
+
+#[tokio::test]
+async fn cancelling_a_turn_stops_the_commands_agy_started() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let input = plan(
+        &root,
+        "gemini-4-neon-high",
+        "fixture:agy-command fixture:agy-slow=60000 Run the build",
+    );
+    let lease = s
+        .accounts
+        .acquire(&s, RUN, Provider::Antigravity, MODEL)
+        .await
+        .unwrap()
+        .expect("an Antigravity account is leased");
+    let broker = broker::serve(&s, &lease).await.unwrap();
+    let mut config = s.config.clone();
+    config.home = lease.home.parent().unwrap().to_owned();
+    let (tx, mut rx) = mpsc::channel(256);
+    let stop = CancellationToken::new();
+    let cancel = stop.clone();
+    let task = tokio::spawn(async move { antigravity::run(&config, input, tx, cancel).await });
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let pid_file = native_home(&s).join("agy-command.pid");
+    let pid: i32 = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = pid.trim().parse()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the command starts");
+    // A killed command may stay a zombie until its new parent reaps it.
+    let alive = |pid: i32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+        })
+    };
+    assert!(alive(pid));
+
+    stop.cancel();
+    assert!(task.await.unwrap().is_err());
+    let stopped = tokio::time::timeout(Duration::from_secs(10), async {
+        while alive(pid) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(stopped.is_ok(), "the command outlived the cancelled turn");
+    drain.abort();
+    drop(broker);
+    s.accounts.release(&s, &lease).await.unwrap();
 }
 
 #[tokio::test]

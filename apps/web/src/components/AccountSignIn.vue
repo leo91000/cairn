@@ -11,7 +11,6 @@ import {
   credentialsProject,
   googleAccount,
   googleCloudKey,
-  needsTermsConfirmation,
 } from '../accounts'
 import { api, notify } from '../api'
 import {
@@ -34,7 +33,8 @@ const emit = defineEmits<{ close: [] }>()
 const chosen = ref<Provider>(props.provider ?? 'codex')
 const name = ref(props.account?.name ?? '')
 const apiKey = ref('')
-const modelProvider = ref(props.account?.modelProvider ?? 'opencode')
+// An Antigravity account whose sign-in never finished reconnects by signing in.
+const modelProvider = ref(props.account?.modelProvider ?? (props.account?.provider === 'antigravity' ? googleAccount : 'opencode'))
 const keyProviders = ref<ApiKeyProvider[]>([])
 const providerError = ref('')
 const loadingProviders = ref(false)
@@ -52,7 +52,7 @@ const choices = computed(() => offersChoice.value
   : [])
 const usesKey = computed(() => connectsWithKey(chosen.value, offersChoice.value ? modelProvider.value : null))
 const usesCredentials = computed(() => offersChoice.value && modelProvider.value === 'google-cloud')
-const confirmsTerms = computed(() => needsTermsConfirmation(chosen.value, modelProvider.value))
+const confirmsTerms = computed(() => chosen.value === 'antigravity' && modelProvider.value === googleAccount)
 const acceptedTerms = ref(false)
 const credentials = ref('')
 const project = ref('')

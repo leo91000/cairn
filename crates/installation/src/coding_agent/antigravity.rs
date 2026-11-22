@@ -153,7 +153,7 @@ impl ExecutionAdapter for Antigravity {
     ) -> Result<()> {
         let Some(account) = account else {
             return Err(Error::bad(
-                "Connect a Gemini API key or Google Cloud credentials for Antigravity before starting this agent.",
+                "Connect an Antigravity account (Gemini API key, Google Cloud credentials or Google account) before starting this agent.",
             ));
         };
         let record = s.accounts.account(s, &account.account_id).await?;

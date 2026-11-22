@@ -77,7 +77,8 @@ export function connectsWithKey(provider: Provider, modelProvider: string | null
 
 /** A sign-in that Google's Antigravity terms forbid from third-party applications. */
 export function needsTermsConfirmation(provider: Provider, modelProvider: string | null | undefined) {
-  return provider === 'antigravity' && modelProvider === googleAccount
+  // An account whose sign-in never finished has no kind yet: reconnecting it signs in.
+  return provider === 'antigravity' && (!modelProvider || modelProvider === googleAccount)
 }
 
 /** What reconnecting this account does: replace its key, or sign in again. */

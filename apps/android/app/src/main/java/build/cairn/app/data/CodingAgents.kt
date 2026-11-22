@@ -37,7 +37,7 @@ val codingAgents =
             "Clé API ou compte Google",
             "Antigravity",
             apiKeys = true,
-            requiresModel = true,
+            // Like the web: an agent without a model uses the catalog's default.
             ordered = true,
             planTurns = true,
             accountSignIn = true,
