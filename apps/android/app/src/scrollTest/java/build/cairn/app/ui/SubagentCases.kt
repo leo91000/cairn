@@ -22,7 +22,7 @@ abstract class SubagentCases {
     protected open fun capture(name: String) = Unit
 
     @Test
-    fun workingSubagentsStayInSightAndOpenTheirActivity() = conversation {
+    fun workingSubagentsStayInSightAndOpenTheirActivity() = conversation { current ->
         compose.onNodeWithTag("subagent-team").assertExists()
         compose
             .onNode(hasText("2 en cours") and hasAnyAncestor(hasTestTag("subagent-team")))
@@ -49,6 +49,21 @@ abstract class SubagentCases {
             compose.onAllNodesWithTag("subagent-sheet").fetchSemanticsNodes().isEmpty()
         }
 
+        val activityButton =
+            compose.onNodeWithContentDescription("2 sous-agents au travail. Ouvrir leur activité")
+        activityButton.performTouchInput { down(center) }
+        current.updateAndGet { chat ->
+            chat.copy(
+                messages = listOf(ChatMessage(id = "follow-up", text = "Continue comme prévu."))
+            )
+        }
+        compose.waitUntil(10000) {
+            compose.onAllNodesWithTag("queued-message").fetchSemanticsNodes().isNotEmpty()
+        }
+        activityButton.performTouchInput { up() }
+        compose.onNodeWithTag("subagent-sheet").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Fermer l’activité du sous-agent").performClick()
+
         compose.onNodeWithContentDescription("Options de la conversation").performClick()
         compose.onNodeWithText("Plein écran").performClick()
         compose.onNodeWithTag("subagent-bar").assertDoesNotExist()
@@ -60,13 +75,13 @@ abstract class SubagentCases {
 
     @Test
     fun workingIndicatorFollowsStatusOnlyUpdates() =
-        conversation(withSubagents = false) { update ->
+        conversation(withSubagents = false) { current ->
             compose.onNodeWithTag("agent-working").assertIsDisplayed()
-            update("queued")
+            current.updateAndGet { it.copy(run = it.run!!.copy(status = "queued")) }
             compose.waitUntil(10000) {
                 compose.onAllNodesWithTag("agent-working").fetchSemanticsNodes().isEmpty()
             }
-            update("running")
+            current.updateAndGet { it.copy(run = it.run!!.copy(status = "running")) }
             compose.waitUntil(10000) {
                 compose.onAllNodesWithTag("agent-working").fetchSemanticsNodes().isNotEmpty()
             }
@@ -74,7 +89,7 @@ abstract class SubagentCases {
 
     private fun conversation(
         withSubagents: Boolean = true,
-        check: ((String) -> Unit) -> Unit,
+        check: (AtomicReference<Chat>) -> Unit,
     ) {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
@@ -263,7 +278,7 @@ abstract class SubagentCases {
                 compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
             }
             try {
-                check { status -> current.set(chat.copy(run = chat.run!!.copy(status = status))) }
+                check(current)
             } finally {
                 vm.api.closeStreams()
             }

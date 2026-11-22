@@ -27,6 +27,35 @@ const delegated = inject(delegatedChatsKey, null)
 const state = (agent: ActivityArtifact) => subagentState(agent, props.active, delegated?.value)
 const running = computed(() => props.agents.filter(agent => state(agent) === 'running'))
 const first = computed(() => running.value[0] ?? props.agents[0])
+
+let mousePress: { button: HTMLButtonElement, x: number, y: number } | undefined
+
+function retainMousePress(event: PointerEvent) {
+  if (!event.isPrimary || event.button !== 0)
+    return
+
+  const button = event.currentTarget as HTMLButtonElement
+  mousePress = event.pointerType === 'mouse' ? { button, x: event.clientX, y: event.clientY } : undefined
+  // The queue can move the button between mouse-down and mouse-up.
+  if (mousePress)
+    button.setPointerCapture(event.pointerId)
+}
+
+function openActivity(id: string, event: MouseEvent) {
+  const button = event.currentTarget as HTMLButtonElement
+  const press = mousePress
+  mousePress = undefined
+
+  // A stationary press still counts when the button moves. A drag must
+  // finish over the visible button because capture also retargets outside it.
+  if (event.detail && press?.button === button
+    && (event.clientX !== press.x || event.clientY !== press.y)
+    && !button.contains(document.elementFromPoint(event.clientX, event.clientY))) {
+    return
+  }
+
+  emit('open', id, button)
+}
 </script>
 
 <template>
@@ -41,7 +70,8 @@ const first = computed(() => running.value[0] ?? props.agents[0])
         :aria-label="`${agent.title}, ${subagentLabels[state(agent)]}. Open its activity`"
         :aria-pressed="selected === agent.id"
         data-testid="subagent-chip"
-        @click="emit('open', agent.id, $event.currentTarget as HTMLElement)"
+        @pointerdown="retainMousePress"
+        @click="openActivity(agent.id, $event)"
       >
         <SubagentMark :agent="agent" :size="20" />
         <span class="max-w-40 truncate">{{ agent.title }}</span>
@@ -54,7 +84,8 @@ const first = computed(() => running.value[0] ?? props.agents[0])
       v-if="first"
       class="hidden min-h-11 min-w-0 flex-1 items-center gap-2 text-left phone:flex"
       :aria-label="`${running.length === 1 ? '1 subagent' : `${running.length} subagents`} working. Open their activity`"
-      @click="emit('open', first.id, $event.currentTarget as HTMLElement)"
+      @pointerdown="retainMousePress"
+      @click="openActivity(first.id, $event)"
     >
       <span class="flex shrink-0 -space-x-1.5">
         <SubagentMark
