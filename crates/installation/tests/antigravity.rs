@@ -269,9 +269,12 @@ async fn gemini_keys_stay_private_and_catalogs_group_levels_across_account_kinds
             .as_deref(),
         Some("gemini-3.5-flash")
     );
-    // The catalog home ran `agy models` with the key and Gemini as its provider.
-    let catalog_home = s.config.data_dir.join("antigravity-catalog/gemini");
-    assert_eq!(records(&catalog_home, "models")[0]["kind"], "gemini");
+    // Each listing ran in a private directory that no longer holds credentials.
+    let catalogs = s.config.data_dir.join("antigravity-catalog");
+    assert!(
+        std::fs::read_dir(&catalogs).map_or(true, |mut entries| entries.next().is_none()),
+        "catalog listings must not leave credential copies"
+    );
 
     // The broker hands a run the key; the run never reads the vault.
     let lease = s
