@@ -98,5 +98,5 @@ export function resumesOnSend(chat: ChatDetail | null | undefined, queued: numbe
  */
 export function failureReason(chat: ChatDetail | null | undefined, reason: string) {
   const held = !!chat?.paused && chat.messages.some(message => message.status === 'queued' && !message.questionId)
-  return held ? reason.replace(/Send a message to continue\.$/, 'Resume the queue to continue.') : reason
+  return held ? `${reason.replace(/\s*Send a message to continue\.$/, '')} Resume the queue to continue.` : reason
 }

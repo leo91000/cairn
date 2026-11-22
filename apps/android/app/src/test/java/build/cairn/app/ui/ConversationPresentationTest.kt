@@ -539,13 +539,20 @@ class ConversationPresentationTest {
                 id = "r",
                 status = "failed",
                 taskId = "",
-                error = "Exit 1. Send a message to continue.",
+                error = "Process exited with status 1.",
             )
         val held = Chat(id = "chat", paused = true, run = run, messages = listOf(first))
-        assertEquals("Exit 1. Reprenez la file pour continuer.", conversationError(held))
         assertEquals(
-            "Exit 1. Send a message to continue.",
+            "Process exited with status 1. Reprenez la file pour continuer.",
+            conversationError(held),
+        )
+        assertEquals(
+            "Process exited with status 1.",
             conversationError(held.copy(messages = emptyList())),
+        )
+        assertEquals(
+            "La réponse s’est arrêtée avant la fin. Reprenez la file pour continuer.",
+            conversationError(held.copy(run = run.copy(error = null))),
         )
     }
 

@@ -109,11 +109,8 @@ internal fun conversationError(chat: Chat?): String? {
     // A held queue is resumed: a message written now would wait behind it (ADR-0090).
     val held = chat.paused && chat.messages.any { it.status == "queued" && it.questionId == null }
     if (!held) return reason
-    for (suffix in listOf("Send a message to continue.", "Envoyez un message pour continuer.")) if (
-        reason.endsWith(suffix)
-    )
-        return reason.removeSuffix(suffix) + "Reprenez la file pour continuer."
-    return reason
+    return reason.removeSuffix("Envoyez un message pour continuer.").trimEnd() +
+        " Reprenez la file pour continuer."
 }
 
 /** The conversation already shows a failed run's reason as its failure notice. */

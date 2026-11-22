@@ -47,19 +47,23 @@ before, from the run view in the apps or through `set_chat_paused` and
 recovery that tells the agent to check what it already did, and messages written
 since follow it. When the turn's message is no longer waiting, a message written
 after the turn ended is sent instead of a replay. A queue that holds messages says
-so: its failure text asks to resume the queue rather than to send a message.
+so: the apps ask to resume the queue rather than to send a message.
 
 Explicit pauses keep their meaning: a person's pause, Stop, a rule's cancellation
 and a requested fresh session still pause the conversation, and rules still cannot
 lift them. After a failed or interrupted turn, rules also wait: they can steer or
-answer again once a person starts its next turn, by writing or by resuming it. Agents with
+answer again once its next turn starts, which a person does by writing or by
+resuming it. A cancelled turn pauses the conversation as Stop does, whether it was
+stopped from the conversation or its run was cancelled; a person's next message
+lifts that pause. Agents with
 control access can continue it as they could resume it before. When the last turn
 failed or was stopped and the queue is empty, the next message a person sends
 resumes it. A queue paused after a successful turn, or holding messages, keeps
 holding what is added to it.
 
-Conversation failure messages say to send a message to continue; missions keep
-their resume wording. A preparation failure, which happens before any turn exists
+Conversation failure messages carry no call to action: the returned message in
+the composer, or the held queue and its Resume, shows what continues the
+conversation. Missions keep their resume wording. A preparation failure, which happens before any turn exists
 (reduced agent access, an invalid configuration), still pauses the conversation
 and keeps its message: it needs a repair, which resending would not provide.
 

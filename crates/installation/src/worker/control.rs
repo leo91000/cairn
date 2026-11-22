@@ -450,7 +450,7 @@ pub(crate) fn requeue(
     crate::chats::continuation::cancel_for_run(db, id)?;
     if crate::chats::turn_returned(db, id)? {
         return Err(Error::conflict(
-            "This message went back to your composer. Send it again to continue.",
+            "This turn's message went back to the person who wrote it. Sending it again continues the conversation.",
         ));
     }
     if pending_switch && selection.is_some() {

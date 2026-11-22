@@ -134,7 +134,7 @@ pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
         Err(error) => return Err(error),
     }
     let message = if run.trigger == "chat" {
-        "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; send a message when ready."
+        "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved."
     } else {
         "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; resume when ready."
     };

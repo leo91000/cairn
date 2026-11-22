@@ -2136,21 +2136,22 @@ impl Execution<'_> {
         if !saved.last_error().is_empty() {
             return saved.last_error().to_owned();
         }
-        // A conversation continues with the next message (ADR-0090); a mission is resumed.
+        // A conversation shows what continues it: its returned message or its held queue
+        // (ADR-0090). A mission is resumed.
         let next = if self.run["trigger"] == "chat" {
-            "Send a message to continue."
+            ""
         } else {
-            "Resume the conversation to continue."
+            " Resume the conversation to continue."
         };
         match exit.code {
             Some(crate::runner::CONTROLLER_FAILED) => {
                 format!(
-                    "{} failed while running this attempt. {next}",
+                    "{} failed while running this attempt.{next}",
                     controller_name(self.run)
                 )
             }
-            Some(code) => format!("Process exited with status {code}. {next}"),
-            None => format!("Process stopped before finishing. {next}"),
+            Some(code) => format!("Process exited with status {code}.{next}"),
+            None => format!("Process stopped before finishing.{next}"),
         }
     }
 }
