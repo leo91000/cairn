@@ -33,7 +33,8 @@ export function chatDelivery(chat: ChatDetail | null, cards: TimelineEntry[], ou
   const messages = (chat?.messages ?? []).filter(message => message.status === 'queued' || message.status === 'sending')
   if (outgoing && !messages.some(message => message.id === outgoing.id))
     messages.push(outgoing)
-  const active = !!chat?.run && ['queued', 'running'].includes(chat.run.status)
+  // As on Android, a run waiting on its background work is still active.
+  const active = !!chat?.run && ['queued', 'running', 'waiting'].includes(chat.run.status)
   // A scheduled wait resumes the task before queued follow-ups start. After a turn that failed
   // or stopped, the next message starts a new one: what it never delivered came back unsent.
   const canStart = !chat?.paused && !active && !scheduledWakeup(chat)
@@ -93,9 +94,10 @@ export function restoredComposer(returned: ChatMessage[], draft: string) {
 /** After a Stop, even one still settling, or a failed turn, the next message resumes an empty paused queue. */
 export function resumesOnSend(chat: ChatDetail | null | undefined, queued: number) {
   const stopped = ['failed', 'interrupted', 'cancelled'].includes(chat?.run?.status ?? '') || !!chat?.run?.cancelRequestedAt
-  // A turn message still unacknowledged when it stopped may be held for a replay first.
+  // A turn message still unacknowledged when it stopped, or steering already claimed by it,
+  // may be held for a replay first.
   const turn = chat?.run?.chatExecution?.messageId
-  const starting = chat?.messages.some(message => message.id === turn && (message.status === 'queued' || message.status === 'sending'))
+  const starting = chat?.messages.some(message => message.status === 'sending' || (message.id === turn && message.status === 'queued'))
   return !!chat?.paused && !queued && stopped && !starting
 }
 

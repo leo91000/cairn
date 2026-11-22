@@ -537,7 +537,8 @@ function pasteFiles(event: ClipboardEvent) {
   addFiles(pasted)
 }
 
-const active = computed(() => !!detail.value?.run && ['queued', 'running'].includes(detail.value.run.status))
+// As on Android, a run waiting on its background work is still active.
+const active = computed(() => !!detail.value?.run && ['queued', 'running', 'waiting'].includes(detail.value.run.status))
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 // The plan of the current request stays in sight beside the composer while the agent follows it.
 const currentPlan = computed(() => runActive.value && !suspended.value ? activity.value?.plan : undefined)
@@ -2241,7 +2242,7 @@ function key(event: KeyboardEvent) {
                       type="button"
                       class="round-action border border-line text-coral"
                       :aria-label="scheduled ? 'Cancel scheduled wait' : 'Stop response'"
-                      :title="scheduled ? 'Cancel scheduled wait' : 'Stop response'"
+                      :title="scheduled ? 'Cancel wakeup and pause queue' : 'Stop response'"
                       :disabled="busy"
                       @click="action('stop')"
                     >

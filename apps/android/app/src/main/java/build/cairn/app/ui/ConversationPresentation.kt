@@ -464,11 +464,12 @@ internal fun resumesOnSend(chat: Chat?, queued: Int): Boolean {
     val stopped =
         chat?.run?.status in setOf("failed", "interrupted", "cancelled") ||
             chat?.run?.cancelRequestedAt != null
-    // A turn message still unacknowledged when it stopped may be held for a replay first.
+    // A turn message still unacknowledged when it stopped, or steering already claimed by it,
+    // may be held for a replay first.
     val turn = chat?.run?.chatExecution?.messageId
     val starting =
         chat?.messages.orEmpty().any {
-            it.id == turn && it.status in setOf("queued", "sending")
+            it.status == "sending" || (it.id == turn && it.status == "queued")
         }
     return chat?.paused == true && queued == 0 && stopped && !starting
 }

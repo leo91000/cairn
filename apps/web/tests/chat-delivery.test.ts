@@ -259,6 +259,8 @@ describe('returned messages', () => {
       },
     }
     expect(resumesOnSend(chat([message('first', { status: 'sending' })], starting, true), 0)).toBe(false)
+    // So does steering the stopping turn already claimed.
+    expect(resumesOnSend(chat([message('steer', { status: 'sending', mode: 'steer' })], starting, true), 0)).toBe(false)
     expect(resumesOnSend(chat([], { status: 'failed' }, false), 0)).toBe(false)
   })
 })

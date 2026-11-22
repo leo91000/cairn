@@ -1221,8 +1221,9 @@ pub(crate) fn skips_replay(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bo
     Ok(written_since && !turn_held(db, chat_id, run)?)
 }
 
-/// The stopped turn still holds a message from before it ended, its own or steering the
-/// agent may have read: only a replay recovers it, telling the agent to check what it did.
+/// The stopped turn still holds a message from before it ended: its own, steering the agent
+/// may have read, or a message held for a person. Resuming replays the turn first, as a
+/// recovery that tells the agent to check what it did, and held messages follow it.
 pub(crate) fn turn_held(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bool> {
     let turn = run["chatExecution"]["messageId"].as_str();
     let ended_at = turn_end(run);
