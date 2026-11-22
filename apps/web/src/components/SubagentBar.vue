@@ -33,8 +33,8 @@ const first = computed(() => running.value[0] ?? props.agents[0])
 // A queued message can appear between press and release and move these buttons. The browser
 // then sends the click to whatever moved under the pointer, so pointer presses open on release.
 let press: { button: HTMLButtonElement, pointerId: number, box: Box } | undefined
+// Not cleared on unmount: opening can navigate away before the browser's click arrives.
 let stopIgnoringClick: (() => void) | undefined
-onBeforeUnmount(() => stopIgnoringClick?.())
 
 function shownBox(button: HTMLButtonElement) {
   return visibleBox(button.getBoundingClientRect(), button.parentElement?.getBoundingClientRect())
@@ -65,28 +65,38 @@ function cancelPress() {
   press = undefined
 }
 
-// The release decided; the click that follows may target another control.
+const ignoredEvents = ['mousedown', 'mouseup', 'click'] as const
+
+// The release decided; the compatibility mouse events and click that follow may target
+// another control, or move focus inside the activity that just opened.
 function ignoreNextClick() {
   stopIgnoringClick?.()
   const ignore = (event: MouseEvent) => {
+    // Keyboard and assistive activation report no click count.
+    if (event.detail === 0)
+      return
+
     event.preventDefault()
     event.stopImmediatePropagation()
-    stop()
+    if (event.type === 'click')
+      stop()
   }
 
   const timer = setTimeout(stop, 1000)
 
   function stop() {
     clearTimeout(timer)
-    window.removeEventListener('click', ignore, true)
+    for (const type of ignoredEvents)
+      window.removeEventListener(type, ignore, true)
     stopIgnoringClick = undefined
   }
 
-  window.addEventListener('click', ignore, true)
+  for (const type of ignoredEvents)
+    window.addEventListener(type, ignore, true)
   stopIgnoringClick = stop
 }
 
-// Keyboard and assistive activation; pointer presses have already been handled on release.
+// Keyboard, assistive and other non-primary activation; primary presses open on release.
 function openFromClick(id: string, event: MouseEvent) {
   emit('open', id, event.currentTarget as HTMLElement)
 }
@@ -107,6 +117,7 @@ function openFromClick(id: string, event: MouseEvent) {
         @pointerdown="holdPress"
         @pointerup="releasePress(agent.id, $event)"
         @pointercancel="cancelPress"
+        @contextmenu="cancelPress"
         @click="openFromClick(agent.id, $event)"
       >
         <SubagentMark :agent="agent" :size="20" />
@@ -123,6 +134,7 @@ function openFromClick(id: string, event: MouseEvent) {
       @pointerdown="holdPress"
       @pointerup="releasePress(first.id, $event)"
       @pointercancel="cancelPress"
+      @contextmenu="cancelPress"
       @click="openFromClick(first.id, $event)"
     >
       <span class="flex shrink-0 -space-x-1.5">

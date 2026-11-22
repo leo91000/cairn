@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
+import org.junit.Assert.assertNotEquals
 import org.junit.Rule
 import org.junit.Test
 
@@ -51,6 +52,7 @@ abstract class SubagentCases {
 
         val activityButton =
             compose.onNodeWithContentDescription("2 sous-agents au travail. Ouvrir leur activité")
+        val pressedTop = activityButton.getBoundsInRoot().top
         activityButton.performTouchInput { down(center) }
         current.updateAndGet { chat ->
             chat.copy(
@@ -60,6 +62,8 @@ abstract class SubagentCases {
         compose.waitUntil(10000) {
             compose.onAllNodesWithTag("queued-message").fetchSemanticsNodes().isNotEmpty()
         }
+        // The queued message moved the button before the release.
+        assertNotEquals(pressedTop, activityButton.getBoundsInRoot().top)
         activityButton.performTouchInput { up() }
         compose.waitUntil(5000) {
             compose.onAllNodesWithTag("subagent-sheet").fetchSemanticsNodes().isNotEmpty()
