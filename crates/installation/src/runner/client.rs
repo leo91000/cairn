@@ -1,5 +1,5 @@
 //! Guest-side `runner` client: starts an attempt and relays its output and exit.
-use super::CONTROLLER_INTERRUPTED;
+use super::{CONTROLLER_INTERRUPTED, STOPPED};
 use crate::{
     error::{Error, Result},
     microvm::{protocol::Event, wire},
@@ -14,8 +14,6 @@ use std::{future::Future, time::Duration};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-/// Exit code reported when this client is asked to stop.
-const STOPPED: i32 = 143;
 const ERROR_BODY_LIMIT: usize = 10_000;
 const LOCAL_OUTPUT_FAILURE: &str = "Local output forwarding failed.";
 // Native startup can spend two minutes waiting for disk ownership before it

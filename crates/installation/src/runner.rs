@@ -26,6 +26,7 @@ use std::{
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) const STOPPED: i32 = 143;
 pub const CONTROLLER_INTERRUPTED: i32 = 75;
 /// The controller itself failed while running the attempt (EX_SOFTWARE). The
 /// disk is kept; the manager retries a bounded number of times, even on remote

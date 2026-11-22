@@ -17,6 +17,7 @@ use crate::{
     provider::Provider,
     recovery, run_output,
     run_status::RunStatus,
+    runner::STOPPED,
     service::{Service, covers, policy},
     skills::{atomic_write, private_dir},
     storage::policy::Policy,
@@ -35,8 +36,6 @@ use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
-/// Exit code reported for processes the worker had to stop.
-const STOPPED: i32 = 143;
 const SUMMARY_LIMIT: usize = 100_000;
 const HISTORY_LIMIT: usize = 16_000;
 const RESUME_PROMPT: &str = "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.";
