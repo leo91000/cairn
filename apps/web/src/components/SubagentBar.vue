@@ -28,19 +28,14 @@ const state = (agent: ActivityArtifact) => subagentState(agent, props.active, de
 const running = computed(() => props.agents.filter(agent => state(agent) === 'running'))
 const first = computed(() => running.value[0] ?? props.agents[0])
 
-let mousePress: { button: HTMLButtonElement, bounds: DOMRect } | undefined
-
-function containsPoint(bounds: DOMRect, event: MouseEvent) {
-  return event.clientX >= bounds.left && event.clientX < bounds.right
-    && event.clientY >= bounds.top && event.clientY < bounds.bottom
-}
+let mousePress: { button: HTMLButtonElement, x: number, y: number } | undefined
 
 function retainMousePress(event: PointerEvent) {
   if (!event.isPrimary || event.button !== 0)
     return
 
   const button = event.currentTarget as HTMLButtonElement
-  mousePress = event.pointerType === 'mouse' ? { button, bounds: button.getBoundingClientRect() } : undefined
+  mousePress = event.pointerType === 'mouse' ? { button, x: event.clientX, y: event.clientY } : undefined
   // The queue can move the button between mouse-down and mouse-up.
   if (mousePress)
     button.setPointerCapture(event.pointerId)
@@ -51,11 +46,11 @@ function openActivity(id: string, event: MouseEvent) {
   const press = mousePress
   mousePress = undefined
 
-  // Capture keeps the click on the button even when the mouse drags away.
-  // A keyboard click has no pointer coordinates.
+  // A stationary press still counts when the button moves. A drag must
+  // finish over the visible button because capture also retargets outside it.
   if (event.detail && press?.button === button
-    && !containsPoint(press.bounds, event)
-    && !containsPoint(button.getBoundingClientRect(), event)) {
+    && (event.clientX !== press.x || event.clientY !== press.y)
+    && !button.contains(document.elementFromPoint(event.clientX, event.clientY))) {
     return
   }
 
