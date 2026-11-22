@@ -760,7 +760,11 @@ internal fun ChatPage(
                 (reasoning.isNotEmpty() && reasoning != runningAgent.reasoning) ||
                 (speed.isNotEmpty() && speed != runningAgent.speed.ifEmpty { "standard" }))
     // While the agent works, a message joins its turn unless it must wait for the next one.
-    val steers = active && chat?.paused != true && !changesRunningAgent && !steerBlocked
+    // A turn being stopped or compacting reads no steering: a message waits for the next turn.
+    val steerable =
+        chat?.run?.cancelRequestedAt == null && chat?.run?.chatExecution?.operation != "compact"
+    val steers =
+        active && steerable && chat?.paused != true && !changesRunningAgent && !steerBlocked
     // After a Stop or a failed turn, the next message resumes an empty queue, whoever paused it.
     // A queue paused after a successful turn, or holding messages, keeps holding what is added.
     val resumesOnSend = resumesOnSend(chat, pending.size)
@@ -1015,17 +1019,21 @@ internal fun ChatPage(
         if (editing != null) return@LaunchedEffect
         returned.forEach { restored += it.id }
         // The message comes back as written: its plan request and agent choices included.
+        // A draft already written keeps its own agent choices; a plan request stays one.
+        val empty = draft.isBlank() && attachments.isEmpty()
         val restoredDraft = restoredComposer(returned, draft)
         composer.setTextAndPlaceCursorAtEnd(restoredDraft.text)
         val kept = attachments.map { it.attachment.id }.toSet()
         attachments =
             attachments +
                 restoredDraft.attachments.filter { it.id !in kept }.map { DraftAttachment(it) }
-        provider = restoredDraft.provider.ifBlank { currentProvider }
-        model = restoredDraft.model
-        reasoning = restoredDraft.reasoning
-        speed = restoredDraft.speed
-        planning = restoredDraft.plan
+        if (empty) {
+            provider = restoredDraft.provider.ifBlank { currentProvider }
+            model = restoredDraft.model
+            reasoning = restoredDraft.reasoning
+            speed = restoredDraft.speed
+        }
+        planning = planning || restoredDraft.plan
         // Restoring recomposes this screen and restarts the effect: the withdrawal must finish.
         withContext(kotlinx.coroutines.NonCancellable) {
             try {

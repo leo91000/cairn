@@ -207,11 +207,16 @@ replies and execution activity. Snapshot checksums detect concurrent changes;
 ordinary list offsets should be restarted when records change while paging.
 
 `edit_chat_message` replaces a queued message, and `delete_chat_message` withdraws
-one; sending and delivered messages cannot be edited. `set_chat_paused` controls
-the follow-up queue while letting a current turn finish. `stop_chat` interrupts
-that turn, cancels a scheduled wakeup and pauses follow-ups, retaining queued
-messages. `resume_chat` resumes a stopped/failed execution under the existing
-recovery rules; `set_chat_paused(false)` resumes queued follow-ups. A failed
+one, or a message a failed or stopped turn returned to the caller (`returnedTo`);
+sending and delivered messages cannot be edited. `set_chat_paused` controls the
+follow-up queue while letting a current turn finish. `stop_chat` interrupts that
+turn, cancels a scheduled wakeup and pauses follow-ups: messages a person wrote that
+it never delivered return to them, others stay queued. After a stop, send the next
+message, then call `set_chat_paused(false)`; it replays the stopped turn first only
+while that turn still holds a message from before it ended. `resume_chat` resumes a
+stopped/failed execution under the existing recovery rules, and is refused once the
+turn's message was returned (`turnReturned`)
+([ADR-0090](adr/0090-failed-turns-return-unsent-messages.md)). A failed
 restored session can use `restart_chat_session` with `confirm: true` to keep its
 history and files but start a fresh native session. Chat summaries report
 `contextUsage` (latest request tokens, window, cache share, estimate flag; `null` when

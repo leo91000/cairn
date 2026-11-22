@@ -33,8 +33,10 @@ once per turn, so a person's later resumption is never undone.
 
 Web and Android restore returned messages only in the composer of the person they
 name, in the conversation shown, ahead of any draft, with their attachments, and
-withdraw them so another device does not restore them again. They keep the message's plan
-request and agent choices. Only the person a message was returned to may withdraw
+withdraw them so another device does not restore them again. A plan request stays one,
+and an empty composer takes the message's agent choices; a draft already written keeps
+its own. While a turn is being stopped or compacts, sending queues for the next turn
+rather than steering. Only the person a message was returned to may withdraw
 it (`delete_chat_message`), from the apps or the public MCP they authorized; agents
 cannot. A restored draft is as durable as any other draft. Conversation views carry
 `turnReturned`, which the apps use to stop offering recovery for that turn.

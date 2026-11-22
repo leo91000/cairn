@@ -666,7 +666,9 @@ const changesRunningAgent = computed(() => {
   return switchingProvider.value || differs(model.value, agent.model) || differs(reasoning.value, agent.reasoning) || (!!speed.value && speed.value !== (agent.speed || 'standard'))
 })
 // While the agent works, a message joins its turn unless it must wait for the next one.
-const steers = computed(() => active.value && !detail.value?.paused && !changesRunningAgent.value && !steerBlocked.value)
+// A turn being stopped or compacting reads no steering: a message waits for the next turn.
+const steerable = computed(() => !detail.value?.run?.cancelRequestedAt && detail.value?.run?.chatExecution?.operation !== 'compact')
+const steers = computed(() => active.value && steerable.value && !detail.value?.paused && !changesRunningAgent.value && !steerBlocked.value)
 // Saving an edit keeps the queued message where it was.
 const editedMode = computed(() => pending.value.find(message => message.id === editing.value)?.mode ?? 'queue')
 // After a Stop or a failed turn, the next message resumes an empty queue, whoever paused it. A
@@ -1378,15 +1380,20 @@ watch([() => detail.value?.messages, readOnly, inactive, editing, busy], ([messa
   for (const message of returned)
     restored.add(message.id)
   // The message comes back as written: its plan request and agent choices included.
+  // A draft already written keeps its own agent choices; a plan request stays one either way.
+  const empty = !hasDraft.value
   const composer = restoredComposer(returned, draft.value)
   draft.value = composer.text
   const kept = new Set(attachments.value.map(attachment => attachment.id))
   attachments.value = [...attachments.value, ...composer.attachments.filter(attachment => !kept.has(attachment.id))]
-  provider.value = composer.provider || currentProvider.value
-  model.value = composer.model
-  reasoning.value = composer.reasoning
-  speed.value = composer.speed
-  planning.value = composer.plan
+  if (empty) {
+    provider.value = composer.provider || currentProvider.value
+    model.value = composer.model
+    reasoning.value = composer.reasoning
+    speed.value = composer.speed
+  }
+
+  planning.value = planning.value || composer.plan
   // Another device of the same person may have restored and withdrawn it first.
   void Promise.all(returned.map(message => deleteChatMessage(api, { chatId: chat.id, messageId: message.id })
     .catch((e: unknown) => {

@@ -60,8 +60,8 @@ keeps those conversations trashed and paused without extending their restoration
 deadline. New conversation deletion retains ADR-0041 behavior with no recovery
 window.
 
-After expiration, send a new message to recreate
-the environment. The same conversation and run retain their history and artifacts;
+After expiration, send a new message to recreate the environment, and resume the
+queue if it is still paused after a successful turn. The same conversation and run retain their history and artifacts;
 the old checkpoint, session and disk pointers are not reused. The fresh native
 session receives the bounded visible transcript, and uploaded attachments are
 copied back into its input directory. Every subsequent agent turn carries the
