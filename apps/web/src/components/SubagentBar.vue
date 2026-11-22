@@ -29,20 +29,25 @@ const running = computed(() => props.agents.filter(agent => state(agent) === 'ru
 const first = computed(() => running.value[0] ?? props.agents[0])
 
 // The queue can move a button between press and release, and the browser then sends the
-// click elsewhere. A pointer press therefore opens on its release, which reaches the button:
-// mouse and pen presses are captured here, touch presses implicitly by the browser.
-// The slop is the pointer travel, in CSS pixels, that still counts as a press rather than a drag.
-const pressSlop = 4
+// click elsewhere. A pointer press therefore opens on its release, which capture keeps on the
+// button. The slop is the pointer travel, in CSS pixels, that still counts as a press rather
+// than a drag; a finger drifts further than a mouse.
+const pressSlop = { mouse: 4, pen: 4, touch: 10 }
 let press: {
   button: HTMLButtonElement
   pointerId: number
   x: number
   y: number
+  slop: number
 } | undefined
 let released: HTMLButtonElement | undefined
 
+// Any later press starts a sequence whose click is its own.
+const forgetRelease = () => released = undefined
+window.addEventListener('pointerdown', forgetRelease, { capture: true })
+onBeforeUnmount(() => window.removeEventListener('pointerdown', forgetRelease, { capture: true }))
+
 function hold(event: PointerEvent) {
-  released = undefined
   press = undefined
   if (!event.isPrimary || event.button !== 0)
     return
@@ -53,12 +58,12 @@ function hold(event: PointerEvent) {
     pointerId: event.pointerId,
     x: event.clientX,
     y: event.clientY,
+    slop: pressSlop[event.pointerType as keyof typeof pressSlop] ?? pressSlop.mouse,
   }
-  if (event.pointerType !== 'touch')
-    button.setPointerCapture(event.pointerId)
+  button.setPointerCapture(event.pointerId)
 }
 
-// A scroll or system gesture took the press over.
+// A scroll, long press or system gesture took the press over.
 function cancel() {
   press = undefined
 }
@@ -72,11 +77,13 @@ function release(id: string, event: PointerEvent) {
 
   released = button
   // A drag must finish over the visible button because capture also retargets outside it.
-  if (Math.hypot(event.clientX - held.x, event.clientY - held.y) > pressSlop
+  if (Math.hypot(event.clientX - held.x, event.clientY - held.y) > held.slop
     && !button.contains(document.elementFromPoint(event.clientX, event.clientY))) {
     return
   }
 
+  // The tap's focus is dropped with its click, and the drawer returns focus to its opener.
+  button.focus({ preventScroll: true })
   emit('open', id, button)
 }
 
@@ -115,6 +122,7 @@ function openActivity(id: string, event: MouseEvent) {
         @pointerdown="hold"
         @pointerup="release(agent.id, $event)"
         @pointercancel="cancel"
+        @contextmenu="cancel"
         @touchend="dropTapClick"
         @click="openActivity(agent.id, $event)"
       >
@@ -132,6 +140,7 @@ function openActivity(id: string, event: MouseEvent) {
       @pointerdown="hold"
       @pointerup="release(first.id, $event)"
       @pointercancel="cancel"
+      @contextmenu="cancel"
       @touchend="dropTapClick"
       @click="openActivity(first.id, $event)"
     >

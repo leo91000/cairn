@@ -988,6 +988,8 @@ test('working subagents stay in sight beside the composer and open as a drawer o
           counted.clicks = 0
           document.addEventListener('click', () => counted.clicks! += 1, { capture: true })
         })
+        // A finger drifts further than a mouse before lifting.
+        await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: touched.x + 6, y: touched.y }] })
         await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
       }
 
