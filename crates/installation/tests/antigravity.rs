@@ -19,6 +19,7 @@ const KEY: &str = "synthetic-gemini-key-never-a-real-credential";
 const MODEL: &str = "gemini-4-neon";
 const RUN: &str = "antigravity-test";
 const PLAN_REFUSAL: &str = "This is a Cairn plan turn";
+const NATIVE_QUESTION_REFUSAL: &str = "Antigravity's own question tool is unavailable in Cairn";
 
 /// The executable Cairn launches as `agy`. Integration tests run from a test
 /// executable whose own `antigravity-hook` mode does not exist, so the hook
@@ -1088,7 +1089,11 @@ async fn gemini_server(
                 let contents = request["contents"].to_string();
                 recorded.lock().unwrap().push(request);
                 let responses = contents.matches("functionResponse").count();
-                let part = if contents.contains("PLAN-TOOLS") && responses == 0 {
+                let part = if contents.contains("ASK-NATIVE") && responses == 0 {
+                    json!({ "functionCall": { "name": "ask_question", "args": {
+                        "questions": [{ "question": "Which color?", "options": ["Red", "Blue"] }],
+                    } } })
+                } else if contents.contains("PLAN-TOOLS") && responses == 0 {
                     json!({ "functionCall": { "name": "run_command", "args": {
                         "CommandLine": format!("echo native > {}", marker.display()),
                         "WaitMsBeforeAsync": 3000, "toolSummary": "x",
@@ -1260,4 +1265,37 @@ async fn native_plan_turns_deny_commands_and_writes() {
             .any(|t| t["tool"] == "write_file" && t["status"] == "failed")
     );
     assert_eq!(events.last().unwrap()["type"], "turn.completed");
+}
+
+/// The real release sends Cairn's hook the tool call it can read: an ordinary turn
+/// refuses Antigravity's own question tool, which only a parsed name can match.
+#[tokio::test]
+#[ignore = "requires a native Antigravity binary"]
+async fn native_ordinary_turns_refuse_the_native_question_tool() {
+    let root = TempDir::new().unwrap();
+    let (url, requests, server) = gemini_server(root.path()).await;
+    let s = native_service(&root, Some(&url)).await;
+    connect(&s, "gemini", KEY).await;
+    let (model, slug) = native_model(&s).await;
+    let mut input = plan(&root, &slug, "ASK-NATIVE Ask me a question.");
+    input["model"] = model.into();
+    let (result, _) = run(&s, input).await;
+    server.abort();
+    result.unwrap();
+    let requests = requests.lock().unwrap();
+    let refused = requests.iter().any(|request| {
+        request["contents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|content| content["parts"].as_array().into_iter().flatten())
+            .any(|part| {
+                let response = &part["functionResponse"];
+                response["name"] == "ask_question"
+                    && response["response"]
+                        .to_string()
+                        .contains(NATIVE_QUESTION_REFUSAL)
+            })
+    });
+    assert!(refused, "{requests:?}");
 }

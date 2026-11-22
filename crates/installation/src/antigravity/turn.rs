@@ -327,10 +327,14 @@ impl Group {
         }
     }
 
-    /// Records the groups of the commands `agy` is running now.
+    /// Records the groups of the commands `agy` is running now, and forgets groups
+    /// that no longer have a process: their identifier may be reused by another one.
     pub(super) fn refresh(&mut self) {
+        let processes = processes();
+        self.seen
+            .retain(|group| processes.iter().any(|(_, _, member)| member == group));
         let Some(root) = self.root else { return };
-        for group in tree_groups(root, &processes()) {
+        for group in tree_groups(root, &processes) {
             if group != root && !self.seen.contains(&group) {
                 self.seen.push(group);
             }
@@ -355,6 +359,9 @@ impl Group {
     /// the reaped identifier is never signalled again.
     pub(super) fn finish(&mut self) {
         self.root = None;
+        // Linux never reuses the identifier of a group that still has a process,
+        // so a group that is still populated now is still one of these commands.
+        self.refresh();
         for group in std::mem::take(&mut self.seen) {
             kill_group(group);
         }

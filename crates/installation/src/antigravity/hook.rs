@@ -51,12 +51,17 @@ const SIDE_REFUSAL: &str =
     "Tools are unavailable while answering a side question. Answer from the conversation.";
 
 const MCP_REFUSAL: &str = "This MCP tool is outside the agent's access policy.";
+const UNREADABLE: &str = "Cairn could not read this tool call, so it was refused.";
 
 impl Policy {
     pub fn decide(&self, call: &Value) -> std::result::Result<(), &'static str> {
         let name = call["name"].as_str().unwrap_or_default();
         if self.mode == Mode::Side {
             return Err(SIDE_REFUSAL);
+        }
+        // A call this policy cannot read is refused in every mode.
+        if name.is_empty() {
+            return Err(UNREADABLE);
         }
         if name == "call_mcp_tool" {
             let server = call["args"]["ServerName"].as_str().unwrap_or_default();
@@ -146,6 +151,13 @@ mod tests {
         assert!(turn.decide(&call("write_file")).is_ok());
         assert!(turn.decide(&call("invoke_subagent")).is_ok());
         assert!(turn.decide(&call("ask_question")).is_err());
+        // An unreadable call never falls through to an allow.
+        assert!(turn.decide(&json!({ "args": {} })).is_err());
+        assert!(turn.decide(&json!({ "name": 3 })).is_err());
+        assert!(
+            turn.decide(&json!({ "name": "call_mcp_tool", "args": { "ToolName": "x" } }))
+                .is_err()
+        );
     }
 
     #[test]

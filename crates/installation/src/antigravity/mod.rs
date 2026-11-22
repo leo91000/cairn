@@ -269,10 +269,16 @@ pub(crate) fn parse_models(output: &str) -> Vec<Value> {
             });
             let slugs = levels.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>();
             let leveled = levels.iter().all(|(level, _)| level.is_some());
-            let id = if leveled && levels.len() > 1 {
-                common_prefix(&slugs)
-            } else {
-                slugs[0].to_owned()
+            // The family's identifier does not depend on how many levels an account
+            // kind lists: `gemini-4-neon-high` alone is still `gemini-4-neon`.
+            let stripped = levels.iter().find_map(|(level, slug)| {
+                slug.strip_suffix(&format!("-{}", level.as_deref()?))
+                    .map(str::to_owned)
+            });
+            let id = match stripped {
+                Some(base) if leveled => base,
+                _ if leveled && levels.len() > 1 => common_prefix(&slugs),
+                _ => slugs[0].to_owned(),
             };
             let id = if valid_slug(&id) {
                 id
@@ -637,6 +643,18 @@ mod tests {
             "gemini-3-flash-preview"
         );
         assert!(slug(&models, "unknown", "").is_none());
+    }
+
+    #[test]
+    fn a_family_keeps_its_identifier_whatever_levels_an_account_kind_lists() {
+        let one = parse_models("gemini-4-neon-high\tGemini 4 Neon (High)\n");
+        assert_eq!(one[0]["model"], "gemini-4-neon");
+        assert_eq!(
+            slug(&one, "gemini-4-neon", "high").unwrap(),
+            "gemini-4-neon-high"
+        );
+        let irregular = parse_models("gemini-3.5-flash\tGemini 3.5 Flash (High)\n");
+        assert_eq!(irregular[0]["model"], "gemini-3.5-flash");
     }
 
     #[test]
