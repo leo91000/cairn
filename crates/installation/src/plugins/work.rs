@@ -471,11 +471,15 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let chat = s.conversation_boundary(&chat_id).await?;
     if let Some(run_id) = chat["runId"].as_str() {
         let run = s.store.run(run_id).await?;
+        // A turn whose message went back to its author is over, held messages or not.
         let held = s
             .store
             .read({
                 let (chat_id, run) = (chat_id.clone(), run.clone());
-                move |db| crate::chats::turn_held(db, &chat_id, &run)
+                move |db| {
+                    Ok(crate::chats::turn_held(db, &chat_id, &run)?
+                        && !crate::chats::turn_returned(db, text(&run, "id"))?)
+                }
             })
             .await?;
         if crate::run_status::RunStatus::of(&run)

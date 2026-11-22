@@ -42,8 +42,10 @@ A turn whose own message was returned is over: resuming or retrying it is
 refused, unpausing does not replay it, and its coding agent is no longer offered
 for a switch, because that would deliver a message that is back in its author's
 composer. A turn whose message the agent may have received can still be resumed as
-before, from the run view in the apps or through `set_chat_paused` and
-`resume_chat`. Unpausing replays a stopped turn whose message is held, as a
+before: in the apps through the held queue's Resume, the quota card or the
+OpenCode retry, and for agents through `set_chat_paused` and `resume_chat`. After a
+Stop or a failure with nothing held, neither app offers to resume: the next
+message continues the conversation. Unpausing replays a stopped turn whose message is held, as a
 recovery that tells the agent to check what it already did, and messages written
 since follow it. When no message from before the turn ended is held, a message
 written after the turn ended is sent instead of a replay. A queue that holds messages says

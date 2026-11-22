@@ -1270,7 +1270,10 @@ fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
         // The turn's own message, and steering being sent to it, reached the agent only if a
         // process launched for this turn.
         let uncertain = if own || message.status == MessageStatus::Sending {
-            *received.get_or_insert(!never_received(db, run)?)
+            if received.is_none() {
+                received = Some(!never_received(db, run)?);
+            }
+            received == Some(true)
         } else {
             false
         };

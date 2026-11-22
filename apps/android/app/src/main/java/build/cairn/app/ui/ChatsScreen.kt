@@ -1270,8 +1270,10 @@ internal fun ChatPage(
                                     },
                                 )
                                 chat?.let { current ->
-                                    // Resuming needs access; reading and stopping do not.
-                                    if (!(readOnly && current.paused))
+                                    // Resuming needs access; reading and stopping do not. After
+                                    // a Stop or failure with nothing waiting, the next message
+                                    // resumes the conversation, as on the web.
+                                    if (!(readOnly && current.paused) && !resumesOnSend)
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
