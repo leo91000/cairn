@@ -22,8 +22,21 @@ suspend fun CairnApi.pluginOperation(
     val result = wireJson.parseToJsonElement(request(method, path, body))
     val id = result.jsonObject["operation"]?.jsonPrimitive?.contentOrNull ?: return result
     val deadline = SystemClock.elapsedRealtime() + 10 * 60 * 1000
+    var rateLimitDelay = 1000L
     while (SystemClock.elapsedRealtime() < deadline) {
-        val operation = getPluginOperation(PluginOperationInput(id))
+        val operation =
+            try {
+                getPluginOperation(PluginOperationInput(id))
+            } catch (error: ApiException) {
+                if (error.status != 429) throw error
+
+                // The manager already accepted this operation. Retry its status read.
+                delay(minOf(rateLimitDelay, deadline - SystemClock.elapsedRealtime()))
+                rateLimitDelay = minOf(rateLimitDelay * 2, 8000L)
+                continue
+            }
+
+        rateLimitDelay = 1000L
         when (operation.state) {
             "completed" -> {
                 val result = contractJson.encodeToJsonElement(operation.result!!).jsonObject
