@@ -72,7 +72,7 @@ function hold(event: PointerEvent) {
   button.setPointerCapture(event.pointerId)
 }
 
-// A scroll, long press or system gesture took the press over.
+// A scroll, long press, system gesture or lost button took the press over.
 function cancel() {
   press = undefined
 }
@@ -135,6 +135,7 @@ function openActivity(id: string, event: MouseEvent) {
         @pointerdown="hold"
         @pointerup="release(agent.id, $event)"
         @pointercancel="cancel"
+        @lostpointercapture="cancel"
         @contextmenu="cancel"
         @touchend="dropTapClick"
         @click="openActivity(agent.id, $event)"
@@ -153,6 +154,7 @@ function openActivity(id: string, event: MouseEvent) {
       @pointerdown="hold"
       @pointerup="release(first.id, $event)"
       @pointercancel="cancel"
+      @lostpointercapture="cancel"
       @contextmenu="cancel"
       @touchend="dropTapClick"
       @click="openActivity(first.id, $event)"

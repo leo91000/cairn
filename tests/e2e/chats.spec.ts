@@ -973,21 +973,19 @@ test('working subagents stay in sight beside the composer and open as a drawer o
       await expect(drawer).toHaveCount(0)
       const touch = await page.context().newCDPSession(page)
       const touched = { x: movedBounds.x + movedBounds.width / 2, y: movedBounds.y + movedBounds.height / 2 }
+      await page.evaluate(() => {
+        const counted = window as Window & { clicks?: number }
+        counted.clicks = 0
+        document.addEventListener('click', () => counted.clicks! += 1, { capture: true })
+      })
+      // Keep the hold short of a long press: a shorter window moves the button under the finger.
       await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touched] })
       try {
-        // Removing the queued message moves the button under the finger.
-        const queued = (await workspace.api(`/api/chats/${chat.id}`)).messages.find((message: { text: string }) => message.text === followUp)
-        await workspace.api(`/api/chats/${chat.id}/messages/${queued.id}`, 'DELETE')
-        await expect(page.getByTestId('queued-message')).toHaveCount(0)
+        await page.setViewportSize({ width: 390, height: 700 })
         const shiftedBounds = (await phoneButton.boundingBox())!
         expect(touched.y < shiftedBounds.y || touched.y > shiftedBounds.y + shiftedBounds.height).toBe(true)
       }
       finally {
-        await page.evaluate(() => {
-          const counted = window as Window & { clicks?: number }
-          counted.clicks = 0
-          document.addEventListener('click', () => counted.clicks! += 1, { capture: true })
-        })
         // A finger drifts further than a mouse before lifting.
         await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: touched.x + 6, y: touched.y }] })
         await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
