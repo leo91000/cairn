@@ -93,7 +93,10 @@ export function restoredComposer(returned: ChatMessage[], draft: string) {
 /** After a Stop, even one still settling, or a failed turn, the next message resumes an empty paused queue. */
 export function resumesOnSend(chat: ChatDetail | null | undefined, queued: number) {
   const stopped = ['failed', 'interrupted', 'cancelled'].includes(chat?.run?.status ?? '') || !!chat?.run?.cancelRequestedAt
-  return !!chat?.paused && !queued && stopped
+  // A turn message still unacknowledged when it stopped may be held for a replay first.
+  const turn = chat?.run?.chatExecution?.messageId
+  const starting = chat?.messages.some(message => message.id === turn && (message.status === 'queued' || message.status === 'sending'))
+  return !!chat?.paused && !queued && stopped && !starting
 }
 
 /**

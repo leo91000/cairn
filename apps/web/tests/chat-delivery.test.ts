@@ -247,6 +247,18 @@ describe('returned messages', () => {
     expect(resumesOnSend(chat([], { status: 'succeeded' }, true), 0)).toBe(false)
     // A Stop still settling: the run has not ended yet.
     expect(resumesOnSend(chat([], { status: 'running', cancelRequestedAt: 1 }, true), 0)).toBe(true)
+    // Its own message still starting may be held: Resume then replays it first.
+    const starting = {
+      status: 'running' as const,
+      cancelRequestedAt: 1,
+      chatExecution: {
+        attachments: [],
+        messageId: 'first',
+        recovery: false,
+        text: 'first',
+      },
+    }
+    expect(resumesOnSend(chat([message('first', { status: 'sending' })], starting, true), 0)).toBe(false)
     expect(resumesOnSend(chat([], { status: 'failed' }, false), 0)).toBe(false)
   })
 })

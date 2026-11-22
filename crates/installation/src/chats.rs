@@ -1541,6 +1541,19 @@ fn continue_run(
     checkpoint.provider_retry_reservation = None;
     checkpoint.pending_paid_admission = None;
     checkpoint.controller_observation = None;
+    // A new turn after one that did not succeed gives up the environment that turn retained,
+    // as a manual resume does: recovery fences it before launch, with a full budget.
+    if run["status"] != RunStatus::Succeeded
+        && let Some(held) = checkpoint.held_environment.take()
+        && checkpoint.runner_id() == Some(held.attempt.as_str())
+    {
+        crate::worker::jobs::unknown(
+            db,
+            run_id,
+            &held.attempt,
+            "The previous environment will be stopped for the next turn; background completion is unknown.",
+        )?;
+    }
     if checkpoint.held_environment.is_none() {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
     }
@@ -2825,6 +2838,58 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 assert!(refused.message.contains("person who wrote it"), "{}", refused.message);
                 edit_as(db, "chat", "second", None, &Origin::Human("alice".into()))?;
                 assert!(find_message(db, "chat", "second")?.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_turn_after_a_failure_gives_up_the_retained_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "startedAt": 1,
+                        "status": "failed",
+                        "finishedAt": 900,
+                        "sessionId": "native",
+                        "chatExecution": { "messageId": "turn", "text": "Turn", "attachments": [], "recovery": false },
+                        "snapshot": { "agent": { "provider": "codex" } },
+                    }),
+                    None,
+                )?;
+                let profile = serde_json::from_value(run["snapshot"]["agent"].clone())?;
+                db.save_agent(&profile)?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                }))?;
+                let mut saved = RunCheckpoint::fresh(None);
+                saved.launched = Some(true);
+                saved.prepared = Some(Some(json!({ "workspace": "preserved" })));
+                saved.runner_id = Some(Some("attempt".into()));
+                saved.remaining_ms = Some(Some(0));
+                saved.held_environment = Some(crate::worker::checkpoint::HeldEnvironment {
+                    attempt: "attempt".into(),
+                    generation: "generation".into(),
+                    expires_at: 1,
+                });
+                saved.store_in(db, "run")?;
+                let message = db.put_message(&json!({ "id": "next", "chatId": "chat", "text": "Again", "status": "queued", "createdAt": 1000 }))?;
+                launch_turn(db, "chat", Some(run.clone()), message, run)?;
+                // Like a manual resume: the expired hold goes, recovery fences it, and the new
+                // turn has a full budget instead of the old deadline.
+                let checkpoint = RunCheckpoint::load_in(db, "run")?.unwrap();
+                assert!(checkpoint.held_environment.is_none());
+                assert_ne!(checkpoint.remaining_ms, Some(Some(0)));
+                assert_eq!(db.run("run")?.unwrap()["recoveryPending"], true);
                 Ok(())
             })
             .await

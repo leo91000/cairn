@@ -460,8 +460,15 @@ internal fun restoredComposer(returned: List<ChatMessage>, draft: String): Resto
  * After a Stop, even one still settling, or a failed turn, the next message resumes an empty paused
  * queue.
  */
-internal fun resumesOnSend(chat: Chat?, queued: Int): Boolean =
-    chat?.paused == true &&
-        queued == 0 &&
-        (chat.run?.status in setOf("failed", "interrupted", "cancelled") ||
-            chat.run?.cancelRequestedAt != null)
+internal fun resumesOnSend(chat: Chat?, queued: Int): Boolean {
+    val stopped =
+        chat?.run?.status in setOf("failed", "interrupted", "cancelled") ||
+            chat?.run?.cancelRequestedAt != null
+    // A turn message still unacknowledged when it stopped may be held for a replay first.
+    val turn = chat?.run?.chatExecution?.messageId
+    val starting =
+        chat?.messages.orEmpty().any {
+            it.id == turn && it.status in setOf("queued", "sending")
+        }
+    return chat?.paused == true && queued == 0 && stopped && !starting
+}
