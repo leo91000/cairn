@@ -228,6 +228,21 @@ fn common_prefix(slugs: &[&str]) -> String {
     first[..length].trim_end_matches(['-', '.', '_']).to_owned()
 }
 
+/// A slug without its level segment, wherever it is: `gemini-4-neon-high` and
+/// `gemini-3.1-pro-low-thinking` become `gemini-4-neon` and `gemini-3.1-pro-thinking`.
+fn without_level(slug: &str, level: &str) -> Option<String> {
+    let segment = format!("-{level}");
+    let (start, _) = slug.rmatch_indices(&segment).find(|(start, _)| {
+        let end = start + segment.len();
+        end == slug.len() || slug[end..].starts_with('-')
+    })?;
+    Some(format!(
+        "{}{}",
+        &slug[..start],
+        &slug[start + segment.len()..]
+    ))
+}
+
 pub fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 100
@@ -271,10 +286,9 @@ pub(crate) fn parse_models(output: &str) -> Vec<Value> {
             let leveled = levels.iter().all(|(level, _)| level.is_some());
             // The family's identifier does not depend on how many levels an account
             // kind lists: `gemini-4-neon-high` alone is still `gemini-4-neon`.
-            let stripped = levels.iter().find_map(|(level, slug)| {
-                slug.strip_suffix(&format!("-{}", level.as_deref()?))
-                    .map(str::to_owned)
-            });
+            let stripped = levels
+                .iter()
+                .find_map(|(level, slug)| without_level(slug, level.as_deref()?));
             let id = match stripped {
                 Some(base) if leveled => base,
                 _ if leveled && levels.len() > 1 => common_prefix(&slugs),
@@ -603,7 +617,7 @@ mod tests {
             [
                 "gemini-4-neon",
                 "gemini-3.5-flash",
-                "gemini-3.1-pro-low-thinking",
+                "gemini-3.1-pro-thinking",
                 "gemini-3-flash-preview",
                 "gemini-pro-orchestrator"
             ]
@@ -634,7 +648,7 @@ mod tests {
         assert!(slug(&models, "gemini-4-neon", "medium").is_none());
         // A model with one level or none runs its only slug.
         assert_eq!(
-            slug(&models, "gemini-3.1-pro-low-thinking", "").unwrap(),
+            slug(&models, "gemini-3.1-pro-thinking", "").unwrap(),
             "gemini-3.1-pro-low-thinking"
         );
         assert_eq!(models[3]["supportedReasoningEfforts"], json!([]));
@@ -655,6 +669,18 @@ mod tests {
         );
         let irregular = parse_models("gemini-3.5-flash\tGemini 3.5 Flash (High)\n");
         assert_eq!(irregular[0]["model"], "gemini-3.5-flash");
+        // A level in the middle of the slug is removed too, with one level or two.
+        let low = parse_models("gemini-3.1-pro-low-thinking\tGemini 3.1 Pro (Low)\n");
+        let both = parse_models(
+            "gemini-3.1-pro-low-thinking\tGemini 3.1 Pro (Low)\ngemini-3.1-pro-high-thinking\tGemini 3.1 Pro (High)\n",
+        );
+        assert_eq!(low[0]["model"], "gemini-3.1-pro-thinking");
+        assert_eq!(both[0]["model"], "gemini-3.1-pro-thinking");
+        assert_eq!(
+            slug(&both, "gemini-3.1-pro-thinking", "high").unwrap(),
+            "gemini-3.1-pro-high-thinking"
+        );
+        assert!(without_level("gemini-4-neon-higher", "high").is_none());
     }
 
     #[test]

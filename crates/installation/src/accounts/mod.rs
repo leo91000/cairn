@@ -608,7 +608,9 @@ impl Accounts {
             format!("Connect a {label} account in Connections before running this agent.")
         } else if ready.iter().all(|a| !a.enabled) {
             format!("Every {label} account is paused. Resume one in Connections to continue.")
-        } else if provider == Provider::Opencode && compatible.is_empty() {
+        } else if matches!(provider, Provider::Opencode | Provider::Antigravity)
+            && compatible.is_empty()
+        {
             format!(
                 "No enabled {label} account supports model {model}. Choose a model available through your connections or connect its model provider."
             )

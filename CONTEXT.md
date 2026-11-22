@@ -137,7 +137,7 @@ _À éviter_ : profil (qui suggère une configuration réutilisable indépendant
 Un réglage propre à un agent Cairn qui remplace la valeur de l’installation. Retirer cette personnalisation fait suivre à nouveau les changements du défaut de l’installation, même lorsque les deux valeurs étaient identiques.
 
 **Compte d’agent de code** :
-Un abonnement connecté à un agent de code (un compte ChatGPT pour Codex, un compte Claude pour Claude Code) ou une clé API liée à un fournisseur de modèles pour OpenCode (par exemple OpenCode Zen), ou, pour Antigravity, une clé API Gemini ou des identifiants Google Cloud. Les exécutions consomment son usage. Un agent de code peut avoir plusieurs comptes ; un compte en pause n’est plus choisi pour les nouvelles exécutions.
+Un abonnement connecté à un agent de code (un compte ChatGPT pour Codex, un compte Claude pour Claude Code) ou une clé API liée à un fournisseur de modèles pour OpenCode (par exemple OpenCode Zen), ou, pour Antigravity, une clé API Gemini, des identifiants Google Cloud ou un compte Google (que les conditions d’Antigravity interdisent depuis une application tierce). Les exécutions consomment son usage. Un agent de code peut avoir plusieurs comptes ; un compte en pause n’est plus choisi pour les nouvelles exécutions.
 _À éviter_ : connexion Claude, compte Codex (sauf pour désigner un compte de cet agent de code).
 
 **Fenêtre d’usage** :

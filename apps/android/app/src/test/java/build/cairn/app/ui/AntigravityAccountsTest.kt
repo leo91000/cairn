@@ -44,7 +44,7 @@ class AntigravityAccountsTest {
     }
 
     @Test
-    fun `only Antigravity Google accounts sign in again; key accounts replace their key`() {
+    fun `only Antigravity Google accounts sign in again and key accounts replace their key`() {
         fun account(provider: String, modelProvider: String?) =
             Account(provider = provider, modelProvider = modelProvider)
         assertTrue(signsIn(account("antigravity", "google")))

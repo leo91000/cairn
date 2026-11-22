@@ -103,7 +103,17 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
         token["token"]["refresh_token"] = saved["token"]["token"]["refresh_token"].clone();
     }
     credential["token"] = token;
-    s.vault.set(&secret_id(id), &credential).await?;
+    // The account may have been removed while `agy` renewed: never bring its
+    // refresh token back into the vault.
+    let (vault, id, saved) = (s.vault.clone(), id.to_owned(), credential.clone());
+    s.store
+        .transaction(move |db| {
+            if !super::stored(db)?.iter().any(|account| account.id == id) {
+                return Err(Error::not_found("This Antigravity account was removed."));
+            }
+            vault.set_in(db, &secret_id(&id), &saved)
+        })
+        .await?;
     Ok(credential)
 }
 

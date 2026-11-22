@@ -426,6 +426,21 @@ pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value>
             )));
         }
     }
+    if Provider::of_agent(&engine)? == Provider::Antigravity {
+        let model = text(&engine, "model");
+        let catalog = s.antigravity.models(s).await?;
+        let offered = model.is_empty()
+            || catalog["models"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|entry| entry["model"] == model);
+        if !offered {
+            return Err(Error::bad(format!(
+                "No connected Antigravity account offers model {model}. Call task_models with provider antigravity and choose one of its models, or connect an account that offers it."
+            )));
+        }
+    }
     let caller = crate::project_workspaces::authorize(s, bearer).await?;
     let requester_id = text(&caller["snapshot"]["agent"], "id").to_owned();
     let target_id = text(&engine, "id").to_owned();
