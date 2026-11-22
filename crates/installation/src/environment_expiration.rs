@@ -637,6 +637,7 @@ fn detach_environment_in(
     if resume {
         fresh.completed = Some(false);
         fresh.launched = Some(false);
+        fresh.launched_turn = None;
         if !mission {
             fresh.turn_pending = Some(true);
             fresh.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));

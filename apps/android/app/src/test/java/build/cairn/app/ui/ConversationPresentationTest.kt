@@ -533,6 +533,23 @@ class ConversationPresentationTest {
     }
 
     @Test
+    fun `a held queue is resumed rather than written to`() {
+        val run =
+            Run(
+                id = "r",
+                status = "failed",
+                taskId = "",
+                error = "Exit 1. Send a message to continue.",
+            )
+        val held = Chat(id = "chat", paused = true, run = run, messages = listOf(first))
+        assertEquals("Exit 1. Reprenez la file pour continuer.", conversationError(held))
+        assertEquals(
+            "Exit 1. Send a message to continue.",
+            conversationError(held.copy(messages = emptyList())),
+        )
+    }
+
+    @Test
     fun `the next message resumes only an empty queue paused by a stop or failure`() {
         listOf("failed", "interrupted", "cancelled").forEach {
             val chat =

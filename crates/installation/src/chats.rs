@@ -1000,6 +1000,11 @@ pub(crate) fn edit_as(
         None
     };
     let returned = author.is_some();
+    if current.status == MessageStatus::Cancelled && !returned {
+        return Err(Error::conflict(
+            "This message was cancelled and can no longer be changed.",
+        ));
+    }
     if let Some(author) = author {
         let allowed = match origin {
             crate::native::policy::Origin::Human(account)
@@ -1197,17 +1202,31 @@ fn turn_end(run: &Value) -> i64 {
         .unwrap_or(0)
 }
 
-/// An ordinary message written after the stopped turn ended: it starts the next turn rather
-/// than letting a resumption replay the stopped one.
-pub(crate) fn written_since_turn(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bool> {
+/// Whether resuming the conversation should leave its stopped turn alone: the turn's
+/// message went back to its author, or it is no longer waiting and a message written since
+/// starts the next turn. A turn message held behind the pause is replayed first, as a
+/// recovery, so the agent that may have it is told to check what it already did.
+pub(crate) fn skips_replay(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bool> {
+    if turn_returned(db, text(run, "id"))? {
+        return Ok(true);
+    }
     let turn = run["chatExecution"]["messageId"].as_str();
     let ended_at = turn_end(run);
-    Ok(db.conversation_messages(chat_id)?.iter().any(|message| {
+    let messages = db.conversation_messages(chat_id)?;
+    let turn_held = messages.iter().any(|message| {
+        Some(message.id.as_str()) == turn
+            && matches!(
+                message.status,
+                MessageStatus::Queued | MessageStatus::Sending
+            )
+    });
+    let written_since = messages.iter().any(|message| {
         message.status == MessageStatus::Queued
             && message.question_id.is_none()
             && message.created_at > ended_at
             && Some(message.id.as_str()) != turn
-    }))
+    });
+    Ok(written_since && !turn_held)
 }
 
 /// A turn whose agent never received its message: no attempt launched a process for this
@@ -1460,6 +1479,7 @@ fn continue_run(
         checkpoint.fresh_session = Some(false);
         execution.context = Some(handoff_context(db, run_id)?);
         checkpoint.launched = Some(false);
+        checkpoint.launched_turn = None;
         checkpoint.controller_recoveries = None;
         db.change_run(
             run_id,
@@ -2063,7 +2083,9 @@ impl Service {
             };
             if let Some(run) = run.as_ref().filter(|run| run_is_active(run)) {
                 // Messages sent while compacting wait for the next turn instead of steering.
-                if !is_compaction(run) {
+                // A queued run has no process to read steering yet: it is claimed once one
+                // runs, so a turn that never ran gives it back with its message.
+                if !is_compaction(run) && run["status"] != RunStatus::Queued {
                     self.publish_steering(&chat, run, side_open.contains(&chat.id))
                         .await?;
                 }
@@ -2687,6 +2709,10 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     let steering = find_message(db, "chat", "steering")?.unwrap();
                     let expected = if launched { MessageStatus::Queued } else { MessageStatus::Cancelled };
                     assert_eq!(steering.status, expected, "launched {launched}");
+                    // A message written since does not skip the replay of the held turn, which
+                    // tells the agent to check what it already did.
+                    db.put_message(&json!({ "id": "since", "chatId": "chat", "text": "since", "status": "queued", "createdAt": 1000 }))?;
+                    assert!(!skips_replay(db, "chat", &run)?);
                     assert!(conversation(db, "chat")?.paused);
                     assert!(!turn_returned(db, "run")?);
                     Ok(())
@@ -2735,9 +2761,12 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 for id in ["second", "steering", "since"] {
                     record_message(db, "chat", id, &EntryWriter::Person("alice".into()))?;
                 }
-                assert!(written_since_turn(db, "chat", &run)?);
+                // The turn's own message still waits: resuming replays it first.
+                assert!(!skips_replay(db, "chat", &run)?);
 
                 settle_turn(db, "chat", &run)?;
+                // Once it went back to its author, resuming sends what was written since.
+                assert!(skips_replay(db, "chat", &run)?);
                 assert_eq!(find_message(db, "chat", "second")?.unwrap().status, MessageStatus::Cancelled);
                 assert_eq!(find_message(db, "chat", "steering")?.unwrap().status, MessageStatus::Cancelled);
                 assert!(!conversation(db, "chat")?.paused);

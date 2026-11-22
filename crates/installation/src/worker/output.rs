@@ -356,6 +356,7 @@ pub(super) async fn record(
                     // Persist retry intent before fencing can fail. Settlement
                     // and every subsequent launch still require a successful fence.
                     c.launched = Some(false);
+                    c.launched_turn = None;
                 }
             })
             .await?;

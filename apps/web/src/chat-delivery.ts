@@ -91,3 +91,12 @@ export function restoredComposer(returned: ChatMessage[], draft: string) {
 export function resumesOnSend(chat: ChatDetail | null | undefined, queued: number) {
   return !!chat?.paused && !queued && ['failed', 'interrupted', 'cancelled'].includes(chat.run?.status ?? '')
 }
+
+/**
+ * A failed conversation's reason, worded for what continues it: a held queue is resumed, as a
+ * message written now would wait behind it (ADR-0090).
+ */
+export function failureReason(chat: ChatDetail | null | undefined, reason: string) {
+  const held = !!chat?.paused && chat.messages.some(message => message.status === 'queued' && !message.questionId)
+  return held ? reason.replace(/Send a message to continue\.$/, 'Resume the queue to continue.') : reason
+}

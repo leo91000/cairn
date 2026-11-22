@@ -19,7 +19,8 @@ received: the turn's own message when no attempt launched a process for that tur
 (for example, admission or the controller refused it), steering messages sent to
 such a turn, and queued messages written before the turn ended or before Stop was
 pressed. Steering sent to a turn whose process launched may have been read, so it
-is held. Returned messages come back in order; a resent message follows any held
+is held. Steering is claimed only once a process runs: a run waiting for
+admission, an account or an automatic retry leaves it queued. Returned messages come back in order; a resent message follows any held
 message that waited behind it. They become `cancelled` and name the person
 they go back to (`returnedTo`). Everything else is held behind a pause, queued
 again, as every failure did before: messages from rules and agents, which have no
@@ -42,8 +43,11 @@ refused, unpausing does not replay it, and its coding agent is no longer offered
 for a switch, because that would deliver a message that is back in its author's
 composer. A turn whose message the agent may have received can still be resumed as
 before, from the run view in the apps or through `set_chat_paused` and
-`resume_chat`. Unpausing replays a stopped turn unless a message was written after it
-ended, which is sent instead.
+`resume_chat`. Unpausing replays a stopped turn whose message is held, as a
+recovery that tells the agent to check what it already did, and messages written
+since follow it. When the turn's message is no longer waiting, a message written
+after the turn ended is sent instead of a replay. A queue that holds messages says
+so: its failure text asks to resume the queue rather than to send a message.
 
 Explicit pauses keep their meaning: a person's pause, Stop, a rule's cancellation
 and a requested fresh session still pause the conversation, and rules still cannot

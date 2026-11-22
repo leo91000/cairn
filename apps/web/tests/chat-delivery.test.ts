@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import {
   chatDelivery,
   chatWaitNotice,
+  failureReason,
   restoredComposer,
   resumesOnSend,
   returnedMessages,
@@ -242,5 +243,14 @@ describe('returned messages', () => {
     expect(resumesOnSend(chat([], { status: 'failed' }, true), 1)).toBe(false)
     expect(resumesOnSend(chat([], { status: 'succeeded' }, true), 0)).toBe(false)
     expect(resumesOnSend(chat([], { status: 'failed' }, false), 0)).toBe(false)
+  })
+})
+
+describe('failure reasons', () => {
+  const reason = 'Process exited with status 1. Send a message to continue.'
+  it('ask to resume a queue that holds messages behind a pause', () => {
+    expect(failureReason(chat([message('held')], { status: 'failed' }, true), reason)).toBe('Process exited with status 1. Resume the queue to continue.')
+    expect(failureReason(chat([], { status: 'failed' }, true), reason)).toBe(reason)
+    expect(failureReason(chat([message('next')], { status: 'failed' }), reason)).toBe(reason)
   })
 })

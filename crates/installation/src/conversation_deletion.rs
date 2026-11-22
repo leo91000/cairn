@@ -472,9 +472,10 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
         }
     }
     db.revoke_mcp_run(run)?;
-    for message in db.conversation_messages(cid)? {
-        db.delete(&crate::chats::returned_key(&message.id))?;
-    }
+    db.0.execute(
+        "DELETE FROM kv WHERE key IN (SELECT 'message-returned:'||id FROM chat_messages WHERE chat_id=?)",
+        [cid],
+    )?;
     db.0.execute("DELETE FROM chat_messages WHERE chat_id=?", [cid])?;
     db.0.execute("DELETE FROM runs WHERE id=?", [run])?;
     db.remove_conversation(cid)?;
@@ -626,10 +627,16 @@ mod tests {
                 for key in keys {
                     db.set(key, &json!({ "messageId": "message" }), None)?;
                 }
+                // A message returned to its author keeps its mark until the conversation goes.
+                db.put_message(&json!({ "id": "returned", "chatId": "chat", "text": "Back", "status": "cancelled", "createdAt": 1 }))?;
+                db.set("message-returned:returned", &json!("alice"), None)?;
+                db.set("message-returned:elsewhere", &json!("alice"), None)?;
                 forget(db, "chat", "run")?;
                 for key in keys {
                     assert!(db.kv(key)?.is_none(), "{key}");
                 }
+                assert!(db.kv("message-returned:returned")?.is_none());
+                assert_eq!(db.kv("message-returned:elsewhere")?, Some(json!("alice")));
                 Ok(())
             })
             .await

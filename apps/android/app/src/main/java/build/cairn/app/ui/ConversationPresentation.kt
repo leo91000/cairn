@@ -103,8 +103,17 @@ internal fun conversationError(chat: Chat?): String? {
     if (own != null) return own
 
     val run = chat?.run?.takeIf { it.status == "failed" } ?: return null
-    return run.error?.trim()?.ifEmpty { null }
-        ?: "La réponse s’est arrêtée avant la fin. Envoyez un message pour continuer."
+    val reason =
+        run.error?.trim()?.ifEmpty { null }
+            ?: "La réponse s’est arrêtée avant la fin. Envoyez un message pour continuer."
+    // A held queue is resumed: a message written now would wait behind it (ADR-0090).
+    val held = chat.paused && chat.messages.any { it.status == "queued" && it.questionId == null }
+    if (!held) return reason
+    for (suffix in listOf("Send a message to continue.", "Envoyez un message pour continuer.")) if (
+        reason.endsWith(suffix)
+    )
+        return reason.removeSuffix(suffix) + "Reprenez la file pour continuer."
+    return reason
 }
 
 /** The conversation already shows a failed run's reason as its failure notice. */
