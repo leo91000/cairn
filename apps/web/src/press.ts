@@ -24,3 +24,9 @@ export function releasedOnControl(pressed: Box, current: Box, x: number, y: numb
   const inside = (box: Box) => x >= box.left && x <= box.right && y >= box.top && y <= box.bottom
   return inside(pressed) || inside(current)
 }
+
+// A touch or pen tap that stops a scrolling row's fling is not a press: browsers send no click
+// for it. A mouse press never stops a fling, so it always counts.
+export function stopsRowFling(pointerType: string, pressedAt: number, rowScrolledAt: number): boolean {
+  return pointerType !== 'mouse' && pressedAt - rowScrolledAt < 100
+}

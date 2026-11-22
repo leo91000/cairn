@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { releasedOnControl, visibleBox } from '../src/press'
+import { releasedOnControl, stopsRowFling, visibleBox } from '../src/press'
 
 const pressed = {
   left: 10,
@@ -56,5 +56,21 @@ describe('visibleBox', () => {
 
   it('keeps an unclipped control whole', () => {
     expect(visibleBox(pressed, undefined)).toEqual(pressed)
+  })
+})
+
+describe('stopsRowFling', () => {
+  it('treats a touch or pen tap while the row still scrolls as stopping its fling', () => {
+    expect(stopsRowFling('touch', 1040, 1000)).toBe(true)
+    expect(stopsRowFling('pen', 1099, 1000)).toBe(true)
+  })
+
+  it('counts a touch once the row has settled', () => {
+    expect(stopsRowFling('touch', 1100, 1000)).toBe(false)
+    expect(stopsRowFling('touch', 10, Number.NEGATIVE_INFINITY)).toBe(false)
+  })
+
+  it('always counts a mouse press, even right after a wheel scroll', () => {
+    expect(stopsRowFling('mouse', 1010, 1000)).toBe(false)
   })
 })

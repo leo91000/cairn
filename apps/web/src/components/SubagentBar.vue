@@ -7,7 +7,7 @@ import {
   onBeforeUnmount,
   ref,
 } from 'vue'
-import { releasedOnControl, visibleBox } from '../press'
+import { releasedOnControl, stopsRowFling, visibleBox } from '../press'
 import {
   delegatedChatsKey,
   subagentDots as dots,
@@ -46,7 +46,6 @@ function shownBox(button: HTMLButtonElement) {
   return visibleBox(button.getBoundingClientRect(), button.parentElement?.getBoundingClientRect())
 }
 
-// A tap that stops the chip row's fling is not a press; the browser sends no click for it.
 let rowScrolledAt = Number.NEGATIVE_INFINITY
 
 function rowScrolled(event: Event) {
@@ -56,7 +55,7 @@ function rowScrolled(event: Event) {
 function holdPress(id: string, event: PointerEvent, inScrollingRow = false) {
   if (!event.isPrimary || event.button !== 0)
     return
-  if (inScrollingRow && event.timeStamp - rowScrolledAt < 100)
+  if (inScrollingRow && stopsRowFling(event.pointerType, event.timeStamp, rowScrolledAt))
     return
 
   cancelPress()

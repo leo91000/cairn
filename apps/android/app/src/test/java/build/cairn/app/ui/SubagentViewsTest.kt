@@ -12,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.dp
@@ -223,6 +224,71 @@ class SubagentViewsTest {
         chip.performTouchInput { click(Offset(centerX, -band)) }
         chip.performTouchInput { click(Offset(centerX, height + band)) }
         assertEquals(2, opened.size)
+    }
+
+    @Test
+    @Config(qualifiers = "w720dp-h900dp-xhdpi")
+    fun `swiping the chip row or stopping its fling opens no chip`() {
+        val many =
+            fixtureEntries(
+                    (1..12).map { subagent("item.started", "Agent number $it") },
+                    chat = true,
+                )
+                .single()
+                .agents
+        val opened = mutableListOf<String>()
+        compose.setContent {
+            CairnTheme("light") {
+                Column(Modifier.background(MaterialTheme.colorScheme.background)) {
+                    SubagentBar(many, active = true) { opened += it }
+                }
+            }
+        }
+        val row =
+            compose.onNode(
+                SemanticsMatcher.keyIsDefined(SemanticsProperties.HorizontalScrollAxisRange)
+            )
+        fun scrolled() =
+            row.fetchSemanticsNode().config[SemanticsProperties.HorizontalScrollAxisRange].value()
+        // A point on the chip nearest the row's middle, in the row's coordinates.
+        fun chipNearMiddle(): Offset {
+            val bounds = row.fetchSemanticsNode().boundsInRoot
+            val chip =
+                compose
+                    .onAllNodesWithTag("subagent-chip")
+                    .fetchSemanticsNodes()
+                    .map { it.boundsInRoot }
+                    .filter { it.width > 0f && it.left >= bounds.left && it.right <= bounds.right }
+                    .minBy { kotlin.math.abs(it.center.x - bounds.center.x) }
+            return Offset(chip.center.x - bounds.left, chip.center.y - bounds.top)
+        }
+
+        row.performTouchInput {
+            swipeLeft(startX = right - 2f, endX = centerX, durationMillis = 400)
+        }
+        compose.waitForIdle()
+        assertNotEquals(0f, scrolled())
+        assertEquals(emptyList<String>(), opened)
+
+        // A quick fling keeps the row moving; the tap that stops it opens nothing.
+        compose.mainClock.autoAdvance = false
+        row.performTouchInput {
+            swipeLeft(startX = right - 2f, endX = left + 2f, durationMillis = 50)
+        }
+        compose.mainClock.advanceTimeBy(32)
+        val flinging = scrolled()
+        compose.mainClock.advanceTimeBy(32)
+        assertNotEquals(flinging, scrolled())
+        val tap = chipNearMiddle()
+        row.performTouchInput { click(tap) }
+        compose.mainClock.autoAdvance = true
+        compose.waitForIdle()
+        assertEquals(emptyList<String>(), opened)
+
+        // Once the row has settled, a tap on a chip opens it.
+        val settled = chipNearMiddle()
+        row.performTouchInput { click(settled) }
+        assertEquals(1, opened.size)
     }
 
     @Test
