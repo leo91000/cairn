@@ -46,8 +46,17 @@ function shownBox(button: HTMLButtonElement) {
   return visibleBox(button.getBoundingClientRect(), button.parentElement?.getBoundingClientRect())
 }
 
-function holdPress(id: string, event: PointerEvent) {
+// A tap that stops the chip row's fling is not a press; the browser sends no click for it.
+let rowScrolledAt = Number.NEGATIVE_INFINITY
+
+function rowScrolled(event: Event) {
+  rowScrolledAt = event.timeStamp
+}
+
+function holdPress(id: string, event: PointerEvent, inScrollingRow = false) {
   if (!event.isPrimary || event.button !== 0)
+    return
+  if (inScrollingRow && event.timeStamp - rowScrolledAt < 100)
     return
 
   cancelPress()
@@ -137,7 +146,7 @@ function openFromClick(id: string, event: MouseEvent) {
 <template>
   <section class="subagent-bar mb-2 flex min-w-0 items-center gap-2 rounded-2xl border border-line bg-surface px-2.5 py-1.5" aria-label="Subagents at work" data-testid="subagent-bar">
     <span class="shrink-0 pl-1 font-heading text-xs font-semibold text-ink phone:hidden">Subagents</span>
-    <div class="flex min-w-0 flex-1 gap-1.5 overflow-x-auto [scrollbar-width:none] phone:hidden">
+    <div class="flex min-w-0 flex-1 gap-1.5 overflow-x-auto [scrollbar-width:none] phone:hidden" @scroll="rowScrolled">
       <button
         v-for="agent in agents"
         :key="agent.id"
@@ -146,7 +155,7 @@ function openFromClick(id: string, event: MouseEvent) {
         :aria-label="`${agent.title}, ${subagentLabels[state(agent)]}. Open its activity`"
         :aria-pressed="selected === agent.id"
         data-testid="subagent-chip"
-        @pointerdown="holdPress(agent.id, $event)"
+        @pointerdown="holdPress(agent.id, $event, true)"
         @pointercancel="cancelPress"
         @lostpointercapture="cancelPress"
         @contextmenu="cancelPress"
