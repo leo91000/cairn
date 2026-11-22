@@ -1692,6 +1692,9 @@ impl Execution<'_> {
         )
         .await?;
         let identity = recovery::process_identity(child.child.id().unwrap()).await?;
+        let launched_turn = self.run["chatExecution"]["messageId"]
+            .as_str()
+            .map(str::to_owned);
         if self.run["chatExecution"].is_object() {
             self.run["chatExecution"]["recovery"] = true.into();
             let patch = json!({ "chatExecution": self.run["chatExecution"] });
@@ -1712,6 +1715,7 @@ impl Execution<'_> {
                 c.turn_pending = None;
                 c.recovery_deadline_ms = None;
                 c.launched = Some(true);
+                c.launched_turn = launched_turn.clone();
                 c.start_rejected = Some(false);
                 c.output_interrupted = None;
                 c.provider_failure_attempt = None;

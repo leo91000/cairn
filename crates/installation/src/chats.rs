@@ -705,7 +705,12 @@ fn require_sendable(
 ) -> Result<()> {
     let undelivered = messages
         .iter()
-        .filter(|message| message.status != MessageStatus::Delivered)
+        .filter(|message| {
+            matches!(
+                message.status,
+                MessageStatus::Queued | MessageStatus::Sending
+            )
+        })
         .count();
     if undelivered >= MAX_UNDELIVERED {
         return Err(Error::conflict(
@@ -986,6 +991,21 @@ pub(crate) fn edit_as(
     // A returned message goes back to its author's composer, which withdraws it.
     let returned = current.status == MessageStatus::Cancelled && values.is_none();
     if returned {
+        // A returned message is its author's draft: only they take it back.
+        let author = db.kv(&returned_key(&current.id))?;
+        let allowed = match origin {
+            crate::native::policy::Origin::Human(account)
+            | crate::native::policy::Origin::PublicAccount(account) => {
+                author.is_none_or(|author| author == account.as_str())
+            }
+            crate::native::policy::Origin::Unknown => true,
+            _ => author.is_none(),
+        };
+        if !allowed {
+            return Err(Error::conflict(
+                "This message went back to the person who wrote it.",
+            ));
+        }
         db.delete(&returned_key(&current.id))?;
     }
     if current.status != MessageStatus::Queued && !returned {
@@ -1185,18 +1205,25 @@ pub(crate) fn written_since_turn(db: &Db<'_>, chat_id: &str, run: &Value) -> Res
     }))
 }
 
-/// A turn whose agent process never received its message: never launched, refused at
-/// startup, or failed before any turn was submitted. Otherwise the agent may have it.
+/// A turn whose agent process never received its message: no process launched for this
+/// turn, it was refused at startup, or it failed before any turn was submitted. Otherwise
+/// the agent may have it. Checkpoints saved before turns were recorded only know whether
+/// the run ever launched.
 fn never_received(db: &Db<'_>, run: &Value) -> Result<bool> {
     let Some(checkpoint) = RunCheckpoint::load_in(db, text(run, "id"))? else {
         return Ok(run["startedAt"].is_null());
+    };
+    let turn = run["chatExecution"]["messageId"].as_str();
+    let launched = match &checkpoint.launched_turn {
+        Some(launched) => Some(launched.as_str()) == turn,
+        None => checkpoint.launched(),
     };
     let startup = checkpoint
         .retry_cause
         .as_ref()
         .and_then(Option::as_ref)
         .is_some_and(|cause| cause.startup);
-    Ok(!checkpoint.launched() || checkpoint.start_rejected == Some(true) || startup)
+    Ok(!launched || checkpoint.start_rejected == Some(true) || startup)
 }
 
 fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
@@ -1217,7 +1244,12 @@ fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
         if !pending || (message.created_at > ended_at && !own) {
             continue;
         }
-        let uncertain = own && *received.get_or_insert(!never_received(db, run)?);
+        // A steering message being sent may have reached the running turn.
+        let uncertain = if own {
+            *received.get_or_insert(!never_received(db, run)?)
+        } else {
+            message.status == MessageStatus::Sending
+        };
         let author = if message.question_id.is_some() || uncertain {
             None
         } else {
@@ -2050,7 +2082,7 @@ impl Service {
                 let settling = self
                     .store
                     .read(move |db| {
-                        if settled(db, &ended)? {
+                        if !db.has_pending_messages(&chat_id)? || settled(db, &ended)? {
                             return Ok(false);
                         }
                         let unsent = unsent(db, &chat_id, &ended)?;
@@ -2659,6 +2691,63 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 .await
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn later_turns_and_steering_return_only_what_never_left() {
+        use crate::conversation_writers::{EntryWriter, record_message};
+        use crate::native::policy::Origin;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                // An earlier turn launched; this turn's message never reached a process.
+                let run = db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "startedAt": 1,
+                        "status": "cancelled",
+                        "cancelRequestedAt": 500,
+                        "finishedAt": 900,
+                        "chatExecution": { "messageId": "second", "text": "Second", "attachments": [], "recovery": false },
+                        "snapshot": { "agent": { "provider": "codex" } },
+                    }),
+                    None,
+                )?;
+                db.save_checkpoint_boundary("run", &json!({ "launched": true, "launchedTurn": "first" }))?;
+                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                let message = |id: &str, status: &str, created_at: i64| {
+                    json!({ "id": id, "chatId": "chat", "text": id, "status": status, "createdAt": created_at })
+                };
+                db.put_message(&message("first", "delivered", 10))?;
+                db.put_message(&message("second", "sending", 400))?;
+                // Claimed for steering: the turn may have read it.
+                let mut steering = message("steering", "sending", 450);
+                steering["mode"] = "steer".into();
+                db.put_message(&steering)?;
+                db.put_message(&message("since", "queued", 700))?;
+                for id in ["second", "steering", "since"] {
+                    record_message(db, "chat", id, &EntryWriter::Person("alice".into()))?;
+                }
+                assert!(written_since_turn(db, "chat", &run)?);
+
+                settle_turn(db, "chat", &run)?;
+                assert_eq!(find_message(db, "chat", "second")?.unwrap().status, MessageStatus::Cancelled);
+                assert_eq!(find_message(db, "chat", "steering")?.unwrap().status, MessageStatus::Queued);
+                assert!(conversation(db, "chat")?.paused);
+
+                // Only the author of a returned message takes it back.
+                let refused = edit_as(db, "chat", "second", None, &Origin::Human("bob".into())).unwrap_err();
+                assert!(refused.message.contains("person who wrote it"), "{}", refused.message);
+                edit_as(db, "chat", "second", None, &Origin::Human("alice".into()))?;
+                assert!(find_message(db, "chat", "second")?.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

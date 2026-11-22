@@ -479,6 +479,7 @@ internal fun ChatPage(
     var compacting by remember(id) { mutableStateOf(false) }
     var sharing by remember(id) { mutableStateOf(false) }
     var renaming by remember(id) { mutableStateOf(false) }
+    var cancelledExpanded by rememberSaveable(id) { mutableStateOf(false) }
     BackHandler(selected && fullscreen) { fullscreen = false }
     var choosing by rememberSaveable(id) { mutableStateOf(false) }
     var details by rememberSaveable(id) { mutableStateOf(false) }
@@ -516,7 +517,18 @@ internal fun ChatPage(
         }
     }
     val timelineKeys = remember(id) { TimelineKeys() }
-    val quota = remember(chat?.run, live.entries) { chatQuota(chat?.run, live.entries) }
+    // A turn whose message went back to the composer is over: sending it again is the way on.
+    val returnedTurn =
+        chat?.run?.let { run ->
+            val turn = run.chatExecution?.messageId
+            turn != null &&
+                run.status in setOf("failed", "interrupted", "cancelled") &&
+                chat.messages.none { it.id == turn && it.status != "cancelled" }
+        } == true
+    val quota =
+        remember(chat?.run, live.entries, returnedTurn) {
+            if (returnedTurn) null else chatQuota(chat?.run, live.entries)
+        }
     // A failed or interrupted turn never resumes its wakeup, even when the record lingers.
     val pendingWakeup = liveWakeup(chat)
     val history =
@@ -762,11 +774,6 @@ internal fun ChatPage(
     val held = chat?.paused == true && !resumesOnSend
     // Saving an edit keeps the queued message where it was.
     val editedMode = pending.find { it.id == editing }?.mode ?: "queue"
-    // The failed turn's message is still the server's to replay, rather than back in a composer.
-    val turnPending =
-        chat?.messages.orEmpty().any {
-            it.id == chat?.run?.chatExecution?.messageId && it.status != "cancelled"
-        }
     val questions = chat?.questions.orEmpty().filter { it.status == "pending" }
     // Files over the limits stay visible as refused cards; the others join the draft.
     fun attach(
@@ -1493,7 +1500,7 @@ internal fun ChatPage(
                         enabled = !state.busy,
                         // A message that went back to the composer is retried by sending it again.
                         retry =
-                            if (readOnly || !turnPending) null
+                            if (readOnly || returnedTurn) null
                             else ({ if (chat != null) setPaused(chat, false) }),
                         create = if (readOnly) null else create,
                         dismiss = { errorDismissed = true },
@@ -1615,6 +1622,35 @@ internal fun ChatPage(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                        // Cancelled by a deletion and restored from the trash: returned messages
+                        // go to their author's composer instead.
+                        val cancelled =
+                            chat?.messages.orEmpty().filter {
+                                it.status == "cancelled" && it.returnedTo == null
+                            }
+                        if (cancelled.isNotEmpty()) {
+                            TextButton({ cancelledExpanded = !cancelledExpanded }) {
+                                Text("Messages annulés (${cancelled.size})")
+                            }
+                            if (cancelledExpanded)
+                                Column(
+                                    Modifier.heightIn(max = 200.dp)
+                                        .verticalScroll(rememberScrollState())
+                                ) {
+                                    cancelled.forEach { message ->
+                                        Text(message.text)
+                                        if (!readOnly)
+                                            TextButton({
+                                                composer.setTextAndPlaceCursorAtEnd(message.text)
+                                                attachments =
+                                                    message.attachments.map { DraftAttachment(it) }
+                                                cancelledExpanded = false
+                                            }) {
+                                                Text("Copier dans le message")
+                                            }
+                                    }
+                                }
+                        }
                         if (live.catchingUp && id != null) {
                             Column(
                                 Modifier.weight(1f).fillMaxWidth(),

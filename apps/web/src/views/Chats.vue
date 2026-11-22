@@ -79,6 +79,7 @@ import ConversationSharing from '../components/ConversationSharing.vue'
 import ConversationSummary from '../components/ConversationSummary.vue'
 import Icon from '../components/Icon.vue'
 import MenuButton from '../components/MenuButton.vue'
+import MessageAttachments from '../components/MessageAttachments.vue'
 import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
 import PlanBar from '../components/PlanBar.vue'
@@ -389,7 +390,13 @@ function switcherAnchor() {
 const readOnly = computed(() => !!detail.value && !canDirectChat(state.usableAgents, detail.value, chats.value))
 const error = ref('')
 const dismissedError = ref(false)
-const quota = computed(() => chatQuota(detail.value?.run, timeline.value))
+// A turn whose message went back to the composer is over: sending it again is the way on.
+const returnedTurn = computed(() => {
+  const run = detail.value?.run
+  const turn = run?.chatExecution?.messageId
+  return !!run && !!turn && ['failed', 'interrupted', 'cancelled'].includes(run.status) && !detail.value?.messages.some(message => message.id === turn && message.status !== 'cancelled')
+})
+const quota = computed(() => returnedTurn.value ? null : chatQuota(detail.value?.run, timeline.value))
 const visibleError = computed(() => {
   if (error.value)
     return error.value
@@ -655,8 +662,6 @@ const changesRunningAgent = computed(() => {
 })
 // While the agent works, a message joins its turn unless it must wait for the next one.
 const steers = computed(() => active.value && !detail.value?.paused && !changesRunningAgent.value && !steerBlocked.value)
-// The failed turn's message is still the server's to replay, rather than back in a composer.
-const turnPending = computed(() => detail.value?.messages.some(message => message.id === detail.value?.run?.chatExecution?.messageId && message.status !== 'cancelled') ?? false)
 // Saving an edit keeps the queued message where it was.
 const editedMode = computed(() => pending.value.find(message => message.id === editing.value)?.mode ?? 'queue')
 // Stopping or a failed turn pauses an empty queue, which the next message resumes. A queue paused
@@ -2001,7 +2006,7 @@ function key(event: KeyboardEvent) {
                 >OpenCode settings<Icon :name="ArrowUpRight" :size="14" /></a>
                 <!-- A message that went back to the composer is retried by sending it again. -->
                 <UiButton
-                  v-if="!readOnly && turnPending"
+                  v-if="!readOnly && !returnedTurn"
                   size="small"
                   :disabled="busy"
                   @click="action('pause', { paused: false })"
@@ -2063,6 +2068,21 @@ function key(event: KeyboardEvent) {
             <p v-if="detail?.sessionRestartRequested && !readOnly" class="mb-3 text-sm text-muted">
               Ready for a fresh session. Your next message starts it.
             </p>
+            <!-- Cancelled by a deletion and restored from the trash: returned messages go to their author's composer instead. -->
+            <details v-if="detail?.messages.some(message => message.status === 'cancelled' && !message.returnedTo)" class="mb-3 rounded-lg border border-line p-3 text-xs">
+              <summary class="cursor-pointer text-muted">
+                Cancelled messages
+              </summary>
+              <div v-for="message in detail.messages.filter(message => message.status === 'cancelled' && !message.returnedTo)" :key="message.id" class="mt-3">
+                <p class="whitespace-pre-wrap wrap-anywhere">
+                  {{ message.text }}
+                </p>
+                <MessageAttachments v-if="message.attachments?.length" :attachments="message.attachments" class="mt-2 items-start!" />
+                <button v-if="!readOnly" class="mt-2 text-accent" @click="draft = message.text; textarea?.focus()">
+                  Copy to message
+                </button>
+              </div>
+            </details>
             <PlanBar v-if="currentPlan" :plan="currentPlan" />
             <SubagentBar
               v-if="subagentBar"

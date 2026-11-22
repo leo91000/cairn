@@ -652,6 +652,16 @@ impl Db<'_> {
             .collect())
     }
 
+    /// Whether the conversation has a message waiting to be sent, read from the pending index.
+    pub(crate) fn has_pending_messages(&self, chat: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT 1 FROM chat_messages WHERE chat_id=? AND status IN ('queued','sending') LIMIT 1",
+            )?
+            .exists([chat])?)
+    }
+
     pub fn messages(&self, chat: &str) -> Result<Vec<Value>> {
         self.conversation_messages(chat)?
             .into_iter()

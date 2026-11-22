@@ -31,6 +31,10 @@ pub struct RunCheckpoint {
     pub held_environment: Option<HeldEnvironment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launched: Option<bool>,
+    /// The chat message whose turn last launched a process. A turn's own message the
+    /// agent never received goes back to its author (ADR-0090).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launched_turn: Option<String>,
     /// Small durable row, loaded separately from the retained workspace.
     #[serde(skip)]
     pub progress: Option<super::progress::Progress>,
