@@ -28,6 +28,8 @@ const state = (agent: ActivityArtifact) => subagentState(agent, props.active, de
 const running = computed(() => props.agents.filter(agent => state(agent) === 'running'))
 const first = computed(() => running.value[0] ?? props.agents[0])
 
+// Pointer travel, in CSS pixels, that still counts as a press rather than a drag.
+const pressSlop = 4
 let mousePress: { button: HTMLButtonElement, x: number, y: number } | undefined
 
 function retainMousePress(event: PointerEvent) {
@@ -46,10 +48,10 @@ function openActivity(id: string, event: MouseEvent) {
   const press = mousePress
   mousePress = undefined
 
-  // A stationary press still counts when the button moves. A drag must
+  // A press that barely moves still counts when the button moves. A drag must
   // finish over the visible button because capture also retargets outside it.
   if (event.detail && press?.button === button
-    && (event.clientX !== press.x || event.clientY !== press.y)
+    && Math.hypot(event.clientX - press.x, event.clientY - press.y) > pressSlop
     && !button.contains(document.elementFromPoint(event.clientX, event.clientY))) {
     return
   }

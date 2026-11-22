@@ -939,14 +939,16 @@ test('working subagents stay in sight beside the composer and open as a drawer o
     const phoneButton = bar.getByRole('button', { name: /2 subagents working/ })
     await expect(phoneButton).toBeInViewport()
     const buttonBounds = (await phoneButton.boundingBox())!
-    await page.mouse.move(buttonBounds.x + buttonBounds.width / 2, buttonBounds.y + buttonBounds.height / 2)
+    const pressed = { x: buttonBounds.x + buttonBounds.width / 2, y: buttonBounds.y + buttonBounds.height / 2 }
+    await page.mouse.move(pressed.x, pressed.y)
     await page.mouse.down()
-    // The queue appears after the press and before the release at the same point.
+    // The queue appears after the press, and the hand drifts a pixel before the release.
     submission.resolve()
     try {
       await expect(page.getByTestId('queued-message').getByText(followUp, { exact: true })).toBeVisible()
     }
     finally {
+      await page.mouse.move(pressed.x + 1, pressed.y + 1)
       await page.mouse.up()
     }
 
@@ -954,6 +956,8 @@ test('working subagents stay in sight beside the composer and open as a drawer o
     await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
     await expect(drawer).toHaveCount(0)
     const movedBounds = (await phoneButton.boundingBox())!
+    // The release point is no longer over the button.
+    expect(pressed.y + 1 < movedBounds.y || pressed.y + 1 > movedBounds.y + movedBounds.height).toBe(true)
     await page.mouse.move(movedBounds.x + movedBounds.width / 2, movedBounds.y + movedBounds.height / 2)
     await page.mouse.down()
     await page.mouse.move(1, 1)
