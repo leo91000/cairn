@@ -952,7 +952,9 @@ test('working subagents stay in sight beside the composer and open as a drawer o
 
     await expect(drawer).toBeVisible()
     await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
-    await page.getByLabel('Attach files', { exact: true }).setInputFiles({
+    const attachmentInput = page.getByLabel('Attach files', { exact: true })
+    await expect(attachmentInput).toBeEnabled()
+    await attachmentInput.setInputFiles({
       name: 'panel-notes.txt',
       mimeType: 'text/plain',
       buffer: Buffer.from('Notes on the subagent panel.'),
