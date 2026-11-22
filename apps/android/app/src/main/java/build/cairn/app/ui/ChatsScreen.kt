@@ -621,7 +621,7 @@ internal fun ChatPage(
             if (running) backgroundWait(live.entries) else null
         }
     // A subagent's full activity opens in a sheet. The current request's subagents stay in sight
-    // above the message field while one of them works.
+    // just below the composer while one of them works.
     var openedSubagent by rememberSaveable(id) { mutableStateOf<String?>(null) }
     val subagentTeams = remember(timeline) { subagentTeams(timeline) }
     // A delegated task is a conversation of its own: open it rather than a sheet.
@@ -1983,9 +1983,6 @@ internal fun ChatPage(
                                             color = MaterialTheme.colorScheme.outlineVariant,
                                         )
                                     }
-                                    // The queue grows above the bar and keeps its targets in place.
-                                    if (subagentBar)
-                                        SubagentBar(currentSubagents, active, openSubagent)
                                     if (planBlocked)
                                         Text(
                                             if (planAllowed)
@@ -2262,6 +2259,8 @@ internal fun ChatPage(
                                     }
                                 }
                             }
+                        // Queue and draft changes grow the composer upward.
+                        if (subagentBar) SubagentBar(currentSubagents, active, openSubagent)
                     }
             }
             asking?.let { selected ->

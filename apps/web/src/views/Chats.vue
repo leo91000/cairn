@@ -2055,15 +2055,6 @@ function key(event: KeyboardEvent) {
                 />
                 <hr class="mx-3 border-line">
               </template>
-              <!-- The queue grows above the bar, keeping its click targets in place. -->
-              <SubagentBar
-                v-if="subagentBar"
-                class="mx-1 mt-1"
-                :agents="currentSubagents"
-                :active="runActive"
-                :selected="openedSubagent"
-                @open="openSubagent"
-              />
               <div class="px-3 pt-2 pb-2">
                 <div v-if="dragging && !readOnly && !noAgent" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-surface/95 text-sm font-semibold text-accent">
                   <Icon :name="Paperclip" :size="20" />Drop files here
@@ -2189,6 +2180,14 @@ function key(event: KeyboardEvent) {
                 </div>
               </div>
             </form>
+            <!-- Queue and draft changes grow the composer upward, leaving this target in place. -->
+            <SubagentBar
+              v-if="subagentBar"
+              :agents="currentSubagents"
+              :active="runActive"
+              :selected="openedSubagent"
+              @open="openSubagent"
+            />
           </div>
         </section>
       </div>

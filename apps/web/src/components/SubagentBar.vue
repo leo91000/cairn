@@ -30,13 +30,12 @@ const first = computed(() => running.value[0] ?? props.agents[0])
 </script>
 
 <template>
-  <section class="subagent-bar mb-2 flex min-w-0 items-center gap-2 rounded-2xl border border-line bg-surface px-2.5 py-1.5" aria-label="Subagents at work" data-testid="subagent-bar">
+  <section class="subagent-bar mt-2 flex min-w-0 items-center gap-2 rounded-2xl border border-line bg-surface px-2.5 py-1.5" aria-label="Subagents at work" data-testid="subagent-bar">
     <span class="shrink-0 pl-1 font-heading text-xs font-semibold text-ink phone:hidden">Subagents</span>
     <div class="flex min-w-0 flex-1 gap-1.5 overflow-x-auto [scrollbar-width:none] phone:hidden">
       <button
         v-for="agent in agents"
         :key="agent.id"
-        type="button"
         class="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-[10px] border py-1 pr-2 pl-1 text-xs hover:bg-hover"
         :class="selected === agent.id ? 'border-accent bg-soft' : 'border-line bg-inset'"
         :aria-label="`${agent.title}, ${subagentLabels[state(agent)]}. Open its activity`"
@@ -53,7 +52,6 @@ const first = computed(() => running.value[0] ?? props.agents[0])
     <span class="shrink-0 pr-1 text-2xs text-muted phone:hidden">{{ running.length === 1 ? '1 running' : `${running.length} running` }}</span>
     <button
       v-if="first"
-      type="button"
       class="hidden min-h-11 min-w-0 flex-1 items-center gap-2 text-left phone:flex"
       :aria-label="`${running.length === 1 ? '1 subagent' : `${running.length} subagents`} working. Open their activity`"
       @click="emit('open', first.id, $event.currentTarget as HTMLElement)"
