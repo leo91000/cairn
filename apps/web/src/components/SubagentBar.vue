@@ -27,10 +27,44 @@ const delegated = inject(delegatedChatsKey, null)
 const state = (agent: ActivityArtifact) => subagentState(agent, props.active, delegated?.value)
 const running = computed(() => props.agents.filter(agent => state(agent) === 'running'))
 const first = computed(() => running.value[0] ?? props.agents[0])
+
+let mousePress: { button: HTMLButtonElement, bounds: DOMRect } | undefined
+
+function containsPoint(bounds: DOMRect, event: MouseEvent) {
+  return event.clientX >= bounds.left && event.clientX < bounds.right
+    && event.clientY >= bounds.top && event.clientY < bounds.bottom
+}
+
+function retainMousePress(event: PointerEvent) {
+  if (!event.isPrimary || event.button !== 0)
+    return
+
+  const button = event.currentTarget as HTMLButtonElement
+  mousePress = event.pointerType === 'mouse' ? { button, bounds: button.getBoundingClientRect() } : undefined
+  // The queue can move the button between mouse-down and mouse-up.
+  if (mousePress)
+    button.setPointerCapture(event.pointerId)
+}
+
+function openActivity(id: string, event: MouseEvent) {
+  const button = event.currentTarget as HTMLButtonElement
+  const press = mousePress
+  mousePress = undefined
+
+  // Capture keeps the click on the button even when the mouse drags away.
+  // A keyboard click has no pointer coordinates.
+  if (event.detail && press?.button === button
+    && !containsPoint(press.bounds, event)
+    && !containsPoint(button.getBoundingClientRect(), event)) {
+    return
+  }
+
+  emit('open', id, button)
+}
 </script>
 
 <template>
-  <section class="subagent-bar mt-2 flex min-w-0 items-center gap-2 rounded-2xl border border-line bg-surface px-2.5 py-1.5" aria-label="Subagents at work" data-testid="subagent-bar">
+  <section class="subagent-bar mb-2 flex min-w-0 items-center gap-2 rounded-2xl border border-line bg-surface px-2.5 py-1.5" aria-label="Subagents at work" data-testid="subagent-bar">
     <span class="shrink-0 pl-1 font-heading text-xs font-semibold text-ink phone:hidden">Subagents</span>
     <div class="flex min-w-0 flex-1 gap-1.5 overflow-x-auto [scrollbar-width:none] phone:hidden">
       <button
@@ -41,7 +75,8 @@ const first = computed(() => running.value[0] ?? props.agents[0])
         :aria-label="`${agent.title}, ${subagentLabels[state(agent)]}. Open its activity`"
         :aria-pressed="selected === agent.id"
         data-testid="subagent-chip"
-        @click="emit('open', agent.id, $event.currentTarget as HTMLElement)"
+        @pointerdown="retainMousePress"
+        @click="openActivity(agent.id, $event)"
       >
         <SubagentMark :agent="agent" :size="20" />
         <span class="max-w-40 truncate">{{ agent.title }}</span>
@@ -54,7 +89,8 @@ const first = computed(() => running.value[0] ?? props.agents[0])
       v-if="first"
       class="hidden min-h-11 min-w-0 flex-1 items-center gap-2 text-left phone:flex"
       :aria-label="`${running.length === 1 ? '1 subagent' : `${running.length} subagents`} working. Open their activity`"
-      @click="emit('open', first.id, $event.currentTarget as HTMLElement)"
+      @pointerdown="retainMousePress"
+      @click="openActivity(first.id, $event)"
     >
       <span class="flex shrink-0 -space-x-1.5">
         <SubagentMark

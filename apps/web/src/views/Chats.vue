@@ -2030,6 +2030,13 @@ function key(event: KeyboardEvent) {
               </div>
             </details>
             <PlanBar v-if="currentPlan" :plan="currentPlan" />
+            <SubagentBar
+              v-if="subagentBar"
+              :agents="currentSubagents"
+              :active="runActive"
+              :selected="openedSubagent"
+              @open="openSubagent"
+            />
             <form
               class="chat-composer relative rounded-[26px] border border-line bg-surface p-1 focus-within:border-accent/50"
               @submit.prevent="send()"
@@ -2180,14 +2187,6 @@ function key(event: KeyboardEvent) {
                 </div>
               </div>
             </form>
-            <!-- Queue and draft changes grow the composer upward, leaving this target in place. -->
-            <SubagentBar
-              v-if="subagentBar"
-              :agents="currentSubagents"
-              :active="runActive"
-              :selected="openedSubagent"
-              @open="openSubagent"
-            />
           </div>
         </section>
       </div>

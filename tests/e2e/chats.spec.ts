@@ -952,15 +952,16 @@ test('working subagents stay in sight beside the composer and open as a drawer o
 
     await expect(drawer).toBeVisible()
     await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
-    const attachmentInput = page.getByLabel('Attach files', { exact: true })
-    await expect(attachmentInput).toBeEnabled()
-    await attachmentInput.setInputFiles({
-      name: 'panel-notes.txt',
-      mimeType: 'text/plain',
-      buffer: Buffer.from('Notes on the subagent panel.'),
-    })
-    await expect(page.getByRole('button', { name: 'Preview panel-notes.txt' })).toBeVisible()
-    expect(await phoneButton.boundingBox()).toEqual(buttonBounds)
+    await expect(drawer).toHaveCount(0)
+    const movedBounds = (await phoneButton.boundingBox())!
+    await page.mouse.move(movedBounds.x + movedBounds.width / 2, movedBounds.y + movedBounds.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(1, 1)
+    await page.mouse.up()
+    await expect(drawer).toHaveCount(0)
+
+    await phoneButton.press('Enter')
+    await expect(drawer).toBeVisible()
   }
   finally {
     submission.resolve()

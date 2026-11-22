@@ -330,7 +330,7 @@ private fun SubagentRow(agent: Subagent, active: Boolean, now: Long, open: () ->
 }
 
 /**
- * The subagents of the current request, below the composer so they stay in sight while the
+ * The subagents of the current request, above the composer so they stay in sight while the
  * conversation scrolls. Each one opens its full activity; on phones they fold into one button.
  */
 @Composable

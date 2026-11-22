@@ -12,7 +12,6 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
-import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 
@@ -50,8 +49,9 @@ abstract class SubagentCases {
             compose.onAllNodesWithTag("subagent-sheet").fetchSemanticsNodes().isEmpty()
         }
 
-        val bar = compose.onNodeWithTag("subagent-bar")
-        val barBounds = bar.getBoundsInRoot()
+        val activityButton =
+            compose.onNodeWithContentDescription("2 sous-agents au travail. Ouvrir leur activité")
+        activityButton.performTouchInput { down(center) }
         current.updateAndGet { chat ->
             chat.copy(
                 messages = listOf(ChatMessage(id = "follow-up", text = "Continue comme prévu."))
@@ -60,7 +60,9 @@ abstract class SubagentCases {
         compose.waitUntil(10000) {
             compose.onAllNodesWithTag("queued-message").fetchSemanticsNodes().isNotEmpty()
         }
-        assertEquals(barBounds, bar.getBoundsInRoot())
+        activityButton.performTouchInput { up() }
+        compose.onNodeWithTag("subagent-sheet").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Fermer l’activité du sous-agent").performClick()
 
         compose.onNodeWithContentDescription("Options de la conversation").performClick()
         compose.onNodeWithText("Plein écran").performClick()
