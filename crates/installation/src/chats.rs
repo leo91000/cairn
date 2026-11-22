@@ -992,8 +992,7 @@ pub(crate) fn edit_as(
     }
     require_live(&chat)?;
     let mut current = required(find_message(db, chat_id, message_id)?, "Message not found")?;
-    // A returned message goes back to its author's composer, which withdraws it.
-    // A returned message is its author's draft: only they take it back.
+    // A returned message is its author's draft: only their composer takes it back.
     let author = if current.status == MessageStatus::Cancelled && values.is_none() {
         db.kv(&returned_key(&current.id))?
     } else {

@@ -666,7 +666,7 @@ internal fun ChatPage(
                         .copy(subagents = waitingForSubagents(it.taskIds, currentSubagents))
                 } ?: workingStep(live.events, chat?.agentName.orEmpty(), chat?.run?.startedAt)
         }
-    val conversationError = conversationError(chat)
+    val conversationError = conversationError(chat, readOnly)
     val error = conversationError?.takeUnless {
         quota != null && (isQuotaMessage(it) || it == quota.message)
     }

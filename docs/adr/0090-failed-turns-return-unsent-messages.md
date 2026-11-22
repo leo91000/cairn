@@ -1,7 +1,7 @@
 # Failed turns return unsent messages
 
 Date: 2026-11-20. Updates the queue behaviour after a failed or stopped turn in
-ADR-0063 and ADR-0065; the bounded automatic retry policy is unchanged.
+ADR-0063, ADR-0065 and ADR-0067; the bounded automatic retry policy is unchanged.
 
 ## Context
 

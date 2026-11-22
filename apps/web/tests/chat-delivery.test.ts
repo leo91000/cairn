@@ -273,5 +273,7 @@ describe('failure reasons', () => {
     expect(failureReason(held, 'The response stopped before finishing. Send a message to continue.')).toBe('The response stopped before finishing. Resume the queue to continue.')
     expect(failureReason(chat([], { status: 'failed' }, true), reason)).toBe(reason)
     expect(failureReason(chat([message('next')], { status: 'failed' }), reason)).toBe(reason)
+    // Someone without access to the agent is told nothing to do.
+    expect(failureReason(held, reason, true)).toBe(reason)
   })
 })

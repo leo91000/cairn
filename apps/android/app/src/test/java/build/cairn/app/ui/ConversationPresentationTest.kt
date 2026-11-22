@@ -563,6 +563,12 @@ class ConversationPresentationTest {
             "La réponse s’est arrêtée avant la fin. Reprenez la file pour continuer.",
             conversationError(held.copy(run = run.copy(error = null))),
         )
+        // Someone without access to the agent is told nothing to do.
+        assertEquals("Process exited with status 1.", conversationError(held, readOnly = true))
+        assertEquals(
+            "La réponse s’est arrêtée avant la fin.",
+            conversationError(held.copy(run = run.copy(error = null)), readOnly = true),
+        )
     }
 
     @Test

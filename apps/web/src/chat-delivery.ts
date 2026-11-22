@@ -105,7 +105,8 @@ export function resumesOnSend(chat: ChatDetail | null | undefined, queued: numbe
  * A failed conversation's reason, worded for what continues it: a held queue is resumed, as a
  * message written now would wait behind it (ADR-0090).
  */
-export function failureReason(chat: ChatDetail | null | undefined, reason: string) {
-  const held = !!chat?.paused && chat.messages.some(message => message.status === 'queued')
+export function failureReason(chat: ChatDetail | null | undefined, reason: string, readOnly = false) {
+  // Someone without access to the agent cannot resume: they are told nothing to do.
+  const held = !readOnly && !!chat?.paused && chat.messages.some(message => message.status === 'queued')
   return held ? `${reason.replace(/\s*Send a message to continue\.$/, '')} Resume the queue to continue.` : reason
 }

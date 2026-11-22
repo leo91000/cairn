@@ -98,16 +98,18 @@ internal fun conversationState(
 }
 
 /** The error shown above the conversation, including a response that stopped before finishing. */
-internal fun conversationError(chat: Chat?): String? {
+internal fun conversationError(chat: Chat?, readOnly: Boolean = false): String? {
     val own = chat?.error?.takeIf { it.isNotBlank() }
     if (own != null) return own
 
     val run = chat?.run?.takeIf { it.status == "failed" } ?: return null
+    // Someone without access to the agent cannot continue: they are told nothing to do.
     val reason =
         run.error?.trim()?.ifEmpty { null }
-            ?: "La réponse s’est arrêtée avant la fin. Envoyez un message pour continuer."
+            ?: if (readOnly) "La réponse s’est arrêtée avant la fin."
+            else "La réponse s’est arrêtée avant la fin. Envoyez un message pour continuer."
     // A held queue is resumed: a message written now would wait behind it (ADR-0090).
-    val held = chat.paused && chat.messages.any { it.status == "queued" }
+    val held = !readOnly && chat.paused && chat.messages.any { it.status == "queued" }
     if (!held) return reason
     return reason.removeSuffix("Envoyez un message pour continuer.").trimEnd() +
         " Reprenez la file pour continuer."

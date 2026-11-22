@@ -408,7 +408,7 @@ const visibleError = computed(() => {
   if (quota.value && (!chatError || isQuotaMessage(chatError) || chatError === quota.value.message))
     return ''
   const failedRun = detail.value?.run?.status === 'failed' ? detail.value.run : null
-  return chatError || (failedRun ? failureReason(detail.value, failedRun.error || (readOnly.value ? 'The response stopped before finishing.' : 'The response stopped before finishing. Send a message to continue.')) : '')
+  return chatError || (failedRun ? failureReason(detail.value, failedRun.error || (readOnly.value ? 'The response stopped before finishing.' : 'The response stopped before finishing. Send a message to continue.'), readOnly.value) : '')
 })
 const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('OpenCode Go requires Global regions for this model.'))
 // The conversation already shows a failed run's reason as its failure card.
