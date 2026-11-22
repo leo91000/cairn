@@ -224,6 +224,14 @@ class SubagentViewsTest {
         chip.performTouchInput { click(Offset(centerX, -band)) }
         chip.performTouchInput { click(Offset(centerX, height + band)) }
         assertEquals(2, opened.size)
+
+        // A tap that starts on the chip and drifts into the band still opens it.
+        chip.performTouchInput {
+            down(Offset(centerX, 1f))
+            moveTo(Offset(centerX, -band))
+            up()
+        }
+        assertEquals(3, opened.size)
     }
 
     @Test

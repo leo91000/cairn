@@ -19,11 +19,16 @@ export function visibleBox(control: Box, container: Box | undefined): Box {
 }
 
 // Live content can move a control between press and release. A release counts when the
-// pointer stays over the control where it was pressed, or ends over where it is now.
-export function releasedOnControl(pressed: Box, current: Box, x: number, y: number): boolean {
-  const inside = (box: Box) => x >= box.left && x <= box.right && y >= box.top && y <= box.bottom
+// pointer stays over the control where it was pressed, or ends over where it is now, within
+// [slop]: a touch drifts a little across the edge of what it taps.
+export function releasedOnControl(pressed: Box, current: Box, x: number, y: number, slop = 0): boolean {
+  const inside = (box: Box) => x >= box.left - slop && x <= box.right + slop
+    && y >= box.top - slop && y <= box.bottom + slop
   return inside(pressed) || inside(current)
 }
+
+// Browsers turn a touch that moves further into a scroll and cancel the press.
+export const touchSlop = 16
 
 // A touch or pen tap that stops a scrolling row's fling is not a press: browsers send no click
 // for it. A mouse press never stops a fling, so it always counts.

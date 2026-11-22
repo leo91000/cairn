@@ -11,6 +11,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputChange
@@ -55,7 +56,9 @@ internal fun Modifier.pressSurvivingMoves(
                     return@awaitEachGesture
 
                 down.consume()
-                val pressed = pressedLayout.boundsInRoot()
+                // Like Compose's clickable, a release in the minimum touch target still counts.
+                val padding = extendedTouchPadding
+                val pressed = pressedLayout.touchBounds(padding.width, padding.height)
                 val press = PressInteraction.Press(position)
                 val pressSource = source
                 var shown = false
@@ -86,13 +89,20 @@ internal fun Modifier.pressSurvivingMoves(
                 val release = up ?: return@awaitEachGesture
                 val current = layout[0]?.takeIf { it.isAttached } ?: return@awaitEachGesture
                 val point = current.localToRoot(release.position)
-                if (point in pressed || point in current.boundsInRoot()) {
+                if (
+                    point in pressed || point in current.touchBounds(padding.width, padding.height)
+                ) {
                     release.consume()
                     click()
                 }
             }
         }
 }
+
+private fun LayoutCoordinates.touchBounds(horizontal: Float, vertical: Float): Rect =
+    boundsInRoot().let {
+        Rect(it.left - horizontal, it.top - vertical, it.right + horizontal, it.bottom + vertical)
+    }
 
 /** Compose's wait for a tap's release, without cancelling when the pointer leaves the control. */
 private suspend fun AwaitPointerEventScope.releaseOrCancel(): PointerInputChange? {

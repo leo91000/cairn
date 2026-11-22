@@ -1004,13 +1004,25 @@ test('a touch on working subagents opens them even when the queue moves the butt
     await authenticateWorkspace(page)
     const bar = page.getByTestId('subagent-bar')
     await expect(bar).toContainText('2 running')
+    const phoneButton = bar.getByRole('button', { name: /2 subagents working/ })
+    const drawer = page.getByRole('dialog', { name: 'Subagent activity' })
+    const input = await context.newCDPSession(page)
+
+    // A tap that drifts a few pixels past the edge of the unmoved button still opens it.
+    const edge = (await phoneButton.boundingBox())!
+    const near = { x: edge.x + edge.width / 2, y: edge.y + 2 }
+    await input.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [near] })
+    await input.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...near, y: near.y - 5 }] })
+    await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await expect(drawer).toBeVisible()
+    await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
+    await expect(drawer).toHaveCount(0)
+
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep going while I check the panel.')
     await holdNextSubmission(page, chat.id, submission)
     await page.getByRole('button', { name: 'Queue', exact: true }).click()
-    const phoneButton = bar.getByRole('button', { name: /2 subagents working/ })
     const bounds = (await phoneButton.boundingBox())!
     const touch = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
-    const input = await context.newCDPSession(page)
     await input.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touch] })
     submission.resolve()
     try {
@@ -1022,7 +1034,6 @@ test('a touch on working subagents opens them even when the queue moves the butt
     }
 
     // The browser's click after the touch would otherwise open the queued message under it.
-    const drawer = page.getByRole('dialog', { name: 'Subagent activity' })
     await expect(drawer).toBeVisible()
     await expect(page.getByTestId('queued-message-sheet')).toHaveCount(0)
     await drawer.getByRole('button', { name: 'Close subagent activity' }).click()

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { releasedOnControl, stopsRowFling, visibleBox } from '../src/press'
+import {
+  releasedOnControl,
+  stopsRowFling,
+  touchSlop,
+  visibleBox,
+} from '../src/press'
 
 const pressed = {
   left: 10,
@@ -23,6 +28,12 @@ describe('releasedOnControl', () => {
 
   it('accepts a release that follows the control to its new position', () => {
     expect(releasedOnControl(pressed, moved, 110, 600)).toBe(true)
+  })
+
+  it('accepts a touch that drifts a little past the edge of an unmoved control', () => {
+    expect(releasedOnControl(pressed, pressed, 110, 498, touchSlop)).toBe(true)
+    expect(releasedOnControl(pressed, pressed, 110, 498)).toBe(false)
+    expect(releasedOnControl(pressed, pressed, 110, 500 - touchSlop - 1, touchSlop)).toBe(false)
   })
 
   it('ignores a release dragged away from both positions', () => {

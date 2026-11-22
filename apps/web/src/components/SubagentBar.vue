@@ -7,7 +7,12 @@ import {
   onBeforeUnmount,
   ref,
 } from 'vue'
-import { releasedOnControl, stopsRowFling, visibleBox } from '../press'
+import {
+  releasedOnControl,
+  stopsRowFling,
+  touchSlop,
+  visibleBox,
+} from '../press'
 import {
   delegatedChatsKey,
   subagentDots as dots,
@@ -81,7 +86,8 @@ function releasePress(event: PointerEvent) {
   cancelPress()
   const { id, button } = held
   ignoreNextClick(button)
-  if (!releasedOnControl(held.box, shownBox(button), event.clientX, event.clientY))
+  const slop = event.pointerType === 'mouse' ? 0 : touchSlop
+  if (!releasedOnControl(held.box, shownBox(button), event.clientX, event.clientY, slop))
     return
 
   // The browser's own mouse-down may land beside a button that moved, so focus it here.
