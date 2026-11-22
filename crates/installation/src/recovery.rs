@@ -85,6 +85,7 @@ pub(crate) enum ObservationAction {
     Release,
     Exhausted,
     Record(Option<crate::runner::ControllerResult>),
+    PublishCleanup(Option<crate::runner::ControllerResult>),
 }
 
 pub(crate) async fn terminal_code<F, Fut>(
@@ -93,6 +94,7 @@ pub(crate) async fn terminal_code<F, Fut>(
     node: Option<&str>,
     cancel: &tokio_util::sync::CancellationToken,
     limit: Duration,
+    cleanup_observation_pending: bool,
     mut persist: F,
 ) -> Result<()>
 where
@@ -101,12 +103,38 @@ where
 {
     let runner_url = crate::nodes::transport::url_for_node(s, node);
     if runner_url.is_empty() {
-        persist(ObservationAction::Exhausted).await?;
+        let action = if cleanup_observation_pending {
+            ObservationAction::PublishCleanup(None)
+        } else {
+            ObservationAction::Exhausted
+        };
+        persist(action).await?;
         return Ok(());
     }
-    let token = secret(&s.config.data_dir, "runner-secret").await?;
+    let token = match secret(&s.config.data_dir, "runner-secret").await {
+        Ok(token) => token,
+        Err(error) if cleanup_observation_pending => {
+            tracing::warn!(attempt, %error, "Could not authenticate optional cleanup observation");
+            persist(ObservationAction::PublishCleanup(None)).await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     let url = format!("{runner_url}/runs/{attempt}");
-    let deadline = tokio::time::Instant::now() + limit.min(Duration::from_secs(5));
+    let max_observation = Duration::from_secs(5);
+    // An interrupted cleanup observation already has a durable workload fence.
+    // On restart its read budget is independent of the expired workload budget.
+    let budget = if cleanup_observation_pending {
+        max_observation
+    } else {
+        limit.min(max_observation)
+    };
+    let deadline = tokio::time::Instant::now() + budget;
+    if cleanup_observation_pending {
+        let result = observe_cleanup_retirement(s, &url, &token, deadline, cancel).await;
+        persist(ObservationAction::PublishCleanup(result)).await?;
+        return Ok(());
+    }
     loop {
         if s.shutdown.is_cancelled() || cancel.is_cancelled() {
             return Ok(());
@@ -143,7 +171,15 @@ where
                 return Ok(());
             }
             Some(Ok(Ok(code))) => {
+                let pending_cleanup = code.finalization_failed && code.native_cleanup.is_some();
                 persist(ObservationAction::Record(Some(code))).await?;
+                // The existing deadline applies to the original observation.
+                // Persist the known failure before trying optional retirement.
+                if pending_cleanup {
+                    let result =
+                        observe_cleanup_retirement(s, &url, &token, deadline, cancel).await;
+                    persist(ObservationAction::PublishCleanup(result)).await?;
+                }
                 return Ok(());
             }
             Some(Err(_)) => {
@@ -161,6 +197,27 @@ where
             () = tokio::time::sleep_until(next_read) => {}
         }
     }
+}
+
+/// Optional retirement evidence never replaces the already durable failure.
+async fn observe_cleanup_retirement(
+    s: &Service,
+    url: &str,
+    token: &str,
+    deadline: tokio::time::Instant,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Option<crate::runner::ControllerResult> {
+    if tokio::time::Instant::now() >= deadline || s.shutdown.is_cancelled() || cancel.is_cancelled()
+    {
+        return None;
+    }
+    let retirement = crate::runner::observe_cleanup_retirement(&s.http, url, token);
+    tokio::select! {
+        () = s.shutdown.cancelled() => None,
+        () = cancel.cancelled() => None,
+        result = tokio::time::timeout_at(deadline, retirement) => result.ok().and_then(Result::ok),
+    }
+    .filter(|result| result.physical_finalized && result.native_cleanup.is_some())
 }
 
 /// Stops every trace of the run's previous execution before it may be relaunched.

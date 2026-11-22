@@ -1,6 +1,9 @@
 //! Bridge the isolated physical worker to the authenticated attempt result.
+use super::super::cleanup::read_attempt_evidence;
 use super::*;
-use std::os::unix::fs::MetadataExt;
+
+// The manager can miss the underlying failure if this optional probe stalls.
+const WAIT_RETIREMENT_PROBE: Duration = Duration::from_millis(250);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,20 +144,6 @@ async fn record_pending(state: &Path, id: &str, message: &str) -> Result<()> {
     Ok(())
 }
 
-async fn read_attempt_evidence(path: &Path, limit: usize) -> Option<Vec<u8>> {
-    let file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .await
-        .ok()?;
-    let metadata = file.metadata().await.ok()?;
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > limit as u64 {
-        return None;
-    }
-    crate::process::read_bounded(file, limit).await.ok()
-}
-
 impl Controller {
     pub(super) async fn record_cleanup_pending(&self, id: &str, message: &str) -> Result<()> {
         record_pending(&self.state, id, message).await
@@ -168,18 +157,37 @@ impl Controller {
             return json!({});
         };
         if crate::runner::client_cleanup_result(&result, id).is_some()
-            && self.cleanup_receipt_superseded(id).await
+            && self.cleanup_receipt_superseded(id, None).await
         {
-            // The earlier wait can keep its observed outcome. A new fence
-            // must not report that the verified close is still pending.
+            // A new fence must not report that the verified close is still pending.
             tracing::debug!(attempt = id, "Ignoring superseded native cleanup receipt");
             return json!({});
         }
         result
     }
 
-    async fn cleanup_receipt_superseded(&self, id: &str) -> bool {
-        let Some(bytes) = read_attempt_evidence(&self.file(id, "cleanup-result"), 1024).await
+    pub(super) async fn reconcile_wait_result(&self, id: &str, mut result: Value) -> Value {
+        if crate::runner::client_cleanup_result(&result, id).is_some() {
+            let retired = tokio::time::timeout(
+                WAIT_RETIREMENT_PROBE,
+                self.cleanup_receipt_superseded(id, Some(id)),
+            )
+            .await
+            .unwrap_or(false);
+            let cleanup = result["NativeCleanup"].as_object_mut().unwrap();
+            cleanup.remove("retired");
+            if retired {
+                // Older managers still need the original failure fields to
+                // suppress replay. The attempt-bound extension attests closure.
+                cleanup.insert("retired".into(), true.into());
+            }
+        }
+        result
+    }
+
+    async fn cleanup_receipt_superseded(&self, id: &str, attempt: Option<&str>) -> bool {
+        let Ok(Some(bytes)) =
+            read_attempt_evidence(&self.file(id, "cleanup-result"), 1024, false).await
         else {
             return false;
         };
@@ -194,7 +202,7 @@ impl Controller {
             return false;
         }
 
-        let Some(owner) = read_attempt_evidence(&self.file(id, "run"), 36).await else {
+        let Ok(Some(owner)) = read_attempt_evidence(&self.file(id, "run"), 36, false).await else {
             return false;
         };
         let Ok(run) = std::str::from_utf8(&owner) else {
@@ -207,7 +215,7 @@ impl Controller {
                 tokio::fs::symlink_metadata(self.file(id, "active")).await,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound
             )
-            && self.cleanup.retired(&self.state, run).await
+            && self.cleanup.retired(&self.state, run, attempt).await
     }
 }
 
@@ -654,11 +662,77 @@ mod tests {
         assert!(!controller.file(&attempt, "active").exists());
         assert!(controller.file(&attempt, "cleanup-result").exists());
         assert_eq!(controller.stopped_result(&attempt).await, json!({}));
-        let response = controller.wait(&attempt);
+        let response = controller.wait(&attempt, true);
         let history = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&history).unwrap(), value);
+        let history = serde_json::from_slice::<Value>(&history).unwrap();
+        let mut retired = value.clone();
+        retired["NativeCleanup"]["retired"] = true.into();
+        assert_eq!(history, retired);
+        // Legacy managers keep treating this as an execution failure.
+        let legacy = crate::runner::client_cleanup_result(&history, &attempt).unwrap();
+        assert!(legacy.finalization_failed);
+        assert!(!legacy.physical_finalized);
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &std::fs::read(controller.file(&attempt, "exit")).unwrap()
+            )
+            .unwrap(),
+            value
+        );
+
+        let later_attempt = crate::config::id();
+        super::super::super::cleanup::quarantine(&controller.state, &run, &later_attempt).unwrap();
+        let historical_result =
+            axum::body::to_bytes(controller.wait(&attempt, true).into_body(), 4096)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&historical_result).unwrap(),
+            history
+        );
+        // Stop still fences the whole conversation.
+        assert_eq!(controller.stopped_result(&attempt).await, value);
+    }
+
+    #[test]
+    fn wait_preserves_a_fenced_failure_when_retirement_io_stalls() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (_root, controller) = super::super::tests::fixture().await;
+            let attempt = crate::config::id();
+            let pending = json!({
+                "StatusCode": crate::runner::CONTROLLER_FAILED,
+                "FinalizationFailed": true,
+                "NativeCleanup": {
+                    "attemptId": attempt,
+                    "workloadFenced": true,
+                    "message": "Native disk cleanup is pending."
+                }
+            });
+            let (ready, started) = tokio::sync::oneshot::channel();
+            let (release, blocked) = tokio::sync::oneshot::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = ready.send(());
+                let _ = blocked.blocking_recv();
+            });
+            started.await.unwrap();
+
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                controller.reconcile_wait_result(&attempt, pending.clone()),
+            )
+            .await;
+            let _ = release.send(());
+            blocker.await.unwrap();
+
+            assert_eq!(result.unwrap(), pending);
+        });
     }
 
     #[tokio::test]
@@ -679,21 +753,31 @@ mod tests {
             .unwrap();
         let pending = controller.stopped_result(&attempt).await;
         assert!(crate::runner::client_cleanup_result(&pending, &attempt).is_some());
+        let waiting = async || {
+            let body = axum::body::to_bytes(controller.wait(&attempt, true).into_body(), 4096)
+                .await
+                .unwrap();
+            serde_json::from_slice::<Value>(&body).unwrap()
+        };
+        assert_eq!(waiting().await, pending);
 
         let completion = controller.file(&attempt, "cleanup-result");
         let flushed = br#"{"completion":"Flushed"}"#;
         let other_completion = controller.file(&other_attempt, "cleanup-result");
         tokio::fs::write(&other_completion, flushed).await.unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
+        assert_eq!(waiting().await, pending);
         tokio::fs::hard_link(&other_completion, &completion)
             .await
             .unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
+        assert_eq!(waiting().await, pending);
         tokio::fs::remove_file(&completion).await.unwrap();
         tokio::fs::symlink(&other_completion, &completion)
             .await
             .unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
+        assert_eq!(waiting().await, pending);
         tokio::fs::remove_file(&completion).await.unwrap();
         for bytes in [
             b"malformed".as_slice(),
@@ -705,15 +789,18 @@ mod tests {
         ] {
             tokio::fs::write(&completion, bytes).await.unwrap();
             assert_eq!(controller.stopped_result(&attempt).await, pending);
+            assert_eq!(waiting().await, pending);
         }
 
         tokio::fs::write(&completion, flushed).await.unwrap();
         let active = controller.file(&attempt, "active");
         tokio::fs::write(&active, &run).await.unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
+        assert_eq!(waiting().await, pending);
         tokio::fs::remove_file(active).await.unwrap();
         super::super::super::cleanup::quarantine(&controller.state, &run, &attempt).unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
+        assert_eq!(waiting().await, pending);
         tokio::fs::remove_file(
             controller
                 .state
@@ -729,5 +816,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, failure);
+        assert_eq!(waiting().await, failure);
     }
 }

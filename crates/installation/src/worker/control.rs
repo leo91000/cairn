@@ -468,7 +468,7 @@ pub(crate) fn requeue(
         checkpoint.controller_recoveries = None;
         checkpoint.controller_recovery_reservation = None;
         checkpoint.provider_failure_attempt = None;
-        checkpoint.finalization_failure_attempt = None;
+        checkpoint.reset_finalization_observation();
         checkpoint.move_recovery_reservation = None;
         checkpoint.provider_retry_reservation = None;
         checkpoint.pending_paid_admission = None;
