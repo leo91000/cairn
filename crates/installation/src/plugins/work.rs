@@ -470,10 +470,20 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let chat = s.conversation_boundary(&chat_id).await?;
     if let Some(run_id) = chat["runId"].as_str() {
         let run = s.store.run(run_id).await?;
+        // A turn whose message went back to its author is over: the plugin's message starts
+        // the next turn instead (ADR-0090).
+        let returned = s
+            .store
+            .read({
+                let run_id = run_id.to_owned();
+                move |db| crate::chats::turn_returned(db, &run_id)
+            })
+            .await?;
         if crate::run_status::RunStatus::of(&run)
             .is_some_and(crate::run_status::RunStatus::is_resumable)
             && chat["cancelledByDeletion"] != true
             && chat["sessionRestartRequested"] != true
+            && !returned
         {
             let expected = expected.clone();
             let event = event.clone();

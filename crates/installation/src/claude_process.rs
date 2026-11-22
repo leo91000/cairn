@@ -1797,7 +1797,7 @@ impl Turn<'_> {
 fn take_line(bytes: &[u8], buffer: &mut Vec<u8>) -> Result<(usize, bool)> {
     if bytes.is_empty() {
         return Err(Error::bad_gateway(
-            "Claude Code disconnected before completing its response. Resume to continue.",
+            "Claude Code disconnected before completing its response. Send a message or resume to continue.",
         ));
     }
     let end = bytes.iter().position(|b| *b == b'\n').map(|i| i + 1);

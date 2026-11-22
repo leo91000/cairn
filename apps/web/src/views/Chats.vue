@@ -667,8 +667,8 @@ const changesRunningAgent = computed(() => {
 const steers = computed(() => active.value && !detail.value?.paused && !changesRunningAgent.value && !steerBlocked.value)
 // Saving an edit keeps the queued message where it was.
 const editedMode = computed(() => pending.value.find(message => message.id === editing.value)?.mode ?? 'queue')
-// Stopping or a failed turn pauses an empty queue, which the next message resumes. A queue paused
-// on purpose, or holding messages, keeps holding what is added to it.
+// After a Stop or a failed turn, the next message resumes an empty queue, whoever paused it. A
+// queue paused after a successful turn, or holding messages, keeps holding what is added to it.
 const resumesOnSend = computed(() => resumesOnSendFor(detail.value, pending.value.length))
 const held = computed(() => !!detail.value?.paused && !resumesOnSend.value)
 const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)

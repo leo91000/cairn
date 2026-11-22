@@ -228,7 +228,7 @@ fn native_error(error: &Value) -> Error {
                 message.contains("This Go model requires Global regions.")
             }) =>
         {
-            "OpenCode Go requires Global regions for this model. Review your OpenCode workspace Privacy settings and select Global if appropriate, then resume. To keep your current settings, start a new conversation with another model."
+            "OpenCode Go requires Global regions for this model. Review your OpenCode workspace Privacy settings and select Global if appropriate, then retry. To keep your current settings, start a new conversation with another model."
         }
         Some(401 | 403) => {
             "OpenCode authentication failed. Check the model provider and replace its API key in Connections."

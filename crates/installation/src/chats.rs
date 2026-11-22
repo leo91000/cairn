@@ -384,7 +384,7 @@ fn compaction_blocker(
     }
     if run["status"] != RunStatus::Succeeded {
         return Ok(Some(
-            "Resume or resolve the last turn before compacting.".into(),
+            "Continue or resolve the last turn before compacting.".into(),
         ));
     }
     if !run["workspaceCleanedAt"].is_null() {
@@ -993,16 +993,18 @@ pub(crate) fn edit_as(
     require_live(&chat)?;
     let mut current = required(find_message(db, chat_id, message_id)?, "Message not found")?;
     // A returned message goes back to its author's composer, which withdraws it.
-    let returned = current.status == MessageStatus::Cancelled && values.is_none();
-    if returned {
-        // A returned message is its author's draft: only they take it back.
-        let author = db.kv(&returned_key(&current.id))?;
+    // A returned message is its author's draft: only they take it back.
+    let author = if current.status == MessageStatus::Cancelled && values.is_none() {
+        db.kv(&returned_key(&current.id))?
+    } else {
+        None
+    };
+    let returned = author.is_some();
+    if let Some(author) = author {
         let allowed = match origin {
             crate::native::policy::Origin::Human(account)
-            | crate::native::policy::Origin::PublicAccount(account) => {
-                author.is_none_or(|author| author == account.as_str())
-            }
-            _ => author.is_none(),
+            | crate::native::policy::Origin::PublicAccount(account) => author == account.as_str(),
+            _ => false,
         };
         if !allowed {
             return Err(Error::conflict(
@@ -1241,11 +1243,12 @@ fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
         if !pending || (message.created_at > ended_at && !own) {
             continue;
         }
-        // A steering message being sent may have reached the running turn.
-        let uncertain = if own {
+        // The turn's own message, and steering being sent to it, reached the agent only if a
+        // process launched for this turn.
+        let uncertain = if own || message.status == MessageStatus::Sending {
             *received.get_or_insert(!never_received(db, run)?)
         } else {
-            message.status == MessageStatus::Sending
+            false
         };
         let author = if message.question_id.is_some() || uncertain {
             None
@@ -2670,12 +2673,20 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     }
                     db.put_message(&turn)?;
                     record_message(db, "chat", "turn", &EntryWriter::Person("alice".into()))?;
+                    let steering = json!({ "id": "steering", "chatId": "chat", "text": "steer", "mode": "steer", "status": "sending", "createdAt": 650 });
+                    db.put_message(&steering)?;
+                    record_message(db, "chat", "steering", &EntryWriter::Person("alice".into()))?;
 
                     // The agent may have the message, or an answer cannot go back to a
                     // composer: either waits, queued again, behind a pause as before.
                     settle_turn(db, "chat", &run)?;
                     let turn = find_message(db, "chat", "turn")?.unwrap();
                     assert_eq!(turn.status, MessageStatus::Queued, "launched {launched}");
+                    // Steering sent to a launched turn may have been read; never launched, it
+                    // goes back with the turn.
+                    let steering = find_message(db, "chat", "steering")?.unwrap();
+                    let expected = if launched { MessageStatus::Queued } else { MessageStatus::Cancelled };
+                    assert_eq!(steering.status, expected, "launched {launched}");
                     assert!(conversation(db, "chat")?.paused);
                     assert!(!turn_returned(db, "run")?);
                     Ok(())
@@ -2716,7 +2727,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 };
                 db.put_message(&message("first", "delivered", 10))?;
                 db.put_message(&message("second", "sending", 400))?;
-                // Claimed for steering: the turn may have read it.
+                // Claimed for steering, but no process launched for this turn to read it.
                 let mut steering = message("steering", "sending", 450);
                 steering["mode"] = "steer".into();
                 db.put_message(&steering)?;
@@ -2728,8 +2739,8 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
 
                 settle_turn(db, "chat", &run)?;
                 assert_eq!(find_message(db, "chat", "second")?.unwrap().status, MessageStatus::Cancelled);
-                assert_eq!(find_message(db, "chat", "steering")?.unwrap().status, MessageStatus::Queued);
-                assert!(conversation(db, "chat")?.paused);
+                assert_eq!(find_message(db, "chat", "steering")?.unwrap().status, MessageStatus::Cancelled);
+                assert!(!conversation(db, "chat")?.paused);
 
                 // Only the author of a returned message takes it back.
                 let refused = edit_as(db, "chat", "second", None, &Origin::Human("bob".into())).unwrap_err();
@@ -2832,7 +2843,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                         "claude",
                         "failed",
                         Some("session"),
-                        "Resume or resolve the last turn",
+                        "Continue or resolve the last turn",
                     ),
                     (
                         "claude",

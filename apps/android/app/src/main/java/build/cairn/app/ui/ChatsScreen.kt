@@ -761,8 +761,8 @@ internal fun ChatPage(
                 (speed.isNotEmpty() && speed != runningAgent.speed.ifEmpty { "standard" }))
     // While the agent works, a message joins its turn unless it must wait for the next one.
     val steers = active && chat?.paused != true && !changesRunningAgent && !steerBlocked
-    // Stopping or a failed turn pauses an empty queue, which the next message resumes. A queue
-    // paused on purpose, or holding messages, keeps holding what is added to it.
+    // After a Stop or a failed turn, the next message resumes an empty queue, whoever paused it.
+    // A queue paused after a successful turn, or holding messages, keeps holding what is added.
     val resumesOnSend = resumesOnSend(chat, pending.size)
     val held = chat?.paused == true && !resumesOnSend
     // Saving an edit keeps the queued message where it was.

@@ -16,9 +16,11 @@ this as a conversation they must repair rather than one they can keep writing in
 The dispatcher settles a turn that failed, was interrupted or was stopped once.
 It returns the ordinary messages a person wrote that the agent certainly never
 received: the turn's own message when no attempt launched a process for that turn
-(for example, admission or the controller refused it), and queued messages written
-before the turn ended or before Stop was pressed. Steering messages already being
-sent may have reached the running turn. They become `cancelled` and name the person
+(for example, admission or the controller refused it), steering messages sent to
+such a turn, and queued messages written before the turn ended or before Stop was
+pressed. Steering sent to a turn whose process launched may have been read, so it
+is held. Returned messages come back in order; a resent message follows any held
+message that waited behind it. They become `cancelled` and name the person
 they go back to (`returnedTo`). Everything else is held behind a pause, queued
 again, as every failure did before: messages from rules and agents, which have no
 composer to go back to, questionnaire answers, and a turn message the agent may
@@ -46,7 +48,7 @@ ended, which is sent instead.
 Explicit pauses keep their meaning: a person's pause, Stop, a rule's cancellation
 and a requested fresh session still pause the conversation, and rules still cannot
 lift them. After a failed or interrupted turn, rules also wait: they can steer or
-answer again once a person writes in the conversation or resumes it. Agents with
+answer again once a person starts its next turn, by writing or by resuming it. Agents with
 control access can continue it as they could resume it before. When the last turn
 failed or was stopped and the queue is empty, the next message a person sends
 resumes it. A queue paused after a successful turn, or holding messages, keeps

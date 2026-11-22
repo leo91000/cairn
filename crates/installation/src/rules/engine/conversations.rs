@@ -748,8 +748,8 @@ fn start(
     Ok(json!({ "conversationId": chat, "messageId": message, "key": key }))
 }
 
-/// A failed turn no longer pauses the conversation; it still waits for a person before
-/// rules continue it. A stop pauses it, which the pause checks already cover.
+/// A failed turn no longer pauses the conversation; rules still wait until a person starts
+/// its next turn, by writing or resuming. A stop pauses it, which the pause checks cover.
 fn require_person_after_failure(db: &Db<'_>, chat: &Conversation) -> Result<()> {
     let failed = chat
         .run_id
@@ -765,7 +765,7 @@ fn require_person_after_failure(db: &Db<'_>, chat: &Conversation) -> Result<()> 
         });
     if failed {
         return Err(Error::conflict(
-            "This conversation's last turn failed. Rules can continue it once a person writes in it or resumes it.",
+            "This conversation's last turn failed. Rules can continue it once a person starts its next turn.",
         ));
     }
     Ok(())
