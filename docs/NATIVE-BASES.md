@@ -11,11 +11,11 @@ The copy does not fsync each file. After the checksum verification, one `syncfs`
 of the data pool flushes the copy; it is renamed and its format published only
 after that barrier succeeds. The barrier's descriptor is opened before the copy
 starts, so a writeback error during the copy fails it even when another
-environment's `syncfs` observed that error first. Recent ext4 kernels can return
-success from `syncfs` after a shutdown during the flush itself; the data-pool
-rename and directory fsync that follow then fail with an I/O error, so the
-format is never published. A crash before publication leaves a partial private
-tree that initialization retries from the pinned source.
+environment's `syncfs` observed that error first. The barrier then fsyncs the
+target directory: ext4 refuses that fsync after a shutdown or an emergency
+read-only remount during the flush, which `syncfs` and `statvfs` may not report.
+A crash before the rename leaves a partial private tree that initialization
+deletes and copies again from the pinned source.
 
 Per-file fsync cost one host journal commit per file on a loop-backed pool: on a
 32-thread i9-14900K host, the 5,201-entry / 113 MiB cairn base took 66.7 s with

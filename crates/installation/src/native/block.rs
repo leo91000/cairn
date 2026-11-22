@@ -997,8 +997,11 @@ pub(super) async fn sync_opened(directory: std::fs::File) -> std::io::Result<()>
         if unsafe { libc::syncfs(directory.as_raw_fd()) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        // An error can remount ext4 during this very flush, while syncfs still
-        // returns success. Check both sides before claiming completion.
+        // An error can shut down ext4 or make it emergency read-only during
+        // this very flush, while syncfs still returns success and statvfs may
+        // not report read-only. ext4 refuses fsync in both states, and it costs
+        // little once syncfs has committed the journal.
+        directory.sync_all()?;
         require_writable(&directory)
     })
     .await
