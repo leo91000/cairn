@@ -110,16 +110,21 @@ async fn prepared_directory_base_is_verified_and_private_copies_survive_cache_re
     };
     assert!(other.lookup(&archives, 128).await.unwrap().is_none());
     let source = bases.state.join("native-bases").join(&ready.key);
+    let contents = bases.contents(&ready.key);
     assert!(!source.join("lazy").exists());
+    assert!(!source.join("contents").exists());
+    assert_eq!(
+        std::fs::metadata(contents.parent().unwrap())
+            .unwrap()
+            .mode()
+            & 0o777,
+        0o700
+    );
     let private = bases.state.join("private-copy");
     private_dir(&private).await.unwrap();
-    super::directory::copy_unbudgeted(
-        &source.join("contents"),
-        &private,
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+    super::directory::copy_unbudgeted(&contents, &private, &CancellationToken::new(), false)
+        .await
+        .unwrap();
     let relative = Path::new("workspaces")
         .join(&archive.project_id)
         .join("file");
@@ -128,13 +133,12 @@ async fn prepared_directory_base_is_verified_and_private_copies_survive_cache_re
         b"initial project"
     );
     assert_ne!(
-        std::fs::metadata(source.join("contents").join(&relative))
-            .unwrap()
-            .ino(),
+        std::fs::metadata(contents.join(&relative)).unwrap().ino(),
         std::fs::metadata(private.join(&relative)).unwrap().ino()
     );
     bases.trim(0, u64::MAX, None).await.unwrap();
     assert!(!source.exists());
+    assert!(!contents.exists());
     assert_eq!(
         std::fs::read(private.join(relative)).unwrap(),
         b"initial project"
@@ -206,15 +210,22 @@ async fn changed_cache_payload_is_rejected_before_a_conversation_can_claim_it() 
         .await
         .unwrap();
     let ready = bases.lookup(&archives, 128).await.unwrap().unwrap();
-    let source = bases.state.join("native-bases").join(ready.key);
-    let payload = source
-        .join("contents/workspaces")
+    let source = bases.state.join("native-bases").join(&ready.key);
+    let payload = bases
+        .contents(&ready.key)
+        .join("workspaces")
         .join(&archives[0].project_id)
         .join("file");
     let mut bytes = std::fs::read(&payload).unwrap();
     let last = bytes.len() - 1;
     bytes[last] ^= 0xff;
     std::fs::write(&payload, &bytes).unwrap();
+    // Publication verified this tree for the controller's lifetime: later
+    // lookups check its records and identity without hashing it again.
+    assert!(bases.lookup(&archives, 128).await.unwrap().is_some());
+    assert!(source.join("ready.json").exists());
+    // A restarted controller hashes it before the first claim.
+    forget_verification(&ready.key);
     assert!(bases.lookup(&archives, 128).await.unwrap().is_none());
     assert!(!source.join("ready.json").exists());
     assert_eq!(
@@ -336,6 +347,12 @@ async fn active_background_build_releases_its_temporary_files_before_foreground_
             .count(),
         0
     );
+    assert_eq!(
+        std::fs::read_dir(super::workspace::data_root(&bases.state).join(POOL_DIRECTORY))
+            .unwrap()
+            .count(),
+        0
+    );
     stop.cancel();
     drop(foreground);
     warmer.wait_idle().await;
@@ -447,7 +464,7 @@ async fn measure_prepared_native_bases() {
         "cpuMs": cpu_ms() - cpu
     });
     let ready = bases.lookup(&archives, 256).await.unwrap().unwrap();
-    let cache = bases.state.join("native-bases").join(&ready.key);
+    let cache = bases.contents(&ready.key);
     let mut samples = Vec::new();
     for _ in 0..3 {
         let baseline_run = crate::config::id();
@@ -598,9 +615,10 @@ async fn kernel_prepared_base_admission_and_recovery() {
             } else {
                 private_dir(&workload.join("data")).await.unwrap();
                 super::directory::copy_unbudgeted(
-                    &source.join("contents"),
+                    &bases.contents(&ready.key),
                     &workload.join("data"),
                     &stop,
+                    false,
                 )
                 .await
                 .unwrap();
@@ -876,4 +894,149 @@ async fn prepared_initialization_intent_does_not_authorize_unrecognized_old_payl
             .unwrap()
             .exists()
     );
+}
+
+#[tokio::test]
+async fn trimming_uses_recorded_sizes_and_unpublishes_before_removing_contents() {
+    let (_root, bases, archive, policy) = fixture().await;
+    let archives = vec![archive];
+    bases
+        .warm(
+            &archives,
+            128,
+            16 * 1024 * disk::MIB,
+            &policy,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let ready = bases.lookup(&archives, 128).await.unwrap().unwrap();
+    let control = bases.state.join("native-bases").join(&ready.key);
+    let contents = bases.contents(&ready.key);
+    assert_eq!(
+        ready.allocated_bytes,
+        super::workspace::measure(&contents, true).unwrap()
+    );
+
+    // The recorded size, not a walk of the tree, decides the cache budget.
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(control.join("ready.json")).unwrap()).unwrap();
+    record["allocatedBytes"] = (64 * disk::MIB).into();
+    super::atomic_write(
+        &control.join("ready.json"),
+        &serde_json::to_vec(&record).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(bases.trim(65 * disk::MIB, 0, None).await.unwrap(), 0);
+    assert!(contents.is_dir());
+    assert_eq!(
+        bases.trim(32 * disk::MIB, 0, None).await.unwrap(),
+        64 * disk::MIB
+    );
+    assert!(!control.exists());
+    assert!(!contents.exists());
+}
+
+#[tokio::test]
+async fn startup_cleanup_removes_orphans_and_unpinned_legacy_entries() {
+    let (_root, bases, archive, policy) = fixture().await;
+    let archives = vec![archive];
+    bases
+        .warm(
+            &archives,
+            128,
+            16 * 1024 * disk::MIB,
+            &policy,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let ready = bases.lookup(&archives, 128).await.unwrap().unwrap();
+    let controls = bases.state.join("native-bases");
+    let pool = super::workspace::data_root(&bases.state).join(POOL_DIRECTORY);
+    let key = |index: u8| format!("{index:02x}").repeat(32);
+
+    // Interrupted builds and probes, and contents nothing publishes.
+    private_dir(
+        &pool
+            .join(format!(".build-{}", crate::config::id()))
+            .join("home"),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        pool.join(format!(".probe-{}.source", crate::config::id())),
+        b"x",
+    )
+    .await
+    .unwrap();
+    private_dir(&pool.join(key(1)).join("workspaces"))
+        .await
+        .unwrap();
+    // A current record whose contents were never renamed into place.
+    private_dir(&controls.join(key(2))).await.unwrap();
+    let mut record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(controls.join(&ready.key).join("ready.json")).unwrap(),
+    )
+    .unwrap();
+    record["key"] = key(2).into();
+    tokio::fs::write(
+        controls.join(key(2)).join("ready.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(controls.join(key(2)).join("pin"), b"")
+        .await
+        .unwrap();
+    // Legacy entries: inline contents, or an older ready format.
+    let mut legacy = record.clone();
+    legacy["inputs"]["format"] = 2.into();
+    for index in [3, 4, 5] {
+        let control = controls.join(key(index));
+        private_dir(&control.join("contents/workspaces"))
+            .await
+            .unwrap();
+        tokio::fs::write(control.join("pin"), b"").await.unwrap();
+        legacy["key"] = key(index).into();
+        tokio::fs::write(
+            control.join("ready.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    std::fs::remove_dir_all(controls.join(key(4)).join("contents")).unwrap();
+    // An environment's durable intent still pins this legacy entry.
+    let intent = bases.state.join("legacy-intent.pin");
+    std::fs::hard_link(controls.join(key(5)).join("pin"), &intent).unwrap();
+
+    recover_cache(&bases.state).await.unwrap();
+
+    let mut remaining = std::fs::read_dir(&pool)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    remaining.sort();
+    assert_eq!(remaining, vec![ready.key.clone()]);
+    let mut records = std::fs::read_dir(&controls)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    records.sort();
+    let mut expected = vec![ready.key.clone(), key(5)];
+    expected.sort();
+    assert_eq!(records, expected);
+    assert!(controls.join(key(5)).join("contents").is_dir());
+    assert!(bases.lookup(&archives, 128).await.unwrap().is_some());
+
+    // Once released, the legacy entry is an ordinary trim candidate.
+    std::fs::remove_file(intent).unwrap();
+    bases
+        .trim(u64::MAX, u64::MAX, Some(&ready.key))
+        .await
+        .unwrap();
+    assert!(!controls.join(key(5)).exists());
+    assert!(bases.lookup(&archives, 128).await.unwrap().is_some());
 }

@@ -7,9 +7,62 @@ and decompressing another ZIP; it still creates private files and verifies their
 contents. File ownership, links and xattrs are preserved. The cache shares no
 mutable working-file inodes with conversations.
 
-The copy does not fsync each file. After the checksum verification, one `syncfs`
-of the data pool flushes the copy; it is renamed and its format published only
-after that barrier succeeds. The barrier's descriptor is opened before the copy
+## Layout
+
+[ADR-0092](adr/0092-instant-native-environment-start.md) places base contents on
+the data pool, beside the environments cloned from them:
+
+```text
+state/native-data/.cairn-bases/<key>/            contents (home, output, workspaces)
+state/native-data/.cairn-bases/.build-<uuid>/    contents being extracted
+state/native-bases/<key>/{pin,contents.digest,ready.json}
+```
+
+`.cairn-bases` is a root-owned `0700` directory. Nothing below it is ever bound
+into a workload; an environment only receives a private clone under its own run.
+Control records stay on the controller filesystem, so attempt pins and durable
+initialization intents remain hard links to `pin`. `ready.json` (format 3) binds
+the record to the contents directory's inode and records the contents' allocated
+bytes and clone footprint, both measured once at publication.
+
+A build extracts into `.build-<uuid>` on the pool, so admission, inode and
+physical reserve checks sample the pool. Its control records are sealed in a
+private `state/environments/<uuid>` directory. Publication renames the contents
+into place and fsyncs `.cairn-bases`, then renames the control record and fsyncs
+`native-bases`; a base exists only when both halves agree. Trimming unpublishes
+the control record durably before removing the contents. Trimming and cache
+budgets add the recorded sizes instead of walking cached trees, and full usage
+scans count the contents through the pool's `statvfs`, never twice.
+
+Controller startup, after attempt pins are recovered and before plans are
+admitted, removes interrupted builds and probes, contents without a control
+record, and unpinned control records without matching contents. Unpinned legacy
+records, with inline `contents/` or an older `ready.json` format, are removed as
+well; pinned ones remain until a later trim. Older keys never match format 3.
+
+## Verification
+
+A base is hashed in full when it is published. A controller process trusts it
+afterwards: the first lookup after a restart hashes it again, and later lookups
+check its records and contents directory identity only. A failed verification
+removes `ready.json`. Lookups therefore return the recorded clone footprint
+without walking the base.
+
+## Clone
+
+The controller probes once per process whether the pool supports `FICLONE`. If
+it does, `cp --reflink=always` clones the base: data extents are shared, only
+metadata is written, and mode/ACLs, ownership, timestamps, hard links and xattrs
+are preserved. A structural `rsync -aHAXn` dry run then verifies names, types,
+sizes, times, modes, owners, links, ACLs and xattrs; data needs no checksum
+because the clone's extents are the source's. Otherwise, as on ext4 pools, rsync
+copies every byte and `rsync -c` verifies it. Both run in a monitored process
+group without `CAP_SYS_RESOURCE`. Legacy journal migration copies from another
+filesystem and always uses the checksummed copy.
+
+The copy does not fsync each file. After verification, one `syncfs` of the data
+pool flushes the copy; it is renamed and its format published only after that
+barrier succeeds. The barrier's descriptor is opened before the copy
 starts, so a writeback error during the copy fails it even when another
 environment's `syncfs` observed that error first. The barrier then fsyncs the
 target directory: ext4 refuses that fsync after a shutdown or an emergency
@@ -35,8 +88,8 @@ its existing limits. Existing conversations retain their own files.
 The historical `metadataBytes` response now estimates the complete private
 copy, including per-entry/logical allocation and reserve, rather than only journal
 metadata or compressed cache allocation. Large templates use the bounded cache
-payload limit; a cache on a compressed controller filesystem must not understate
-admission on the uncompressed data pool.
+payload limit. It is measured once at publication and returned unchanged by
+lookups; reflink clones still charge this logical size to the environment quota.
 
 ## Reproducible measurements
 

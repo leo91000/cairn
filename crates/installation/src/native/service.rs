@@ -3088,9 +3088,11 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
 
 // Called only after old workloads and block devices are fenced. Temporary
 // anonymous bases/clones have no authority; conventional committed disks remain.
+// Base cache cleanup follows pin recovery so link counts show only durable intents.
 async fn recover_preparations(data: &Path, state: &Path) -> Result<()> {
     storage::environment::recover(state).await?;
-    super::bases::recover_pins(data).await
+    super::bases::recover_pins(data).await?;
+    super::bases::recover_cache(state).await
 }
 
 async fn bind_controller(path: &Path) -> Result<tokio::net::UnixListener> {

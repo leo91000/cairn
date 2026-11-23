@@ -371,7 +371,8 @@ async fn migrate(
             let capacity = CopyCapacity {
                 state: state.to_owned(), workload: workload.clone(), required, fallback, reserved: 0,
             };
-            copy_verified_with_capacity(&source, &staging, stop, Some(&capacity)).await?;
+            // A different filesystem: copy and checksum every byte.
+            copy_verified_with_capacity(&source, &staging, stop, Some(&capacity), false).await?;
             // Verify the final allocated total as well as the kernel-enforced
             // copy. Keep the old journal intact if the grant is insufficient.
             let allowance = plan["resources"]["diskMiB"].as_u64().unwrap() * super::disk::MIB;
@@ -721,13 +722,16 @@ async fn check_copy_headroom(
         .map_err(Error::internal)?
 }
 
+/// `reflink` selects a block-sharing clone; the caller probed that the source
+/// and target pool supports it. Otherwise every byte is copied and checksummed.
 pub(super) async fn copy_verified(
     source: &Path,
     target: &Path,
     stop: &CancellationToken,
     capacity: &CopyCapacity,
+    reflink: bool,
 ) -> Result<()> {
-    copy_verified_with_capacity(source, target, stop, Some(capacity)).await
+    copy_verified_with_capacity(source, target, stop, Some(capacity), reflink).await
 }
 
 #[cfg(test)]
@@ -735,8 +739,9 @@ pub(super) async fn copy_unbudgeted(
     source: &Path,
     target: &Path,
     stop: &CancellationToken,
+    reflink: bool,
 ) -> Result<()> {
-    copy_verified_with_capacity(source, target, stop, None).await
+    copy_verified_with_capacity(source, target, stop, None, reflink).await
 }
 
 async fn copy_verified_with_capacity(
@@ -744,8 +749,31 @@ async fn copy_verified_with_capacity(
     target: &Path,
     stop: &CancellationToken,
     capacity: Option<&CopyCapacity>,
+    reflink: bool,
 ) -> Result<()> {
-    let mut copy = tokio::process::Command::new("rsync");
+    let mut copy = if reflink {
+        // Copies the contents of `source` into the existing `target`, like the
+        // rsync `source/` form. `mode` carries ACLs; `links` keeps hard links;
+        // shared extents keep holes, so no sparse handling is needed.
+        let mut copy = tokio::process::Command::new("cp");
+        copy.args([
+            "--reflink=always",
+            "--no-dereference",
+            "--recursive",
+            "--preserve=mode,ownership,timestamps,links,xattr",
+            "--no-target-directory",
+            "--",
+        ])
+        .arg(source)
+        .arg(target);
+        copy
+    } else {
+        let mut copy = tokio::process::Command::new("rsync");
+        copy.args(["-aHAX", "--numeric-ids", "--sparse", "--"])
+            .arg(format!("{}/", source.display()))
+            .arg(target);
+        copy
+    };
     // The exec child retains ownership/xattr privileges but cannot bypass quotas.
     unsafe {
         copy.pre_exec(|| {
@@ -763,11 +791,12 @@ async fn copy_verified_with_capacity(
     // it only after this returns. The descriptor is opened before the copy so
     // writeback errors during it reach this barrier.
     let barrier = tokio::fs::File::open(target).await?.into_std().await;
-    copy.args(["-aHAX", "--numeric-ids", "--sparse", "--"])
-        .arg(format!("{}/", source.display()))
-        .arg(target);
-    rsync_status(copy, stop, capacity).await?;
-    verify_copy_with_capacity(source, target, stop, capacity).await?;
+    copy_status(copy, stop, capacity, true).await?;
+    // A reflinked file's data extents are the source's by construction: verify
+    // names, types, sizes, times, modes, owners, links, ACLs and xattrs only.
+    // The copy's final capacity check has just run; the verifier allocates
+    // nothing, and is still monitored and checked when it finishes.
+    verify_copy_with_capacity(source, target, stop, capacity, !reflink, false).await?;
     block::sync_opened(barrier).await.map_err(Into::into)
 }
 
@@ -777,7 +806,7 @@ pub(super) async fn verify_copy(
     stop: &CancellationToken,
     capacity: &CopyCapacity,
 ) -> Result<()> {
-    verify_copy_with_capacity(source, target, stop, Some(capacity)).await
+    verify_copy_with_capacity(source, target, stop, Some(capacity), true, true).await
 }
 
 async fn verify_copy_with_capacity(
@@ -785,11 +814,13 @@ async fn verify_copy_with_capacity(
     target: &Path,
     stop: &CancellationToken,
     capacity: Option<&CopyCapacity>,
+    checksum: bool,
+    check_first: bool,
 ) -> Result<()> {
     let mut verify = tokio::process::Command::new("rsync");
     verify
         .args([
-            "-aHAXnc",
+            if checksum { "-aHAXnc" } else { "-aHAXn" },
             "--numeric-ids",
             "--delete",
             "--itemize-changes",
@@ -797,19 +828,22 @@ async fn verify_copy_with_capacity(
         ])
         .arg(format!("{}/", source.display()))
         .arg(target);
-    rsync_status(verify, stop, capacity).await
+    copy_status(verify, stop, capacity, check_first).await
 }
 
-/// rsync is a local trusted program; both commands are quiet on success. Keep
-/// its leader unreaped until stdout closes, so cancellation can signal only its
-/// original process group while that leader's PID cannot be recycled.
-async fn rsync_status(
+/// rsync and cp are local trusted programs; every command is quiet on success.
+/// Keep its leader unreaped until stdout closes, so cancellation can signal
+/// only its original process group while that leader's PID cannot be recycled.
+/// `check_first` may be false only right after another monitored command's
+/// final capacity check.
+async fn copy_status(
     mut command: tokio::process::Command,
     stop: &CancellationToken,
     capacity: Option<&CopyCapacity>,
+    check_first: bool,
 ) -> Result<()> {
     use tokio::io::AsyncReadExt;
-    if let Some(capacity) = capacity {
+    if check_first && let Some(capacity) = capacity {
         capacity.check().await?;
     }
     if stop.is_cancelled() {
@@ -1447,6 +1481,117 @@ mod tests {
         }
     }
 
+    fn copy_fixture(root: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let source = root.join("source");
+        std::fs::create_dir_all(source.join("workspaces/project/nested")).unwrap();
+        std::fs::write(source.join("workspaces/project/file"), b"base contents").unwrap();
+        std::fs::hard_link(
+            source.join("workspaces/project/file"),
+            source.join("workspaces/project/hard"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../file", source.join("workspaces/project/nested/link"))
+            .unwrap();
+        std::fs::File::create(source.join("workspaces/project/sparse"))
+            .unwrap()
+            .set_len(8 * 1024 * 1024)
+            .unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o700)).unwrap();
+        source
+    }
+
+    #[tokio::test]
+    async fn base_copy_uses_reflink_only_where_the_pool_supports_it() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let source = copy_fixture(fixture.path());
+        let supported = super::super::bases::reflink_supported(fixture.path());
+        assert_eq!(
+            super::super::bases::reflink_supported(fixture.path()),
+            supported,
+            "the probe result is cached for the controller process"
+        );
+        assert!(
+            std::fs::read_dir(fixture.path())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".probe-")),
+            "the probe leaves no files behind"
+        );
+        if Path::new("/dev/shm").is_dir() {
+            let memory = tempfile::tempdir_in("/dev/shm").unwrap();
+            assert!(
+                !super::super::bases::reflink_supported(memory.path()),
+                "tmpfs cannot share extents and must use the copying path"
+            );
+        }
+
+        for reflink in [false, true] {
+            let target = fixture.path().join(format!("target-{reflink}"));
+            std::fs::create_dir(&target).unwrap();
+            let copied =
+                copy_unbudgeted(&source, &target, &CancellationToken::new(), reflink).await;
+            if reflink && !supported {
+                // A block-sharing clone is never silently degraded: callers
+                // choose the copying path from the probe instead.
+                assert!(copied.is_err());
+                continue;
+            }
+            copied.unwrap();
+            let file = target.join("workspaces/project/file");
+            assert_eq!(std::fs::read(&file).unwrap(), b"base contents");
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().ino(),
+                std::fs::metadata(target.join("workspaces/project/hard"))
+                    .unwrap()
+                    .ino()
+            );
+            assert_ne!(
+                std::fs::metadata(&file).unwrap().ino(),
+                std::fs::metadata(source.join("workspaces/project/file"))
+                    .unwrap()
+                    .ino()
+            );
+            assert_eq!(
+                std::fs::read_link(target.join("workspaces/project/nested/link")).unwrap(),
+                Path::new("../file")
+            );
+            assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o777, 0o700);
+            assert_eq!(
+                std::fs::metadata(target.join("workspaces/project/sparse"))
+                    .unwrap()
+                    .blocks(),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn structural_verification_rejects_a_changed_reflink_copy() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = copy_fixture(fixture.path());
+        let target = fixture.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        copy_unbudgeted(&source, &target, &CancellationToken::new(), false)
+            .await
+            .unwrap();
+        std::fs::write(target.join("workspaces/project/extra"), b"unexpected").unwrap();
+        let verified = verify_copy_with_capacity(
+            &source,
+            &target,
+            &CancellationToken::new(),
+            None,
+            false,
+            true,
+        )
+        .await;
+        assert!(verified.unwrap_err().is_conflict());
+    }
+
     #[tokio::test]
     async fn cancellation_settles_only_the_owned_copy_process_group() {
         let fixture = tempfile::tempdir().unwrap();
@@ -1455,7 +1600,7 @@ mod tests {
         let operation = tokio::spawn({
             let stop = stop.clone();
             let command = sleeping_copy(&marker);
-            async move { rsync_status(command, &stop, None).await }
+            async move { copy_status(command, &stop, None, true).await }
         });
         let handles = copy_process_handles(&marker).await;
         stop.cancel();
@@ -1509,7 +1654,7 @@ mod tests {
         let marker = data.path().join("copy-processes");
         let operation = tokio::spawn({
             let command = sleeping_copy(&marker);
-            async move { rsync_status(command, &CancellationToken::new(), Some(&capacity)).await }
+            async move { copy_status(command, &CancellationToken::new(), Some(&capacity), true).await }
         });
         let handles = copy_process_handles(&marker).await;
         copy_budget(&state, 128).await;
