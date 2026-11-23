@@ -465,12 +465,13 @@ impl Catalog {
 
     /// One entry per model offered by any connected account kind.
     pub async fn models(&self, s: &Service) -> Result<Value> {
-        self.inventory(s, false).await
+        self.inventory(s, None).await
     }
 
-    /// Lists the models again, unless `fresh` is false and a recent listing of the
-    /// same accounts exists.
-    async fn inventory(&self, s: &Service, fresh: bool) -> Result<Value> {
+    /// Lists the models of the same accounts again, unless a listing is still current
+    /// or, with `since`, finished after that time: launches waiting together for a
+    /// relisting share one.
+    async fn inventory(&self, s: &Service, since: Option<i64>) -> Result<Value> {
         let mut accounts = s
             .accounts
             .of(s, Provider::Antigravity)
@@ -493,9 +494,8 @@ impl Catalog {
             .collect::<Vec<_>>();
         let mut cached = self.cached.lock().await;
         if let Some(cache) = &*cached
-            && !fresh
             && cache.accounts == fingerprint
-            && now() - cache.at < cache.lifetime
+            && since.map_or(now() - cache.at < cache.lifetime, |since| cache.at >= since)
         {
             return Ok(cache.value.clone());
         }
@@ -637,10 +637,11 @@ impl Catalog {
     /// The models of `kind`, listed again when the latest listing lacks them: a kind
     /// whose listing failed briefly must not keep its accounts' turns from launching.
     async fn kind(&self, s: &Service, kind: &str) -> Result<Vec<Value>> {
+        let started = now();
         if let Some(models) = self.cached_kind(kind) {
             return Ok(models);
         }
-        self.inventory(s, true).await?;
+        self.inventory(s, Some(started)).await?;
         self.cached_kind(kind).ok_or_else(|| {
             Error::unavailable(
                 "Antigravity could not list this account's models. Try again shortly.",
