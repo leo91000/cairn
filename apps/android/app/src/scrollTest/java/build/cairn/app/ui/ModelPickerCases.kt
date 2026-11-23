@@ -476,4 +476,52 @@ abstract class ModelPickerCases {
         compose.onNodeWithText("Auto", substring = false).performScrollTo().performClick()
         compose.runOnIdle { assertEquals("auto/sonnet" to "", chosen) }
     }
+
+    @Test
+    fun agentsWithoutAnAccountPointToConnectionsInsteadOfBeingOffered() {
+        val catalogs =
+            mapOf(
+                "codex" to catalog.copy(connected = true),
+                "claude" to catalog.copy(connected = true),
+                "opencode" to ModelCatalog(connected = false),
+                // An installation that predates the field still offers the agent.
+                "antigravity" to ModelCatalog(),
+            )
+        var provider by mutableStateOf("codex")
+        var owner by mutableStateOf(true)
+        var connections = 0
+        compose.setContent {
+            CairnTheme {
+                SurfaceForTest {
+                    ModelPicker(
+                        catalogs.getValue(provider),
+                        "",
+                        "",
+                        provider = provider,
+                        changeProvider = { provider = it },
+                        catalogs = catalogs,
+                        openConnections = if (owner) ({ connections++ }) else null,
+                    ) { _, _ ->
+                    }
+                }
+            }
+        }
+        compose.onNodeWithTag("model-picker").performClick()
+        compose.onNodeWithText("Antigravity").assertExists()
+        compose.onNodeWithText("OpenCode").assertDoesNotExist()
+        compose.onNodeWithTag("unconnected-agents").assertTextContains("OpenCode", substring = true)
+        compose.onNodeWithText("Connecter").performClick()
+        compose.runOnIdle { assertEquals(1, connections) }
+        compose.onNodeWithTag("model-settings-sheet").assertDoesNotExist()
+
+        // A member cannot open Connections; a chat already on the agent keeps showing it.
+        owner = false
+        provider = "opencode"
+        compose.onNodeWithTag("model-picker").performClick()
+        compose.onNodeWithText("OpenCode").assertExists()
+        compose.onNodeWithTag("unconnected-agents").assertDoesNotExist()
+        compose.onNodeWithText("Connecter").assertDoesNotExist()
+        provider = "codex"
+        compose.onNodeWithText("Non connecté").assertExists()
+    }
 }

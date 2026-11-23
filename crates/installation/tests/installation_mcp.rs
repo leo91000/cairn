@@ -6281,6 +6281,7 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
             account_http(&app, &owner, "GET", "/api/opencode/models", Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{expected}");
         assert!(!expected["models"].as_array().unwrap().is_empty());
+        assert_eq!(expected["connected"], true, "{expected}");
         let (_, response) = node_management_call(
             &app,
             endpoint,
@@ -6290,6 +6291,21 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
         )
         .await;
         assert_eq!(result(&response), &expected);
+
+        // An agent without an account says so, for clients to point to Connections.
+        let (status, unconnected) =
+            account_http(&app, &owner, "GET", "/api/antigravity/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{unconnected}");
+        assert_eq!(unconnected["connected"], false, "{unconnected}");
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_models",
+            json!({"provider":"antigravity"}),
+        )
+        .await;
+        assert_eq!(result(&response), &unconnected);
     }
     for (endpoint, token) in [
         ("/mcp", public.as_str()),

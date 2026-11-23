@@ -67,6 +67,11 @@ pub struct ModelCatalog {
     pub checked_at: Option<i64>,
     pub stale: bool,
     pub error: String,
+    /// Whether the coding agent has a signed-in, enabled account that can run.
+    /// Absent from installations that predate it, where clients assume it can.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connected: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]

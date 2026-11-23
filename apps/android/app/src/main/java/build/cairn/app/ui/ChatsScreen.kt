@@ -2267,6 +2267,9 @@ internal fun ChatPage(
                                                 defaultSpeed = defaultSpeed,
                                                 changeSpeed = { speed = it },
                                                 onReasoningIntent = ::setResumeReasoningIntent,
+                                                catalogs = state.modelCatalogs,
+                                                openConnections =
+                                                    openConnections.takeIf { state.isOwner },
                                             ) { m, r ->
                                                 model = m
                                                 reasoning = r

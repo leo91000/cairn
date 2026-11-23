@@ -683,7 +683,14 @@ private fun AgentPage(
                     AgentSection.Identity ->
                         IdentitySection(vm, state, baseline, draft.agent, creating, ::update)
                     AgentSection.Engine ->
-                        EngineSection(vm, state, draft.agent, ::update, !creating && !dirty) {
+                        EngineSection(
+                            vm,
+                            state,
+                            draft.agent,
+                            ::update,
+                            !creating && !dirty,
+                            openConnections = { navigate("connections") },
+                        ) {
                             navigate(
                                 "agents/${draft.agent.id}/configuration/${draft.agent.provider}"
                             )
@@ -2229,6 +2236,7 @@ private fun EngineSection(
     agent: Agent,
     update: ((Agent) -> Agent) -> Unit,
     configurationEnabled: Boolean,
+    openConnections: () -> Unit,
     configuration: () -> Unit,
 ) {
     ModelPicker(
@@ -2248,6 +2256,9 @@ private fun EngineSection(
         field = true,
         speed = agent.speed,
         changeSpeed = { speed -> update { it.copy(speed = speed) } },
+        catalogs = state.modelCatalogs,
+        // Leaving with unsaved changes would lose them, as for the native configuration.
+        openConnections = openConnections.takeIf { configurationEnabled },
     ) { model, reasoning ->
         update { it.copy(model = model, reasoning = reasoning) }
     }

@@ -9,26 +9,30 @@ import { api, state } from './api'
 // fetching on every page load; opening a picker refreshes it.
 const installationScope = state.installationId ? `${state.installationId}:` : ''
 
-function stored(key: string): ModelCatalog['models'] {
+function stored(key: string): Pick<ModelCatalog, 'models' | 'connected'> {
   try {
-    return JSON.parse(localStorage.getItem(`${installationScope}${key}`) || 'null')?.models ?? []
+    const value = JSON.parse(localStorage.getItem(`${installationScope}${key}`) || 'null')
+    return { models: value?.models ?? [], connected: typeof value?.connected === 'boolean' ? value.connected : undefined }
   }
   catch {
-    return []
+    return { models: [] }
   }
 }
 
 function store(key: string, catalog: ModelCatalog) {
   try {
-    localStorage.setItem(`${installationScope}${key}`, JSON.stringify({ models: catalog.models }))
+    localStorage.setItem(`${installationScope}${key}`, JSON.stringify({ models: catalog.models, connected: catalog.connected }))
   }
   catch {}
 }
 
 function createCatalog(provider: Provider) {
   const key = `cairn-models:${provider}`
+  const saved = stored(key)
   const catalog = reactive({
-    models: stored(key),
+    models: saved.models,
+    // Unknown until a listing says so, or from an installation that predates it.
+    connected: saved.connected as boolean | undefined,
     checkedAt: null as number | null,
     stale: false,
     error: '',
@@ -48,7 +52,7 @@ function createCatalog(provider: Provider) {
       .then((value) => {
         if (requestRevision !== revision)
           return
-        Object.assign(catalog, value, { nativeDefaults: value.nativeDefaults })
+        Object.assign(catalog, value, { nativeDefaults: value.nativeDefaults, connected: value.connected })
         store(key, value)
       })
       .catch((error: Error) => {

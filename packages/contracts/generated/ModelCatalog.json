@@ -167,6 +167,13 @@
         "null"
       ]
     },
+    "connected": {
+      "description": "Whether the coding agent has a signed-in, enabled account that can run.\nAbsent from installations that predate it, where clients assume it can.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "error": {
       "default": "",
       "type": "string"

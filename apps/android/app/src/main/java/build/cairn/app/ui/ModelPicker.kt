@@ -179,7 +179,8 @@ private val GeminiMark by lazy {
  * composer and agent settings. Empty values preserve server inheritance. When [changeProvider] is
  * set, the sheet also switches between Codex and Claude Code; the caller supplies that provider's
  * catalog. When [changeSpeed] is set, Codex models listing speeds offer them; the speed is kept
- * across model changes.
+ * across model changes. With [catalogs], agents whose catalog says no account can run are not
+ * offered: the sheet names them and, with [openConnections], leads to Connections.
  */
 @Composable
 internal fun ModelPicker(
@@ -201,6 +202,8 @@ internal fun ModelPicker(
     defaultSpeed: String = "",
     changeSpeed: ((String) -> Unit)? = null,
     onReasoningIntent: (ResumeReasoningIntent) -> Unit = {},
+    catalogs: Map<String, ModelCatalog>? = null,
+    openConnections: (() -> Unit)? = null,
     change: (String, String) -> Unit,
 ) {
     val inheritedModel =
@@ -389,8 +392,14 @@ internal fun ModelPicker(
                     FilledTonalButton(onClick = { open = false }) { Text("Terminé") }
                 }
                 if (changeProvider != null) {
+                    // The chosen agent stays, so a chat whose account went away still shows it.
+                    val (offered, unconnected) =
+                        codingAgents.partition {
+                            it.provider == provider ||
+                                catalogs?.get(it.provider)?.connected != false
+                        }
                     SectionLabel("Assistant de code")
-                    ProviderTiles(codingAgents.map { it.provider to it.vendor }) {
+                    ProviderTiles(offered.map { it.provider to it.vendor }) {
                         value,
                         vendor,
                         tileModifier ->
@@ -401,6 +410,16 @@ internal fun ModelPicker(
                             }
                         }
                     }
+                    if (unconnected.isNotEmpty())
+                        UnconnectedAgents(
+                            unconnected.map { it.provider },
+                            openConnections?.let {
+                                {
+                                    open = false
+                                    it()
+                                }
+                            },
+                        )
                     AnimatedVisibility(switching) {
                         Row(
                             Modifier.fillMaxWidth()
@@ -762,6 +781,40 @@ internal fun ProviderTiles(
                 if (row.size == 1) Spacer(Modifier.weight(1f))
             }
         }
+    }
+}
+
+/** Agents without an account that can run, pointing to Connections when the viewer may open it. */
+@Composable
+private fun UnconnectedAgents(providers: List<String>, openConnections: (() -> Unit)?) {
+    Row(
+        Modifier.fillMaxWidth()
+            .testTag("unconnected-agents")
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
+            .padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+            .heightIn(min = 44.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        providers.forEach {
+            ProviderMark(it, 18.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(
+            providers.joinToString(", ") { providerLabel(it) },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (openConnections != null) TextButton(onClick = openConnections) { Text("Connecter") }
+        else
+            Text(
+                "Non connecté",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 10.dp),
+            )
     }
 }
 

@@ -11,6 +11,7 @@ import {
   useId,
   watch,
 } from 'vue'
+import { RouterLink } from 'vue-router'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import {
   billingLabels,
@@ -20,6 +21,7 @@ import {
   STANDARD_SPEED,
 } from '../../../../packages/contracts/models'
 import { brands } from '../accounts'
+import { state } from '../api'
 import {
   Check,
   ChevronDown,
@@ -78,6 +80,10 @@ const position = ref<CSSProperties>({})
 const catalog = computed(() => modelCatalogs[provider.value].catalog)
 const reload = () => modelCatalogs[provider.value].load()
 const current = computed(() => providers.find(item => item.value === provider.value) ?? providers[0])
+// Agents without an account that can run are pointed to Connections rather than offered. The
+// chosen agent stays, so a chat whose account went away still shows where it runs.
+const offered = computed(() => providers.filter(item => item.value === provider.value || modelCatalogs[item.value].catalog.connected !== false))
+const unconnected = computed(() => providers.filter(item => !offered.value.includes(item)))
 const inheritedModel = computed(() => props.inherit ? props.defaultModel : catalog.value.nativeDefaults?.model || props.defaultModel)
 const inheritedReasoning = computed(() => props.inherit ? props.defaultReasoning : catalog.value.nativeDefaults?.reasoning || props.defaultReasoning)
 const inheritedSpeedValue = computed(() => props.inherit ? props.defaultSpeed : catalog.value.nativeDefaults?.speed || props.defaultSpeed)
@@ -240,7 +246,8 @@ async function show() {
   if (props.disabled || open.value)
     return
   open.value = true
-  void reload()
+  for (const item of providers)
+    void modelCatalogs[item.value].load()
   place()
   await nextTick()
   dialog.value?.showModal()
@@ -353,7 +360,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
           </h3>
           <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Coding agent">
             <button
-              v-for="item in providers"
+              v-for="item in offered"
               :key="item.value"
               type="button"
               role="radio"
@@ -370,6 +377,27 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                 <span class="text-3xs text-muted">{{ item.vendor }}</span>
               </span>
             </button>
+          </div>
+          <div v-if="unconnected.length" class="flex items-center justify-between gap-3 rounded-xl border border-dashed border-control px-3 py-2.5 text-2xs">
+            <span class="flex min-w-0 items-center gap-2 text-muted">
+              <Icon
+                v-for="item in unconnected"
+                :key="item.value"
+                :name="item.icon"
+                :size="16"
+                class="shrink-0 opacity-60"
+              />
+              <span class="truncate">{{ unconnected.map(item => item.label).join(', ') }}</span>
+            </span>
+            <RouterLink
+              v-if="state.installationRole === 'owner'"
+              to="/connections"
+              class="shrink-0 font-semibold text-accent"
+              @click="close"
+            >
+              Connect more →
+            </RouterLink>
+            <span v-else class="shrink-0 text-muted">Not connected</span>
           </div>
           <p v-if="switching" class="flex items-start gap-2 rounded-lg bg-soft px-3 py-2 text-2xs text-ink" role="status">
             <Icon :name="Info" :size="14" class="mt-px text-accent" />The next message starts a new {{ current.label }} session with this chat’s context and existing files.

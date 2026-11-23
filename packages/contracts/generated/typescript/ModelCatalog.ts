@@ -8,4 +8,9 @@ export interface ModelCatalog {
   checkedAt: number | null
   stale: boolean
   error: string
+  /**
+   * Whether the coding agent has a signed-in, enabled account that can run.
+   * Absent from installations that predate it, where clients assume it can.
+   */
+  connected?: boolean
 }

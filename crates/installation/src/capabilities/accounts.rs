@@ -221,6 +221,13 @@ impl AccountOperation {
                 catalog.native_defaults = catalog.native_defaults.filter(|defaults| {
                     *defaults != cairn_contracts::CodingAgentPreferences::default()
                 });
+                catalog.connected = Some(
+                    s.accounts
+                        .of(s, provider)
+                        .await?
+                        .iter()
+                        .any(crate::accounts::Account::is_active),
+                );
                 serde_json::to_value(catalog)?
             }
             "get_coding_agent_account_sign_in" => {

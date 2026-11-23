@@ -176,3 +176,31 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
   await expect(page.getByText('Codex doesn’t list the selected speed for this model here, so Cairn asks for Standard')).toBeVisible()
   expect(workspace.service.chats.detail(chatId).run?.snapshot.agent).toMatchObject({ model: 'fixture-deep', speed: 'priority' })
 })
+
+test('points coding agents without an account to Connections instead of offering them', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  const menu = page.getByRole('dialog', { name: 'Agent & model' })
+  await picker.click()
+  await expect(menu.getByRole('radio', { name: 'Codex', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveCount(0)
+  await expect(menu.getByRole('radio', { name: 'OpenCode', exact: true })).toHaveCount(0)
+  await expect(menu.getByText(/OpenCode, Antigravity$/)).toBeVisible()
+  await menu.getByRole('link', { name: 'Connect more →', exact: true }).click()
+  await expect(page).toHaveURL(/\/connections$/)
+  await expect(menu).toHaveCount(0)
+
+  await workspace.api('/api/accounts', 'POST', {
+    provider: 'antigravity',
+    name: 'Picker Gemini key',
+    modelProvider: 'gemini',
+    apiKey: 'synthetic-picker-gemini-key',
+  })
+  await page.goto(workspacePath('/chats'))
+  await picker.click()
+  await menu.getByRole('radio', { name: 'Antigravity', exact: true }).click()
+  await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await expect(menu.getByText(/OpenCode$/)).toBeVisible()
+})
