@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  mouseSlop,
   releasedOnControl,
   sameOrigin,
   stopsRowFling,
@@ -36,6 +37,17 @@ describe('releasedOnControl', () => {
     expect(releasedOnControl(pressed, pressed, 110, 498, touchSlop)).toBe(true)
     expect(releasedOnControl(pressed, pressed, 110, 498)).toBe(false)
     expect(releasedOnControl(pressed, pressed, 110, 500 - touchSlop - 1, touchSlop)).toBe(false)
+  })
+
+  it('accepts a mouse click that WebKit truncates to just outside a fractional edge', () => {
+    const chip = {
+      left: 18.59,
+      top: 10.4,
+      right: 120.59,
+      bottom: 42.4,
+    }
+    expect(releasedOnControl(chip, chip, 18, 10, mouseSlop)).toBe(true)
+    expect(releasedOnControl(chip, chip, 16, 26, mouseSlop)).toBe(false)
   })
 
   it('ignores a release dragged away from both positions', () => {
@@ -112,6 +124,14 @@ describe('tapStillFinds', () => {
   it('misses a control that shrank from under the release, so a neighbour would take the tap', () => {
     expect(tapStillFinds(origin, origin, chip, shrunk, 200, 26)).toBe(false)
     expect(tapStillFinds(origin, origin, chip, shrunk, 150, 26)).toBe(true)
+  })
+
+  it('finds a control that grew in place', () => {
+    expect(tapStillFinds(origin, origin, chip, { ...chip, right: 260 }, 200, 26)).toBe(true)
+  })
+
+  it('misses a chip the row clips back from under the release', () => {
+    expect(tapStillFinds(origin, origin, chip, { ...chip, right: 190 }, 200, 26)).toBe(false)
   })
 
   it('misses a control that moved, and keeps a release that drifted past the edge', () => {

@@ -30,6 +30,10 @@ export function releasedOnControl(pressed: Box, current: Box, x: number, y: numb
 // How far a touch or pen release may drift past the control and still count.
 export const touchSlop = 16
 
+// WebKit truncates mouse coordinates but hit-tests the exact position, so a click within a pixel
+// of a fractional left or top edge reads as just outside it.
+export const mouseSlop = 1
+
 // A touch or pen tap that stops a scrolling row's fling is not a press: browsers send no click
 // for it. A mouse press never stops a fling, so it always counts.
 export function stopsRowFling(pointerType: string, pressedAt: number, rowScrolledAt: number): boolean {

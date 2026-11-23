@@ -8,6 +8,7 @@ import {
   ref,
 } from 'vue'
 import {
+  mouseSlop,
   releasedOnControl,
   stopsRowFling,
   tapStillFinds,
@@ -107,7 +108,7 @@ function releasePress(event: PointerEvent) {
   }
 
   ignoreFollowingClick(button)
-  const slop = event.pointerType === 'mouse' ? 0 : touchSlop
+  const slop = event.pointerType === 'mouse' ? mouseSlop : touchSlop
   if (!releasedOnControl(held.box, current, event.clientX, event.clientY, slop))
     return
 
