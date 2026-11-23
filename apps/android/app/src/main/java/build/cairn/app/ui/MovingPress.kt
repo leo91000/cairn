@@ -20,14 +20,16 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import kotlin.math.abs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
  * Lets a tap survive live content moving its control between press and release, as when a queued
  * message grows the composer under the subagent bar. Compose's click handling cancels at the first
- * move outside the control's new bounds; here the release counts when it ends over the visible
- * control where it was pressed or where it is now, as on the web.
+ * move outside the control's new bounds. While the control stays put, this behaves as Compose's
+ * tap; once it moved, the press survives and opens over the visible control where it is now or
+ * within touch slop of where it was pressed, as on the web.
  *
  * Apply it to the content of a clickable Surface sharing [interactions], which draws the ripple.
  * Consuming the press leaves keyboard, accessibility and focus activation to that Surface.
@@ -70,19 +72,25 @@ internal fun Modifier.pressSurvivingMoves(
                     shown = true
                 }
 
-                // Like Compose's clickable, leaving the control cancels the press. Once the control
-                // moved, the finger may also stay within touch slop of where it was pressed.
+                // While the control stays put, leaving it cancels the press as with Compose's tap:
+                // its whole size plus the minimum touch target, even where a scrolling row clips
+                // it. Once it moved, the finger may be over the visible control where it is now or
+                // within touch slop of where it was pressed.
                 val slop = viewConfiguration.touchSlop
-                fun touchBoundsNow() =
+                fun movedLayout() =
                     layout[0]
                         ?.takeIf { it.isAttached }
-                        ?.let {
-                            it to it.touchBounds(padding.width, padding.height)
-                        }
+                        ?.takeUnless { it.touchBounds(padding.width, padding.height).near(pressed) }
                 fun overControl(change: PointerInputChange): Boolean {
-                    val (current, now) = touchBoundsNow() ?: return false
+                    val current = layout[0]?.takeIf { it.isAttached } ?: return false
+                    val moved =
+                        movedLayout()
+                            ?: return change.position.x in
+                                -padding.width..size.width + padding.width &&
+                                change.position.y in -padding.height..size.height + padding.height
                     val point = current.localToRoot(change.position)
-                    return point in now || (now != pressed && point in pressed.inflate(slop))
+                    return point in moved.touchBounds(padding.width, padding.height) ||
+                        point in pressed.inflate(slop)
                 }
 
                 var up: PointerInputChange? = null
@@ -91,8 +99,7 @@ internal fun Modifier.pressSurvivingMoves(
                     up = releaseOrCancel(::overControl)
                     // A release the press survived counts on an unmoved control, as with Compose's
                     // tap; a moved control judges it by the same rule as the moves.
-                    accepted =
-                        up != null && (touchBoundsNow()?.second == pressed || overControl(up))
+                    accepted = up != null && (movedLayout() == null || overControl(up))
                 } finally {
                     showing.cancel()
                     val opens = accepted
@@ -119,6 +126,12 @@ private fun LayoutCoordinates.touchBounds(horizontal: Float, vertical: Float): R
     boundsInRoot().let {
         Rect(it.left - horizontal, it.top - vertical, it.right + horizontal, it.bottom + vertical)
     }
+
+private fun Rect.near(other: Rect): Boolean =
+    abs(left - other.left) < 1f &&
+        abs(top - other.top) < 1f &&
+        abs(right - other.right) < 1f &&
+        abs(bottom - other.bottom) < 1f
 
 /** Compose's wait for a tap's release, judging the pointer by [overControl] instead of bounds. */
 private suspend fun AwaitPointerEventScope.releaseOrCancel(
