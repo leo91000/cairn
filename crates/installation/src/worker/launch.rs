@@ -1297,6 +1297,16 @@ impl Execution<'_> {
                 ));
             }
         }
+        // The environment starts the turn as soon as it accepts it: its message may be read
+        // even if this launch fails before the runner client is recorded (ADR-0090).
+        let turn = self.run["chatExecution"]["messageId"]
+            .as_str()
+            .map(str::to_owned);
+        if turn.is_some() {
+            self.checkpoint
+                .update(|c| c.launched_turn = turn.clone())
+                .await?;
+        }
         workspace.env.insert(
             "RUNNER_URL".into(),
             nodes::transport::url(self.s, &self.id).await?,

@@ -64,8 +64,8 @@ In the apps, a person's next message lifts a pause left by a Stop or a cancelled
 cancelled wakeup alone leaves a successful turn's queue paused until Resume; public MCP and agent callers send
 the message, then call `set_chat_paused(false)`. Without a pause, any caller who may send
 continues the conversation, after a failure as after a success. The launch of a turn is
-recorded once its process starts: a manager crash in between can return a message the
-process already read. When the last turn
+recorded once its process starts, or once a retained environment accepts the turn: a
+manager crash in between can return a message the process already read. When the last turn
 failed or was stopped and the queue is empty, the next message a person sends
 resumes it. A queue paused after a successful turn, or holding messages, keeps
 holding what is added to it.
