@@ -83,6 +83,8 @@ impl Sides {
             handle.abort();
             let directory = side_home(&self.home, id);
             tokio::spawn(async move {
+                // Removed once the task stopped, so no credential file lands after it.
+                let _ = handle.await;
                 let _ = tokio::fs::remove_dir_all(directory).await;
             });
         }

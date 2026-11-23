@@ -864,13 +864,14 @@ async fn plan_turns_refuse_conversations_redirected_by_a_link() {
     let (result, events) = run(&s, first.clone()).await;
     result.unwrap();
     let conversation = thread(&events);
-    // An earlier YOLO turn replaced the conversation database with a link elsewhere.
-    let database = native_home(&s).join(format!(
-        ".gemini/antigravity-cli/conversations/{conversation}.db"
+    // An earlier YOLO turn planted the conversation's journal as a link to a working
+    // file, which SQLite would write through.
+    let journal = native_home(&s).join(format!(
+        ".gemini/antigravity-cli/conversations/{conversation}.db-wal"
     ));
-    let elsewhere = root.path().join("elsewhere.db");
-    std::fs::rename(&database, &elsewhere).unwrap();
-    std::os::unix::fs::symlink(&elsewhere, &database).unwrap();
+    let target = root.path().join("main.rs");
+    std::fs::write(&target, "fn main() {}\n").unwrap();
+    std::os::unix::fs::symlink(&target, &journal).unwrap();
     let launches = records(&native_home(&s), "launch").len();
     let (result, _) = run(&s, plan_after(&root, &first, &conversation)).await;
     let error = result.unwrap_err();
@@ -885,6 +886,7 @@ async fn plan_turns_refuse_conversations_redirected_by_a_link() {
         launches,
         "agy never started"
     );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "fn main() {}\n");
 }
 
 #[tokio::test]

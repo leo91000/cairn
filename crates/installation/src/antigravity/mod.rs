@@ -441,6 +441,12 @@ impl Catalog {
 
     /// One entry per model offered by any connected account kind.
     pub async fn models(&self, s: &Service) -> Result<Value> {
+        self.inventory(s, false).await
+    }
+
+    /// Lists the models again, unless `fresh` is false and a recent listing of the
+    /// same accounts exists.
+    async fn inventory(&self, s: &Service, fresh: bool) -> Result<Value> {
         let mut accounts = s
             .accounts
             .of(s, Provider::Antigravity)
@@ -463,6 +469,7 @@ impl Catalog {
             .collect::<Vec<_>>();
         let mut cached = self.cached.lock().await;
         if let Some(cache) = &*cached
+            && !fresh
             && cache.accounts == fingerprint
             && now() - cache.at < 300_000
         {
@@ -583,28 +590,36 @@ impl Catalog {
         model: &str,
         reasoning: &str,
     ) -> Result<Option<String>> {
-        if self.cached_kind(kind).is_none() {
-            self.models(s).await?;
-        }
-        Ok(self
-            .cached_kind(kind)
-            .and_then(|models| slug(&models, model, reasoning)))
+        Ok(slug(&self.kind(s, kind).await?, model, reasoning))
     }
 
     /// The model an account of `kind` runs for an agent without one: its kind's first.
     pub async fn default_model(&self, s: &Service, kind: &str) -> Result<Option<String>> {
-        if self.cached_kind(kind).is_none() {
-            self.models(s).await?;
-        }
         Ok(self
-            .cached_kind(kind)
-            .and_then(|models| models.first().map(|m| text(m, "model").to_owned())))
+            .kind(s, kind)
+            .await?
+            .first()
+            .map(|m| text(m, "model").to_owned()))
     }
 
     /// Whether an account of `kind` offers `model`, without waiting for discovery.
     pub fn offers(&self, kind: &str, model: &str) -> bool {
         self.cached_kind(kind)
             .is_some_and(|models| models.iter().any(|m| m["model"] == model))
+    }
+
+    /// The models of `kind`, listed again when the latest listing lacks them: a kind
+    /// whose listing failed briefly must not keep its accounts' turns from launching.
+    async fn kind(&self, s: &Service, kind: &str) -> Result<Vec<Value>> {
+        if let Some(models) = self.cached_kind(kind) {
+            return Ok(models);
+        }
+        self.inventory(s, true).await?;
+        self.cached_kind(kind).ok_or_else(|| {
+            Error::unavailable(
+                "Antigravity could not list this account's models. Try again shortly.",
+            )
+        })
     }
 
     fn cached_kind(&self, kind: &str) -> Option<Vec<Value>> {

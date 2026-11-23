@@ -81,7 +81,9 @@ l'état natif (plugins, réglages) ne s'y applique. Seul son dossier
 `conversations` est un lien vers celui de l'état natif, où `agy` reprend et
 enregistre directement la conversation : rien n'est recopié, et un tour de plan
 arrêté ne perd rien. Un HOME de tour de plan qui ne peut pas être effacé fait
-échouer le tour. Un tour de plan ou une question à côté est refusé, avec le chemin en cause, quand
+échouer le tour. Le tour de plan est aussi refusé quand ce dossier, ou ce qu'il
+contient (base, journal, WAL), est un lien symbolique, un lien physique ou un
+fichier spécial : SQLite écrirait à travers, hors de l'état natif. Un tour de plan ou une question à côté est refusé, avec le chemin en cause, quand
 le répertoire de travail ou l'un de ses parents contient `.agents/hooks.json` ou
 `.agents/mcp_config.json` : ces commandes du dépôt ne peuvent pas être bornées.
 

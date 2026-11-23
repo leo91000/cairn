@@ -344,6 +344,33 @@ pub(super) fn redirected(root: &Path, path: &Path) -> bool {
     false
 }
 
+/// Whether anything under `directory` is a link, a hard-linked file or a special file:
+/// SQLite opens a database's journal and WAL beside it by name, so any of them could
+/// send a plan turn's writes elsewhere.
+pub(super) fn planted(directory: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => return error.kind() != std::io::ErrorKind::NotFound,
+    };
+    for entry in entries {
+        let Ok(metadata) = entry.and_then(|entry| {
+            std::fs::symlink_metadata(entry.path()).map(|metadata| (entry.path(), metadata))
+        }) else {
+            return true;
+        };
+        let (path, metadata) = metadata;
+        if metadata.is_dir() {
+            if planted(&path) {
+                return true;
+            }
+        } else if !metadata.is_file() || metadata.nlink() > 1 {
+            return true;
+        }
+    }
+    false
+}
+
 const CONVERSATIONS: &str = ".gemini/antigravity-cli/conversations";
 
 /// A plan turn's native HOME: fresh, so plugins or configuration an earlier YOLO turn
@@ -351,15 +378,17 @@ const CONVERSATIONS: &str = ".gemini/antigravity-cli/conversations";
 /// through a link. `agy` resumes and records the conversation there directly
 /// (measured on 1.5.14), so nothing is copied back and a stopped plan turn loses
 /// nothing.
-async fn plan_home(state: &Path, bounded: &Path, conversation: &str) -> Result<()> {
+async fn plan_home(state: &Path, bounded: &Path) -> Result<()> {
     fresh_home(bounded).await?;
     let conversations = state.join(CONVERSATIONS);
-    let database = conversations.join(format!("{conversation}.db"));
     // The link must lead to the run's own conversations, never where a link planted
     // by an earlier turn would send the plan turn's writes.
-    if redirected(state, &conversations)
-        || (!conversation.is_empty() && redirected(state, &database))
-    {
+    let (root, checked) = (state.to_owned(), conversations.clone());
+    let replaced =
+        tokio::task::spawn_blocking(move || redirected(&root, &checked) || planted(&checked))
+            .await
+            .map_err(Error::internal)?;
+    if replaced {
         return Err(Error::conflict(
             "Antigravity's saved conversations were replaced by a link, so this plan turn cannot be bounded. Start a new conversation.",
         ));
@@ -859,7 +888,7 @@ async fn execute(
         // A plan turn runs in a fresh native HOME with only its conversation.
         let home = if mode == Mode::Plan {
             let bounded = state.join(PLAN_HOME);
-            plan_home(&state, &bounded, &conversation).await?;
+            plan_home(&state, &bounded).await?;
             bounded
         } else {
             state.clone()
@@ -1112,6 +1141,14 @@ mod tests {
         std::fs::write(root.path().join("elsewhere.db"), "").unwrap();
         std::os::unix::fs::symlink(root.path().join("elsewhere.db"), &database).unwrap();
         assert!(redirected(&state, &database));
+        assert!(planted(&conversations));
+        std::fs::remove_file(&database).unwrap();
+        assert!(!planted(&conversations));
+        std::fs::hard_link(root.path().join("elsewhere.db"), &database).unwrap();
+        assert!(planted(&conversations), "a hard link is refused");
+        std::fs::remove_file(&database).unwrap();
+        std::fs::write(&database, "").unwrap();
+        assert!(!planted(&conversations));
         std::fs::remove_dir_all(state.join(".gemini")).unwrap();
         std::fs::create_dir_all(state.join(".gemini")).unwrap();
         std::os::unix::fs::symlink(root.path(), state.join(".gemini/antigravity-cli")).unwrap();
