@@ -153,4 +153,8 @@ qualification CI exécute le binaire résolu contre un faux serveur Gemini.
   1.5.14 avec un compte de test ; la fixture de Cairn le reproduit. La qualification CI
   ne peut pas le vérifier sans compte Google : une nouvelle version d'`agy` qui le
   changerait ferait échouer les comptes Google (« Reconnect »), pas les autres.
+- Cairn voit les commandes d'`agy` en parcourant ses descendants toutes les 250 ms
+  et à l'arrêt. Une commande détachée (`nohup … &`) dont le shell se termine avant
+  d'être vu quitte cet arbre : comme pour les autres moteurs, seul le nettoyage de
+  l'environnement l'arrête (le subreaper de chaque tour en microVM).
 - Pas de compaction demandée par Cairn ni de vitesse.

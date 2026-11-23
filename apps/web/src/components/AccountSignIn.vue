@@ -122,8 +122,9 @@ watch(modelProvider, () => {
 watch(() => props.accounts.signIn.value?.state, (state) => {
   if (state === 'complete')
     emit('close')
-  // Each Google sign-in, including a retry, needs its own confirmation.
-  if (state === 'failed')
+  // Each Google sign-in, including a retry or one after a cancellation, needs its
+  // own confirmation.
+  if (state !== 'pending')
     acceptedTerms.value = false
 })
 // Separate sources: each poll brings a new sign-in object, which must not reset the feedback.
