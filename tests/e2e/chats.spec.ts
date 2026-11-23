@@ -868,24 +868,39 @@ test('subagents show as a team with their own steps and report', async ({ page, 
   }
 })
 
+async function waitForWorkingSubagents(workspace: Workspace, chatId: string) {
+  await workspace.api(`/api/chats/${chatId}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:subagents-working-team',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chatId}`)).run?.status, { timeout: 15000 }).toBe('running')
+  const run = (await workspace.api(`/api/chats/${chatId}`)).run
+  const spawned = () => workspace.service.store.events(run.id, 0, 100)
+    .filter(event => event.type === 'item.completed' && (event.payload?.item as Record<string, unknown> | undefined)?.type === 'subagent')
+    .map(event => event.payload!.item as Record<string, unknown>)
+  await expect.poll(() => spawned().length).toBe(2)
+  // Mirror Claude's explicit background wait after its subagents have been launched.
+  for (const agent of spawned())
+    workspace.service.store.event(run.id, 'item.updated', '', { type: 'item.updated', item: { ...agent, task_id: agent.id } })
+  workspace.service.store.event(run.id, 'turn.waiting', '', { type: 'turn.waiting', tasks: spawned().map(agent => ({ id: agent.id, description: agent.name })) })
+}
+
+// Holds the next queued submission so its row appears while a press is still down. The hold
+// has its own bound: a test timeout skips the caller's finally.
+async function holdNextSubmission(page: Page, chatId: string, submission: PromiseWithResolvers<void>) {
+  await page.route(`**/api/chats/${chatId}/messages`, async (route) => {
+    await Promise.race([submission.promise, new Promise(resolve => setTimeout(resolve, 20000))])
+    await route.continue()
+  })
+}
+
 test('working subagents stay in sight beside the composer and open as a drawer on phones', async ({ page, workspace }) => {
   test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
+  const submission = Promise.withResolvers<void>()
   try {
-    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
-      id: randomUUID(),
-      text: 'fixture:subagents-working-team',
-    })
-    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('running')
-    const run = (await workspace.api(`/api/chats/${chat.id}`)).run
-    const spawned = () => workspace.service.store.events(run.id, 0, 100)
-      .filter(event => event.type === 'item.completed' && (event.payload?.item as Record<string, unknown> | undefined)?.type === 'subagent')
-      .map(event => event.payload!.item as Record<string, unknown>)
-    await expect.poll(() => spawned().length).toBe(2)
-    // Mirror Claude's explicit background wait after its subagents have been launched.
-    for (const agent of spawned())
-      workspace.service.store.event(run.id, 'item.updated', '', { type: 'item.updated', item: { ...agent, task_id: agent.id } })
-    workspace.service.store.event(run.id, 'turn.waiting', '', { type: 'turn.waiting', tasks: spawned().map(agent => ({ id: agent.id, description: agent.name })) })
+    await waitForWorkingSubagents(workspace, chat.id)
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto(workspacePath(`/chats/${chat.id}`))
     await authenticateWorkspace(page)
@@ -914,7 +929,19 @@ test('working subagents stay in sight beside the composer and open as a drawer o
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
     await panel.getByRole('button', { name: 'Close subagent activity' }).click()
     await expect(chip).toBeFocused()
-    await chip.click()
+    // A click just inside a chip's left edge opens it. WebKit truncates mouse coordinates, so with
+    // the edge on a half pixel the click reads as a quarter pixel left of the chip. The first
+    // chip's edge only follows the static label: later chips shift as running timers tick.
+    await expect(bar.getByTestId('subagent-chip').first()).toContainText('Review the keyboard handling')
+    await chip.evaluate((element) => {
+      const left = element.getBoundingClientRect().left
+      element.style.marginLeft = `${(1.5 - (left % 1)) % 1}px`
+    })
+    const chipBounds = (await chip.boundingBox())!
+    expect(chipBounds.x % 1).toBeCloseTo(0.5)
+    await page.mouse.click(chipBounds.x + 0.25, chipBounds.y + chipBounds.height / 2)
+    await expect(chip).toHaveAttribute('aria-pressed', 'true')
+    await chip.evaluate(element => element.style.removeProperty('margin-left'))
     await page.screenshot({ path: test.info().outputPath('subagent-bar-1440.png'), animations: 'disabled' })
 
     await page.setViewportSize({ width: 390, height: 844 })
@@ -926,13 +953,133 @@ test('working subagents stay in sight beside the composer and open as a drawer o
     await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
     await expect(drawer).toHaveCount(0)
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeFocused()
-    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep going while I check the panel.')
+    const followUp = 'Keep going while I check the panel.'
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill(followUp)
+    await holdNextSubmission(page, chat.id, submission)
     await page.getByRole('button', { name: 'Send after this turn', exact: true }).click()
     await expect(bar).toContainText('2 running')
-    await bar.getByRole('button', { name: /2 subagents working/ }).click()
-    await expect(page.getByRole('dialog', { name: 'Subagent activity' })).toBeVisible()
+    const phoneButton = bar.getByRole('button', { name: /2 subagents working/ })
+    await expect(phoneButton).toBeInViewport()
+    const buttonBounds = (await phoneButton.boundingBox())!
+    const pressX = buttonBounds.x + buttonBounds.width / 2
+    const pressY = buttonBounds.y + buttonBounds.height / 2
+    await page.mouse.move(pressX, pressY)
+    await page.mouse.down()
+    submission.resolve()
+    try {
+      await expect(page.getByTestId('queued-message').getByText(followUp, { exact: true })).toBeVisible()
+      // The queue moved the button away from the press before the release.
+      await expect.poll(async () => Math.abs((await phoneButton.boundingBox())!.y - buttonBounds.y)).toBeGreaterThan(10)
+      await page.mouse.move(pressX + 1, pressY + 1)
+    }
+    finally {
+      await page.mouse.up()
+    }
+
+    await expect(drawer).toBeVisible()
+    await expect(page.getByTestId('queued-message-sheet')).toHaveCount(0)
+    await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
+    await expect(drawer).toHaveCount(0)
+    await expect(phoneButton).toBeFocused()
+    const movedBounds = (await phoneButton.boundingBox())!
+    await page.mouse.move(movedBounds.x + movedBounds.width / 2, movedBounds.y + movedBounds.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(1, 1)
+    await page.mouse.up()
+    await expect(drawer).toHaveCount(0)
+
+    await phoneButton.press('Enter')
+    await expect(drawer).toBeVisible()
   }
   finally {
+    submission.resolve()
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).not.toBe('running')
+  }
+})
+
+test('a touch on working subagents opens them even when the queue moves the button before release', async ({
+  page,
+  context,
+  workspace,
+  browserName,
+}) => {
+  test.skip(browserName !== 'chromium', 'Holding a touch needs Chromium input events')
+  test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const submission = Promise.withResolvers<void>()
+  try {
+    await waitForWorkingSubagents(workspace, chat.id)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const bar = page.getByTestId('subagent-bar')
+    await expect(bar).toContainText('2 running')
+    const phoneButton = bar.getByRole('button', { name: /2 subagents working/ })
+    const drawer = page.getByRole('dialog', { name: 'Subagent activity' })
+    const input = await context.newCDPSession(page)
+
+    // A tap that drifts a few pixels past the edge of the unmoved button still opens it.
+    const edge = (await phoneButton.boundingBox())!
+    const near = { x: edge.x + edge.width / 2, y: edge.y + 2 }
+    await input.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [near] })
+    await input.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...near, y: near.y - 5 }] })
+    await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await expect(drawer).toBeVisible()
+    // The browser's own tap opened it, so the drawer's focus shows no keyboard ring.
+    await expect.poll(() => page.evaluate(() => document.activeElement?.matches(':focus-visible'))).toBe(false)
+    await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
+    await expect(drawer).toHaveCount(0)
+
+    // Content that moves the button after the release, before the browser's tap, takes no tap.
+    await page.evaluate(() => window.addEventListener('pointerup', () => {
+      const shift = document.createElement('div')
+      shift.dataset.testid = 'late-shift'
+      shift.style.height = '80px'
+      document.querySelector('[data-testid="subagent-bar"]')!.after(shift)
+    }, { once: true }))
+    const center = { x: edge.x + edge.width / 2, y: edge.y + edge.height / 2 }
+    await input.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [center] })
+    await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await expect(page.getByTestId('late-shift')).toHaveCount(1)
+    await expect.poll(async () => Math.abs((await phoneButton.boundingBox())!.y - edge.y)).toBeGreaterThan(10)
+    await expect(drawer).toBeVisible()
+    await page.evaluate(() => document.querySelector('[data-testid="late-shift"]')?.remove())
+    await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
+    await expect(drawer).toHaveCount(0)
+
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep going while I check the panel.')
+    await holdNextSubmission(page, chat.id, submission)
+    await page.getByRole('button', { name: 'Send after this turn', exact: true }).click()
+    const bounds = (await phoneButton.boundingBox())!
+    const touch = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
+    await input.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touch] })
+    submission.resolve()
+    try {
+      await expect(page.getByTestId('queued-message')).toBeVisible()
+      await expect.poll(async () => Math.abs((await phoneButton.boundingBox())!.y - bounds.y)).toBeGreaterThan(10)
+    }
+    finally {
+      await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    }
+
+    // The browser's click after the touch would otherwise open the queued message under it.
+    await expect(drawer).toBeVisible()
+    await expect(page.getByTestId('queued-message-sheet')).toHaveCount(0)
+    await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
+    await expect(drawer).toHaveCount(0)
+    await expect(phoneButton).toBeFocused()
+
+    // A later tap on the queued message still opens it.
+    const queued = (await page.getByTestId('queued-message').getByRole('button').first().boundingBox())!
+    const tap = { x: queued.x + queued.width / 2, y: queued.y + queued.height / 2 }
+    await input.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [tap] })
+    await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await expect(page.getByTestId('queued-message-sheet')).toBeVisible()
+  }
+  finally {
+    submission.resolve()
     await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).not.toBe('running')
   }

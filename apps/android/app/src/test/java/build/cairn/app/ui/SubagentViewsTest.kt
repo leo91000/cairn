@@ -1,15 +1,22 @@
 package build.cairn.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.dp
@@ -18,6 +25,8 @@ import java.io.File
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -157,6 +166,369 @@ class SubagentViewsTest {
             .onNodeWithContentDescription("1 sous-agent au travail. Ouvrir leur activité")
             .performClick()
         assertEquals(team.first().id, opened)
+    }
+
+    @Test
+    fun `a press on the bar opens once even when a queued message moves it before release`() {
+        val opened = mutableListOf<String>()
+        var queued by mutableStateOf(false)
+        compose.setContent {
+            CairnTheme("light") {
+                Column(
+                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+                    verticalArrangement = Arrangement.Bottom,
+                ) {
+                    SubagentBar(team, active = true) { opened += it }
+                    // The queue strip opens the composer below the bar and pushes it up.
+                    if (queued) Spacer(Modifier.height(72.dp))
+                    Spacer(Modifier.height(56.dp))
+                }
+            }
+        }
+        val button =
+            compose.onNodeWithContentDescription("1 sous-agent au travail. Ouvrir leur activité")
+        button.performClick()
+        button.performSemanticsAction(SemanticsActions.OnClick)
+        assertEquals(listOf(team.first().id, team.first().id), opened)
+
+        val pressedTop = button.getBoundsInRoot().top
+        button.performTouchInput { down(center) }
+        queued = true
+        compose.waitForIdle()
+        assertNotEquals(pressedTop, button.getBoundsInRoot().top)
+        // The finger jitters where the button was, then lifts.
+        button.performTouchInput {
+            moveBy(Offset(0f, 2f))
+            up()
+        }
+        assertEquals(3, opened.size)
+
+        // As with Compose's tap, a press that leaves the unmoved button and comes back opens
+        // nothing, however short the excursion.
+        val slop = compose.onRoot().fetchSemanticsNode().layoutInfo.viewConfiguration.touchSlop
+        button.performTouchInput {
+            down(center)
+            moveTo(Offset(centerX, -slop / 2f))
+            moveTo(center)
+            up()
+        }
+        assertEquals(3, opened.size)
+
+        // A press dragged away from both positions opens nothing, even when it comes back.
+        button.performTouchInput {
+            down(center)
+            moveBy(Offset(0f, -height * 4f))
+            up()
+        }
+        button.performTouchInput {
+            down(center)
+            moveBy(Offset(0f, -height * 4f))
+            moveTo(center)
+            up()
+        }
+        assertEquals(3, opened.size)
+    }
+
+    @Test
+    fun `a press near the bar's edge opens when it lifts just past it, moved or not`() {
+        val opened = mutableListOf<String>()
+        var queued by mutableStateOf(false)
+        compose.setContent {
+            CairnTheme("light") {
+                Column(
+                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+                    verticalArrangement = Arrangement.Bottom,
+                ) {
+                    SubagentBar(team, active = true) { opened += it }
+                    if (queued) Spacer(Modifier.height(72.dp))
+                    Spacer(Modifier.height(56.dp))
+                }
+            }
+        }
+        val button =
+            compose.onNodeWithContentDescription("1 sous-agent au travail. Ouvrir leur activité")
+
+        // As with Compose's tap, a lift just past the unmoved edge still counts.
+        button.performTouchInput {
+            down(Offset(centerX, height - 2f))
+            // The lift itself lands there, with no move event before it.
+            updatePointerTo(0, Offset(centerX, height + 3f))
+            up()
+        }
+        assertEquals(1, opened.size)
+
+        // Pressed near the top edge, then the button moves up and the finger drifts a few pixels
+        // past where that edge was: still within touch slop of the press, so it opens.
+        val before = button.getBoundsInRoot().top
+        button.performTouchInput { down(Offset(centerX, 2f)) }
+        queued = true
+        compose.waitForIdle()
+        val moved = with(compose.density) { (before - button.getBoundsInRoot().top).toPx() }
+        assertTrue(moved > 0f)
+        button.performTouchInput {
+            moveTo(Offset(centerX, moved - 3f))
+            up()
+        }
+        assertEquals(2, opened.size)
+    }
+
+    @Test
+    @Config(qualifiers = "w720dp-h900dp-xhdpi")
+    fun `a chip opens from the edge of its minimum touch target`() {
+        val opened = mutableListOf<String>()
+        compose.setContent {
+            CairnTheme("light") {
+                Column(Modifier.background(MaterialTheme.colorScheme.background)) {
+                    SubagentBar(team, active = true) { opened += it }
+                }
+            }
+        }
+        // The chip draws 40dp tall inside the 48dp touch target its Surface reserves.
+        val chip = compose.onAllNodesWithTag("subagent-chip")[0]
+        val band = with(compose.density) { 2.dp.toPx() }
+        chip.performTouchInput { click(Offset(centerX, -band)) }
+        chip.performTouchInput { click(Offset(centerX, height + band)) }
+        assertEquals(2, opened.size)
+
+        // A tap that starts on the chip and drifts into the band still opens it.
+        chip.performTouchInput {
+            down(Offset(centerX, 1f))
+            moveTo(Offset(centerX, -band))
+            up()
+        }
+        assertEquals(3, opened.size)
+    }
+
+    @Test
+    @Config(qualifiers = "w720dp-h900dp-xhdpi")
+    fun `swiping the chip row or stopping its fling opens no chip`() {
+        val many =
+            fixtureEntries(
+                    (1..12).map { subagent("item.started", "Agent number $it") },
+                    chat = true,
+                )
+                .single()
+                .agents
+        val opened = mutableListOf<String>()
+        compose.setContent {
+            CairnTheme("light") {
+                Column(Modifier.background(MaterialTheme.colorScheme.background)) {
+                    SubagentBar(many, active = true) { opened += it }
+                }
+            }
+        }
+        val row =
+            compose.onNode(
+                SemanticsMatcher.keyIsDefined(SemanticsProperties.HorizontalScrollAxisRange)
+            )
+        fun scrolled() =
+            row.fetchSemanticsNode().config[SemanticsProperties.HorizontalScrollAxisRange].value()
+        // A point on the chip nearest the row's middle, in the row's coordinates.
+        fun chipNearMiddle(): Offset {
+            val bounds = row.fetchSemanticsNode().boundsInRoot
+            val chip =
+                compose
+                    .onAllNodesWithTag("subagent-chip")
+                    .fetchSemanticsNodes()
+                    .map { it.boundsInRoot }
+                    .filter { it.width > 0f && it.left >= bounds.left && it.right <= bounds.right }
+                    .minBy { kotlin.math.abs(it.center.x - bounds.center.x) }
+            return Offset(chip.center.x - bounds.left, chip.center.y - bounds.top)
+        }
+
+        row.performTouchInput {
+            swipeLeft(startX = right - 2f, endX = centerX, durationMillis = 400)
+        }
+        compose.waitForIdle()
+        assertNotEquals(0f, scrolled())
+        assertEquals(emptyList<String>(), opened)
+
+        // A quick fling keeps the row moving; the tap that stops it opens nothing.
+        compose.mainClock.autoAdvance = false
+        row.performTouchInput {
+            swipeLeft(startX = right - 2f, endX = left + 2f, durationMillis = 50)
+        }
+        compose.mainClock.advanceTimeBy(32)
+        val flinging = scrolled()
+        compose.mainClock.advanceTimeBy(32)
+        assertNotEquals(flinging, scrolled())
+        val tap = chipNearMiddle()
+        row.performTouchInput { click(tap) }
+        compose.mainClock.autoAdvance = true
+        compose.waitForIdle()
+        assertEquals(emptyList<String>(), opened)
+
+        // Once the row has settled, a tap on a chip opens it.
+        val settled = chipNearMiddle()
+        row.performTouchInput { click(settled) }
+        assertEquals(1, opened.size)
+    }
+
+    @Test
+    @Config(qualifiers = "w720dp-h900dp-xhdpi")
+    fun `a chip clipped by the row still opens when a tap drifts past the row's edge`() {
+        val many =
+            fixtureEntries(
+                    (1..12).map { subagent("item.started", "Agent number $it") },
+                    chat = true,
+                )
+                .single()
+                .agents
+        val opened = mutableListOf<String>()
+        compose.setContent {
+            CairnTheme("light") {
+                Column(Modifier.background(MaterialTheme.colorScheme.background)) {
+                    SubagentBar(many, active = true) { opened += it }
+                }
+            }
+        }
+        val row =
+            compose.onNode(
+                SemanticsMatcher.keyIsDefined(SemanticsProperties.HorizontalScrollAxisRange)
+            )
+        val bounds = row.fetchSemanticsNode().boundsInRoot
+        val clipped =
+            compose
+                .onAllNodesWithTag("subagent-chip")
+                .fetchSemanticsNodes()
+                .map { it.boundsInRoot }
+                .single { kotlin.math.abs(it.right - bounds.right) < 1f && it.width > 6f }
+        val y = clipped.center.y - bounds.top
+        row.performTouchInput {
+            down(Offset(width - 3f, y))
+            moveTo(Offset(width + 5f, y))
+            up()
+        }
+        assertEquals(
+            0f,
+            row.fetchSemanticsNode().config[SemanticsProperties.HorizontalScrollAxisRange].value(),
+        )
+        assertEquals(1, opened.size)
+    }
+
+    @Test
+    fun `press feedback completes only when the press opens`() {
+        val interactions = MutableInteractionSource()
+        val seen = mutableListOf<String>()
+        var opened = 0
+        var queued by mutableStateOf(false)
+        var wide by mutableStateOf(false)
+        compose.setContent {
+            LaunchedEffect(interactions) {
+                interactions.interactions.collect {
+                    seen +=
+                        when (it) {
+                            is PressInteraction.Press -> "press"
+                            is PressInteraction.Release -> "release"
+                            is PressInteraction.Cancel -> "cancel"
+                            else -> "other"
+                        }
+                }
+            }
+            CairnTheme("light") {
+                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Bottom) {
+                    Surface(onClick = { opened++ }, interactionSource = interactions) {
+                        Box(
+                            Modifier.pressSurvivingMoves(interactions) { opened++ }
+                                .size(if (wide) 210.dp else 200.dp, 48.dp)
+                                .testTag("probe")
+                        )
+                    }
+                    if (queued) Spacer(Modifier.height(72.dp))
+                    Spacer(Modifier.height(56.dp))
+                }
+            }
+        }
+        val probe = compose.onNodeWithTag("probe", useUnmergedTree = true)
+        val slop = compose.onRoot().fetchSemanticsNode().layoutInfo.viewConfiguration.touchSlop
+
+        // An unmoved lift just past the edge opens, as with Compose's tap.
+        probe.performTouchInput {
+            down(Offset(centerX, height - 2f))
+            updatePointerTo(0, Offset(centerX, height + 3f))
+            up()
+        }
+        compose.waitForIdle()
+        assertEquals(1, opened)
+        assertEquals(listOf("press", "release"), seen)
+
+        // A short excursion off the unmoved control cancels.
+        probe.performTouchInput {
+            down(center)
+            moveTo(Offset(centerX, -slop / 2f))
+            moveTo(center)
+            up()
+        }
+        compose.waitForIdle()
+        assertEquals(1, opened)
+        assertEquals(listOf("press", "release", "press", "cancel"), seen)
+
+        // A control that grows in place has not moved: a short excursion still cancels.
+        probe.performTouchInput { down(Offset(centerX, height - 2f)) }
+        wide = true
+        compose.waitForIdle()
+        probe.performTouchInput {
+            moveTo(Offset(centerX, height + slop / 2f))
+            up()
+        }
+        compose.waitForIdle()
+        wide = false
+        compose.waitForIdle()
+        assertEquals(1, opened)
+        assertEquals(listOf("press", "release", "press", "cancel", "press", "cancel"), seen)
+
+        // A moved control's lift outside both positions cancels too.
+        probe.performTouchInput { down(center) }
+        queued = true
+        compose.waitForIdle()
+        probe.performTouchInput {
+            updatePointerTo(0, Offset(centerX, -height * 4f))
+            up()
+        }
+        compose.waitForIdle()
+        assertEquals(1, opened)
+        assertEquals(
+            listOf("press", "release", "press", "cancel", "press", "cancel", "press", "cancel"),
+            seen,
+        )
+    }
+
+    @Test
+    fun `inside a scroll container the press shows only once it is not a scroll`() {
+        val interactions = MutableInteractionSource()
+        val seen = mutableListOf<String>()
+        compose.setContent {
+            LaunchedEffect(interactions) {
+                interactions.interactions.collect {
+                    seen +=
+                        when (it) {
+                            is PressInteraction.Press -> "press"
+                            is PressInteraction.Release -> "release"
+                            is PressInteraction.Cancel -> "cancel"
+                            else -> "other"
+                        }
+                }
+            }
+            CairnTheme("light") {
+                Surface(onClick = {}, interactionSource = interactions) {
+                    Box(
+                        Modifier.pressSurvivingMoves(interactions, inScrollContainer = true) {}
+                            .size(200.dp, 48.dp)
+                            .testTag("probe")
+                    )
+                }
+            }
+        }
+        val probe = compose.onNodeWithTag("probe", useUnmergedTree = true)
+        compose.mainClock.autoAdvance = false
+        probe.performTouchInput { down(center) }
+        compose.mainClock.advanceTimeBy(20)
+        assertEquals(emptyList<String>(), seen)
+        compose.mainClock.advanceTimeBy(android.view.ViewConfiguration.getTapTimeout().toLong())
+        assertEquals(listOf("press"), seen)
+        probe.performTouchInput { up() }
+        compose.mainClock.advanceTimeByFrame()
+        assertEquals(listOf("press", "release"), seen)
     }
 
     @Test
