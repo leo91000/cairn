@@ -630,9 +630,7 @@ impl Rpc {
 }
 
 fn unavailable() -> Error {
-    Error::unavailable(
-        "Codex disconnected before finishing the operation. Try again or resume the conversation.",
-    )
+    Error::unavailable("Codex disconnected before finishing the operation.")
 }
 
 #[cfg(test)]

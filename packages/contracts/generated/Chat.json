@@ -459,6 +459,13 @@
           "default": "",
           "type": "string"
         },
+        "returnedTo": {
+          "description": "The person a failed or stopped turn returned this unsent message to. Only their\ncomposer restores it; messages from rules and agents are returned to nobody.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "revision": {
           "default": "",
           "type": "string"
@@ -3034,6 +3041,10 @@
         "integer",
         "null"
       ]
+    },
+    "turnReturned": {
+      "description": "The last turn's own message went back to its author: that turn cannot be resumed,\nand sending the message again continues the conversation (ADR-0091).",
+      "type": "boolean"
     },
     "unread": {
       "default": false,

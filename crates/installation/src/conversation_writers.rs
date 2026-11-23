@@ -331,6 +331,20 @@ pub(crate) fn record_entry(db: &Db<'_>, conversation: &str, writer: &EntryWriter
     Ok(())
 }
 
+/// The person who wrote a message as it is now stored, if a person did.
+pub(crate) fn person(db: &Db<'_>, conversation: &str, message: &str) -> Result<Option<String>> {
+    Ok(db
+        .0
+        .prepare_cached(
+            "SELECT account_id FROM conversation_entry_writers WHERE message_id=? AND chat_id=? AND writer='person'",
+        )?
+        .query_row(params![message, conversation], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .optional()?
+        .flatten())
+}
+
 /// Preserve any unattested prior revision before a person edits or removes it.
 /// Replacing the current attestation must never erase an unrecorded entry.
 pub(crate) fn record_message_before_change(db: &Db<'_>, message: &Message) -> Result<()> {

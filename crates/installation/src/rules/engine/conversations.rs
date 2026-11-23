@@ -748,6 +748,30 @@ fn start(
     Ok(json!({ "conversationId": chat, "messageId": message, "key": key }))
 }
 
+/// A failed turn no longer pauses the conversation; rules still wait until its next turn
+/// starts, which a person does by writing or resuming. A stop or cancellation pauses it,
+/// which the pause checks cover.
+fn require_person_after_failure(db: &Db<'_>, chat: &Conversation) -> Result<()> {
+    let failed = chat
+        .run_id
+        .as_deref()
+        .map(|run| db.run_state(run))
+        .transpose()?
+        .flatten()
+        .is_some_and(|run| {
+            matches!(
+                run.status,
+                crate::run_status::RunStatus::Failed | crate::run_status::RunStatus::Interrupted
+            )
+        });
+    if failed {
+        return Err(Error::conflict(
+            "This conversation's last turn failed. Rules can continue it once its next turn starts.",
+        ));
+    }
+    Ok(())
+}
+
 /// Sends a message to the conversation of a key, which Cairn delivers after its current
 /// turn, as for a person who writes again. Only a person can resume a paused conversation.
 fn steer(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
@@ -760,6 +784,7 @@ fn steer(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
             "This conversation is paused. Rules can steer it again once a person resumes it.",
         ));
     }
+    require_person_after_failure(db, &chat)?;
     let id = id();
     crate::chats::send_as_in(db, &chat.id, json!({ "id": id, "text": message }), &origin)?;
     record_rule_input(db, &chat.id, &id, acting.row, acting.depth)?;
@@ -859,6 +884,7 @@ fn answer(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
             "This conversation is paused. Rules can answer it again once a person resumes it.",
         ));
     }
+    require_person_after_failure(db, &chat)?;
     let question = db
         .questions(&chat.id)?
         .into_iter()

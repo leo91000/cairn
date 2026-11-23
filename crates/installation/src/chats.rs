@@ -264,6 +264,10 @@ fn conversation_view_with_run(
     let mut view = Chat {
         next_selection: None,
         can_request_new_session: crate::conversation_lifecycle::can_request_new_session(&chat, run),
+        turn_returned: run
+            .map(|run| turn_returned(db, text(run, "id")))
+            .transpose()?
+            .unwrap_or(false),
         finished_at: serde_json::from_value(run_field("finishedAt"))?,
         read_at: question_at.max(run_field("finishedAt").as_i64()),
         context_usage: serde_json::from_value(run_field("contextUsage"))?,
@@ -380,7 +384,7 @@ fn compaction_blocker(
     }
     if run["status"] != RunStatus::Succeeded {
         return Ok(Some(
-            "Resume or resolve the last turn before compacting.".into(),
+            "Continue or resolve the last turn before compacting.".into(),
         ));
     }
     if !run["workspaceCleanedAt"].is_null() {
@@ -705,7 +709,12 @@ fn require_sendable(
 ) -> Result<()> {
     let undelivered = messages
         .iter()
-        .filter(|message| message.status != MessageStatus::Delivered)
+        .filter(|message| {
+            matches!(
+                message.status,
+                MessageStatus::Queued | MessageStatus::Sending
+            )
+        })
         .count();
     if undelivered >= MAX_UNDELIVERED {
         return Err(Error::conflict(
@@ -867,6 +876,13 @@ pub(crate) fn send(
                 "This message identifier has already been used.",
             ));
         }
+        // A retry must not report a message that went back to its author, or was withdrawn,
+        // as accepted (ADR-0091).
+        if existing.status == MessageStatus::Cancelled {
+            return Err(Error::conflict(
+                "This message was cancelled. Send it again as a new message.",
+            ));
+        }
         return Ok(serde_json::to_value(existing)?);
     }
     if let Some(approval) = approval {
@@ -983,7 +999,32 @@ pub(crate) fn edit_as(
     }
     require_live(&chat)?;
     let mut current = required(find_message(db, chat_id, message_id)?, "Message not found")?;
-    if current.status != MessageStatus::Queued {
+    // A returned message is its author's draft: only their composer takes it back.
+    let author = if current.status == MessageStatus::Cancelled && values.is_none() {
+        db.kv(&returned_key(&current.id))?
+    } else {
+        None
+    };
+    let returned = author.is_some();
+    if current.status == MessageStatus::Cancelled && !returned {
+        return Err(Error::conflict(
+            "This message was cancelled and can no longer be changed.",
+        ));
+    }
+    if let Some(author) = author {
+        let allowed = match origin {
+            crate::native::policy::Origin::Human(account)
+            | crate::native::policy::Origin::PublicAccount(account) => author == account.as_str(),
+            _ => false,
+        };
+        if !allowed {
+            return Err(Error::conflict(
+                "This message went back to the person who wrote it.",
+            ));
+        }
+        db.delete(&returned_key(&current.id))?;
+    }
+    if current.status != MessageStatus::Queued && !returned {
         return Err(Error::conflict("This message is already being sent."));
     }
     crate::conversation_writers::record_message_before_change(db, &current)?;
@@ -1138,13 +1179,203 @@ fn next_queued(db: &Db<'_>, chat_id: &str) -> Result<Option<Value>> {
         .map_err(Into::into)
 }
 
-/// A chat whose last turn did not succeed waits for the user, unless a deletion
-/// cancelled it or the user asked for a fresh session.
+/// A chat whose last turn did not succeed returns what it never delivered, unless a
+/// deletion cancelled it or the user asked for a fresh session.
 fn needs_attention(chat: &Conversation, run: Option<&Value>) -> bool {
     run.is_some_and(|run| run["status"] != RunStatus::Succeeded)
         && !chat.cancelled_by_deletion
         && !chat.session_restart_requested
         && chat.environment_state != Some(EnvironmentState::Expired)
+}
+
+/// What a turn that did not succeed never delivered: its own message and ordinary messages
+/// written before it ended, or before Stop was pressed. Messages written since start the
+/// next turn. A person's messages certainly never delivered go back to them (`returning`).
+/// Everything else is `held` behind a pause, as every failure did before: messages from
+/// rules and agents, which have no composer to go back to, questionnaire answers, and a turn
+/// message the agent may have received. A compaction carries no message.
+#[derive(Default)]
+struct Unsent {
+    returning: Vec<(Message, String)>,
+    held: Vec<Message>,
+}
+
+/// When a turn that did not succeed ended: when Stop was pressed, or when it finished.
+fn turn_end(run: &Value) -> i64 {
+    run["cancelRequestedAt"]
+        .as_i64()
+        .or_else(|| run["finishedAt"].as_i64())
+        .unwrap_or(0)
+}
+
+/// Whether resuming the conversation should leave its stopped turn alone: the turn's
+/// message went back to its author, or it is no longer waiting and a message written since
+/// starts the next turn. A turn message held behind the pause is replayed first, as a
+/// recovery, so the agent that may have it is told to check what it already did.
+pub(crate) fn skips_replay(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bool> {
+    if turn_returned(db, text(run, "id"))? {
+        return Ok(true);
+    }
+    let turn = run["chatExecution"]["messageId"].as_str();
+    let ended_at = turn_end(run);
+    let written_since = db.conversation_messages(chat_id)?.iter().any(|message| {
+        message.status == MessageStatus::Queued
+            && message.question_id.is_none()
+            && message.created_at > ended_at
+            && Some(message.id.as_str()) != turn
+    });
+    Ok(written_since && !turn_held(db, chat_id, run)?)
+}
+
+/// The stopped turn still holds a message: its own, steering or an answer it claimed, even
+/// after Stop was pressed, which the agent may have read, or a message from before it ended
+/// held for a person. Resuming replays the turn first, as a recovery that tells the agent to
+/// check what it did, and held messages follow it.
+pub(crate) fn turn_held(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bool> {
+    let turn = run["chatExecution"]["messageId"].as_str();
+    let ended_at = turn_end(run);
+    Ok(db.conversation_messages(chat_id)?.iter().any(|message| {
+        message.status == MessageStatus::Sending
+            || (message.status == MessageStatus::Queued
+                && (Some(message.id.as_str()) == turn || message.created_at <= ended_at))
+    }))
+}
+
+/// A turn whose agent never received its message: no attempt launched a process for this
+/// turn, for example when admission or the controller refused it. Once any attempt launched
+/// one, the agent may have it, whatever later attempts reported. Checkpoints saved before
+/// turns were recorded only know whether the run ever launched.
+fn never_received(db: &Db<'_>, run: &Value) -> Result<bool> {
+    let Some(checkpoint) = RunCheckpoint::load_in(db, text(run, "id"))? else {
+        return Ok(run["startedAt"].is_null());
+    };
+    // A launch without a chat message, such as a mission's, records an empty turn.
+    let turn = run["chatExecution"]["messageId"]
+        .as_str()
+        .unwrap_or_default();
+    Ok(match &checkpoint.launched_turn {
+        Some(launched) => launched != turn,
+        None => !checkpoint.launched(),
+    })
+}
+
+fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
+    let execution = &run["chatExecution"];
+    // A compaction carries no message: a person's messages written meanwhile follow it,
+    // while those of rules and agents wait for a person, as after any failure.
+    let operation = !execution["operation"].is_null();
+    let turn = execution["messageId"].as_str();
+    let ended_at = turn_end(run);
+    let mut unsent = Unsent::default();
+    let mut received = None;
+    for message in db.conversation_messages(chat_id)? {
+        let pending = matches!(
+            message.status,
+            MessageStatus::Queued | MessageStatus::Sending
+        );
+        let own = !operation && Some(message.id.as_str()) == turn;
+        // Steering or an answer the stopping turn claimed after Stop belongs to it too.
+        if !pending
+            || (message.created_at > ended_at && !own && message.status != MessageStatus::Sending)
+        {
+            continue;
+        }
+        if operation {
+            if crate::conversation_writers::person(db, chat_id, &message.id)?.is_none() {
+                unsent.held.push(message);
+            }
+            continue;
+        }
+        // The turn's own message, and steering being sent to it, reached the agent only if a
+        // process launched for this turn.
+        let uncertain = if own || message.status == MessageStatus::Sending {
+            if received.is_none() {
+                received = Some(!never_received(db, run)?);
+            }
+            received == Some(true)
+        } else {
+            false
+        };
+        let author = if message.question_id.is_some() || uncertain {
+            None
+        } else {
+            crate::conversation_writers::person(db, chat_id, &message.id)?
+        };
+        match author {
+            Some(author) => unsent.returning.push((message, author)),
+            None => unsent.held.push(message),
+        }
+    }
+    Ok(unsent)
+}
+
+/// The tick settles a turn that did not succeed once: later ticks leave a person's
+/// resumption alone. A run continues across turns; its end time names this one.
+fn settled_key(run: &Value) -> String {
+    format!("turn-settled:{}", text(run, "id"))
+}
+
+fn settled(db: &Db<'_>, run: &Value) -> Result<bool> {
+    Ok(db
+        .kv(&settled_key(run))?
+        .is_some_and(|ended| ended == run["finishedAt"]))
+}
+
+/// Returns a person's unsent messages to them instead of replaying them, and holds the rest
+/// behind a pause, queued again. The run is read again here: a manual resume since the
+/// tick read it keeps its message.
+fn settle_turn(db: &Db<'_>, chat_id: &str, ended: &Value) -> Result<()> {
+    let Some(run) = db.run(text(ended, "id"))? else {
+        return Ok(());
+    };
+    if run["status"] != ended["status"]
+        || run["finishedAt"] != ended["finishedAt"]
+        || run["chatExecution"]["messageId"] != ended["chatExecution"]["messageId"]
+        || settled(db, &run)?
+    {
+        return Ok(());
+    }
+    db.set(&settled_key(&run), &run["finishedAt"], None)?;
+    let turn = run["chatExecution"]["messageId"].as_str();
+    let unsent = unsent(db, chat_id, &run)?;
+    // A cancellation already paused the conversation when it was requested.
+    let held = !unsent.held.is_empty();
+    let ended_at = turn_end(&run);
+    for mut message in unsent.held {
+        // A message claimed after Stop stays claimed: the turn holds it, so resuming replays
+        // the turn first and delivers it again.
+        if message.status == MessageStatus::Sending && message.created_at <= ended_at {
+            message.status = MessageStatus::Queued;
+            db.save_message(&message)?;
+        }
+    }
+    if held && !conversation(db, chat_id)?.paused {
+        pause_in(db, chat_id, true)?;
+    }
+    for (mut message, author) in unsent.returning {
+        // This turn cannot be replayed once its message went back to its author.
+        if Some(message.id.as_str()) == turn {
+            db.set(
+                &format!("turn-returned:{}", text(&run, "id")),
+                &message.id.clone().into(),
+                None,
+            )?;
+        }
+        db.set(&returned_key(&message.id), &author.into(), None)?;
+        message.status = MessageStatus::Cancelled;
+        db.save_message(&message)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn returned_key(message: &str) -> String {
+    format!("message-returned:{message}")
+}
+
+/// Whether a failure or stop returned this turn's message to its author: replaying the turn
+/// would deliver a message that is back in their composer.
+pub(crate) fn turn_returned(db: &Db<'_>, run: &str) -> Result<bool> {
+    Ok(db.kv(&format!("turn-returned:{run}"))?.is_some())
 }
 
 /// Applies the provider, model, reasoning and speed chosen for this message. The speed is
@@ -1246,7 +1477,12 @@ fn continue_run(
     let run_id = text(run, "id");
     let mut checkpoint = match RunCheckpoint::load_in(db, run_id)? {
         Some(value) => value,
-        None if chat.cancelled_by_deletion => RunCheckpoint::default(),
+        // A turn stopped or failed before it ever launched starts afresh.
+        None if chat.cancelled_by_deletion
+            || (run["status"] != RunStatus::Succeeded && run["startedAt"].is_null()) =>
+        {
+            RunCheckpoint::default()
+        }
         None => return Err(Error::conflict("Run checkpoint not found")),
     };
     let provider = Provider::of_run(snapshot)?;
@@ -1254,8 +1490,14 @@ fn continue_run(
         || run["environmentState"] == "expired";
     let fresh_environment_without_session =
         run["environmentExpiredAt"].is_number() && !run["sessionId"].is_string();
+    // A turn that handed the conversation over failed before its session existed: the
+    // next message hands it over again rather than starting without its history.
+    let unfinished_handoff = run["status"] != RunStatus::Succeeded
+        && run["chatExecution"]["context"].is_string()
+        && !run["sessionId"].is_string();
     let restart_requested = expired
         || fresh_environment_without_session
+        || unfinished_handoff
         || chat.session_restart_requested
         || checkpoint.fresh_session == Some(true);
     if provider != Provider::of_run(run)? || restart_requested {
@@ -1267,6 +1509,11 @@ fn continue_run(
         checkpoint.fresh_session = Some(false);
         execution.context = Some(handoff_context(db, run_id)?);
         checkpoint.launched = Some(false);
+        // The same turn relaunched with another coding agent keeps its earlier launch: the
+        // first agent may already have its message.
+        if checkpoint.launched_turn.as_deref() != Some(execution.message_id.as_str()) {
+            checkpoint.launched_turn = None;
+        }
         checkpoint.controller_recoveries = None;
         db.change_run(
             run_id,
@@ -1305,11 +1552,24 @@ fn continue_run(
     checkpoint.controller_recoveries = None;
     checkpoint.controller_recovery_reservation = None;
     checkpoint.provider_failure_attempt = None;
-    checkpoint.finalization_failure_attempt = None;
+    checkpoint.reset_finalization_observation();
     checkpoint.move_recovery_reservation = None;
     checkpoint.provider_retry_reservation = None;
     checkpoint.pending_paid_admission = None;
     checkpoint.controller_observation = None;
+    // A new turn after one that did not succeed gives up the environment that turn retained,
+    // as a manual resume does: recovery fences it before launch, with a full budget.
+    if run["status"] != RunStatus::Succeeded
+        && let Some(held) = checkpoint.held_environment.take()
+        && checkpoint.runner_id() == Some(held.attempt.as_str())
+    {
+        crate::worker::jobs::unknown(
+            db,
+            run_id,
+            &held.attempt,
+            "The previous environment will be stopped before continuing; background completion is unknown.",
+        )?;
+    }
     if checkpoint.held_environment.is_none() {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
     }
@@ -1321,6 +1581,7 @@ fn continue_run(
         snapshot: Some(serde_json::from_value(snapshot["snapshot"].clone())?),
         status: Some(RunStatus::Queued),
         error: Some(None),
+        retry: Some(None),
         finished_at: Some(None),
         cancel_requested_at: Some(None),
         recovery_pending: Some(checkpoint.held_environment.is_none()),
@@ -1441,6 +1702,8 @@ fn launch_turn(
         chat.run_id = Some(text(&snapshot, "id").to_owned());
         text(&snapshot, "id").to_owned()
     };
+    db.delete(&format!("turn-returned:{run_id}"))?;
+    db.delete(&format!("turn-settled:{run_id}"))?;
     match &launched_by {
         Some(message) => crate::conversation_writers::record_turn(db, &run_id, message)?,
         None => crate::conversation_writers::record_relaunch(db, &run_id, &chat.id)?,
@@ -1867,7 +2130,9 @@ impl Service {
             };
             if let Some(run) = run.as_ref().filter(|run| run_is_active(run)) {
                 // Messages sent while compacting wait for the next turn instead of steering.
-                if !is_compaction(run) {
+                // A queued run has no process to read steering yet: it is claimed once one
+                // runs, so a turn that never ran gives it back with its message.
+                if !is_compaction(run) && run["status"] != RunStatus::Queued {
                     self.publish_steering(&chat, run, side_open.contains(&chat.id))
                         .await?;
                 }
@@ -1880,17 +2145,43 @@ impl Service {
                 continue;
             }
             let id = chat.id.clone();
-            if needs_attention(&chat, run.as_ref()) {
+            if let Some(run) = run.as_ref().filter(|run| needs_attention(&chat, Some(run))) {
                 self.chat_cancel_wait(&id).await?;
+                // Read first: an idle failed conversation needs no writer on each tick.
+                let (chat_id, ended) = (id.clone(), run.clone());
+                let settling = self
+                    .store
+                    .read(move |db| Ok(db.has_pending_messages(&chat_id)? && !settled(db, &ended)?))
+                    .await?;
+                if settling {
+                    // The next tick dispatches what remains, unless a pause holds it.
+                    let (chat_id, ended) = (id.clone(), run.clone());
+                    self.store
+                        .transaction(move |db| settle_turn(db, &chat_id, &ended))
+                        .await?;
+                    // No turn runs now: steering returned to its author must not wait in the
+                    // inbox for the next turn's process.
+                    let directory = self
+                        .config
+                        .data_dir
+                        .join("runs")
+                        .join(text(run, "id"))
+                        .join("chat-input");
+                    if tokio::fs::try_exists(&directory).await.unwrap_or(false) {
+                        side_questions::publish_inbox(
+                            &self.store,
+                            text(run, "id"),
+                            "",
+                            &directory,
+                            Vec::new(),
+                        )
+                        .await?;
+                    }
+                    continue;
+                }
                 if chat.paused {
                     continue;
                 }
-                let chat_id = id.clone();
-                self.store
-                    .transaction(move |db| next_queued(db, &chat_id).map(|_| ()))
-                    .await?;
-                self.chat_pause(&id, true).await?;
-                continue;
             }
             // A scheduled wait continues the current task before queued follow-ups.
             let (waiting_chat, waiting_run) = (chat.clone(), run.clone());
@@ -2287,6 +2578,568 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
     }
 
     #[tokio::test]
+    async fn a_failed_turn_returns_what_it_never_delivered() {
+        use crate::conversation_writers::{EntryWriter, record_message};
+
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                // Stopped before its execution saved a checkpoint.
+                let run = db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "status": "cancelled",
+                        "cancelRequestedAt": 500,
+                        "finishedAt": 900,
+                        "chatExecution": { "messageId": "turn", "text": "Turn", "attachments": [], "recovery": false },
+                        "snapshot": { "agent": { "provider": "codex" } },
+                    }),
+                    None,
+                )?;
+                let profile = serde_json::from_value(run["snapshot"]["agent"].clone())?;
+                db.save_agent(&profile)?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                    "nativeProvenanceUnknown": false,
+                }))?;
+                let message = |id: &str, status: &str, created_at: i64| {
+                    json!({
+                        "id": id,
+                        "chatId": "chat",
+                        "text": id,
+                        "status": status,
+                        "createdAt": created_at,
+                    })
+                };
+                db.put_message(&message("delivered", "delivered", 10))?;
+                // The turn's own message, never acknowledged, was written before others.
+                db.put_message(&message("turn", "sending", 600))?;
+                db.put_message(&message("follow-up", "queued", 400))?;
+                db.put_message(&message("from-rule", "queued", 420))?;
+                let mut answer = message("answer", "queued", 450);
+                answer["questionId"] = "question".into();
+                db.put_message(&answer)?;
+                // Written after Stop was pressed: it starts the next turn.
+                db.put_message(&message("after", "queued", 700))?;
+                for id in ["turn", "follow-up"] {
+                    record_message(db, "chat", id, &EntryWriter::Person("alice".into()))?;
+                }
+                record_message(db, "chat", "from-rule", &EntryWriter::Rule("rule".into()))?;
+
+                settle_turn(db, "chat", &run)?;
+                // A turn is settled once: a person's later resumption is left alone.
+                assert!(settled(db, &run)?);
+                pause_in(db, "chat", false)?;
+                settle_turn(db, "chat", &run)?;
+                assert!(!conversation(db, "chat")?.paused);
+                pause_in(db, "chat", true)?;
+                let status = |id: &str| -> Result<MessageStatus> {
+                    Ok(find_message(db, "chat", id)?.unwrap().status)
+                };
+                assert_eq!(status("delivered")?, MessageStatus::Delivered);
+                assert_eq!(status("turn")?, MessageStatus::Cancelled);
+                assert_eq!(status("follow-up")?, MessageStatus::Cancelled);
+                // A rule has no composer: its message stays queued behind a pause, as before.
+                assert_eq!(status("from-rule")?, MessageStatus::Queued);
+                assert!(conversation(db, "chat")?.paused);
+                // Answers are not returned, and a message written since starts the next turn.
+                assert_eq!(status("answer")?, MessageStatus::Queued);
+                assert_eq!(status("after")?, MessageStatus::Queued);
+                assert!(unsent(db, "chat", &run)?.returning.is_empty());
+
+                // Only the person who wrote a message gets it back.
+                let returned_to = |id: &str| -> Result<Value> {
+                    Ok(db
+                        .messages("chat")?
+                        .into_iter()
+                        .find(|message| message["id"] == id)
+                        .unwrap()["returnedTo"]
+                        .clone())
+                };
+                assert_eq!(returned_to("turn")?, "alice");
+                assert_eq!(returned_to("follow-up")?, "alice");
+                assert!(returned_to("from-rule")?.is_null());
+                assert!(returned_to("after")?.is_null());
+                // The turn whose message went back cannot be replayed.
+                assert!(turn_returned(db, "run")?);
+                let refused = crate::worker::control::requeue(db, "run", None, None, None, None)
+                    .unwrap_err();
+                assert!(refused.message.contains("went back"), "{}", refused.message);
+
+                // Retrying a send whose message came back queues nothing: it is refused.
+                let retried = send(
+                    db,
+                    "chat",
+                    json!({ "id": "follow-up", "text": "follow-up" }),
+                    None,
+                    &crate::native::policy::Origin::Human("alice".into()),
+                )
+                .unwrap_err();
+                assert!(retried.message.contains("cancelled"), "{}", retried.message);
+
+                // The composer that restores a returned message withdraws it and its mark.
+                edit_as(db, "chat", "turn", None, &crate::native::policy::Origin::Human("alice".into()))?;
+                assert!(find_message(db, "chat", "turn")?.is_none());
+                assert!(db.kv(&returned_key("turn"))?.is_none());
+
+                // A message cancelled for another reason, such as deletion, goes to nobody.
+                db.put_message(&message("deleted", "cancelled", 300))?;
+                record_message(db, "chat", "deleted", &EntryWriter::Person("alice".into()))?;
+                assert!(returned_to("deleted")?.is_null());
+
+                // The next message starts a turn although the stopped one never launched, with
+                // a new retry budget.
+                db.change_run(
+                    "run",
+                    crate::runs::RunChanges {
+                        retry: Some(Some(serde_json::from_value(json!({
+                            "attempt": 5, "limit": 5, "nextAttemptAt": null,
+                            "cause": { "kind": "timeout", "message": "Old" },
+                            "startedAt": 1, "deadlineAt": 2,
+                        }))?)),
+                        ..Default::default()
+                    },
+                )?;
+                pause_in(db, "chat", false)?;
+                let after = db.messages("chat")?.into_iter().find(|message| message["id"] == "after").unwrap();
+                launch_turn(db, "chat", Some(run.clone()), after, db.run("run")?.unwrap())?;
+                let launched = db.run("run")?.unwrap();
+                assert_eq!(launched["status"], "queued");
+                assert_eq!(launched["chatExecution"]["messageId"], "after");
+                assert!(launched["retry"].is_null());
+                assert_eq!(status("after")?, MessageStatus::Sending);
+                assert!(!turn_returned(db, "run")?);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_compaction_returns_nothing_and_holds_rule_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "status": "failed",
+                        "finishedAt": 900,
+                        "chatExecution": { "messageId": "first", "text": "", "attachments": [], "recovery": false, "operation": COMPACT },
+                        "snapshot": { "agent": { "provider": "codex" } },
+                    }),
+                    None,
+                )?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": "agent",
+                }))?;
+                db.put_message(&json!({
+                    "id": "person",
+                    "chatId": "chat",
+                    "text": "Next",
+                    "status": "queued",
+                    "createdAt": 100,
+                }))?;
+                crate::conversation_writers::record_message(
+                    db,
+                    "chat",
+                    "person",
+                    &crate::conversation_writers::EntryWriter::Person("alice".into()),
+                )?;
+                db.put_message(&json!({
+                    "id": "rule",
+                    "chatId": "chat",
+                    "text": "From a rule",
+                    "status": "queued",
+                    "createdAt": 200,
+                }))?;
+                // Nothing is returned: a person's message follows the compaction, while a
+                // rule's waits behind a pause for a person, as after any failure.
+                let unsent = unsent(db, "chat", &run)?;
+                assert!(unsent.returning.is_empty());
+                assert_eq!(unsent.held.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(), ["rule"]);
+                settle_turn(db, "chat", &run)?;
+                assert!(conversation(db, "chat")?.paused);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn uncertain_launches_and_answers_are_held_not_returned() {
+        use crate::conversation_writers::{EntryWriter, record_message};
+
+        for (launched, answer) in [(true, false), (false, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            store
+                .transaction(move |db| {
+                    let run = db.add_run_fixture(
+                        &json!({
+                            "id": "run",
+                            "taskId": "chat",
+                            "createdAt": 0,
+                            "startedAt": 1,
+                            "status": "failed",
+                            "finishedAt": 900,
+                            "chatExecution": { "messageId": "turn", "text": "Turn", "attachments": [], "recovery": false },
+                            "snapshot": { "agent": { "provider": "codex" } },
+                        }),
+                        None,
+                    )?;
+                    db.save_checkpoint_boundary("run", &json!({ "launched": launched }))?;
+                    db.save_conversation_boundary(&json!({
+                        "id": "chat",
+                        "runId": "run",
+                        "agentId": "agent",
+                    }))?;
+                    let mut turn = json!({
+                        "id": "turn",
+                        "chatId": "chat",
+                        "text": "turn",
+                        "status": "sending",
+                        "createdAt": 600,
+                    });
+                    if answer {
+                        turn["questionId"] = "question".into();
+                    }
+                    db.put_message(&turn)?;
+                    record_message(db, "chat", "turn", &EntryWriter::Person("alice".into()))?;
+                    let steering = json!({
+                        "id": "steering",
+                        "chatId": "chat",
+                        "text": "steer",
+                        "mode": "steer",
+                        "status": "sending",
+                        "createdAt": 650,
+                    });
+                    db.put_message(&steering)?;
+                    record_message(db, "chat", "steering", &EntryWriter::Person("alice".into()))?;
+
+                    // The agent may have the message, or an answer cannot go back to a
+                    // composer: either waits, queued again, behind a pause as before.
+                    settle_turn(db, "chat", &run)?;
+                    let turn = find_message(db, "chat", "turn")?.unwrap();
+                    assert_eq!(turn.status, MessageStatus::Queued, "launched {launched}");
+                    // Steering sent to a launched turn may have been read; never launched, it
+                    // goes back with the turn.
+                    let steering = find_message(db, "chat", "steering")?.unwrap();
+                    let expected = if launched { MessageStatus::Queued } else { MessageStatus::Cancelled };
+                    assert_eq!(steering.status, expected, "launched {launched}");
+                    // A message written since does not skip the replay of the held turn, which
+                    // tells the agent to check what it already did.
+                    db.put_message(&json!({
+                        "id": "since",
+                        "chatId": "chat",
+                        "text": "since",
+                        "status": "queued",
+                        "createdAt": 1000,
+                    }))?;
+                    assert!(!skips_replay(db, "chat", &run)?);
+                    assert!(conversation(db, "chat")?.paused);
+                    assert!(!turn_returned(db, "run")?);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn launches_without_a_message_are_not_this_turns() {
+        use crate::conversation_writers::{EntryWriter, record_message};
+
+        // A mission continued in chat: its launch delivered none of the chat's messages.
+        // A turn without a message that launched may have read the steering it claimed.
+        for (message_id, returned) in [(Some("turn"), true), (None, false)] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            store
+                .transaction(move |db| {
+                    let mut execution = json!({ "text": "", "attachments": [], "recovery": false });
+                    if let Some(id) = message_id {
+                        execution["messageId"] = id.into();
+                    }
+                    let run = db.add_run_fixture(
+                        &json!({
+                            "id": "run",
+                            "taskId": "chat",
+                            "createdAt": 0,
+                            "startedAt": 1,
+                            "status": "cancelled",
+                            "cancelRequestedAt": 500,
+                            "finishedAt": 900,
+                            "chatExecution": execution,
+                            "snapshot": { "agent": { "provider": "codex" } },
+                        }),
+                        None,
+                    )?;
+                    db.save_checkpoint_boundary(
+                        "run",
+                        &json!({
+                            "launched": true,
+                            "launchedTurn": "",
+                        }),
+                    )?;
+                    db.save_conversation_boundary(&json!({
+                        "id": "chat",
+                        "runId": "run",
+                        "agentId": "agent",
+                    }))?;
+                    if message_id.is_some() {
+                        db.put_message(&json!({
+                            "id": "turn",
+                            "chatId": "chat",
+                            "text": "turn",
+                            "status": "sending",
+                            "createdAt": 100,
+                        }))?;
+                        record_message(db, "chat", "turn", &EntryWriter::Person("alice".into()))?;
+                    }
+                    db.put_message(&json!({
+                        "id": "steering",
+                        "chatId": "chat",
+                        "text": "steer",
+                        "mode": "steer",
+                        "status": "sending",
+                        "createdAt": 200,
+                    }))?;
+                    record_message(db, "chat", "steering", &EntryWriter::Person("alice".into()))?;
+                    settle_turn(db, "chat", &run)?;
+                    let expected = if returned {
+                        MessageStatus::Cancelled
+                    } else {
+                        MessageStatus::Queued
+                    };
+                    assert_eq!(
+                        find_message(db, "chat", "steering")?.unwrap().status,
+                        expected,
+                        "{message_id:?}"
+                    );
+                    if returned {
+                        assert_eq!(
+                            find_message(db, "chat", "turn")?.unwrap().status,
+                            MessageStatus::Cancelled
+                        );
+                        assert!(turn_returned(db, "run")?);
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_claimed_after_stop_replays_the_stopped_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "startedAt": 1,
+                        "status": "cancelled",
+                        "cancelRequestedAt": 500,
+                        "finishedAt": 900,
+                        "chatExecution": { "messageId": "turn", "text": "Turn", "attachments": [], "recovery": false },
+                        "snapshot": { "agent": { "provider": "codex" } },
+                    }),
+                    None,
+                )?;
+                db.save_checkpoint_boundary("run", &json!({
+                    "launched": true,
+                    "launchedTurn": "turn",
+                }))?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": "agent",
+                }))?;
+                db.put_message(&json!({
+                    "id": "turn",
+                    "chatId": "chat",
+                    "text": "turn",
+                    "status": "delivered",
+                    "createdAt": 100,
+                }))?;
+                // Answered while the turn was being stopped: the stopping agent claimed it.
+                db.put_message(&json!({
+                    "id": "answer",
+                    "chatId": "chat",
+                    "text": "answer",
+                    "questionId": "question",
+                    "mode": "steer",
+                    "status": "sending",
+                    "createdAt": 600,
+                }))?;
+                db.put_message(&json!({
+                    "id": "since",
+                    "chatId": "chat",
+                    "text": "since",
+                    "status": "queued",
+                    "createdAt": 1000,
+                }))?;
+                settle_turn(db, "chat", &run)?;
+                // The agent may have read the answer: it is held, and resuming replays the
+                // turn first, as a recovery, before the message written since.
+                assert_eq!(find_message(db, "chat", "answer")?.unwrap().status, MessageStatus::Sending);
+                assert!(conversation(db, "chat")?.paused);
+                assert!(turn_held(db, "chat", &run)?);
+                assert!(!skips_replay(db, "chat", &run)?);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn later_turns_and_steering_return_only_what_never_left() {
+        use crate::conversation_writers::{EntryWriter, record_message};
+        use crate::native::policy::Origin;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                // An earlier turn launched; this turn's message never reached a process.
+                let run = db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "startedAt": 1,
+                        "status": "cancelled",
+                        "cancelRequestedAt": 500,
+                        "finishedAt": 900,
+                        "chatExecution": { "messageId": "second", "text": "Second", "attachments": [], "recovery": false },
+                        "snapshot": { "agent": { "provider": "codex" } },
+                    }),
+                    None,
+                )?;
+                db.save_checkpoint_boundary("run", &json!({
+                    "launched": true,
+                    "launchedTurn": "first",
+                }))?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": "agent",
+                }))?;
+                let message = |id: &str, status: &str, created_at: i64| {
+                    json!({
+                        "id": id,
+                        "chatId": "chat",
+                        "text": id,
+                        "status": status,
+                        "createdAt": created_at,
+                    })
+                };
+                db.put_message(&message("first", "delivered", 10))?;
+                db.put_message(&message("second", "sending", 400))?;
+                // Claimed for steering, but no process launched for this turn to read it.
+                let mut steering = message("steering", "sending", 450);
+                steering["mode"] = "steer".into();
+                db.put_message(&steering)?;
+                db.put_message(&message("since", "queued", 700))?;
+                for id in ["second", "steering", "since"] {
+                    record_message(db, "chat", id, &EntryWriter::Person("alice".into()))?;
+                }
+                // The turn's own message still waits: resuming replays it first.
+                assert!(!skips_replay(db, "chat", &run)?);
+
+                settle_turn(db, "chat", &run)?;
+                // Once it went back to its author, resuming sends what was written since.
+                assert!(skips_replay(db, "chat", &run)?);
+                assert_eq!(find_message(db, "chat", "second")?.unwrap().status, MessageStatus::Cancelled);
+                assert_eq!(find_message(db, "chat", "steering")?.unwrap().status, MessageStatus::Cancelled);
+                // Nothing is held: the cancellation itself paused the conversation, not this.
+                assert!(!conversation(db, "chat")?.paused);
+
+                // Only the author of a returned message takes it back.
+                let refused = edit_as(db, "chat", "second", None, &Origin::Human("bob".into())).unwrap_err();
+                assert!(refused.message.contains("person who wrote it"), "{}", refused.message);
+                edit_as(db, "chat", "second", None, &Origin::Human("alice".into()))?;
+                assert!(find_message(db, "chat", "second")?.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_turn_after_a_failure_gives_up_the_retained_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "startedAt": 1,
+                        "status": "failed",
+                        "finishedAt": 900,
+                        "sessionId": "native",
+                        "chatExecution": { "messageId": "turn", "text": "Turn", "attachments": [], "recovery": false },
+                        "snapshot": { "agent": { "provider": "codex" } },
+                    }),
+                    None,
+                )?;
+                let profile = serde_json::from_value(run["snapshot"]["agent"].clone())?;
+                db.save_agent(&profile)?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                }))?;
+                let mut saved = RunCheckpoint::fresh(None);
+                saved.launched = Some(true);
+                saved.prepared = Some(Some(json!({ "workspace": "preserved" })));
+                saved.runner_id = Some(Some("attempt".into()));
+                saved.remaining_ms = Some(Some(0));
+                saved.held_environment = Some(crate::worker::checkpoint::HeldEnvironment {
+                    attempt: "attempt".into(),
+                    generation: "generation".into(),
+                    expires_at: 1,
+                });
+                saved.store_in(db, "run")?;
+                let message = db.put_message(&json!({
+                    "id": "next",
+                    "chatId": "chat",
+                    "text": "Again",
+                    "status": "queued",
+                    "createdAt": 1000,
+                }))?;
+                launch_turn(db, "chat", Some(run.clone()), message, run)?;
+                // Like a manual resume: the expired hold goes, recovery fences it, and the new
+                // turn has a full budget instead of the old deadline.
+                let checkpoint = RunCheckpoint::load_in(db, "run")?.unwrap();
+                assert!(checkpoint.held_environment.is_none());
+                assert_ne!(checkpoint.remaining_ms, Some(Some(0)));
+                assert_eq!(db.run("run")?.unwrap()["recoveryPending"], true);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn compaction_runs_only_between_turns_and_keeps_the_last_reply() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
@@ -2376,7 +3229,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                         "claude",
                         "failed",
                         Some("session"),
-                        "Resume or resolve the last turn",
+                        "Continue or resolve the last turn",
                     ),
                     (
                         "claude",

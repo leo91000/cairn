@@ -453,9 +453,14 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     }
     db.delete_checkpoint(run)?;
     crate::environment_expiration::forget_in(db, run)?;
-    for key in [format!("turn-speed:{run}"), format!("chat-error:{cid}")]
-        .into_iter()
-        .chain(crate::chat_titles::keys(cid))
+    for key in [
+        format!("turn-speed:{run}"),
+        format!("turn-returned:{run}"),
+        format!("turn-settled:{run}"),
+        format!("chat-error:{cid}"),
+    ]
+    .into_iter()
+    .chain(crate::chat_titles::keys(cid))
     {
         db.delete(&key)?;
     }
@@ -467,6 +472,10 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
         }
     }
     db.revoke_mcp_run(run)?;
+    db.0.execute(
+        "DELETE FROM kv WHERE key IN (SELECT 'message-returned:'||id FROM chat_messages WHERE chat_id=?)",
+        [cid],
+    )?;
     db.0.execute("DELETE FROM chat_messages WHERE chat_id=?", [cid])?;
     db.0.execute("DELETE FROM runs WHERE id=?", [run])?;
     db.remove_conversation(cid)?;
@@ -608,6 +617,8 @@ mod tests {
                 db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
                 let keys = [
                     "turn-speed:run",
+                    "turn-returned:run",
+                    "turn-settled:run",
                     "chat-error:chat",
                     "chat-title-pending:chat",
                     "chat-title-checked:chat",
@@ -616,10 +627,22 @@ mod tests {
                 for key in keys {
                     db.set(key, &json!({ "messageId": "message" }), None)?;
                 }
+                // A message returned to its author keeps its mark until the conversation goes.
+                db.put_message(&json!({
+                    "id": "returned",
+                    "chatId": "chat",
+                    "text": "Back",
+                    "status": "cancelled",
+                    "createdAt": 1,
+                }))?;
+                db.set("message-returned:returned", &json!("alice"), None)?;
+                db.set("message-returned:elsewhere", &json!("alice"), None)?;
                 forget(db, "chat", "run")?;
                 for key in keys {
                     assert!(db.kv(key)?.is_none(), "{key}");
                 }
+                assert!(db.kv("message-returned:returned")?.is_none());
+                assert_eq!(db.kv("message-returned:elsewhere")?, Some(json!("alice")));
                 Ok(())
             })
             .await

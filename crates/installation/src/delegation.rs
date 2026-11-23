@@ -110,7 +110,8 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "task_cancel",
             "description": "Stop a task this conversation delegated: interrupt its current turn, \
-                cancel its wait and hold its queued messages. Its conversation and report remain.",
+                cancel its wait and hold its queued messages; messages a person wrote that it never \
+                delivered go back to them. Its conversation and report remain.",
             "inputSchema": cairn_contracts::schema_for::<TaskCancelInput>(cairn_contracts::Contract::Deserialize),
             "outputSchema": cairn_contracts::schema_for::<cairn_contracts::DelegatedTask>(cairn_contracts::Contract::Serialize),
         }),

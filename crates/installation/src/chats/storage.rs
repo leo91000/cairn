@@ -582,7 +582,8 @@ impl Db<'_> {
         } else {
             "chat_id=?1 AND ?2 IS NULL"
         };
-        let mut statement = self.0.prepare_cached(&format!("SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,NULL,plan FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"))?;
+        // A message a failed or stopped turn returned names the person it went back to.
+        let mut statement = self.0.prepare_cached(&format!("SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,NULL,plan,CASE WHEN status='cancelled' THEN (SELECT json_extract(data,'$') FROM kv WHERE key='message-returned:'||chat_messages.id) END FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"))?;
         let rows = statement
             .query_map(params![chat, message], |r| {
                 Ok((
@@ -601,6 +602,7 @@ impl Db<'_> {
                         question_id: r.get(11)?,
                         attachments: Vec::new(),
                         plan: r.get(13)?,
+                        returned_to: r.get(14)?,
                     },
                     decode::<std::collections::BTreeMap<String, MessageAnswer>>(r, 12)?,
                 ))
@@ -648,6 +650,16 @@ impl Db<'_> {
                 Message { content, answers }
             })
             .collect())
+    }
+
+    /// Whether the conversation has a message waiting to be sent, read from the pending index.
+    pub(crate) fn has_pending_messages(&self, chat: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT 1 FROM chat_messages WHERE chat_id=? AND status IN ('queued','sending') LIMIT 1",
+            )?
+            .exists([chat])?)
     }
 
     pub fn messages(&self, chat: &str) -> Result<Vec<Value>> {

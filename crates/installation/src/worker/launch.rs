@@ -1015,9 +1015,12 @@ impl Execution<'_> {
             if has_live_environment(&saved, self.retained, &workspace.env) {
                 // A failed provider turn must not implicitly replay jobs or
                 // resume a controller that account rotation would fence.
-                return Err(Error::conflict(
-                    "Provider account exhausted in a live environment. Background work will stop; resume explicitly with an available account.",
-                ));
+                // A conversation continues with its next message (ADR-0091); a mission is resumed.
+                return Err(Error::conflict(if self.run["trigger"] == "chat" {
+                    "Provider account exhausted in a live environment. Background work will stop."
+                } else {
+                    "Provider account exhausted in a live environment. Background work will stop; resume explicitly with an available account."
+                }));
             }
             // This adapter has exited; its side questions cannot wait for a different
             // account, even though the run and turn remain running during the switch.
@@ -1275,6 +1278,16 @@ impl Execution<'_> {
         plan["mcpEnv"] = workspace.mcp["env"].clone();
         plan["turnId"] = self.turn.clone().into();
         atomic_write(&plan_path, &serde_json::to_vec(&plan)?).await?;
+        // The environment starts the turn as soon as it accepts it: unless it refuses, its
+        // message may be read even if this launch fails before the runner client is recorded
+        // (ADR-0091).
+        let turn = launched_turn(self.run);
+        self.checkpoint
+            .update(|c| {
+                c.launched_turn_before = c.launched_turn.take();
+                c.launched_turn = turn;
+            })
+            .await?;
         match super::held::request(
             self.s,
             self.run,
@@ -1287,7 +1300,12 @@ impl Execution<'_> {
         .await?
         {
             Event::Accepted { .. } => {}
-            Event::Refused { message, .. } => return Err(Error::conflict(message)),
+            Event::Refused { message, .. } => {
+                self.checkpoint
+                    .update(|c| c.launched_turn = c.launched_turn_before.take())
+                    .await?;
+                return Err(Error::conflict(message));
+            }
             _ => {
                 return Err(Error::unavailable(
                     "Invalid environment continuation acknowledgement.",
@@ -1692,6 +1710,7 @@ impl Execution<'_> {
         )
         .await?;
         let identity = recovery::process_identity(child.child.id().unwrap()).await?;
+        let launched_turn = launched_turn(self.run);
         if self.run["chatExecution"].is_object() {
             self.run["chatExecution"]["recovery"] = true.into();
             let patch = json!({ "chatExecution": self.run["chatExecution"] });
@@ -1712,6 +1731,8 @@ impl Execution<'_> {
                 c.turn_pending = None;
                 c.recovery_deadline_ms = None;
                 c.launched = Some(true);
+                c.launched_turn_before = c.launched_turn.take();
+                c.launched_turn = launched_turn.clone();
                 c.start_rejected = Some(false);
                 c.output_interrupted = None;
                 c.provider_failure_attempt = None;
@@ -2132,17 +2153,22 @@ impl Execution<'_> {
         if !saved.last_error().is_empty() {
             return saved.last_error().to_owned();
         }
+        // A conversation shows what continues it: its returned message or its held queue
+        // (ADR-0091). A mission is resumed.
+        let next = if self.run["trigger"] == "chat" {
+            ""
+        } else {
+            " Resume the conversation to continue."
+        };
         match exit.code {
             Some(crate::runner::CONTROLLER_FAILED) => {
                 format!(
-                    "{} failed while running this attempt. Resume the conversation to continue.",
+                    "{} failed while running this attempt.{next}",
                     controller_name(self.run)
                 )
             }
-            Some(code) => {
-                format!("Process exited with status {code}. Resume the conversation to continue.")
-            }
-            None => "Process stopped before finishing. Resume the conversation to continue.".into(),
+            Some(code) => format!("Process exited with status {code}.{next}"),
+            None => format!("Process stopped before finishing.{next}"),
         }
     }
 }
@@ -2156,6 +2182,18 @@ async fn close_output_readers(out: AbortOnDropHandle<()>, err: AbortOnDropHandle
     }
     let _ = out.await;
     let _ = err.await;
+}
+
+/// The turn a launch serves, recorded so a failure can tell whether the agent may have its
+/// message (ADR-0091). A launch without a chat message, such as a mission's, records an
+/// empty turn: a later chat message was not delivered by it.
+fn launched_turn(run: &Value) -> Option<String> {
+    Some(
+        run["chatExecution"]["messageId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    )
 }
 
 fn has_live_environment(saved: &RunCheckpoint, retained: bool, env: &Environment) -> bool {

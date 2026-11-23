@@ -80,6 +80,7 @@ import build.cairn.contracts.stopChat
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
 @Composable
@@ -518,7 +519,12 @@ internal fun ChatPage(
         }
     }
     val timelineKeys = remember(id) { TimelineKeys() }
-    val quota = remember(chat?.run, live.entries) { chatQuota(chat?.run, live.entries) }
+    // A turn whose message went back to the composer is over: sending it again is the way on.
+    val returnedTurn = chat?.turnReturned == true
+    val quota =
+        remember(chat?.run, live.entries, returnedTurn) {
+            if (returnedTurn) null else chatQuota(chat?.run, live.entries)
+        }
     // A failed or interrupted turn never resumes its wakeup, even when the record lingers.
     val pendingWakeup = liveWakeup(chat)
     val history =
@@ -660,7 +666,7 @@ internal fun ChatPage(
                         .copy(subagents = waitingForSubagents(it.taskIds, currentSubagents))
                 } ?: workingStep(live.events, chat?.agentName.orEmpty(), chat?.run?.startedAt)
         }
-    val conversationError = conversationError(chat)
+    val conversationError = conversationError(chat, readOnly)
     val error = conversationError?.takeUnless {
         quota != null && (isQuotaMessage(it) || it == quota.message)
     }
@@ -744,6 +750,30 @@ internal fun ChatPage(
         }
     val delivery = chatDelivery(chat, live.entries, outgoing)
     val pending = delivery.queued
+    // The running turn keeps its coding agent, model, reasoning and speed: a message changing
+    // them waits for the next turn, as the server requires.
+    val runningAgent = chat?.run?.snapshot?.agent
+    val changesRunningAgent =
+        runningAgent != null &&
+            (switchingProvider ||
+                (model.isNotEmpty() && model != runningAgent.model) ||
+                (reasoning.isNotEmpty() && reasoning != runningAgent.reasoning) ||
+                (speed.isNotEmpty() && speed != runningAgent.speed.ifEmpty { "standard" }))
+    // While the agent works, a message joins its turn unless it must wait for the next one.
+    // A turn being stopped or compacting reads no steering: a message waits for the next turn.
+    val steerable =
+        chat?.run?.cancelRequestedAt == null && chat?.run?.chatExecution?.operation != "compact"
+    val steers =
+        active && steerable && chat?.paused != true && !changesRunningAgent && !steerBlocked
+    // After a Stop or a failed turn, the next message resumes an empty queue, whoever paused it.
+    // A queue paused after a successful turn, or holding messages, keeps holding what is added.
+    val resumesOnSend = resumesOnSend(chat, pending.size)
+    val held = chat?.paused == true && !resumesOnSend
+    // Saving an edit keeps the queued message where it was, unless its new choices must wait for
+    // the next turn.
+    val editedMode =
+        if (changesRunningAgent || steerBlocked) "queue"
+        else pending.find { it.id == editing }?.mode ?: "queue"
     val questions = chat?.questions.orEmpty().filter { it.status == "pending" }
     // Files over the limits stay visible as refused cards; the others join the draft.
     fun attach(
@@ -888,6 +918,7 @@ internal fun ChatPage(
                         plan = plan,
                         speed = selectedSpeed,
                     )
+            val resumes = editing == null && resumesOnSend
             try {
                 val edited = editing
                 if (edited == null)
@@ -913,6 +944,7 @@ internal fun ChatPage(
                     api.editChatMessage(
                         EditChatMessageInput(chatId = chatId, messageId = edited, message = content)
                     )
+                if (resumes) api.setChatPaused(SetChatPausedInput(chatId = chatId, paused = false))
             } catch (e: Exception) {
                 outgoing = null
                 if (planApproval != null && e is ApiException && e.status == 409) {
@@ -948,6 +980,86 @@ internal fun ChatPage(
         planning = message.plan == true
         speed = message.speed
         attachments = message.attachments.map { DraftAttachment(it) }
+    }
+    // A turn that failed or stopped returns the messages it never delivered to the person who
+    // wrote them: they come back to their composer, ahead of any draft, and leave the
+    // conversation so no other device restores them again. Restoring waits for an edit or a
+    // send to finish.
+    val restored = remember(id) { mutableSetOf<String>() }
+    val me = state.session.account?.id
+    val returned = returnedMessages(chat, me, restored)
+    LaunchedEffect(returned.map { it.id }, readOnly, editing, state.busy, selected) {
+        val current = chat ?: return@LaunchedEffect
+        // Only the conversation shown restores: a neighbouring page shows a cached copy.
+        if (
+            !selected ||
+                returned.isEmpty() ||
+                readOnly ||
+                state.busy ||
+                current.lifecycle != "active"
+        )
+            return@LaunchedEffect
+        // The message being edited came back: the edit becomes an ordinary draft, which
+        // already holds it, so only the returned copy is withdrawn.
+        returned
+            .find { it.id == editing }
+            ?.let { edited ->
+                restored += edited.id
+                editing = null
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    try {
+                        vm.api.deleteChatMessage(
+                            ChatMessageReference(chatId = current.id, messageId = edited.id)
+                        )
+                    } catch (e: build.cairn.app.data.ApiException) {
+                        if (e.status != 404) vm.report(e)
+                    } catch (e: Exception) {
+                        vm.report(e)
+                    }
+                }
+                return@LaunchedEffect
+            }
+        if (editing != null) return@LaunchedEffect
+        returned.forEach { restored += it.id }
+        // A send whose response was lost and whose message came back starts over with a new
+        // identifier.
+        if (returned.any { it.id == submissionId }) {
+            submissionKey = ""
+            submissionId = ""
+        }
+        // The message comes back as written: its plan request and agent choices included.
+        // A draft already written keeps its own agent choices; a plan request stays one.
+        val empty = draft.isBlank() && attachments.isEmpty()
+        val restoredDraft = restoredComposer(returned, draft)
+        composer.setTextAndPlaceCursorAtEnd(restoredDraft.text)
+        val kept = attachments.map { it.attachment.id }.toSet()
+        attachments =
+            attachments +
+                restoredDraft.attachments.filter { it.id !in kept }.map { DraftAttachment(it) }
+        if (empty) {
+            provider = restoredDraft.provider.ifBlank { currentProvider }
+            model = restoredDraft.model
+            reasoning = restoredDraft.reasoning
+            speed = restoredDraft.speed
+        }
+        planning = planning || restoredDraft.plan
+        // Restoring recomposes this screen and restarts the effect: the withdrawal must finish.
+        withContext(kotlinx.coroutines.NonCancellable) {
+            try {
+                returned.forEach {
+                    try {
+                        vm.api.deleteChatMessage(
+                            ChatMessageReference(chatId = current.id, messageId = it.id)
+                        )
+                    } catch (e: build.cairn.app.data.ApiException) {
+                        // Another device of the same person restored and withdrew it first.
+                        if (e.status != 404) throw e
+                    }
+                }
+            } catch (e: Exception) {
+                vm.report(e)
+            }
+        }
     }
     // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation, with
     // the agent's usual permissions.
@@ -1197,8 +1309,10 @@ internal fun ChatPage(
                                     },
                                 )
                                 chat?.let { current ->
-                                    // Resuming needs access; reading and stopping do not.
-                                    if (!(readOnly && current.paused))
+                                    // Resuming needs access; reading and stopping do not. After
+                                    // a Stop or failure with nothing waiting, the next message
+                                    // resumes the conversation, as on the web.
+                                    if (!(readOnly && current.paused) && !resumesOnSend)
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
@@ -1415,8 +1529,10 @@ internal fun ChatPage(
                 if (error != null && !errorDismissed && isOpenCodePrivacyError(error))
                     OpenCodePrivacyNotice(
                         enabled = !state.busy,
+                        // A message that went back to the composer is retried by sending it again.
                         retry =
-                            if (readOnly) null else ({ if (chat != null) setPaused(chat, false) }),
+                            if (readOnly || returnedTurn) null
+                            else ({ if (chat != null) setPaused(chat, false) }),
                         create = if (readOnly) null else create,
                         dismiss = { errorDismissed = true },
                     )
@@ -1532,12 +1648,18 @@ internal fun ChatPage(
                             }
                         if (chat?.sessionRestartRequested == true && !readOnly)
                             Text(
-                                "Écrivez un nouveau message, puis reprenez la file pour continuer.",
+                                if (held) "Reprenez la file pour démarrer la nouvelle session."
+                                else "Votre prochain message démarre la nouvelle session.",
                                 Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                        val cancelled = chat?.messages.orEmpty().filter { it.status == "cancelled" }
+                        // Cancelled by a deletion and restored from the trash: returned messages
+                        // go to their author's composer instead.
+                        val cancelled =
+                            chat?.messages.orEmpty().filter {
+                                it.status == "cancelled" && it.returnedTo == null
+                            }
                         if (cancelled.isNotEmpty()) {
                             TextButton({ cancelledExpanded = !cancelledExpanded }) {
                                 Text("Messages annulés (${cancelled.size})")
@@ -2080,12 +2202,14 @@ internal fun ChatPage(
                                                             "Réservé aux personnes ayant accès à cet agent"
                                                         else if (planRequested)
                                                             "Que faut-il planifier ? Rien ne sera modifié"
-                                                        else if (chat?.paused == true)
+                                                        else if (held)
                                                             if (liveWakeup(chat) != null)
                                                                 "Ajouter à la file — annule l’attente"
                                                             else "Ajouter à la file…"
                                                         else if (liveWakeup(chat) != null)
                                                             "Répondre maintenant annule l’attente"
+                                                        else if (steers)
+                                                            "Écrire à l’agent pendant qu’il travaille…"
                                                         else if (active) "Ajouter un message…"
                                                         else if (skillOptions.isNotEmpty())
                                                             "Votre message… $ pour les skills"
@@ -2180,20 +2304,21 @@ internal fun ChatPage(
                                         // stopping stays offered.
                                         val hasDraft =
                                             draft.isNotBlank() || attachments.isNotEmpty()
-                                        if (active && editing == null && hasDraft && !readOnly)
+                                        // During a reply, sending joins the agent's turn; the
+                                        // clock queues the message for the next one.
+                                        if (steers && editing == null && hasDraft && !readOnly)
                                             RoundAction(
-                                                "Intervenir maintenant",
-                                                CairnIcons.Steer,
+                                                "Envoyer après ce tour",
+                                                CairnIcons.Clock,
                                                 container =
                                                     MaterialTheme.colorScheme.primaryContainer,
                                                 content =
                                                     MaterialTheme.colorScheme.onPrimaryContainer,
                                                 outlined = false,
                                                 size = 40.dp,
-                                                enabled =
-                                                    canSend && !switchingProvider && !steerBlocked,
+                                                enabled = canSend,
                                             ) {
-                                                send(if (switchingProvider) "queue" else "steer")
+                                                send("queue")
                                             }
                                         if (
                                             (active || chat?.wakeup != null) &&
@@ -2210,7 +2335,12 @@ internal fun ChatPage(
                                             }
                                         else
                                             IconButton(
-                                                onClick = { send("queue") },
+                                                onClick = {
+                                                    send(
+                                                        if (editing != null) editedMode
+                                                        else if (steers) "steer" else "queue"
+                                                    )
+                                                },
                                                 enabled = canSend,
                                                 modifier =
                                                     Modifier.size(48.dp)
@@ -2245,11 +2375,12 @@ internal fun ChatPage(
                                                     ) {
                                                         Icon(
                                                             if (editing != null) Icons.Default.Check
-                                                            else if (active || chat?.paused == true)
+                                                            else if (!steers && (active || held))
                                                                 Icons.Default.Add
                                                             else CairnIcons.Up,
                                                             if (editing != null) "Modifier"
-                                                            else if (active || chat?.paused == true)
+                                                            else if (steers) "Envoyer maintenant"
+                                                            else if (active || held)
                                                                 "Ajouter à la file"
                                                             else "Envoyer",
                                                             Modifier.size(18.dp),

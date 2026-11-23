@@ -277,6 +277,11 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub question_id: Option<String>,
+    /// The person a failed or stopped turn returned this unsent message to. Only their
+    /// composer restores it; messages from rules and agents are returned to nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub returned_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -405,6 +410,11 @@ pub struct Chat {
     pub session_restart_requested: bool,
     #[serde(default)]
     pub can_request_new_session: bool,
+    /// The last turn's own message went back to its author: that turn cannot be resumed,
+    /// and sending the message again continues the conversation (ADR-0091).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(as = "Option<bool>", optional)]
+    pub turn_returned: bool,
     #[serde(default)]
     pub unread: bool,
     #[serde(default)]
@@ -860,7 +870,7 @@ pub struct DeleteChatMessageOutput {
 )]
 pub enum ChatMessagePage {
     Complete {
-        message: ChatMessage,
+        message: Box<ChatMessage>,
     },
     Truncated {
         preview: ChatMessagePreview,

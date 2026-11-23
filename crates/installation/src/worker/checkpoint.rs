@@ -31,6 +31,15 @@ pub struct RunCheckpoint {
     pub held_environment: Option<HeldEnvironment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launched: Option<bool>,
+    /// The chat message (or wakeup) whose turn last launched a process, empty for a launch
+    /// without one, such as a mission's. A turn's own message the agent never received goes
+    /// back to its author (ADR-0091).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launched_turn: Option<String>,
+    /// `launched_turn` before the current attempt's launch, put back if the controller
+    /// rejects that start: an earlier agent may still have the message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launched_turn_before: Option<String>,
     /// Small durable row, loaded separately from the retained workspace.
     #[serde(skip)]
     pub progress: Option<super::progress::Progress>,
