@@ -334,8 +334,18 @@ mod tests {
         assert!(released.load(std::sync::atomic::Ordering::SeqCst));
     }
 
+    // Admission subtracts process-wide pending cache writes. A concurrent
+    // legacy journal write in another test would consume these exact margins.
+    #[test]
+    fn own_reservation_is_not_charged_twice_while_foreign_reservations_remain() {
+        crate::test_process::run_ignored(
+            "native::ingress::tests::own_reservation_is_not_charged_twice_while_foreign_reservations_remain_child",
+        );
+    }
+
     #[tokio::test]
-    async fn own_reservation_is_not_charged_twice_while_foreign_reservations_remain() {
+    #[ignore = "executed by its isolated parent"]
+    async fn own_reservation_is_not_charged_twice_while_foreign_reservations_remain_child() {
         let state = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let own = super::super::disk::Preparation::reserve(
@@ -374,6 +384,14 @@ mod tests {
 
     #[test]
     fn preparation_debits_are_enforced_before_allocating_and_reserve_changes_are_immediate() {
+        crate::test_process::run_ignored(
+            "native::ingress::tests::preparation_debits_are_enforced_before_allocating_and_reserve_changes_are_immediate_child",
+        );
+    }
+
+    #[test]
+    #[ignore = "executed by its isolated parent"]
+    fn preparation_debits_are_enforced_before_allocating_and_reserve_changes_are_immediate_child() {
         let state = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let target = state.path().join("environments").join("private-build");
