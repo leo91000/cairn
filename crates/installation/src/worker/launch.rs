@@ -2185,7 +2185,7 @@ async fn close_output_readers(out: AbortOnDropHandle<()>, err: AbortOnDropHandle
 }
 
 /// The turn a launch serves, recorded so a failure can tell whether the agent may have its
-/// message (ADR-0090). A launch without a chat message (a mission or a wakeup) records an
+/// message (ADR-0090). A launch without a chat message, such as a mission's, records an
 /// empty turn: a later chat message was not delivered by it.
 fn launched_turn(run: &Value) -> Option<String> {
     Some(

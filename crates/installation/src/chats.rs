@@ -1249,7 +1249,7 @@ fn never_received(db: &Db<'_>, run: &Value) -> Result<bool> {
     let Some(checkpoint) = RunCheckpoint::load_in(db, text(run, "id"))? else {
         return Ok(run["startedAt"].is_null());
     };
-    // A launch without a chat message, such as a mission or a wakeup, records an empty turn.
+    // A launch without a chat message, such as a mission's, records an empty turn.
     let turn = run["chatExecution"]["messageId"]
         .as_str()
         .unwrap_or_default();
@@ -2861,7 +2861,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
         use crate::conversation_writers::{EntryWriter, record_message};
 
         // A mission continued in chat: its launch delivered none of the chat's messages.
-        // A wakeup that launched may have read the steering it claimed.
+        // A turn without a message that launched may have read the steering it claimed.
         for (message_id, returned) in [(Some("turn"), true), (None, false)] {
             let root = tempfile::tempdir().unwrap();
             let store = crate::store::Store::open(root.path()).unwrap();

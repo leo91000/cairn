@@ -1355,7 +1355,7 @@ function edit(message: ChatMessage) {
 // them: they come back to their composer, ahead of any draft, and leave the conversation so no
 // other device restores them again. Restoring waits for an edit or a send to finish.
 const restored = new Set<string>()
-watch([() => detail.value?.messages, readOnly, inactive, editing, busy], ([messages]) => {
+watch([() => detail.value?.messages, () => state.accountId, readOnly, inactive, editing, busy], ([messages]) => {
   const chat = detail.value
   // While switching conversations the previous one is still loaded: its messages are not this draft's.
   if (!chat || chat.id !== selectedChatId.value || !state.accountId || readOnly.value || inactive.value || busy.value)
