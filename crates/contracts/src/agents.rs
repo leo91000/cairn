@@ -19,6 +19,7 @@ pub enum AgentProvider {
     Codex,
     Claude,
     Opencode,
+    Antigravity,
 }
 
 /// Relational permission view: null is the explicit wildcard, distinct from an
@@ -102,7 +103,7 @@ pub struct AgentSettings {
     #[schemars(length(min = 1, max = 100))]
     pub name: String,
     #[serde(default)]
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     #[serde(default)]
     #[schemars(length(max = 500))]

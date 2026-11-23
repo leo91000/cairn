@@ -4,7 +4,7 @@ import type { RunListItem } from '../../../../packages/contracts/contracts'
 import type { AccountsState } from '../accounts'
 import { computed, ref, watch } from 'vue'
 import { generalWindows, providers, remainingPercent } from '../../../../packages/contracts/accounts'
-import { resetsIn } from '../accounts'
+import { reconnectLabel, resetsIn } from '../accounts'
 import { api } from '../api'
 import {
   Minus,
@@ -64,6 +64,8 @@ const note = computed(() => {
     return 'Finish signing in to see this account’s usage.'
   if (usage?.error)
     return usage.error
+  if (props.account.provider === 'antigravity')
+    return 'Antigravity doesn’t report usage. Runs can still use this account.'
   return props.account.status === 'unavailable' ? 'Usage appears after the first check, within a minute.' : `${provider.value.label} has not reported usage yet. Runs can still use this account.`
 })
 </script>
@@ -213,7 +215,7 @@ const note = computed(() => {
 
       <footer class="mt-auto flex flex-wrap items-center gap-2 border-t border-line px-6.5 py-4 phone:px-5">
         <UiButton size="small" :disabled="busy || running.length > 0" @click="emit('reconnect')">
-          <Icon :name="RefreshCw" :size="14" />{{ provider.connection === 'apiKey' ? 'Replace API key' : account.state === 'pending' ? 'Sign in' : 'Reconnect' }}
+          <Icon :name="RefreshCw" :size="14" />{{ reconnectLabel(account) }}
         </UiButton>
         <UiButton
           size="small"

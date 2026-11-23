@@ -98,13 +98,21 @@ internal fun conversationState(
 }
 
 /** The error shown above the conversation, including a response that stopped before finishing. */
-internal fun conversationError(chat: Chat?): String? {
+internal fun conversationError(chat: Chat?, readOnly: Boolean = false): String? {
     val own = chat?.error?.takeIf { it.isNotBlank() }
     if (own != null) return own
 
     val run = chat?.run?.takeIf { it.status == "failed" } ?: return null
-    return run.error?.trim()?.ifEmpty { null }
-        ?: "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer."
+    // Someone without access to the agent cannot continue: they are told nothing to do.
+    val reason =
+        run.error?.trim()?.ifEmpty { null }
+            ?: if (readOnly) "La réponse s’est arrêtée avant la fin."
+            else "La réponse s’est arrêtée avant la fin. Envoyez un message pour continuer."
+    // A held queue is resumed: a message written now would wait behind it (ADR-0091).
+    val held = !readOnly && chat.paused && chat.messages.any { it.status == "queued" }
+    if (!held) return reason
+    return reason.removeSuffix("Envoyez un message pour continuer.").trimEnd() +
+        " Reprenez la file pour continuer."
 }
 
 /** The conversation already shows a failed run's reason as its failure notice. */
@@ -158,11 +166,9 @@ internal fun chatDelivery(
         chat?.messages.orEmpty().filter { it.status in setOf("queued", "sending") }.toMutableList()
     if (outgoing != null && messages.none { it.id == outgoing.id }) messages.add(outgoing)
     val active = chat?.run?.active == true
-    // A scheduled wait resumes the task before queued follow-ups start.
-    val canStart =
-        chat?.paused != true &&
-            (chat?.run == null || chat.run.status == "succeeded") &&
-            scheduledWakeup(chat) == null
+    // A scheduled wait resumes the task before queued follow-ups start. After a turn that failed
+    // or stopped, the next message starts a new one: what it never delivered came back unsent.
+    val canStart = chat?.paused != true && !active && scheduledWakeup(chat) == null
     val sending = mutableListOf<SendingMessage>()
     val queued = mutableListOf<ChatMessage>()
     messages.forEachIndexed { index, message ->
@@ -408,4 +414,64 @@ internal fun DetailSheet(
         }
         Box(Modifier.fillMaxHeight(0.85f)) { Page(content = content) }
     }
+}
+
+/** Messages a failed or stopped turn returned to this person, oldest first, not yet restored. */
+internal fun returnedMessages(
+    chat: Chat?,
+    account: String?,
+    restored: Set<String> = emptySet(),
+): List<ChatMessage> =
+    if (chat == null || account.isNullOrEmpty()) emptyList()
+    else
+        chat.messages.filter {
+            it.status == "cancelled" && it.returnedTo == account && it.id !in restored
+        }
+
+internal data class RestoredComposer(
+    val text: String,
+    val attachments: List<build.cairn.contracts.ChatAttachment>,
+    val provider: String,
+    val model: String,
+    val reasoning: String,
+    val speed: String,
+    val plan: Boolean,
+)
+
+/**
+ * The composer state returned messages restore: their text ahead of the draft, and the choices of
+ * the oldest one. A plan request stays one, so a returned plan never changes files.
+ */
+internal fun restoredComposer(returned: List<ChatMessage>, draft: String): RestoredComposer {
+    val first = returned.firstOrNull()
+    // A restore repeated after a reload does not add a block the draft already holds whole.
+    val blocks = draft.split("\n\n").map { it.trim() }.toSet()
+    val texts = returned.map { it.text.trim() }.filter { it.isNotEmpty() && it !in blocks }
+    return RestoredComposer(
+        text = (texts + draft.trim()).filter { it.isNotEmpty() }.joinToString("\n\n"),
+        attachments = returned.flatMap { it.attachments },
+        provider = first?.provider.orEmpty(),
+        model = first?.model.orEmpty(),
+        reasoning = first?.reasoning.orEmpty(),
+        speed = first?.speed.orEmpty(),
+        plan = returned.any { it.plan == true },
+    )
+}
+
+/**
+ * After a Stop, even one still settling, or a failed turn, the next message resumes an empty paused
+ * queue.
+ */
+internal fun resumesOnSend(chat: Chat?, queued: Int): Boolean {
+    val stopped =
+        chat?.run?.status in setOf("failed", "interrupted", "cancelled") ||
+            chat?.run?.cancelRequestedAt != null
+    // A turn message still unacknowledged when it stopped, or steering already claimed by it,
+    // may be held for a replay first.
+    val turn = chat?.run?.chatExecution?.messageId
+    val starting =
+        chat?.messages.orEmpty().any {
+            it.status == "sending" || (it.id == turn && it.status == "queued")
+        }
+    return chat?.paused == true && queued == 0 && stopped && !starting
 }

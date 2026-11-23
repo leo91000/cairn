@@ -429,7 +429,7 @@ onBeforeUnmount(() => {
     </section>
     <div v-if="definition" class="grid min-h-0 flex-1 gap-6 pt-5" :class="wide && selectedNode ? 'grid-cols-[minmax(0,1fr)_360px]' : 'grid-cols-1'">
       <div class="min-h-0 overflow-y-auto pr-1 pb-16 [scrollbar-width:thin]">
-        <div class="mx-auto grid max-w-none gap-4">
+        <div class="mx-auto grid max-w-none grid-cols-1 gap-4">
           <!-- When -->
           <section class="trigger-card grid grid-cols-2 gap-3 rounded-[18px] border border-line bg-raised p-3 max-[700px]:grid-cols-1" aria-label="When">
             <div class="flex items-start gap-3">

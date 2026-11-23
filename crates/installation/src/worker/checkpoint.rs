@@ -31,6 +31,15 @@ pub struct RunCheckpoint {
     pub held_environment: Option<HeldEnvironment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launched: Option<bool>,
+    /// The chat message (or wakeup) whose turn last launched a process, empty for a launch
+    /// without one, such as a mission's. A turn's own message the agent never received goes
+    /// back to its author (ADR-0091).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launched_turn: Option<String>,
+    /// `launched_turn` before the current attempt's launch, put back if the controller
+    /// rejects that start: an earlier agent may still have the message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launched_turn_before: Option<String>,
     /// Small durable row, loaded separately from the retained workspace.
     #[serde(skip)]
     pub progress: Option<super::progress::Progress>,
@@ -89,7 +98,7 @@ pub struct RunCheckpoint {
     /// A classified turn.failed durably recorded for this exact managed attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_failure_attempt: Option<String>,
-    /// Controller-confirmed storage finalization failure for the same attempt.
+    /// A finalization failure or native cleanup response that stops replay for this attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalization_failure_attempt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -369,6 +378,14 @@ impl RunCheckpoint {
         self.retry_cause.as_ref().and_then(Option::as_ref)
     }
 
+    pub(super) fn native_cleanup_failure(&self) -> bool {
+        self.prepared()
+            .is_some_and(|plan| plan["backend"] == "native")
+            && self.runner_id().is_some()
+            && self.runner_id() == self.finalization_failure_attempt.as_deref()
+            && self.last_error().starts_with("Native cleanup: ")
+    }
+
     pub fn finalization_error(&self) -> Option<&str> {
         if self.runner_id().is_some()
             && self.runner_id() == self.finalization_failure_attempt.as_deref()
@@ -393,6 +410,93 @@ impl RunCheckpoint {
         })
     }
 
+    pub fn terminal_observation_pending(&self) -> bool {
+        self.managed() && (self.terminal_code.is_none() || self.cleanup_observation_pending())
+    }
+
+    fn cleanup_observation(&self) -> Option<&ControllerObservation> {
+        // Ordinary terminal reads reserve at least one request. Zero records
+        // the later cleanup observation, using the same checkpoint format.
+        self.controller_observation.as_ref().filter(|observation| {
+            self.native_cleanup_failure()
+                && self.runner_id() == Some(observation.attempt.as_str())
+                && observation.requests == 0
+        })
+    }
+
+    pub fn cleanup_observation_pending(&self) -> bool {
+        self.cleanup_observation()
+            .is_some_and(|observation| observation.in_flight)
+    }
+
+    pub fn reset_finalization_observation(&mut self) {
+        if self.cleanup_observation().is_some() {
+            self.controller_observation = None;
+        }
+        self.finalization_failure_attempt = None;
+    }
+
+    /// Publish the cleanup failure once the optional proof has settled.
+    /// Explicit Resume clears the attempt marker before fencing.
+    pub fn publish_cleanup_observation(
+        &mut self,
+        db: &Db<'_>,
+        id: &str,
+        attempt: &str,
+        result: Option<crate::runner::ControllerResult>,
+    ) -> Result<()> {
+        if self.runner_id() != Some(attempt)
+            || !self.cleanup_observation_pending()
+            || self.settled().is_some()
+        {
+            return Ok(());
+        }
+        if db
+            .run_state(id)?
+            .is_none_or(|run| run.cancel_requested_at.is_some())
+        {
+            return Ok(());
+        }
+        let retired = result.is_some();
+        if let Some(result) = result {
+            self.record_controller_result(db, id, attempt, Some(result))?;
+        }
+        if let Some(message) = self.finalization_error() {
+            db.event(id, &cairn_contracts::EventKind::Error, message, None)?;
+        }
+        self.controller_observation = retired.then(|| ControllerObservation {
+            attempt: attempt.to_owned(),
+            requests: 0,
+            in_flight: false,
+        });
+        Ok(())
+    }
+
+    pub fn record_controller_observation(
+        &mut self,
+        db: &Db<'_>,
+        id: &str,
+        attempt: &str,
+        result: Option<crate::runner::ControllerResult>,
+    ) -> Result<()> {
+        let pending_cleanup = self.finalization_failure_attempt.as_deref() != Some(attempt)
+            && self
+                .prepared()
+                .is_some_and(|plan| plan["backend"] == "native")
+            && result.as_ref().is_some_and(|result| {
+                result.finalization_failed && result.native_cleanup.is_some()
+            });
+        self.record_controller_result_with_reporting(db, id, attempt, result, !pending_cleanup)?;
+        if pending_cleanup {
+            self.controller_observation = Some(ControllerObservation {
+                attempt: attempt.to_owned(),
+                requests: 0,
+                in_flight: true,
+            });
+        }
+        Ok(())
+    }
+
     /// Commit the controller's typed finalization evidence with its status.
     pub fn record_controller_result(
         &mut self,
@@ -400,6 +504,17 @@ impl RunCheckpoint {
         id: &str,
         attempt: &str,
         result: Option<crate::runner::ControllerResult>,
+    ) -> Result<()> {
+        self.record_controller_result_with_reporting(db, id, attempt, result, true)
+    }
+
+    fn record_controller_result_with_reporting(
+        &mut self,
+        db: &Db<'_>,
+        id: &str,
+        attempt: &str,
+        result: Option<crate::runner::ControllerResult>,
+        report_failure: bool,
     ) -> Result<()> {
         if self.runner_id() != Some(attempt) {
             return Err(crate::error::Error::conflict(
@@ -424,29 +539,31 @@ impl RunCheckpoint {
                     .and_then(|result| result.native_cleanup.as_ref())
             })
             .flatten();
+        let retired = self
+            .cleanup_observation()
+            .is_some_and(|observation| !observation.in_flight);
         if let Some(message) = native_cleanup
             && self.finalization_failure_attempt.as_deref() == Some(attempt)
+            && !retired
         {
             self.last_error = Some(Some(format!("Native cleanup: {message}")));
         }
-        if result
-            .as_ref()
-            .is_some_and(|result| result.finalization_failed)
+        // Native cleanup evidence still stops automatic replay after the
+        // disk retires. Retirement cannot recover the workload's exit status.
+        if (native_cleanup.is_some()
+            || result
+                .as_ref()
+                .is_some_and(|result| result.finalization_failed))
             && self.finalization_failure_attempt.as_deref() != Some(attempt)
         {
             self.finalization_failure_attempt = Some(attempt.to_owned());
-            let native = self
-                .prepared()
-                .is_some_and(|prepared| prepared["backend"] == "native");
-            let native_cleanup_failure = result
-                .as_ref()
-                .filter(|_| native)
-                .and_then(|result| result.native_cleanup.clone());
-            if let Some(message) = native_cleanup_failure {
+            if let Some(message) = native_cleanup {
                 self.last_error = Some(Some(format!("Native cleanup: {message}")));
             }
-            let message = self.finalization_error().unwrap();
-            db.event(id, &cairn_contracts::EventKind::Error, message, None)?;
+            if report_failure {
+                let message = self.finalization_error().unwrap();
+                db.event(id, &cairn_contracts::EventKind::Error, message, None)?;
+            }
         }
         if let Some(result) = result
             && result.code == crate::runner::CONTROLLER_FAILED
@@ -558,7 +675,7 @@ impl RunCheckpoint {
         }
         self.runner_id = Some(Some(runner.to_owned()));
         self.provider_failure_attempt = None;
-        self.finalization_failure_attempt = None;
+        self.reset_finalization_observation();
         self.controller_recovery_reservation = None;
         self.move_recovery_reservation = None;
         self.provider_retry_reservation = None;

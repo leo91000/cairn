@@ -10,6 +10,7 @@ const environment = {
   gh: 'APP_GH_VERSION',
   claude: 'APP_CLAUDE_VERSION',
   opencode: 'APP_OPENCODE_VERSION',
+  antigravity: 'APP_ANTIGRAVITY_VERSION',
 }
 const manifests = [
   'application/vnd.oci.image.index.v1+json',

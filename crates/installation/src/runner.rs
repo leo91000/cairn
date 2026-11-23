@@ -9,7 +9,9 @@ mod routes;
 
 pub(crate) use broker::validate as validate_plan;
 pub(crate) use client::cleanup_result as client_cleanup_result;
-pub(crate) use client::{ControllerResult, wait_for_exit};
+pub(crate) use client::{
+    ControllerResult, NATIVE_CLEANUP_RETIREMENT_QUERY, observe_cleanup_retirement, wait_for_exit,
+};
 pub use client::{TerminalReason, client};
 
 use crate::{

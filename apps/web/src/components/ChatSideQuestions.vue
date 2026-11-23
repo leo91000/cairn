@@ -255,6 +255,9 @@ defineExpose({ ask, show, unreachable })
       <p v-if="provider === 'claude'" class="text-xs leading-relaxed text-muted">
         Claude denies attempted tools, but an operator’s managed-policy hooks can run before the denial and may have side effects. Withdrawing cannot undo effects already performed.
       </p>
+      <p v-else-if="provider === 'antigravity'" class="text-xs leading-relaxed text-muted">
+        Antigravity answers from the conversation recorded up to its last finished step, not the step in progress.
+      </p>
       <form v-if="canAsk" class="space-y-3" @submit.prevent="send">
         <button
           v-if="itemId"

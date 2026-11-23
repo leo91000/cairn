@@ -892,7 +892,7 @@ abstract class BackgroundWaitCases {
     fun failedResponseBannerCanBeDismissed() =
         conversation("failed") { _, _ ->
             val message =
-                "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer."
+                "La réponse s’est arrêtée avant la fin. Envoyez un message pour continuer."
             compose.onNodeWithText(message).assertIsDisplayed()
             compose
                 .onNode(

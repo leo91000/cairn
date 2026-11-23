@@ -204,9 +204,9 @@ async function copy(value: string) {
             <p class="mt-2 text-sm text-muted">
               Native settings shared by this installation. Agents can personalize their own configuration.
             </p>
-            <div class="mt-5 grid grid-cols-3 gap-3 phone:grid-cols-1">
+            <div class="mt-5 grid grid-cols-2 gap-3 phone:grid-cols-1">
               <RouterLink
-                v-for="engine in [{ id: 'codex', name: 'Codex', file: 'config.toml' }, { id: 'claude', name: 'Claude Code', file: 'settings.json' }, { id: 'opencode', name: 'OpenCode', file: 'opencode.jsonc' }]"
+                v-for="engine in [{ id: 'codex', name: 'Codex', file: 'config.toml' }, { id: 'claude', name: 'Claude Code', file: 'settings.json' }, { id: 'opencode', name: 'OpenCode', file: 'opencode.jsonc' }, { id: 'antigravity', name: 'Antigravity', file: 'settings.json' }]"
                 :key="engine.id"
                 :to="`/settings/coding-agents/${engine.id}`"
                 class="rounded-xl border border-line bg-surface p-4 transition-colors hover:border-accent hover:bg-soft"

@@ -70,6 +70,8 @@ export default defineConfig({
     { name: 'layout-webkit-plugin-projects', testMatch: 'plugin-projects.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-opencode', testMatch: 'opencode.spec.ts' },
     { name: 'layout-webkit-opencode', testMatch: 'opencode.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
+    { name: 'journeys-antigravity', testMatch: 'antigravity.spec.ts' },
+    { name: 'layout-webkit-antigravity', testMatch: 'antigravity.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-claude', testMatch: 'claude.spec.ts' },
     { name: 'layout-webkit-claude', testMatch: 'claude.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-plugins', testMatch: ['plugins.spec.ts', 'plugin-form-components.spec.ts', 'gmail-plugin.spec.ts'] },

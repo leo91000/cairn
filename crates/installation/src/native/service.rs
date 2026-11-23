@@ -1653,7 +1653,7 @@ impl Controller {
             // Managed rootful Docker uses its own store and the workload cgroup.
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
-            for field in ["codexConfig", "claudeMcps", "opencodeConfig", "args"] {
+            for field in MCP_FIELDS {
                 if let Some(value) = plan["chat"].get_mut(field) {
                     replace_origin(value, &origin);
                 }
@@ -2441,10 +2441,10 @@ impl Controller {
     }
 
     /// Match the VM wait protocol: headers and spaces keep relayed waits alive.
-    fn wait(&self, id: &str) -> Response {
+    fn wait(&self, id: &str, observe_retirement: bool) -> Response {
         let stream = futures_util::stream::unfold(
             (self.clone(), id.to_owned(), false),
-            |(controller, id, done)| async move {
+            move |(controller, id, done)| async move {
                 if done {
                     return None;
                 }
@@ -2456,11 +2456,19 @@ impl Controller {
                 if released
                     && let Ok(code) = tokio::fs::read_to_string(controller.file(&id, "exit")).await
                 {
-                    let result = match code.parse::<i32>() {
-                        Ok(code) => Ok(Bytes::from(json!({ "StatusCode": code }).to_string())),
-                        Err(_) => serde_json::from_str::<Value>(&code)
-                            .map(|value| Bytes::from(value.to_string()))
-                            .map_err(std::io::Error::other),
+                    let result = code
+                        .parse::<i32>()
+                        .map(|code| json!({ "StatusCode": code }))
+                        .or_else(|_| serde_json::from_str::<Value>(&code));
+                    let result = match result {
+                        Ok(value) if observe_retirement => Ok(Bytes::from(
+                            controller
+                                .reconcile_wait_result(&id, value)
+                                .await
+                                .to_string(),
+                        )),
+                        Ok(value) => Ok(Bytes::from(value.to_string())),
+                        Err(error) => Err(std::io::Error::other(error)),
                     };
                     return Some((result, (controller, id, true)));
                 }
@@ -2482,6 +2490,15 @@ fn guest_data(plan: &Value, data: &Path) -> PathBuf {
         .as_str()
         .map_or_else(|| data.to_owned(), PathBuf::from)
 }
+
+/// The chat plan fields where coding agents carry MCP server URLs.
+const MCP_FIELDS: [&str; 5] = [
+    "codexConfig",
+    "claudeMcps",
+    "opencodeConfig",
+    "antigravityMcp",
+    "args",
+];
 
 fn replace_origin(value: &mut Value, origin: &str) {
     match value {
@@ -2768,14 +2785,13 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("DELETE", ["runs", id]) => {
             controller.stop_attempt(id).await?;
-            match tokio::fs::read(controller.file(id, "exit")).await {
-                Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({})),
-                Err(_) => json!({}),
-            }
+            controller.stopped_result(id).await
         }
         ("POST", ["runs", id, "wait"]) => {
             uuid(id)?;
-            return Ok(controller.wait(id));
+            let observe_retirement =
+                request.uri().query() == Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY);
+            return Ok(controller.wait(id, observe_retirement));
         }
         ("GET", ["exclusive"]) => controller.inspect_exclusive().await?,
         ("POST", ["exclusive", "acquire"]) => {
@@ -3464,6 +3480,38 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+        authenticated_wait_result(controller, attempt, false).await
+    }
+
+    pub(crate) async fn retired_cleanup_completion(
+        attempt: &str,
+    ) -> crate::runner::ControllerResult {
+        let (_root, controller) = fixture().await;
+        let run = crate::config::id();
+        private_dir(&controller.state.join("native-cleanup"))
+            .await
+            .unwrap();
+        atomic_write(&controller.file(attempt, "run"), run.as_bytes())
+            .await
+            .unwrap();
+        controller
+            .record_cleanup_pending(attempt, "Native cleanup was pending.")
+            .await
+            .unwrap();
+        atomic_write(
+            &controller.file(attempt, "cleanup-result"),
+            br#"{"completion":"Flushed"}"#,
+        )
+        .await
+        .unwrap();
+        authenticated_wait_result(controller, attempt, true).await
+    }
+
+    async fn authenticated_wait_result(
+        controller: Controller,
+        attempt: &str,
+        observe_retirement: bool,
+    ) -> crate::runner::ControllerResult {
         let router = Router::new().fallback(any(handler)).with_state(controller);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -3472,11 +3520,23 @@ pub(crate) mod tests {
         let http = reqwest::Client::new();
         let unauthorized = http.post(format!("{url}/wait")).send().await.unwrap();
         assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
-        let result =
-            crate::runner::wait_for_exit(&http, &url, "synthetic-private-controller-token").await;
+        let token = "synthetic-private-controller-token";
+        let initial = crate::runner::wait_for_exit(&http, &url, token)
+            .await
+            .unwrap();
+        let result = if observe_retirement {
+            assert!(initial.finalization_failed);
+            assert!(!initial.physical_finalized);
+            assert!(initial.native_cleanup.is_some());
+            crate::runner::observe_cleanup_retirement(&http, &url, token)
+                .await
+                .unwrap()
+        } else {
+            initial
+        };
         server.abort();
         let _ = server.await;
-        result.unwrap()
+        result
     }
 
     #[tokio::test]
@@ -6385,5 +6445,36 @@ pub(crate) mod tests {
         controller.start(&existing).await.unwrap();
         controller.active.lock().await.remove(&existing);
         assert_ne!(controller.start(&attempt).await.unwrap_err().status, 503);
+    }
+}
+
+#[cfg(test)]
+mod mcp_field_tests {
+    use super::MCP_FIELDS;
+    use crate::{
+        coding_agent::mcp::{Configuration, Server},
+        provider::Provider,
+    };
+
+    #[test]
+    fn administrator_relays_rewrite_every_coding_agents_mcp_fields() {
+        let mut configuration = Configuration::new("token".into());
+        configuration.servers.insert(
+            "cairn_workspace".into(),
+            Server::Http {
+                url: format!("{}/mcp-workspace", crate::microvm::mcp::ORIGIN),
+                timeout: None,
+                enabled_tools: None,
+            },
+        );
+        for provider in Provider::ALL {
+            let adapter = provider.adapter();
+            let chat = adapter.chat_mcp(&adapter.mcp_configuration(&configuration).unwrap());
+            for (field, value) in chat.as_object().unwrap() {
+                if value.to_string().contains(crate::microvm::mcp::ORIGIN) {
+                    assert!(MCP_FIELDS.contains(&field.as_str()), "{provider:?} {field}");
+                }
+            }
+        }
     }
 }

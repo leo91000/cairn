@@ -86,6 +86,22 @@ fn adapters_preserve_native_mcp_permissions_and_thread_credentials() {
                 assert_eq!(native["permission"]["cairn_selected_read"], "allow");
                 assert!(native["permission"].get("cairn_selected_write").is_none());
             }
+            Provider::Antigravity => {
+                let workspace = &chat["antigravityMcp"]["mcpServers"]["cairn_workspace"];
+                assert_eq!(
+                    workspace["headers"]["Authorization"],
+                    "Bearer synthetic-run-token"
+                );
+                assert_eq!(
+                    chat["antigravityMcp"]["mcpServers"]["cairn_selected"]["enabledTools"],
+                    json!(["read"])
+                );
+                assert_eq!(
+                    chat["antigravityPolicyMcp"]["cairn_selected"],
+                    json!(["read"])
+                );
+                assert_eq!(chat["args"], json!([]));
+            }
         }
     }
 }
@@ -191,6 +207,22 @@ fn engine_configuration_and_validation_do_not_depend_on_the_other_engine() {
                 assert_eq!(environment["OPENCODE_AUTH_CONTENT"], "{}");
                 assert!(adapter.validate_agent(&json!({ "provider": "opencode", "model": "openrouter/anthropic/claude-sonnet", "access": { "sandbox": "read-only" } })).is_err());
                 assert!(adapter.validate_agent(&json!({ "provider": "opencode", "model": "openrouter/anthropic/claude-sonnet" })).is_ok());
+            }
+            Provider::Antigravity => {
+                assert_eq!(
+                    environment["CAIRN_ANTIGRAVITY_HOME"],
+                    home.to_string_lossy()
+                );
+                // HOME stays the shell's: only the native process receives the private state.
+                assert!(!environment.contains_key("HOME"));
+                assert!(adapter.validate_agent(&json!({ "provider": "antigravity", "model": "gemini-4-neon", "access": { "sandbox": "read-only" } })).is_err());
+                assert!(
+                    adapter
+                        .validate_agent(
+                            &json!({ "provider": "antigravity", "model": "gemini-4-neon" })
+                        )
+                        .is_ok()
+                );
             }
         }
     }

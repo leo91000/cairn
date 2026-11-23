@@ -22,6 +22,8 @@ const note = computed(() => {
     return ''
   if (usage?.error)
     return 'Usage unavailable'
+  if (props.account.provider === 'antigravity')
+    return 'Usage not reported by Antigravity'
   return props.account.modelProvider && props.account.modelProvider !== 'opencode-go' ? 'Usage not reported by provider' : 'Usage not reported yet'
 })
 </script>
@@ -31,7 +33,7 @@ const note = computed(() => {
     type="button"
     class="account-row group grid w-full grid-cols-[minmax(0,1fr)_15rem_5.75rem_8.5rem_1rem] items-center gap-4 border-t border-line px-4.5 py-3.5 text-left transition-colors hover:bg-hover/40 focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-accent phone:grid-cols-[minmax(0,1fr)_auto] phone:gap-x-3 phone:gap-y-2.5 phone:px-4"
     :class="{ 'bg-soft/40': selected }"
-    :aria-label="`${account.name}, ${account.modelProviderName ?? account.email ?? 'not signed in'}`"
+    :aria-label="`${account.name}, ${account.email ?? account.modelProviderName ?? 'not signed in'}`"
     @click="$emit('open')"
   >
     <span class="flex min-w-0 items-center gap-3">
@@ -46,7 +48,7 @@ const note = computed(() => {
           <span class="truncate text-[14px] font-semibold">{{ account.name }}</span>
           <span class="hidden phone:inline-flex"><AccountBadge :account="account" /></span>
         </span>
-        <span class="block truncate text-xs text-muted">{{ account.modelProviderName ?? account.email ?? 'Not signed in' }}<template v-if="account.plan"> · {{ account.plan }}</template></span>
+        <span class="block truncate text-xs text-muted">{{ account.email ?? account.modelProviderName ?? 'Not signed in' }}<template v-if="account.plan"> · {{ account.plan }}</template></span>
       </span>
     </span>
     <span v-if="windows.length" class="grid gap-[7px] phone:order-last phone:col-span-2 phone:grid-cols-2 phone:gap-2" :class="{ 'opacity-55': paused }">

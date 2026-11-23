@@ -31,7 +31,7 @@ pub(crate) fn upgrade(db: &mut rusqlite::Connection) -> Result<()> {
         tx.execute_batch(SCHEMA)?;
         crate::waits::sql::upgrade_jobs(&tx)?;
         tx.pragma_update(None, "user_version", 36)?;
-    } else if version != crate::store::DATABASE_VERSION {
+    } else if !(36..=crate::store::DATABASE_VERSION).contains(&version) {
         return Err(Error::conflict(
             "Unexpected version during background jobs upgrade.",
         ));

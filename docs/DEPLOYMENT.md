@@ -53,6 +53,17 @@ without re-enrolling, and does not restart a running node. It is also how the
 gateway is updated. Restart `cairn-node`
 or `cairn-native-node` when idle to load a refreshed supervisor.
 
+Native nodes receive the coding engines as two verified bundles. The first,
+`/opt/cairn-native-tools.zip`, holds Codex, Claude Code, OpenCode, Node and GitHub
+CLI. It stays within the 1 GiB extraction limit of supervisors that are already
+installed. The second, `/opt/cairn-native-extra-tools.zip`, holds only Antigravity
+(`agy`), with its own manifest and limits: 512 MiB extracted, 256 MiB downloaded.
+Only a refreshed native supervisor fetches the second bundle. It installs `agy`
+in the same tool directory as the other engines. A native node whose supervisor
+predates it keeps working without Antigravity. Rerun the native installer command
+and restart `cairn-native-node` when idle to add Antigravity. The node downloads
+the current release again, with both bundles.
+
 ```sh
 sudo systemctl status cairn-node-gateway
 sudo journalctl -u cairn-node-gateway
@@ -113,11 +124,13 @@ set `CAIRN_INSTALLATION_CLAIM_CODE` and `CAIRN_INSTALLATION_NAME` before first s
 otherwise follow [Manual Compose claim](#manual-compose-claim) after startup.
 
 For a local build, resolve the agent tool versions CI would choose and pass them to Docker
-(see [tool versions](CLI-UPDATES.md)):
+(see [tool versions](CLI-UPDATES.md)). Antigravity also needs the archive URL and SHA-512
+that were resolved with its version (`ANTIGRAVITY_URL`, `ANTIGRAVITY_SHA512`). The image is
+built for linux/amd64 only:
 
 ```sh
 versions=$(node scripts/cli-updates.mjs build-versions) \
-  && node -e 'for (const [tool, version] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${tool.toUpperCase()}_VERSION=${version}`)' "$versions" \
+  && node -e 'for (const [key, value] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${key.includes("-") ? key.replace("-", "_").toUpperCase() : `${key.toUpperCase()}_VERSION`}=${value}`)' "$versions" \
   | xargs docker compose build \
   && docker compose up -d
 ```
@@ -371,7 +384,7 @@ and [Codex authentication](https://learn.chatgpt.com/docs/auth) for the underlyi
 
 Installations update tools through fully validated paired image releases and
 their host timer, with runtime verification and candidate retry. CI resolves the current
-Codex, GitHub CLI, Claude Code and OpenCode releases before building and
+Codex, GitHub CLI, Claude Code, OpenCode and Antigravity releases before building and
 validating images; see [tool versions](CLI-UPDATES.md).
 
 Codex `initialize` and retained-session `thread/resume` get separate, bounded

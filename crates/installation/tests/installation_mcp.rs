@@ -1084,7 +1084,7 @@ async fn agent_catalog_accepts_current_providers_and_reasoning_through_native_mc
         let schema = &tool["inputSchema"]["definitions"]["AgentSettings"];
         assert_eq!(
             schema["properties"]["provider"]["pattern"],
-            json!("^(codex|claude|opencode)$")
+            json!("^(codex|claude|opencode|antigravity)$")
         );
         assert!(schema["properties"]["reasoning"].get("enum").is_none());
     }

@@ -14,7 +14,7 @@ data class SwitchChatCodingAgentInput(
 ) {
     init {
         java.util.UUID.fromString(chatId)
-        require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+        require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
         java.util.UUID.fromString(requestId)
         java.util.UUID.fromString(runId)
     }

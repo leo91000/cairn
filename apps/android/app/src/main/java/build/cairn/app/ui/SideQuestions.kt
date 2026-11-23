@@ -206,6 +206,7 @@ private fun engine(provider: String?) =
         "claude" -> "Claude Code"
         "codex" -> "Codex"
         "opencode" -> "OpenCode"
+        "antigravity" -> "Antigravity"
         else -> "L’agent"
     }
 
@@ -298,6 +299,12 @@ internal fun ColumnScope.SideQuestionPanel(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        else if (chat.provider == "antigravity")
+            Text(
+                "Antigravity répond à partir de la conversation enregistrée jusqu’à sa dernière étape terminée, pas de l’étape en cours.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         if (chat.canAskSideQuestion) {
             if (side.itemId.isNotEmpty())
                 TextButton(onClick = { side.ask("", "") }) { Text("Poser une question générale") }
@@ -368,7 +375,7 @@ internal fun ColumnScope.SideQuestionPanel(
                 // The server's reason, worded in French.
                 when (chat.sideQuestionUnavailable) {
                     "between-replies" ->
-                        "Les questions à côté sont possibles pendant que Claude Code travaille sur une réponse. Envoyez plutôt un message."
+                        "Les questions à côté sont possibles pendant que l’agent travaille sur une réponse. Envoyez plutôt un message."
                     "codex" ->
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
                     "opencode" ->
@@ -382,7 +389,7 @@ internal fun ColumnScope.SideQuestionPanel(
                     "claude-release" ->
                         "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : seule la version 2.1.308 a été qualifiée. Posez-la dans la conversation."
                     "not-offered" ->
-                        "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
+                        "${if (chat.provider == "antigravity") "Antigravity" else "Claude Code"} n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
                     // A reason this version does not know yet: the server's own words.
                     else ->
                         chat.sideQuestionReason

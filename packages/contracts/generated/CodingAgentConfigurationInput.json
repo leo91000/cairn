@@ -11,7 +11,7 @@
       ]
     },
     "provider": {
-      "pattern": "^(codex|claude|opencode)$",
+      "pattern": "^(codex|claude|opencode|antigravity)$",
       "type": "string"
     }
   },

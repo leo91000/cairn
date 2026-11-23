@@ -18,7 +18,10 @@ pub struct DelegateTaskInput {
     #[ts(optional)]
     pub project: Option<DelegationProject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     #[ts(optional)]
     pub provider: Option<AgentProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,7 +102,10 @@ pub struct DelegatedTask {
     pub agent_id: String,
     pub agent_name: String,
     pub project_id: Option<String>,
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     pub provider: Option<AgentProvider>,
     pub model: Option<String>,
     #[schemars(

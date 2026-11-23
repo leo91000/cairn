@@ -11,6 +11,6 @@ data class OrderAccountsInput(
 ) {
     init {
         require(ids.size <= 10)
-        require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+        require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
     }
 }

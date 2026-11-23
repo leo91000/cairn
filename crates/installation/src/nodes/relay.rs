@@ -202,13 +202,17 @@ fn route(method: &str, path: &str) -> Result<()> {
     let (path, query) = path
         .split_once('?')
         .map_or((path, None), |(path, query)| (path, Some(query)));
-    if query.is_some() {
-        if method != "GET" || !path.ends_with("/logs") {
-            return Err(Error::bad("Unsupported execution query."));
-        }
-        crate::runner::logs::offset(query)?;
-    }
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    if let Some(query) = query {
+        match (method, parts.as_slice()) {
+            ("GET", ["runs", _, "logs"]) => {
+                crate::runner::logs::offset(Some(query))?;
+            }
+            ("POST", ["runs", _, "wait"])
+                if query == crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY => {}
+            _ => return Err(Error::bad("Unsupported execution query.")),
+        }
+    }
     let uuid = |id: &str| crate::validation::uuid(id).is_ok();
     let allowed = match parts.as_slice() {
         ["health"] => method == "GET",
@@ -504,6 +508,58 @@ mod tests {
         assert!(route("GET", &format!("{pause}/extra")).is_err());
         stop.cancel();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_native_retirement_wait_passes_the_exact_query_and_controller_authorization() {
+        use axum::{Router, http::StatusCode, routing::post};
+        let controller = Router::new().route(
+            "/runs/{id}/wait",
+            post(
+                |headers: axum::http::HeaderMap, uri: axum::http::Uri| async move {
+                    if headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        != Some("Bearer test-controller")
+                    {
+                        return StatusCode::UNAUTHORIZED;
+                    }
+                    if uri.query() != Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY) {
+                        return StatusCode::BAD_REQUEST;
+                    }
+                    StatusCode::NO_CONTENT
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, controller).await.unwrap() });
+        let http = reqwest::Client::new();
+        let master = Master {
+            client: &http,
+            controller: &http,
+            url: &url,
+            token: "test-node",
+        };
+        let executor = Executor::default();
+        let attempt = crate::config::id();
+        let query = crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY;
+        let path = format!("/runs/{attempt}/wait?{query}");
+        let command = json!({ "method": "POST", "path": path, "body": "" });
+        for (credential, expected) in [
+            ("test-controller", StatusCode::NO_CONTENT),
+            ("wrong-controller", StatusCode::UNAUTHORIZED),
+        ] {
+            let response = call_controller(&master, &url, credential, &command, &executor)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        assert!(route("GET", &path).is_err());
+        assert!(route("POST", &format!("{path}&extra=1")).is_err());
+        assert!(route("POST", &format!("/runs/invalid/wait?{query}")).is_err());
+        assert!(route("POST", &format!("/runs/{attempt}?{query}")).is_err());
+        server.abort();
     }
 
     #[test]

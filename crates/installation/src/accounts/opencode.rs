@@ -232,6 +232,9 @@ impl Driver for Opencode {
         model_provider: &str,
         api_key: &str,
     ) -> Result<()> {
+        if api_key.len() > 8192 || api_key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(Error::bad("Enter a valid provider API key."));
+        }
         let providers = self.api_key_providers(s).await?;
         let provider = providers
             .as_array()
@@ -567,6 +570,7 @@ mod tests {
             )
             .into(),
             opencode_go_usage_url: endpoint.into(),
+            antigravity_bin: "agy".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,

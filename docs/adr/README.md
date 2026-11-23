@@ -93,6 +93,7 @@ for current behavior.
 | 0082 | [Explicit backend moves reuse VM disks](0082-move-vm-disks-between-execution-backends.md) |
 | 0083 | [Disques de conversation locaux à leur node, sans S3](0083-local-conversation-disks-without-s3.md) |
 | 0084 | [Drain native filesystem access per attempt](0084-native-attempt-access-drain.md) |
+| 0091 | [Failed turns return unsent messages](0091-failed-turns-return-unsent-messages.md) |
 
 ## Renumbered collisions
 

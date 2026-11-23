@@ -2468,6 +2468,7 @@ async fn native_auth_relays_refresh_all_providers_and_stop_after_grant_revocatio
         ("codex", ".codex"),
         ("claude", ".claude"),
         ("opencode", ".opencode"),
+        ("antigravity", ".antigravity"),
     ] {
         let (listener, address) = common::bind().await;
         let owner = Owner::at(address.to_string()).await;

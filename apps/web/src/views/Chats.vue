@@ -24,7 +24,6 @@ import {
 import { useRoute, useRouter } from 'vue-router'
 import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
-import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { compactChat } from '../../../../packages/contracts/generated/compactChat'
 import { createChat } from '../../../../packages/contracts/generated/createChat'
 import { deleteChatMessage } from '../../../../packages/contracts/generated/deleteChatMessage'
@@ -56,7 +55,15 @@ import {
   MAX_MESSAGE_SIZE,
   validateSelection,
 } from '../attachments'
-import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
+import {
+  chatDelivery,
+  chatWaitNotice,
+  failureReason,
+  restoredComposer,
+  resumesOnSend as resumesOnSendFor,
+  returnedMessages,
+  scheduledWakeup,
+} from '../chat-delivery'
 import {
   chatListCarried,
   chatPlanEnabled,
@@ -92,15 +99,14 @@ import SubagentPanel from '../components/SubagentPanel.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import UiNotice from '../components/UiNotice.vue'
-import VirtualSelect from '../components/VirtualSelect.vue'
 import { contextNeedsAttention, contextSummary } from '../context-usage'
 import {
   ArrowUp,
   ArrowUpRight,
-  Bot,
   Check,
   ChevronDown,
   ChevronLeft,
+  Clock,
   CornerDownRight,
   FolderGit2,
   Hourglass,
@@ -122,14 +128,13 @@ import {
   Trash2,
   TriangleAlert,
   X,
-  Zap,
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
 import { modelCatalogs } from '../models'
 import { useReadWhileOpen } from '../reads'
 import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, headerStatus, isExclusivelySuspended } from '../run-status'
-import { backgroundWait } from '../signal'
+import { backgroundWait, identityColor } from '../signal'
 import { chatSkills } from '../skill-mentions'
 import {
   needsResumeSelection,
@@ -202,7 +207,7 @@ function resumeDiagnosticRunStatus(status?: string): ResumeDiagnosticRunStatus {
 }
 
 function resumeDiagnosticProvider(provider: string): Provider | 'other' {
-  if (provider === 'codex' || provider === 'claude' || provider === 'opencode')
+  if (provider === 'codex' || provider === 'claude' || provider === 'opencode' || provider === 'antigravity')
     return provider
   return 'other'
 }
@@ -393,7 +398,9 @@ function switcherAnchor() {
 const readOnly = computed(() => !!detail.value && !canDirectChat(state.usableAgents, detail.value, chats.value))
 const error = ref('')
 const dismissedError = ref(false)
-const quota = computed(() => chatQuota(detail.value?.run, timeline.value))
+// A turn whose message went back to its author is over: sending it again is the way on.
+const returnedTurn = computed(() => !!detail.value?.turnReturned)
+const quota = computed(() => returnedTurn.value ? null : chatQuota(detail.value?.run, timeline.value))
 const visibleError = computed(() => {
   if (error.value)
     return error.value
@@ -401,7 +408,7 @@ const visibleError = computed(() => {
   if (quota.value && (!chatError || isQuotaMessage(chatError) || chatError === quota.value.message))
     return ''
   const failedRun = detail.value?.run?.status === 'failed' ? detail.value.run : null
-  return chatError || (failedRun ? failedRun.error || (readOnly.value ? 'The response stopped before finishing.' : 'The response stopped before finishing. Resume the conversation to continue.') : '')
+  return chatError || (failedRun ? failureReason(detail.value, failedRun.error || (readOnly.value ? 'The response stopped before finishing.' : 'The response stopped before finishing. Send a message to continue.'), readOnly.value) : '')
 })
 const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('OpenCode Go requires Global regions for this model.'))
 // The conversation already shows a failed run's reason as its failure card.
@@ -530,7 +537,8 @@ function pasteFiles(event: ClipboardEvent) {
   addFiles(pasted)
 }
 
-const active = computed(() => !!detail.value?.run && ['queued', 'running'].includes(detail.value.run.status))
+// As on Android, a run waiting on its background work is still active.
+const active = computed(() => !!detail.value?.run && ['queued', 'running', 'waiting'].includes(detail.value.run.status))
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 // The plan of the current request stays in sight beside the composer while the agent follows it.
 const currentPlan = computed(() => runActive.value && !suspended.value ? activity.value?.plan : undefined)
@@ -620,12 +628,7 @@ const phoneDescription = computed(() => [
   heading.value?.provider ? `Latest harness: ${providers[heading.value.provider].label}` : '',
   connectionDescription.value,
 ].filter(Boolean).join(' · '))
-const agents = computed(() => state.agents.filter(agent => canUseAgent(state.usableAgents, agent.id)).map(agent => ({
-  value: agent.id,
-  label: agent.name,
-  icon: Bot,
-  description: agent.id === MAIN_AGENT_ID ? 'Full access' : agent.description,
-})))
+const agents = computed(() => state.agents.filter(agent => canUseAgent(state.usableAgents, agent.id)))
 watch(() => state.usableAgents, (usable) => {
   if (!route.params.id && !canUseAgent(usable, agentId.value))
     agentId.value = defaultAgent(usable, state.agents)
@@ -649,10 +652,29 @@ const planAvailable = computed(() => providers[chosenProvider.value].planTurns)
 // Availability can block submission, but must not erase the requested boundary.
 const planRequested = computed(() => planning.value)
 const planBlocked = computed(() => planRequested.value && (!planAllowed.value || !planAvailable.value))
-const planUnavailableMessage = computed(() => planEnabled.value ? 'Plan requires Codex or Claude Code. Choose a compatible agent, or turn Plan off to send an ordinary request.' : 'Plan is disabled for this installation. Enable it in installation settings, or turn Plan off to send an ordinary request.')
+const planUnavailableMessage = computed(() => planEnabled.value ? 'Plan requires Codex, Claude Code or Antigravity. Choose a compatible agent, or turn Plan off to send an ordinary request.' : 'Plan is disabled for this installation. Enable it in installation settings, or turn Plan off to send an ordinary request.')
 const canSend = computed(() => !readOnly.value && !noAgent.value && !planBlocked.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 // A plan request cannot join a turn that can already change files.
 const steerBlocked = computed(() => planRequested.value && !detail.value?.run?.chatExecution?.plan)
+// The running turn keeps its coding agent, model, reasoning and speed: a message changing them
+// waits for the next turn, as the server requires.
+const changesRunningAgent = computed(() => {
+  const agent = detail.value?.run?.snapshot.agent
+  if (!agent)
+    return false
+  const differs = (value: string, current = '') => !!value && value !== current
+  return switchingProvider.value || differs(model.value, agent.model) || differs(reasoning.value, agent.reasoning) || (!!speed.value && speed.value !== (agent.speed || 'standard'))
+})
+// While the agent works, a message joins its turn unless it must wait for the next one.
+// A turn being stopped or compacting reads no steering: a message waits for the next turn.
+const steerable = computed(() => !detail.value?.run?.cancelRequestedAt && detail.value?.run?.chatExecution?.operation !== 'compact')
+const steers = computed(() => active.value && steerable.value && !detail.value?.paused && !changesRunningAgent.value && !steerBlocked.value)
+// Saving an edit keeps the queued message where it was, unless its new choices must wait for the next turn.
+const editedMode = computed(() => changesRunningAgent.value || steerBlocked.value ? 'queue' : pending.value.find(message => message.id === editing.value)?.mode ?? 'queue')
+// After a Stop or a failed turn, the next message resumes an empty queue, whoever paused it. A
+// queue paused after a successful turn, or holding messages, keeps holding what is added to it.
+const resumesOnSend = computed(() => resumesOnSendFor(detail.value, pending.value.length))
+const held = computed(() => !!detail.value?.paused && !resumesOnSend.value)
 const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)
 const inheritConversation = computed(() => chosenProvider.value === conversationAssistant.value?.provider)
 const inheritedAssistant = computed(() => {
@@ -671,10 +693,8 @@ const skills = computed(() => chatSkills(state.skills, selectedAgent.value, deta
 const skillNames = computed(() => skills.value.map(skill => skill.name))
 const projects = computed(() => [{
   value: '',
-  label: 'No project',
-  description: 'Use the agent’s available workspaces',
-  icon: FolderGit2,
-}, ...state.projects.filter(project => selectedAgent.value?.access.projects === null || selectedAgent.value?.access.projects.includes(project.id)).map(project => ({ value: project.id, label: project.name, icon: FolderGit2 }))])
+  label: 'All authorized projects',
+}, ...state.projects.filter(project => selectedAgent.value?.access.projects === null || selectedAgent.value?.access.projects.includes(project.id)).map(project => ({ value: project.id, label: project.name }))])
 const draftScope = state.installationId ? `${state.installationId}:` : ''
 let createdChat: Chat | undefined
 let draftKey = ''
@@ -833,7 +853,8 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
   const origin = chatId.value
   const generation = compositionGeneration
   const currentComposition = () => generation === compositionGeneration && chatId.value === origin
-  const direct = !editing.value && ((mode === 'steer' && !detail.value?.paused) || (!responding.value && !detail.value?.paused && !pending.value.length))
+  const direct = !editing.value && !held.value && (mode === 'steer' || (!responding.value && !pending.value.length))
+  const resumes = !editing.value && resumesOnSend.value
   busy.value = true
   error.value = ''
   try {
@@ -912,6 +933,8 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
       await editChatMessage(api, { chatId: chat.id, messageId: editingMessage, message: submission.message })
     else
       await sendChatMessage(api, { chatId: chat.id, message: submission.message })
+    if (resumes)
+      await setChatPaused(api, { chatId: chat.id, paused: false })
     // Another conversation was opened meanwhile; its composer is not this message's.
     if (!currentComposition())
       return
@@ -1328,6 +1351,61 @@ function edit(message: ChatMessage) {
   textarea.value?.focus()
 }
 
+// A turn that failed or stopped returns the messages it never delivered to the person who wrote
+// them: they come back to their composer, ahead of any draft, and leave the conversation so no
+// other device restores them again. Restoring waits for an edit or a send to finish.
+const restored = new Set<string>()
+watch([() => detail.value?.messages, () => state.accountId, readOnly, inactive, editing, busy], ([messages]) => {
+  const chat = detail.value
+  // While switching conversations the previous one is still loaded: its messages are not this draft's.
+  if (!chat || chat.id !== selectedChatId.value || !state.accountId || readOnly.value || inactive.value || busy.value)
+    return
+  // The message being edited came back: the edit becomes an ordinary draft, which already
+  // holds it, so only the returned copy is withdrawn.
+  const edited = returnedMessages({ ...chat, messages: messages ?? [] }, state.accountId, restored).find(message => message.id === editing.value)
+  if (edited) {
+    restored.add(edited.id)
+    editing.value = null
+    void deleteChatMessage(api, { chatId: chat.id, messageId: edited.id }).catch((e: unknown) => {
+      if (!(e instanceof ApiError && e.status === 404))
+        error.value = (e as Error).message
+    })
+  }
+
+  if (editing.value)
+    return
+  const returned = returnedMessages({ ...chat, messages: messages ?? [] }, state.accountId, restored)
+  if (!returned.length)
+    return
+  for (const message of returned)
+    restored.add(message.id)
+  // A send whose response was lost and whose message came back starts over with a new identifier.
+  if (returned.some(message => message.id === submission?.message.id))
+    submission = undefined
+  // The message comes back as written: its plan request and agent choices included.
+  // A draft already written keeps its own agent choices; a plan request stays one either way.
+  const empty = !hasDraft.value
+  const composer = restoredComposer(returned, draft.value)
+  draft.value = composer.text
+  const kept = new Set(attachments.value.map(attachment => attachment.id))
+  attachments.value = [...attachments.value, ...composer.attachments.filter(attachment => !kept.has(attachment.id))]
+  if (empty) {
+    provider.value = composer.provider || currentProvider.value
+    model.value = composer.model
+    reasoning.value = composer.reasoning
+    speed.value = composer.speed
+  }
+
+  planning.value = planning.value || composer.plan
+  // Another device of the same person may have restored and withdrawn it first.
+  void Promise.all(returned.map(message => deleteChatMessage(api, { chatId: chat.id, messageId: message.id })
+    .catch((e: unknown) => {
+      if (!(e instanceof ApiError && e.status === 404))
+        throw e
+    })))
+    .catch((e: Error) => error.value = e.message)
+}, { immediate: true })
+
 // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation,
 // with the agent's usual permissions.
 async function implementPlan(sourceId: string) {
@@ -1384,7 +1462,7 @@ function key(event: KeyboardEvent) {
   if (window.matchMedia('(pointer: coarse)').matches && !event.ctrlKey && !event.metaKey)
     return
   event.preventDefault()
-  void send(event.altKey && active.value && !switchingProvider.value ? 'steer' : 'queue')
+  void send(editing.value ? editedMode.value : steers.value && !event.altKey ? 'steer' : 'queue')
 }
 </script>
 
@@ -1739,26 +1817,91 @@ function key(event: KeyboardEvent) {
               Only people with access to {{ detail?.agentName || 'its agent' }} can restore it.
             </p>
           </div>
-          <div v-else-if="!detail?.run && !delivery.sending.length" class="flex min-h-0 flex-1 flex-col items-center justify-center overflow-auto px-6 pb-[8vh] pt-8 text-center phone:px-2 phone:py-5">
-            <AgentAvatar
-              v-if="selectedAgent"
-              :name="selectedAgent.name"
-              :identity="selectedAgent.id"
-              :size="56"
-              class="mb-4"
-            />
-            <h2 class="mb-7 text-[30px] font-semibold tracking-tight phone:text-2xl">
-              What are we building?
-            </h2>
-            <div v-if="!detail" class="flex flex-wrap justify-center gap-2">
-              <button
-                v-for="idea in ['Explore this project', 'Review recent changes', 'Help me build…']"
-                :key="idea"
-                class="rounded-full bg-surface px-4 py-2.5 text-xs text-muted hover:bg-hover hover:text-ink"
-                @click="draft = idea; textarea?.focus()"
-              >
-                {{ idea }}
-              </button>
+          <div v-else-if="!detail?.run && !delivery.sending.length" class="flex min-h-0 flex-1 flex-col overflow-auto px-6 pb-[8vh] pt-8 text-center phone:px-2 phone:py-5">
+            <div class="m-auto flex w-full max-w-170 shrink-0 flex-col items-center">
+              <AgentAvatar
+                v-if="selectedAgent"
+                :name="selectedAgent.name"
+                :identity="selectedAgent.id"
+                :size="56"
+                class="mb-4"
+              />
+              <h2 class="mb-7 text-[30px] font-semibold tracking-tight phone:text-2xl">
+                What are we building?
+              </h2>
+              <div v-if="!route.params.id && agents.length" class="mb-6 grid w-full gap-4 text-left">
+                <fieldset :disabled="busy" class="min-w-0">
+                  <legend class="mb-2 text-xs font-semibold text-muted">
+                    Agent
+                  </legend>
+                  <div class="grid grid-cols-3 gap-2 phone:grid-cols-2">
+                    <label
+                      v-for="agent in agents"
+                      :key="agent.id"
+                      class="relative flex min-h-14 min-w-0 cursor-pointer flex-row! items-center gap-2.5! rounded-xl border border-line bg-surface px-2.5 py-2 text-sm! font-semibold! text-ink! hover:bg-hover has-checked:border-accent/65 has-checked:bg-soft has-disabled:cursor-default has-focus-visible:outline-2 has-focus-visible:outline-offset-2 has-focus-visible:outline-accent"
+                    >
+                      <input
+                        v-model="agentId"
+                        type="radio"
+                        name="chat-agent"
+                        :value="agent.id"
+                        class="absolute inset-0 z-1 m-0 size-full cursor-inherit opacity-0"
+                      >
+                      <AgentAvatar :name="agent.name" :identity="agent.id" :size="32" />
+                      <span class="min-w-0 flex-1 wrap-anywhere">{{ agent.name }}</span>
+                      <span
+                        aria-hidden="true"
+                        class="grid size-4 shrink-0 place-items-center rounded-full border"
+                        :class="agentId === agent.id ? 'border-transparent bg-brand text-on-brand' : 'border-control phone:hidden'"
+                      >
+                        <Icon v-if="agentId === agent.id" :name="Check" :size="11" />
+                      </span>
+                    </label>
+                  </div>
+                </fieldset>
+                <fieldset :disabled="busy" class="min-w-0">
+                  <legend class="mb-2 text-xs font-semibold text-muted">
+                    Project
+                  </legend>
+                  <div class="flex flex-wrap gap-1.5">
+                    <label
+                      v-for="project in projects"
+                      :key="project.value"
+                      class="relative inline-flex! min-h-9 max-w-full cursor-pointer flex-row! items-center gap-2 rounded-full border border-line bg-surface px-3 py-1 text-ink! hover:bg-hover has-checked:border-accent/65 has-checked:bg-soft has-disabled:cursor-default has-focus-visible:outline-2 has-focus-visible:outline-offset-2 has-focus-visible:outline-accent"
+                    >
+                      <input
+                        v-model="projectId"
+                        type="radio"
+                        name="chat-project"
+                        :value="project.value"
+                        class="absolute inset-0 z-1 m-0 size-full cursor-inherit opacity-0"
+                      >
+                      <span aria-hidden="true" class="grid size-3 shrink-0 place-items-center">
+                        <span v-if="projectId === project.value" class="grid size-3 place-items-center rounded-full bg-brand text-on-brand">
+                          <Icon :name="Check" :size="9" />
+                        </span>
+                        <span
+                          v-else
+                          class="size-1.75 rounded-full"
+                          :class="project.value ? '' : 'border border-muted'"
+                          :style="project.value ? { background: identityColor(project.value) } : undefined"
+                        />
+                      </span>
+                      <span class="min-w-0 wrap-anywhere">{{ project.label }}</span>
+                    </label>
+                  </div>
+                </fieldset>
+              </div>
+              <div v-if="!detail" class="flex flex-wrap justify-center gap-2">
+                <button
+                  v-for="idea in ['Explore this project', 'Review recent changes', 'Help me build…']"
+                  :key="idea"
+                  class="rounded-full bg-surface px-4 py-2.5 text-xs text-muted hover:bg-hover hover:text-ink"
+                  @click="draft = idea; textarea?.focus()"
+                >
+                  {{ idea }}
+                </button>
+              </div>
             </div>
           </div>
           <ActivityFeed
@@ -1897,8 +2040,9 @@ function key(event: KeyboardEvent) {
                   rel="noopener noreferrer"
                   class="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-accent px-3 text-xs font-semibold text-surface"
                 >OpenCode settings<Icon :name="ArrowUpRight" :size="14" /></a>
+                <!-- A message that went back to the composer is retried by sending it again. -->
                 <UiButton
-                  v-if="!readOnly"
+                  v-if="!readOnly && !returnedTurn"
                   size="small"
                   :disabled="busy"
                   @click="action('pause', { paused: false })"
@@ -1958,13 +2102,14 @@ function key(event: KeyboardEvent) {
               </UiButton>
             </div>
             <p v-if="detail?.sessionRestartRequested && !readOnly" class="mb-3 text-sm text-muted">
-              Ready for a fresh session. Write a new message, then resume the queue.
+              Ready for a fresh session. {{ held ? 'Resume the queue to start it.' : 'Your next message starts it.' }}
             </p>
-            <details v-if="detail?.messages.some(message => message.status === 'cancelled')" class="mb-3 rounded-lg border border-line p-3 text-xs">
+            <!-- Cancelled by a deletion and restored from the trash: returned messages go to their author's composer instead. -->
+            <details v-if="detail?.messages.some(message => message.status === 'cancelled' && !message.returnedTo)" class="mb-3 rounded-lg border border-line p-3 text-xs">
               <summary class="cursor-pointer text-muted">
                 Cancelled messages
               </summary>
-              <div v-for="message in detail.messages.filter(message => message.status === 'cancelled')" :key="message.id" class="mt-3">
+              <div v-for="message in detail.messages.filter(message => message.status === 'cancelled' && !message.returnedTo)" :key="message.id" class="mt-3">
                 <p class="whitespace-pre-wrap wrap-anywhere">
                   {{ message.text }}
                 </p>
@@ -1984,7 +2129,7 @@ function key(event: KeyboardEvent) {
             />
             <form
               class="chat-composer relative rounded-[26px] border border-line bg-surface p-1 focus-within:border-accent/50"
-              @submit.prevent="send()"
+              @submit.prevent="send(editing ? editedMode : steers ? 'steer' : 'queue')"
               @dragenter.prevent="dragging++"
               @dragover.prevent
               @dragleave.prevent="dragging = Math.max(0, dragging - 1)"
@@ -1992,7 +2137,8 @@ function key(event: KeyboardEvent) {
               @paste="pasteFiles"
             >
               <!-- Queued follow-ups open the composer itself, sharing its border and corners, as on Android. -->
-              <template v-if="pending.length || detail?.paused">
+              <!-- A pause that holds the queue keeps its Resume; after a Stop or failure the next message resumes instead. -->
+              <template v-if="pending.length || held">
                 <QueueStrip
                   :read-only="readOnly"
                   :pending="pending"
@@ -2010,25 +2156,6 @@ function key(event: KeyboardEvent) {
               <div class="px-3 pt-2 pb-2">
                 <div v-if="dragging && !readOnly && !noAgent" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-surface/95 text-sm font-semibold text-accent">
                   <Icon :name="Paperclip" :size="20" />Drop files here
-                </div>
-                <!-- A new conversation chooses its agent and project; one still opening does not. -->
-                <div v-if="!route.params.id" class="mb-3 flex max-w-100 items-center gap-1 phone:mb-2">
-                  <VirtualSelect
-                    v-model="agentId"
-                    :options="agents"
-                    label="Chat agent"
-                    hide-label
-                    compact
-                    variant="ghost"
-                  />
-                  <VirtualSelect
-                    v-model="projectId"
-                    :options="projects"
-                    label="Chat project"
-                    hide-label
-                    compact
-                    variant="ghost"
-                  />
                 </div>
                 <div v-if="editing" class="mb-2 flex items-center justify-between text-[11px] text-accent">
                   Editing queued message<button
@@ -2063,7 +2190,7 @@ function key(event: KeyboardEvent) {
                   :skills="skills"
                   aria-label="Message"
                   :disabled="readOnly || noAgent"
-                  :placeholder="readOnly || noAgent ? 'Only people with access to this agent can write here' : planRequested ? 'Describe what to plan… The agent proposes without changing anything' : liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :placeholder="readOnly || noAgent ? 'Only people with access to this agent can write here' : planRequested ? 'Describe what to plan… The agent proposes without changing anything' : liveWait?.wakeup ? (held ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : steers ? 'Message the agent while it works…' : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
@@ -2105,26 +2232,27 @@ function key(event: KeyboardEvent) {
                       <Icon :name="NotebookPen" :size="15" />Plan
                     </button>
                   </div>
-                  <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send.
-                       Without access a leftover draft cannot be sent, so stopping stays offered. -->
+                  <!-- As on Android: during a reply, sending joins the agent's turn and the clock queues
+                       the message for the next one; stop when the field is empty. Without access a
+                       leftover draft cannot be sent, so stopping stays offered. -->
                   <div class="flex shrink-0 items-center gap-1">
                     <button
-                      v-if="active && !editing && hasDraft && !readOnly"
+                      v-if="steers && !editing && hasDraft && !readOnly"
                       type="button"
                       class="round-action bg-soft text-accent"
-                      aria-label="Steer now"
-                      title="Send into the current turn (Alt + Enter)"
-                      :disabled="busy || !canSend || switchingProvider || steerBlocked"
-                      @click="send('steer')"
+                      aria-label="Send after this turn"
+                      title="Send after this turn (Alt + Enter)"
+                      :disabled="busy || !canSend"
+                      @click="send('queue')"
                     >
-                      <Icon :name="Zap" :size="16" />
+                      <Icon :name="Clock" :size="16" />
                     </button>
                     <button
                       v-if="(active || detail?.wakeup) && !editing && (!hasDraft || readOnly)"
                       type="button"
                       class="round-action border border-line text-coral"
                       :aria-label="scheduled ? 'Cancel scheduled wait' : 'Stop response'"
-                      :title="scheduled ? 'Cancel wakeup and pause queue' : 'Stop response and pause queue'"
+                      :title="scheduled ? 'Cancel wakeup and pause queue' : 'Stop response'"
                       :disabled="busy"
                       @click="action('stop')"
                     >
@@ -2135,8 +2263,8 @@ function key(event: KeyboardEvent) {
                       type="submit"
                       class="round-action"
                       :class="canSend && !busy ? 'bg-accent text-surface' : 'bg-ink/10 text-ink/40'"
-                      :aria-label="submitting ? 'Sending…' : editing ? 'Save' : responding || detail?.paused ? 'Queue' : 'Send'"
-                      :title="editing ? 'Save' : responding || detail?.paused ? 'Add to the queue' : 'Send'"
+                      :aria-label="submitting ? 'Sending…' : editing ? 'Save' : steers ? 'Send now' : responding || held ? 'Queue' : 'Send'"
+                      :title="editing ? 'Save' : steers ? 'Send now: the agent reads it during its turn' : responding || held ? 'Add to the queue' : 'Send'"
                       :disabled="busy || !canSend"
                     >
                       <Icon
@@ -2145,7 +2273,7 @@ function key(event: KeyboardEvent) {
                         :size="18"
                         class="animate-spin"
                       />
-                      <Icon v-else :name="editing ? Check : responding || detail?.paused ? Plus : ArrowUp" :size="18" />
+                      <Icon v-else :name="editing ? Check : !steers && (responding || held) ? Plus : ArrowUp" :size="18" />
                     </button>
                   </div>
                 </div>
