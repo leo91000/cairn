@@ -86,6 +86,7 @@ jobs:
           packages: platform-tools
       - uses: gradle/actions/setup-gradle@v5
       - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - uses: ./.github/actions/setup-robolectric
       - run: pnpm validate:pr android
   browser:
     name: browser (same-provider resume and deliverables)

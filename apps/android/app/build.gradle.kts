@@ -164,6 +164,10 @@ tasks.withType<Test>().configureEach {
     maxHeapSize = "512m"
     maxParallelForks = 1
 
+    providers.environmentVariable("CAIRN_ROBOLECTRIC_REPOSITORY_URL").orNull?.let {
+        systemProperty("robolectric.dependency.repo.url", it)
+    }
+
     val activityCorpus = rootProject.file("../../tests/fixtures/activity-events.json")
     inputs.file(activityCorpus)
     systemProperty("cairn.activityCorpus", activityCorpus.absolutePath)
