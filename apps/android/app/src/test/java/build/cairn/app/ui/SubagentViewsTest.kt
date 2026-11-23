@@ -494,6 +494,44 @@ class SubagentViewsTest {
     }
 
     @Test
+    fun `inside a scroll container the press shows only once it is not a scroll`() {
+        val interactions = MutableInteractionSource()
+        val seen = mutableListOf<String>()
+        compose.setContent {
+            LaunchedEffect(interactions) {
+                interactions.interactions.collect {
+                    seen +=
+                        when (it) {
+                            is PressInteraction.Press -> "press"
+                            is PressInteraction.Release -> "release"
+                            is PressInteraction.Cancel -> "cancel"
+                            else -> "other"
+                        }
+                }
+            }
+            CairnTheme("light") {
+                Surface(onClick = {}, interactionSource = interactions) {
+                    Box(
+                        Modifier.pressSurvivingMoves(interactions, inScrollContainer = true) {}
+                            .size(200.dp, 48.dp)
+                            .testTag("probe")
+                    )
+                }
+            }
+        }
+        val probe = compose.onNodeWithTag("probe", useUnmergedTree = true)
+        compose.mainClock.autoAdvance = false
+        probe.performTouchInput { down(center) }
+        compose.mainClock.advanceTimeBy(20)
+        assertEquals(emptyList<String>(), seen)
+        compose.mainClock.advanceTimeBy(android.view.ViewConfiguration.getTapTimeout().toLong())
+        assertEquals(listOf("press"), seen)
+        probe.performTouchInput { up() }
+        compose.mainClock.advanceTimeByFrame()
+        assertEquals(listOf("press", "release"), seen)
+    }
+
+    @Test
     fun `an older teammate preserves a collapsed team's scroll anchor and fold choice`() {
         val older =
             listOf(

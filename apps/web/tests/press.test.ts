@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   releasedOnControl,
-  sameBox,
+  sameOrigin,
   stopsRowFling,
   touchSlop,
   visibleBox,
@@ -87,9 +87,9 @@ describe('stopsRowFling', () => {
   })
 })
 
-describe('sameBox', () => {
-  it('treats sub-pixel rounding as unmoved and a queued row as moved', () => {
-    expect(sameBox(pressed, { ...pressed, top: 500.4, bottom: 544.4 })).toBe(true)
-    expect(sameBox(pressed, moved)).toBe(false)
+describe('sameOrigin', () => {
+  it('treats sub-pixel rounding and resizing in place as unmoved and a queued row as moved', () => {
+    expect(sameOrigin({ x: 10, y: 500 }, { x: 10.4, y: 500.4 })).toBe(true)
+    expect(sameOrigin({ x: 10, y: 500 }, { x: 10, y: 570 })).toBe(false)
   })
 })

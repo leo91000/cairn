@@ -37,7 +37,7 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun Modifier.pressSurvivingMoves(
     interactions: MutableInteractionSource,
-    inScrollingRow: Boolean = false,
+    inScrollContainer: Boolean = false,
     onClick: () -> Unit,
 ): Modifier {
     val click by rememberUpdatedState(onClick)
@@ -45,7 +45,7 @@ internal fun Modifier.pressSurvivingMoves(
     val scope = rememberCoroutineScope()
     val layout = remember { arrayOfNulls<LayoutCoordinates>(1) }
     return onGloballyPositioned { layout[0] = it }
-        .pointerInput(inScrollingRow) {
+        .pointerInput(inScrollContainer) {
             awaitEachGesture {
                 val down = awaitFirstDown()
                 val pressedLayout = layout[0]?.takeIf { it.isAttached } ?: return@awaitEachGesture
@@ -64,10 +64,10 @@ internal fun Modifier.pressSurvivingMoves(
                 val press = PressInteraction.Press(position)
                 val pressSource = source
                 var shown = false
-                // Like Compose's clickable, a scrolling row shows the press once it is not a
+                // Like Compose's clickable, a scroll container shows the press once it is not a
                 // scroll.
                 val showing = scope.launch {
-                    if (inScrollingRow) delay(ViewConfiguration.getTapTimeout().toLong())
+                    if (inScrollContainer) delay(ViewConfiguration.getTapTimeout().toLong())
                     pressSource.emit(press)
                     shown = true
                 }

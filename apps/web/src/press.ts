@@ -27,7 +27,7 @@ export function releasedOnControl(pressed: Box, current: Box, x: number, y: numb
   return inside(pressed) || inside(current)
 }
 
-// Browsers turn a touch that moves further into a scroll and cancel the press.
+// How far a touch or pen release may drift past the control and still count.
 export const touchSlop = 16
 
 // A touch or pen tap that stops a scrolling row's fling is not a press: browsers send no click
@@ -36,8 +36,13 @@ export function stopsRowFling(pointerType: string, pressedAt: number, rowScrolle
   return pointerType !== 'mouse' && pressedAt - rowScrolledAt < 100
 }
 
-// Whether live content left a control where it was pressed, give or take a pixel of rounding.
-export function sameBox(a: Box, b: Box): boolean {
-  return Math.abs(a.left - b.left) < 1 && Math.abs(a.top - b.top) < 1
-    && Math.abs(a.right - b.right) < 1 && Math.abs(a.bottom - b.bottom) < 1
+export interface Origin {
+  x: number
+  y: number
+}
+
+// Whether live content moved a control from where it was pressed, give or take a pixel of
+// rounding. A control that resizes or that its container clips differently has not moved.
+export function sameOrigin(a: Origin, b: Origin): boolean {
+  return Math.abs(a.x - b.x) < 1 && Math.abs(a.y - b.y) < 1
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { ActivityArtifact } from '../activity'
-import type { Box } from '../press'
+import type { Box, Origin } from '../press'
 import {
   computed,
   inject,
@@ -9,7 +9,7 @@ import {
 } from 'vue'
 import {
   releasedOnControl,
-  sameBox,
+  sameOrigin,
   stopsRowFling,
   touchSlop,
   visibleBox,
@@ -43,6 +43,7 @@ let press: {
   button: HTMLButtonElement
   pointerId: number
   box: Box
+  origin: Origin
 } | undefined
 // Not cleared on unmount: opening can navigate away before the browser's click arrives.
 let stopWatching: (() => void) | undefined
@@ -50,6 +51,11 @@ onBeforeUnmount(() => cancelPress())
 
 function shownBox(button: HTMLButtonElement) {
   return visibleBox(button.getBoundingClientRect(), button.parentElement?.getBoundingClientRect())
+}
+
+function originOf(button: HTMLButtonElement): Origin {
+  const { left, top } = button.getBoundingClientRect()
+  return { x: left, y: top }
 }
 
 let rowScrolledAt = Number.NEGATIVE_INFINITY
@@ -71,6 +77,7 @@ function holdPress(id: string, event: PointerEvent, inScrollingRow = false) {
     button,
     pointerId: event.pointerId,
     box: shownBox(button),
+    origin: originOf(button),
   }
   // A mouse has no implicit capture: without it, the release and click of a moved button go
   // to whatever moved under the pointer. Touch and pen keep the browser's own targeting.
@@ -92,8 +99,8 @@ function releasePress(event: PointerEvent) {
   const current = shownBox(button)
   // An unmoved touch or pen press stays the browser's own tap, as before: its click opens the
   // activity, and the activity's focus then follows the pointer.
-  if (event.pointerType !== 'mouse' && sameBox(held.box, current)) {
-    guardNativeTap(id, button, current)
+  if (event.pointerType !== 'mouse' && sameOrigin(held.origin, originOf(button))) {
+    guardNativeTap(id, button, held.origin)
     return
   }
 
@@ -123,10 +130,10 @@ function ignoreFollowingClick(button: HTMLButtonElement) {
 
 // The browser taps an unmoved button after the release. If a queued message moves the button
 // first, that tap would land on the row instead: open the activity and ignore it.
-function guardNativeTap(id: string, button: HTMLButtonElement, released: Box) {
+function guardNativeTap(id: string, button: HTMLButtonElement, released: Origin) {
   let opened = false
   watchFollowingClick(() => {
-    if (!opened && sameBox(released, shownBox(button)))
+    if (!opened && sameOrigin(released, originOf(button)))
       return false
 
     if (!opened) {
@@ -178,7 +185,8 @@ function watchFollowingClick(ignore: (event: MouseEvent) => boolean) {
   stopWatching = stop
 }
 
-// Keyboard, assistive and other non-primary activation; primary presses open on release.
+// The browser's click: keyboard and assistive activation, an unmoved touch or pen tap, and any
+// press that this bar did not hold.
 function openFromClick(id: string, event: MouseEvent) {
   emit('open', id, event.currentTarget as HTMLElement)
 }

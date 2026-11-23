@@ -384,7 +384,7 @@ internal fun SubagentBar(agents: List<Subagent>, active: Boolean, open: (String)
                                 Row(
                                     Modifier.pressSurvivingMoves(
                                             interactions,
-                                            inScrollingRow = true,
+                                            inScrollContainer = true,
                                         ) {
                                             open(agent.id)
                                         }
@@ -433,7 +433,10 @@ internal fun SubagentBar(agents: List<Subagent>, active: Boolean, open: (String)
                         },
                 ) {
                     Row(
-                        Modifier.pressSurvivingMoves(interactions) { open(first.id) }
+                        // The bar can sit in the swipeable conversation pager.
+                        Modifier.pressSurvivingMoves(interactions, inScrollContainer = true) {
+                                open(first.id)
+                            }
                             .heightIn(min = 48.dp)
                             .padding(horizontal = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
