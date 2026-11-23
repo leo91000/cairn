@@ -1,7 +1,11 @@
 //! One logical disk pool includes retained conversations, archives and transfer
 //! staging. Controller and connector mutations share the same process-safe lock.
 use crate::error::{Error, Result};
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 pub(crate) const MIB: u64 = 1_048_576;
 
@@ -38,8 +42,37 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
     measure_usage(data, state, true)
 }
 
+static USAGE_SCANS: AtomicU64 = AtomicU64::new(0);
+
+/// Full usage scans performed by this process, for bootstrap observations.
+pub(crate) fn usage_scans() -> u64 {
+    USAGE_SCANS.load(Ordering::Relaxed)
+}
+
+/// Tests share one process: count scans per controller state as well.
+#[cfg(test)]
+fn scans_by_state() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, u64>>
+{
+    static SCANS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, u64>>,
+    > = std::sync::OnceLock::new();
+    SCANS.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(crate) fn usage_scans_of(state: &Path) -> u64 {
+    scans_by_state()
+        .lock()
+        .unwrap()
+        .get(state)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// Count file-backed staging conservatively, but charge journal/cache blocks
 /// by allocated bytes. Mounted views refer to those same blocks and add no charge.
+/// Base contents live on the data pool and are counted there; `native-bases`
+/// holds only their small control records.
 fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Result<u64> {
     fn size(
         path: &Path,
@@ -64,6 +97,15 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
         }
     }
     use std::os::unix::fs::MetadataExt;
+    USAGE_SCANS.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    {
+        *scans_by_state()
+            .lock()
+            .unwrap()
+            .entry(state.to_owned())
+            .or_default() += 1;
+    }
     let mut seen = std::collections::HashSet::new();
     let mut used = size(data, false, &mut seen)?;
     for entry in std::fs::read_dir(state)? {

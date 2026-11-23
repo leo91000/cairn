@@ -910,7 +910,12 @@ async fn trimming_uses_recorded_sizes_and_unpublishes_before_removing_contents()
         )
         .await
         .unwrap();
+    // Lookups and trimming read records; neither runs a full usage scan.
+    let scans = disk::usage_scans_of(&bases.state);
     let ready = bases.lookup(&archives, 128).await.unwrap().unwrap();
+    assert!(bases.lookup(&archives, 128).await.unwrap().is_some());
+    assert_eq!(bases.trim(u64::MAX, 0, None).await.unwrap(), 0);
+    assert_eq!(disk::usage_scans_of(&bases.state), scans);
     let control = bases.state.join("native-bases").join(&ready.key);
     let contents = bases.contents(&ready.key);
     assert_eq!(

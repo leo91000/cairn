@@ -85,6 +85,7 @@ pub(crate) struct Admission {
     policy: storage::policy::Policy,
     limit: u64,
     initial_target: u64,
+    sampled: u64,
     reservation: u64,
     submitted: u64,
     observation: Observation,
@@ -131,6 +132,7 @@ impl Admission {
             policy: policy.clone(),
             limit,
             initial_target,
+            sampled: used,
             reservation: 0,
             submitted: 0,
             observation: Observation {
@@ -140,6 +142,11 @@ impl Admission {
                 outstanding: 0,
             },
         })
+    }
+
+    /// The full usage sample taken at creation, including reservations.
+    pub fn sampled_usage(&self) -> u64 {
+        self.sampled
     }
 
     pub fn with_reservation(mut self, bytes: u64) -> Self {

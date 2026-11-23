@@ -73,6 +73,16 @@ Matching-identity fast paths remain intact. Interrupted ownership metadata is
 replayed before checking that fast path. The observer does not supply a cache
 that could skip this recovery or avoid inspecting required filesystem metadata.
 
+## Usage scans
+
+`usageScans` counts full native usage scans (`disk::measure_usage`, the walk
+behind shared budget and admission samples) between the bootstrap's start and its
+end, as a delta of a process-wide counter. Scans by concurrent bootstraps, the
+base warmer, health or other controller work in that interval are included, so
+the value is an upper bound for this bootstrap and exact only when it ran alone.
+It freezes with the final report. Regression tests bound the scans of the
+storage admission check separately, per controller state.
+
 ## Export and privacy
 
 Memory observation remains available independently of logging. Export is enabled

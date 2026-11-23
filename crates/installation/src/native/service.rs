@@ -1414,14 +1414,17 @@ impl Controller {
         super::ingress::write((mounted.clone(), ingress, reservation), async move {
             let _mounted = mounted.mount.lock().await;
             let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
+            let limit = controller.disk_limit().await?;
             let admission = super::ingress::Admission::new(
                 &controller.data,
                 &controller.state,
                 &data,
                 &workspace::data_root(&controller.state),
-                controller.disk_limit().await?,
+                limit,
                 &policy,
             )?;
+            // The admission has just taken a full usage sample; reuse it.
+            let growth = disk::available(limit, admission.sampled_usage());
             let check =
                 std::sync::Arc::new(std::sync::Mutex::new(admission.with_reservation(reserved)));
             let copied = check.clone();
@@ -1438,7 +1441,7 @@ impl Controller {
                 &plan,
                 controller
                     .disk_budget(&plan)
-                    .min(controller.disk_growth().await?.saturating_add(reserved)),
+                    .min(growth.saturating_add(reserved)),
                 admit,
             )
             .await?;
@@ -2128,14 +2131,20 @@ impl Controller {
         };
         let home = disk::bytes_if_present(&self.data.join("runs").join(run).join("home")).await?;
         let incoming = seed.saturating_add(home);
-        let growth = self.disk_growth().await?;
+        // Callers hold the storage gate, so no reservation can be published
+        // between samples: one full scan suffices unless reclamation changed
+        // the pool.
+        let limit = self.disk_limit().await?;
+        let mut used = disk::used(&self.data, &self.state).await?;
+        let growth = disk::available(limit, used);
         if incoming > growth {
             crate::project_archives::reclaim_for_foreground(&self.data, incoming - growth, &[])
                 .await?;
+            used = disk::used(&self.data, &self.state).await?;
         }
         if current.saturating_add(incoming) > self.disk_budget(plan)
-            || incoming > self.disk_growth().await?
-            || disk::used(&self.data, &self.state).await? > self.disk_limit().await?
+            || incoming > disk::available(limit, used)
+            || used > limit
         {
             return Err(Error::conflict(
                 "Retained native work leaves insufficient shared disk budget for this preparation.",
@@ -3645,6 +3654,45 @@ pub(crate) mod tests {
                     .unwrap()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn preparation_space_check_scans_usage_once_unless_it_reclaims() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let project_root = controller.data.join("runs").join(&run).join("workspace");
+        let plan = |logical_bytes: u64| {
+            json!({
+                "id": crate::config::id(),
+                "runId": run,
+                "projectRoot": project_root,
+                "resources": { "cpu": 1, "memoryMiB": 512, "diskMiB": 128 },
+                "imports": [{ "source": project_root, "target": project_root }],
+                "nativeProjectArchives": [{
+                    "projectId": crate::config::id(),
+                    "revision": "a".repeat(40),
+                    "key": "b".repeat(64),
+                    "hash": "c".repeat(64),
+                    "bytes": 100,
+                    "logicalBytes": logical_bytes
+                }]
+            })
+        };
+
+        let before = disk::usage_scans_of(&controller.state);
+        controller.check_preparation_space(&plan(15)).await.unwrap();
+        assert_eq!(disk::usage_scans_of(&controller.state) - before, 1);
+
+        // Reclamation changes the pool, so exactly one more sample follows it.
+        let before = disk::usage_scans_of(&controller.state);
+        let huge = controller.disk_limit().await.unwrap() * 2;
+        assert!(
+            controller
+                .check_preparation_space(&plan(huge))
+                .await
+                .is_err()
+        );
+        assert!(disk::usage_scans_of(&controller.state) - before <= 2);
     }
 
     #[tokio::test]
