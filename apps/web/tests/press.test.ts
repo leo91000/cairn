@@ -3,6 +3,7 @@ import {
   releasedOnControl,
   sameOrigin,
   stopsRowFling,
+  tapStillFinds,
   touchSlop,
   visibleBox,
 } from '../src/press'
@@ -91,5 +92,30 @@ describe('sameOrigin', () => {
   it('treats sub-pixel rounding and resizing in place as unmoved and a queued row as moved', () => {
     expect(sameOrigin({ x: 10, y: 500 }, { x: 10.4, y: 500.4 })).toBe(true)
     expect(sameOrigin({ x: 10, y: 500 }, { x: 10, y: 570 })).toBe(false)
+  })
+})
+
+describe('tapStillFinds', () => {
+  const chip = {
+    left: 100,
+    top: 10,
+    right: 220,
+    bottom: 42,
+  }
+  const shrunk = { ...chip, right: 180 }
+  const origin = { x: 100, y: 10 }
+
+  it('finds an unmoved control under the release', () => {
+    expect(tapStillFinds(origin, origin, chip, chip, 200, 26)).toBe(true)
+  })
+
+  it('misses a control that shrank from under the release, so a neighbour would take the tap', () => {
+    expect(tapStillFinds(origin, origin, chip, shrunk, 200, 26)).toBe(false)
+    expect(tapStillFinds(origin, origin, chip, shrunk, 150, 26)).toBe(true)
+  })
+
+  it('misses a control that moved, and keeps a release that drifted past the edge', () => {
+    expect(tapStillFinds(origin, { x: 100, y: 80 }, chip, chip, 150, 26)).toBe(false)
+    expect(tapStillFinds(origin, origin, chip, chip, 150, 46)).toBe(true)
   })
 })

@@ -46,3 +46,11 @@ export interface Origin {
 export function sameOrigin(a: Origin, b: Origin): boolean {
   return Math.abs(a.x - b.x) < 1 && Math.abs(a.y - b.y) < 1
 }
+
+// Whether the browser's tap at a release point still finds the pressed control: it stayed where
+// it was pressed, and if the point was on it then, it still is. A neighbour can slide under the
+// point when the pressed control shrinks in place.
+export function tapStillFinds(pressedOrigin: Origin, origin: Origin, pressed: Box, current: Box, x: number, y: number): boolean {
+  return sameOrigin(pressedOrigin, origin)
+    && (!releasedOnControl(pressed, pressed, x, y) || releasedOnControl(current, current, x, y))
+}

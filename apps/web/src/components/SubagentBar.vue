@@ -9,8 +9,8 @@ import {
 } from 'vue'
 import {
   releasedOnControl,
-  sameOrigin,
   stopsRowFling,
+  tapStillFinds,
   touchSlop,
   visibleBox,
 } from '../press'
@@ -99,8 +99,10 @@ function releasePress(event: PointerEvent) {
   const current = shownBox(button)
   // An unmoved touch or pen press stays the browser's own tap, as before: its click opens the
   // activity, and the activity's focus then follows the pointer.
-  if (event.pointerType !== 'mouse' && sameOrigin(held.origin, originOf(button))) {
-    guardNativeTap(id, button, held.origin)
+  const point = { x: event.clientX, y: event.clientY }
+  if (event.pointerType !== 'mouse'
+    && tapStillFinds(held.origin, originOf(button), held.box, current, point.x, point.y)) {
+    guardNativeTap(id, button, held.origin, point)
     return
   }
 
@@ -124,16 +126,18 @@ function cancelPress() {
 // The release decided; the compatibility mouse events and click that follow may target
 // another control, or move focus inside the activity that just opened.
 function ignoreFollowingClick(button: HTMLButtonElement) {
-  // A touch's mouse-down on the unmoved button still focuses it, as before.
+  // A mouse-down that still lands on the button focuses it, as the browser would.
   watchFollowingClick(event => !(event.type === 'mousedown' && button.contains(event.target as Node)))
 }
 
-// The browser taps an unmoved button after the release. If a queued message moves the button
-// first, that tap would land on the row instead: open the activity and ignore it.
-function guardNativeTap(id: string, button: HTMLButtonElement, released: Origin) {
+// The browser taps an unmoved button after the release. If live content moves the button, or
+// slides another control under the release point first, that tap would land elsewhere: open
+// the activity and ignore it.
+function guardNativeTap(id: string, button: HTMLButtonElement, pressed: Origin, point: Origin) {
+  const released = shownBox(button)
   let opened = false
   watchFollowingClick(() => {
-    if (!opened && sameOrigin(released, originOf(button)))
+    if (!opened && tapStillFinds(pressed, originOf(button), released, shownBox(button), point.x, point.y))
       return false
 
     if (!opened) {
