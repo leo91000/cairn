@@ -758,12 +758,17 @@ async fn copy_verified_with_capacity(
             Ok(())
         });
     }
-    copy.args(["-aHAX", "--numeric-ids", "--sparse", "--fsync", "--"])
+    // No per-file fsync: on a loop-backed pool each one costs a host journal
+    // commit. One syncfs barrier flushes the copy, and every caller publishes
+    // it only after this returns. The descriptor is opened before the copy so
+    // writeback errors during it reach this barrier.
+    let barrier = tokio::fs::File::open(target).await?.into_std().await;
+    copy.args(["-aHAX", "--numeric-ids", "--sparse", "--"])
         .arg(format!("{}/", source.display()))
         .arg(target);
     rsync_status(copy, stop, capacity).await?;
     verify_copy_with_capacity(source, target, stop, capacity).await?;
-    block::sync(target).await
+    block::sync_opened(barrier).await.map_err(Into::into)
 }
 
 pub(super) async fn verify_copy(
