@@ -133,7 +133,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "stop_chat",
         scope: "run",
-        description: "Stop the current turn or pending automatic retry, cancel a scheduled wakeup and pause follow-ups. Messages a person wrote that the turn never delivered are cancelled and returned to them (returnedTo); messages from rules and agents stay queued, held by the pause.",
+        description: "Stop the current turn or pending automatic retry, cancel a scheduled wakeup and pause follow-ups. Messages a person wrote that the turn certainly never delivered are cancelled and returned to them (returnedTo); others (from rules, agents or plugins, answers, or messages the agent may have received) stay queued, held by the pause.",
     },
     ChatOperation {
         name: "compact_chat",

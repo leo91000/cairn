@@ -1015,9 +1015,12 @@ impl Execution<'_> {
             if has_live_environment(&saved, self.retained, &workspace.env) {
                 // A failed provider turn must not implicitly replay jobs or
                 // resume a controller that account rotation would fence.
-                return Err(Error::conflict(
-                    "Provider account exhausted in a live environment. Background work will stop; resume explicitly with an available account.",
-                ));
+                // A conversation continues with its next message (ADR-0090); a mission is resumed.
+                return Err(Error::conflict(if self.run["trigger"] == "chat" {
+                    "Provider account exhausted in a live environment. Background work will stop."
+                } else {
+                    "Provider account exhausted in a live environment. Background work will stop; resume explicitly with an available account."
+                }));
             }
             // This adapter has exited; its side questions cannot wait for a different
             // account, even though the run and turn remain running during the switch.

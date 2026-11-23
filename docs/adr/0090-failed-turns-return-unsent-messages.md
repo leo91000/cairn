@@ -60,7 +60,8 @@ lift them. After a failed or interrupted turn, rules also wait: they can steer o
 answer again once its next turn starts, which a person does by writing or by
 resuming it. Cancelling a conversation's run or its scheduled wakeup pauses it in the
 same transaction, as Stop does, whether from the conversation or through `cancel_run`.
-In the apps, a person's next message lifts that pause; public MCP and agent callers send
+In the apps, a person's next message lifts a pause left by a Stop or a cancelled run; a
+cancelled wakeup alone leaves a successful turn's queue paused until Resume; public MCP and agent callers send
 the message, then call `set_chat_paused(false)`. Without a pause, any caller who may send
 continues the conversation, after a failure as after a success. The launch of a turn is
 recorded once its process starts: a manager crash in between can return a message the

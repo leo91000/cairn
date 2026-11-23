@@ -590,6 +590,30 @@ class ConversationPresentationTest {
                 run = Run(id = "r", status = "running", taskId = "", cancelRequestedAt = 1),
             )
         assertTrue(resumesOnSend(stopping, 0))
+        // Its own message still starting, or steering it already claimed, may be held: Resume
+        // then replays the turn first.
+        val starting =
+            stopping.copy(
+                run =
+                    stopping.run?.copy(
+                        chatExecution = ChatExecution(messageId = "turn", text = "Turn")
+                    ),
+                messages = listOf(ChatMessage(id = "turn", text = "Turn", status = "sending")),
+            )
+        assertFalse(resumesOnSend(starting, 0))
+        val steering =
+            stopping.copy(
+                messages =
+                    listOf(
+                        ChatMessage(
+                            id = "steer",
+                            text = "Steer",
+                            status = "sending",
+                            mode = "steer",
+                        )
+                    )
+            )
+        assertFalse(resumesOnSend(steering, 0))
     }
 
     @Test
