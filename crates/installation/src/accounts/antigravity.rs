@@ -538,6 +538,10 @@ impl Driver for Antigravity {
     async fn clear(&self, home: &Path) -> Result<()> {
         remove_file(&home.join(ADC_FILE)).await?;
         remove_file(&home.join(TOKEN_FILE)).await?;
+        let native = home.to_owned();
+        tokio::task::spawn_blocking(move || crate::antigravity::remove_credentials(&native))
+            .await
+            .map_err(Error::internal)?;
         // Side-question copies and a plan turn's home may hold the run's credentials.
         // A plan turn's home only links the conversations, which stay in place.
         super::remove_directory(&home.join(crate::antigravity::SIDE_QUESTIONS)).await?;

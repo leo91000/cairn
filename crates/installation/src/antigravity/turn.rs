@@ -404,9 +404,7 @@ struct CredentialFiles(PathBuf);
 
 impl Drop for CredentialFiles {
     fn drop(&mut self) {
-        for file in [super::ADC_FILE, super::TOKEN_FILE] {
-            let _ = std::fs::remove_file(self.0.join(file));
-        }
+        super::remove_credentials(&self.0);
     }
 }
 
@@ -949,7 +947,7 @@ async fn execute(
             nonce: crate::config::id()[..8].to_owned(),
             conversation: conversation.clone(),
             last_answer: None,
-            sides: Sides::new(config, &home, &plan, &credentials, events.clone()),
+            sides: Sides::new(config, &home, &plan, events.clone()),
             google: credentials["kind"] == super::GOOGLE,
             renew: false,
             resend: Vec::new(),

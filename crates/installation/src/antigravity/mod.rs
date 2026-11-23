@@ -118,6 +118,27 @@ pub(crate) const ADC_FILE: &str = "cairn-adc.json";
 /// Where `agy` reads a Google account's token without a keyring.
 pub(crate) const TOKEN_FILE: &str = ".gemini/antigravity-cli/antigravity-oauth-token";
 
+/// Removes the credential files of the native `home`, with the temporary files of
+/// writes a cancellation or a failure interrupted before their rename.
+pub(crate) fn remove_credentials(home: &Path) {
+    let token = home.join(TOKEN_FILE);
+    for file in [home.join(ADC_FILE), token.clone()] {
+        let _ = std::fs::remove_file(file);
+    }
+    for directory in [home, token.parent().unwrap()] {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') && name.ends_with(".tmp") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 pub(crate) async fn write_token(home: &Path, token: &Value) -> Result<()> {
     private_dir(&home.join(".gemini/antigravity-cli")).await?;
     atomic_write(&home.join(TOKEN_FILE), &serde_json::to_vec(token)?).await
@@ -387,6 +408,9 @@ pub struct Catalog {
 struct CatalogCache {
     accounts: Vec<(String, Option<String>)>,
     at: i64,
+    /// How long the listing stays current: briefly when an account kind failed, so
+    /// its accounts are not refused for long.
+    lifetime: i64,
     value: Value,
 }
 
@@ -471,7 +495,7 @@ impl Catalog {
         if let Some(cache) = &*cached
             && !fresh
             && cache.accounts == fingerprint
-            && now() - cache.at < 300_000
+            && now() - cache.at < cache.lifetime
         {
             return Ok(cache.value.clone());
         }
@@ -564,6 +588,7 @@ impl Catalog {
                 entry
             })
             .collect::<Vec<_>>();
+        let complete = failure.is_none();
         let value = json!({
             "models": models,
             "checkedAt": now(),
@@ -577,6 +602,7 @@ impl Catalog {
         *cached = Some(CatalogCache {
             accounts: fingerprint,
             at: now(),
+            lifetime: if complete { 300_000 } else { 30_000 },
             value: value.clone(),
         });
         Ok(value)
@@ -636,6 +662,32 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credentials_and_interrupted_writes_are_removed() {
+        let root = tempfile::TempDir::new().unwrap();
+        let home = root.path();
+        let token = home.join(TOKEN_FILE);
+        std::fs::create_dir_all(token.parent().unwrap()).unwrap();
+        for file in [
+            home.join(ADC_FILE),
+            token.clone(),
+            home.join(".interrupted.tmp"),
+            token.with_file_name(".interrupted.tmp"),
+            home.join(SHELL_ENV),
+        ] {
+            std::fs::write(file, "secret").unwrap();
+        }
+        remove_credentials(home);
+        let left = |directory: &Path| {
+            std::fs::read_dir(directory)
+                .unwrap()
+                .filter_map(|e| e.ok()?.path().is_file().then_some(()))
+                .count()
+        };
+        assert_eq!(left(home), 1, "only the shell script stays");
+        assert_eq!(left(token.parent().unwrap()), 0);
+    }
 
     const LISTING: &str = "Fetching available models...\n\
         gemini-4-neon-high\tGemini 4 Neon (High)\n\

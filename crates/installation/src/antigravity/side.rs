@@ -25,7 +25,6 @@ pub(super) struct Sides {
     config: Config,
     home: PathBuf,
     plan: Value,
-    credentials: Value,
     events: mpsc::Sender<Value>,
     running: HashMap<String, JoinHandle<()>>,
     results: (mpsc::Sender<Answer>, mpsc::Receiver<Answer>),
@@ -35,18 +34,11 @@ pub(super) struct Sides {
 type Answer = (String, Result<String>);
 
 impl Sides {
-    pub fn new(
-        config: &Config,
-        home: &Path,
-        plan: &Value,
-        credentials: &Value,
-        events: mpsc::Sender<Value>,
-    ) -> Self {
+    pub fn new(config: &Config, home: &Path, plan: &Value, events: mpsc::Sender<Value>) -> Self {
         Self {
             config: config.clone(),
             home: home.to_owned(),
             plan: plan.clone(),
-            credentials: credentials.clone(),
             events,
             running: HashMap::new(),
             results: mpsc::channel(16),
@@ -63,7 +55,6 @@ impl Sides {
             config: self.config.clone(),
             home: self.home.clone(),
             plan: self.plan.clone(),
-            credentials: self.credentials.clone(),
             conversation: conversation.to_owned(),
             id: id.clone(),
         };
@@ -175,7 +166,6 @@ struct Task {
     config: Config,
     home: PathBuf,
     plan: Value,
-    credentials: Value,
     conversation: String,
     id: String,
 }
@@ -203,6 +193,9 @@ impl Task {
         if let Some(path) = super::repository_commands(Path::new(text(&self.plan, "cwd"))) {
             return Err(super::repository_commands_refusal(&path));
         }
+        // Current credentials: the launch's access token may have expired while the
+        // running turn made no model call.
+        let (_, credentials) = super::turn::credentials(&self.config).await?;
         let home = side_home(&self.home, &self.id);
         // Only a copy of the conversation: nothing an earlier turn left in the native
         // state (plugins, configuration) applies, and the side question never writes
@@ -217,16 +210,16 @@ impl Task {
         tokio::task::spawn_blocking(move || copy_conversation(&from, &to))
             .await
             .map_err(Error::internal)??;
-        super::prepare_native_home(&self.config, &home, Some(&self.credentials)).await?;
+        super::prepare_native_home(&self.config, &home, Some(&credentials)).await?;
         configure(&home, &self.plan, &policy(&self.plan, Mode::Side)).await?;
-        let mut launch = args(&self.plan, &self.credentials, Mode::Side)?;
+        let mut launch = args(&self.plan, &credentials, Mode::Side)?;
         launch.extend([
             "--conversation".into(),
             self.conversation.clone(),
             "-p=".into(),
         ]);
         let cwd = PathBuf::from(text(&self.plan, "cwd"));
-        let mut child = spawn(&self.config, &home, &cwd, &launch, &self.credentials).await?;
+        let mut child = spawn(&self.config, &home, &cwd, &launch, &credentials).await?;
         let mut group = Group::of(&child);
         let mut stdin = child.stdin.take().unwrap();
         // An undrained stderr pipe would block `agy` once it fills.

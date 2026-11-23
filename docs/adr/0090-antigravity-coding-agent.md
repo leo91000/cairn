@@ -89,7 +89,8 @@ le répertoire de travail ou l'un de ses parents contient `.agents/hooks.json` o
 
 **Questions à côté.** `/btw` n'existe que dans l'interface interactive. L'adaptateur
 copie la seule base de la conversation dans un HOME temporaire neuf, lance un second
-`agy --conversation <id>` avec le hook qui refuse tout, puis supprime la copie.
+`agy --conversation <id>` avec le hook qui refuse tout et les identifiants courants
+du courtier (le jeton du lancement a pu expirer), puis supprime la copie.
 Le processus principal et son historique ne sont pas touchés. La réponse voit le
 contexte enregistré jusqu'à la dernière étape terminée, pas l'étape en cours.
 
@@ -107,7 +108,8 @@ contexte enregistré jusqu'à la dernière étape terminée, pas l'étape en cou
 Les secrets restent dans le coffre chiffré et ne passent que par le courtier
 existant du run. Les identifiants Google Cloud sont fournis tels quels au run : un
 fichier `authorized_user` contient donc son refresh token, choisi par l'utilisateur.
-Le manager liste les modèles dans un répertoire privé temporaire, supprimé ensuite. Sur le nœud d'exécution, le fichier d'identifiants Google Cloud et le jeton d'accès sont supprimés à la fin de chaque lancement, annulation comprise : le HOME du run peut être un disque durable de node native ou de microVM. Mesuré avec un compte de test : sans D-Bus, `agy` écrit le jeton
+Le manager liste les modèles dans un répertoire privé temporaire, supprimé ensuite. Sur le nœud d'exécution, le fichier d'identifiants Google Cloud et le jeton d'accès sont supprimés à la fin de chaque lancement, annulation comprise, avec les fichiers
+temporaires d'une écriture interrompue : le HOME du run peut être un disque durable de node native ou de microVM. Mesuré avec un compte de test : sans D-Bus, `agy` écrit le jeton
 OAuth (format `oauth2.Token` : `access_token`, `refresh_token`, `expiry`) dans
 `~/.gemini/antigravity-cli/antigravity-oauth-token`, et fonctionne avec le seul jeton
 d'accès. **Le refresh token reste sur le manager** : un run reçoit un fichier sans
@@ -128,7 +130,9 @@ partagé ; le compte redevient éligible après cinq minutes.
 raisonnement. Au lancement, Cairn résout le modèle et le niveau choisis dans le
 catalogue du type de compte loué et passe l'identifiant natif
 (`--model gemini-4-neon-high`). Le catalogue dépend du type de compte ; un agent
-sans modèle prend le premier modèle du type de compte loué.
+sans modèle prend le premier modèle du type de compte loué. Quand la liste d'un
+type de compte échoue, le catalogue n'est gardé que 30 secondes, et le lancement
+liste à nouveau un type absent au lieu de refuser le compte.
 
 **Accès.** Comme OpenCode, Antigravity exige l'accès YOLO : son sandbox ne
 correspond ni à la lecture seule ni à l'écriture dans l'espace de travail de Cairn.
