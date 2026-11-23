@@ -448,4 +448,207 @@ class AccountsJourneyTest {
             capture("opencode-account-light")
         }
     }
+
+    private fun openAntigravity() {
+        waitText("AGENTS DE CODE")
+        compose.waitUntil(15000) {
+            compose
+                .onAllNodes(hasContentDescription("Ajouter un compte") and isEnabled())
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithContentDescription("Ajouter un compte").performClick()
+        waitText("Ajouter un compte")
+        compose
+            .onNode(
+                hasText("Antigravity") and
+                    hasClickAction() and
+                    hasAnyAncestor(hasTestTag("account-sign-in"))
+            )
+            .performClick()
+        waitText("Une clé API Gemini, des identifiants Google Cloud ou un compte Google.")
+    }
+
+    private fun savedAccount(server: Accounts) =
+        wireJson
+            .parseToJsonElement(
+                server.requests
+                    .first { it.first == "POST /api/installations/fixture/api/accounts" }
+                    .second
+            )
+            .jsonObject
+
+    @Test
+    fun `Antigravity saves a Gemini API key and never checks its usage`() {
+        val server = Accounts()
+        journey(
+            server,
+            { request, _ ->
+                when ("${request.method} ${request.path}") {
+                    "POST /api/installations/fixture/api/accounts" -> {
+                        val account =
+                            """{"id":"gemini","provider":"antigravity","name":"Gemini","modelProvider":"gemini","modelProviderName":"Gemini API","state":"ready","status":"next"}"""
+                        server.accounts += account
+                        """{"kind":"connected","account":$account}"""
+                    }
+                    else -> null
+                }
+            },
+        ) {
+            openAntigravity()
+            compose.onNodeWithText("Nom").performTextInput("Gemini")
+            capture("antigravity-connect-light")
+            compose
+                .onNode(hasText("Clé API Gemini") and hasSetTextAction())
+                .performTextInput("synthetic-android-gemini-key")
+            compose.onNodeWithText("Enregistrer la clé API").performScrollTo().performClick()
+            compose.waitUntil(15000) {
+                server.requests.any { it.first == "POST /api/installations/fixture/api/accounts" }
+            }
+            val saved = savedAccount(server)
+            assertEquals("antigravity", saved["provider"]?.jsonPrimitive?.content)
+            assertEquals("gemini", saved["modelProvider"]?.jsonPrimitive?.content)
+            assertEquals("synthetic-android-gemini-key", saved["apiKey"]?.jsonPrimitive?.content)
+            // The providers endpoint is not needed: Antigravity's connection kinds are fixed.
+            assertTrue(server.requests.none { it.first.contains("/providers/") })
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("account-sign-in").fetchSemanticsNodes().isEmpty()
+            }
+            waitText("Usage non consulté")
+            compose.onNode(hasContentDescription("Gemini, ", substring = true)).performClick()
+            waitText("Antigravity n’indique pas l’usage restant")
+            compose.onNodeWithText("Remplacer la clé API").assertExists()
+        }
+    }
+
+    @Test
+    fun `Antigravity composes Google Cloud credentials, project and region into one key`() {
+        val server = Accounts()
+        journey(
+            server,
+            { request, _ ->
+                when ("${request.method} ${request.path}") {
+                    "POST /api/installations/fixture/api/accounts" -> {
+                        val account =
+                            """{"id":"cloud","provider":"antigravity","name":"Cloud","modelProvider":"google-cloud","modelProviderName":"Google Cloud","state":"ready","status":"next"}"""
+                        server.accounts += account
+                        """{"kind":"connected","account":$account}"""
+                    }
+                    else -> null
+                }
+            },
+        ) {
+            openAntigravity()
+            compose.onNode(hasText("Google Cloud") and hasClickAction()).performClick()
+            waitText("Choisir un fichier JSON")
+            compose.onNodeWithText("Nom").performTextInput("Cloud")
+            val credentials = compose.onNode(hasText("Identifiants JSON") and hasSetTextAction())
+            credentials.performTextInput("{not json")
+            waitText("Ce fichier n’est pas un JSON valide.")
+            credentials.performTextClearance()
+            credentials.performTextInput(
+                """{"type":"service_account","client_email":"agent@cairn-test.iam.gserviceaccount.com"}"""
+            )
+            compose
+                .onNode(hasText("Projet") and hasSetTextAction())
+                .performScrollTo()
+                .performTextInput("cairn-test")
+            capture("antigravity-google-cloud-light")
+            compose.onNodeWithText("Enregistrer les identifiants").performScrollTo().performClick()
+            compose.waitUntil(15000) {
+                server.requests.any { it.first == "POST /api/installations/fixture/api/accounts" }
+            }
+            val saved = savedAccount(server)
+            assertEquals("google-cloud", saved["modelProvider"]?.jsonPrimitive?.content)
+            val key = wireJson.parseToJsonElement(saved.getValue("apiKey").jsonPrimitive.content)
+            assertEquals(
+                "service_account",
+                key.jsonObject["credentials"]?.jsonObject?.get("type")?.jsonPrimitive?.content,
+            )
+            assertEquals("cairn-test", key.jsonObject["project"]?.jsonPrimitive?.content)
+            // A blank region is left to the server, which defaults to global.
+            assertFalse("location" in key.jsonObject)
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("account-sign-in").fetchSemanticsNodes().isEmpty()
+            }
+            compose.onNode(hasContentDescription("Cloud, ", substring = true)).performClick()
+            waitText("Remplacer les identifiants")
+        }
+    }
+
+    @Test
+    fun `an Antigravity Google account signs in only after the terms warning`() {
+        val server = Accounts()
+        journey(
+            server,
+            { request, _ ->
+                when ("${request.method} ${request.path}") {
+                    "POST /api/installations/fixture/api/accounts" -> {
+                        server.signIn =
+                            """{"accountId":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","state":"pending","phase":"authorizing","url":"https://accounts.google.com/o/oauth2/auth?fixture=1","acceptsCode":true}"""
+                        server.accounts +=
+                            """{"id":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","name":"Perso","state":"pending","status":"signIn"}"""
+                        """{"kind":"signIn","signIn":${server.signIn}}"""
+                    }
+                    "POST /api/installations/fixture/api/accounts/sign-in/code" -> {
+                        server.signIn =
+                            """{"accountId":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","state":"complete","phase":"verifying"}"""
+                        server.accounts[0] =
+                            """{"id":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","name":"Perso","email":"perso@example.test","modelProvider":"google","modelProviderName":"Google account","state":"ready","status":"next"}"""
+                        """{"kind":"completed","done":true}"""
+                    }
+                    "POST /api/installations/fixture/api/accounts/00000000-0000-4000-8000-00000000a6c1/sign-in" -> {
+                        server.signIn =
+                            """{"accountId":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","state":"pending","phase":"authorizing","url":"https://accounts.google.com/o/oauth2/auth?fixture=2","acceptsCode":true}"""
+                        """{"kind":"signIn","signIn":${server.signIn}}"""
+                    }
+                    else -> null
+                }
+            },
+        ) {
+            openAntigravity()
+            compose.onNode(hasText("Compte Google") and hasClickAction()).performClick()
+            compose.onNodeWithText("Nom").performTextInput("Perso")
+            waitText("Google peut suspendre le compte")
+            capture("antigravity-google-warning-light")
+            compose.onNodeWithText("Continuer vers la connexion").performScrollTo().performClick()
+            waitText("Se connecter avec un compte Google ?")
+            compose.onNodeWithText("Annuler").performClick()
+            compose.waitForIdle()
+            assertTrue(server.requests.none { it.first.startsWith("POST") })
+            compose.onNodeWithText("Continuer vers la connexion").performScrollTo().performClick()
+            waitText("Se connecter avec un compte Google ?")
+            compose.onNodeWithText("J’accepte le risque, continuer").performClick()
+            waitText("Collez le code affiché par Google")
+            val added = savedAccount(server)
+            assertEquals("antigravity", added["provider"]?.jsonPrimitive?.content)
+            assertNull(added["modelProvider"]?.takeUnless { it is JsonNull })
+            assertNull(added["apiKey"]?.takeUnless { it is JsonNull })
+            compose.onNodeWithText("Ouvrir la connexion Google").assertExists()
+            capture("antigravity-google-sign-in-light")
+            compose.onNodeWithText("Code d’autorisation Google").performTextInput("google-code")
+            compose.onNodeWithText("Terminer la connexion").performScrollTo().performClick()
+            compose.waitUntil(15000) {
+                server.requests.any {
+                    it.first == "POST /api/installations/fixture/api/accounts/sign-in/code"
+                }
+            }
+            waitText("perso@example.test")
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("account-sign-in").fetchSemanticsNodes().isEmpty()
+            }
+            // Reconnecting a Google account signs in again, behind the same warning.
+            compose.onNode(hasContentDescription("Perso, ", substring = true)).performClick()
+            waitText("Reconnecter")
+            compose.onNodeWithText("Reconnecter").performScrollTo().performClick()
+            waitText("Se connecter avec un compte Google ?")
+            compose.onNodeWithText("J’accepte le risque, continuer").performClick()
+            compose.waitUntil(15000) {
+                server.requests.any {
+                    it.first ==
+                        "POST /api/installations/fixture/api/accounts/00000000-0000-4000-8000-00000000a6c1/sign-in"
+                }
+            }
+        }
+    }
 }

@@ -57,6 +57,7 @@ pub fn config(root: &Path) -> Config {
         claude_bin: "claude".into(),
         opencode_bin: "opencode".into(),
         opencode_go_usage_url: cairn_installation::accounts::opencode::USAGE_URL.into(),
+        antigravity_bin: "agy".into(),
         concurrency: 1,
         logger: false,
         worker_enabled: false,

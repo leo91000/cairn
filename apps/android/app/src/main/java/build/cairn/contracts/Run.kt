@@ -114,7 +114,9 @@ data class Run(
     val workspaces: List<RunWorkspace> = listOf(),
 ) {
     init {
-        accountRequired?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        accountRequired?.let {
+            require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(it))
+        }
         environmentExpirationCause?.let {
             require(
                 Regex("^(inactivity|node-change|node-revocation|storage-migration)\$")
@@ -122,7 +124,9 @@ data class Run(
             )
         }
         environmentState?.let { require(Regex("^(cleaning|expired)\$").containsMatchIn(it)) }
-        provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        provider?.let {
+            require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(it))
+        }
         require(resumeCount >= 0L)
         require(
             Regex("^(queued|running|waiting|succeeded|failed|cancelled|interrupted)\$")

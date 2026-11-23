@@ -39,7 +39,7 @@ data class ChatMessage(
     init {
         require(createdAt in 0L..9007199254740991L)
         require(Regex("^(queue|steer)\$").containsMatchIn(mode))
-        require(Regex("^(|codex|claude|opencode)\$").containsMatchIn(provider))
+        require(Regex("^(|codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
         require(Regex("^(queued|sending|delivered|cancelled)\$").containsMatchIn(status))
     }
 }

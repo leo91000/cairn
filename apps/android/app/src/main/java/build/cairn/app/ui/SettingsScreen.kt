@@ -66,7 +66,7 @@ fun SettingsScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> U
                 Text(
                     "Valeurs natives par défaut pour l’installation, personnalisables pour chaque agent."
                 )
-                for (provider in listOf("codex", "claude", "opencode")) {
+                for (provider in codingAgents.map { it.provider }) {
                     OutlinedButton(onClick = { navigate("coding-agent-configuration/$provider") }) {
                         Text(providerLabel(provider))
                     }

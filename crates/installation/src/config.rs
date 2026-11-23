@@ -18,6 +18,8 @@ pub struct Config {
     pub opencode_bin: String,
     #[serde(default = "default_opencode_go_usage_url")]
     pub opencode_go_usage_url: String,
+    #[serde(default = "default_antigravity_bin")]
+    pub antigravity_bin: String,
     pub concurrency: usize,
     pub logger: bool,
     pub worker_enabled: bool,
@@ -43,6 +45,7 @@ impl Config {
             "codexBin": get("CODEX_BIN", "codex"),
             "claudeBin": get("CLAUDE_BIN", "claude"),
             "opencodeBin": get("OPENCODE_BIN", "opencode"),
+            "antigravityBin": get("ANTIGRAVITY_BIN", "agy"),
             "concurrency": concurrency()?,
             "logger": true,
             "workerEnabled": get("WORKER_ENABLED", "true") != "false",
@@ -126,6 +129,10 @@ fn default_claude_bin() -> String {
 
 fn default_opencode_bin() -> String {
     "opencode".into()
+}
+
+fn default_antigravity_bin() -> String {
+    "agy".into()
 }
 
 pub fn concurrency() -> Result<usize> {

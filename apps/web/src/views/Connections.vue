@@ -2,7 +2,7 @@
 import type { Account, Provider } from '../../../../packages/contracts/accounts'
 import { computed, ref } from 'vue'
 import { providers } from '../../../../packages/contracts/accounts'
-import { useAccounts } from '../accounts'
+import { connectsWithKey, needsTermsConfirmation, useAccounts } from '../accounts'
 import AccountDetail from '../components/AccountDetail.vue'
 import AccountRow from '../components/AccountRow.vue'
 import AccountSignIn from '../components/AccountSignIn.vue'
@@ -39,7 +39,8 @@ const signingIn = computed(() => adding.value !== undefined || ['pending', 'fail
 
 async function reconnect(account: Account) {
   opened.value = undefined
-  if (providers[account.provider].connection === 'apiKey') {
+  // A key or credentials are replaced; a Google account sign-in first shows Google's terms.
+  if (connectsWithKey(account.provider, account.modelProvider) || needsTermsConfirmation(account.provider, account.modelProvider)) {
     replacing.value = account
     adding.value = account.provider
   }

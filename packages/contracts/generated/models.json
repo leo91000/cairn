@@ -188,7 +188,7 @@
       "additionalProperties": false,
       "properties": {
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },
@@ -231,7 +231,7 @@
               "type": "string"
             },
             "provider": {
-              "pattern": "^(codex|claude|opencode)$",
+              "pattern": "^(codex|claude|opencode|antigravity)$",
               "type": "string"
             }
           },
@@ -331,7 +331,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "state": {
@@ -380,7 +380,7 @@
           "type": "string"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "state": {
@@ -670,7 +670,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "reasoning": {
@@ -994,7 +994,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "reasoning": {
@@ -1296,7 +1296,7 @@
       "properties": {
         "accountRequired": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -1499,7 +1499,7 @@
         },
         "provider": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -1924,7 +1924,7 @@
         },
         "provider": {
           "default": "",
-          "pattern": "^(|codex|claude|opencode)$",
+          "pattern": "^(|codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "questionId": {
@@ -2010,7 +2010,7 @@
         },
         "provider": {
           "default": "",
-          "pattern": "^(|codex|claude|opencode)$",
+          "pattern": "^(|codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "reasoning": {
@@ -2303,7 +2303,7 @@
         },
         "provider": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -2585,7 +2585,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "remainingPercent": {
@@ -2652,7 +2652,7 @@
         "required": {
           "default": [],
           "items": {
-            "pattern": "^(codex|claude|opencode)$",
+            "pattern": "^(codex|claude|opencode|antigravity)$",
             "type": "string"
           },
           "type": "array"
@@ -2677,7 +2677,7 @@
           "type": "string"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },
@@ -2731,7 +2731,7 @@
           "type": "array"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "revision": {
@@ -2771,7 +2771,7 @@
           ]
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },
@@ -2861,7 +2861,7 @@
         },
         "provider": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -3000,7 +3000,7 @@
           ]
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },
@@ -3101,7 +3101,7 @@
           "type": "string"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },
@@ -3180,7 +3180,7 @@
               "type": "string"
             },
             "provider": {
-              "pattern": "^(codex|claude|opencode)$",
+              "pattern": "^(codex|claude|opencode|antigravity)$",
               "type": "string"
             }
           },
@@ -3455,7 +3455,7 @@
           "description": "Omission inherits the requester project. An explicit choice can clear it."
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -3558,7 +3558,7 @@
           ]
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -3921,7 +3921,7 @@
         },
         "provider": {
           "default": "",
-          "pattern": "^(|codex|claude|opencode)$",
+          "pattern": "^(|codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "reasoning": {
@@ -4007,7 +4007,7 @@
           "type": "array"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "reset": {
@@ -6273,7 +6273,7 @@
       "properties": {
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },
@@ -8222,7 +8222,7 @@
           "type": "string"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "revision": {
@@ -9034,7 +9034,7 @@
           "type": "array"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },
@@ -9075,7 +9075,7 @@
               "type": "string"
             },
             "provider": {
-              "pattern": "^(codex|claude|opencode)$",
+              "pattern": "^(codex|claude|opencode|antigravity)$",
               "type": "string"
             }
           },
@@ -13829,7 +13829,7 @@
         },
         "accountRequired": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -14024,7 +14024,7 @@
         },
         "provider": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -14702,7 +14702,7 @@
         },
         "accountRequired": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -16247,7 +16247,7 @@
           "type": "string"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "requestId": {

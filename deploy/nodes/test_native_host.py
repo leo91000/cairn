@@ -26,6 +26,26 @@ def release(**changes):
     return value
 
 
+def extra(**changes):
+    value = dict(extraToolsSha256='c' * 64, extraToolsSize=3, extraToolsPath='/internal/nodes/native-extra-tools')
+    value.update(changes)
+    return release(**value)
+
+
+def write_bundle(archive, files, **manifest):
+    entries = []
+    with zipfile.ZipFile(archive, 'w') as bundle:
+        bundle.writestr('bin/', b'')
+        for name, payload in files.items():
+            entries.append(dict(path='bin/' + name, size=len(payload), sha256=hashlib.sha256(payload).hexdigest()))
+            bundle.writestr('bin/' + name, payload)
+        bundle.writestr('manifest.json', json.dumps(dict(version=1, os='linux', arch='x86_64', files=entries, **manifest)))
+    return entries
+
+
+MAIN_TOOLS = ('codex', 'claude', 'opencode', 'node', 'gh', 'codex-code-mode-host')
+
+
 class NativeHostTests(unittest.TestCase):
     def test_entrypoint_exposes_only_allowlisted_prerequisite_diagnostics(self):
         source = Path(SPEC.origin).read_text()
@@ -140,6 +160,114 @@ class NativeHostTests(unittest.TestCase):
         self.assertEqual(1234, companion.kwargs['user'])
         self.assertEqual(5678, companion.kwargs['group'])
         self.assertEqual([], companion.kwargs['extra_groups'])
+
+    def test_extra_tool_bundle_is_optional_but_complete_when_named(self):
+        self.assertEqual(extra(), host.validate_release(extra()))
+        self.assertFalse(host.has_extra_tools(host.validate_release(release())))
+        self.assertEqual('a' * 64 + '-' + 'b' * 64, host.version_name(release()))
+        self.assertEqual('a' * 64 + '-' + 'b' * 64 + '-' + 'c' * 64, host.version_name(extra()))
+        partial = extra()
+        partial.pop('extraToolsSize')
+        for value in (partial, extra(extraToolsSha256='../escape'), extra(extraToolsPath='/internal/nodes/native-tools'),
+                      extra(extraToolsSize=256 * 1024 * 1024 + 1), extra(extraToolsSize=0), extra(extraToolsSize='3')):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                host.validate_release(value)
+
+    def test_extra_tools_join_the_workload_bin_directory_and_are_rechecked(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = b'approved executable'
+            write_bundle(root / 'tools.zip', {name: payload for name in MAIN_TOOLS})
+            host.unpack_tools(root / 'tools.zip', root)
+            write_bundle(root / 'extra-tools.zip', {'agy': b'approved antigravity'}, bundle='extra')
+            host.unpack_extra_tools(root / 'extra-tools.zip', root)
+            agy = root / 'tools/bin/agy'
+            self.assertEqual(b'approved antigravity', agy.read_bytes())
+            self.assertEqual(0o555, agy.stat().st_mode & 0o777)
+            self.assertEqual(['bin/agy'], [entry['path'] for entry in json.loads((root / 'tools/extra-manifest.json').read_text())['files']])
+            (root / 'cairn').write_bytes(payload)
+            metadata = extra(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+            host.verify_installed(root, metadata)
+            agy.chmod(0o755)
+            agy.write_bytes(b'corrupted antigravity')
+            with self.assertRaisesRegex(ValueError, 'Installed native'):
+                host.verify_installed(root, metadata)
+            (root / 'tools/extra-manifest.json').unlink()
+            with self.assertRaises(OSError):
+                host.verify_installed(root, metadata)
+
+    def test_extra_tool_bundle_cannot_replace_or_add_unlisted_tools(self):
+        for files, manifest in [({'agy': b'x', 'codex': b'x'}, dict(bundle='extra')), ({'codex': b'x'}, dict(bundle='extra')),
+                                ({'agy': b'x'}, {}), ({'agy': b'x'}, dict(bundle='main'))]:
+            with self.subTest(files=list(files), manifest=manifest), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                write_bundle(root / 'tools.zip', {name: b'approved' for name in MAIN_TOOLS})
+                host.unpack_tools(root / 'tools.zip', root)
+                write_bundle(root / 'extra-tools.zip', files, **manifest)
+                with self.assertRaisesRegex(ValueError, 'native tool'):
+                    host.unpack_extra_tools(root / 'extra-tools.zip', root)
+                self.assertEqual(b'approved', (root / 'tools/bin/codex').read_bytes())
+                self.assertFalse((root / 'tools/extra-manifest.json').exists())
+
+    def test_prepare_installs_the_extra_bundle_named_by_the_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / 'stage'
+            stage.mkdir()
+            binary = b'#!/bin/sh\nexit 0\n'
+            write_bundle(stage / 'tools.zip', {name: b'tool' for name in MAIN_TOOLS})
+            write_bundle(stage / 'extra-tools.zip', {'agy': b'antigravity'}, bundle='extra')
+            payloads = {'/internal/nodes/native-binary': binary, '/internal/nodes/native-tools': (stage / 'tools.zip').read_bytes(),
+                        '/internal/nodes/native-extra-tools': (stage / 'extra-tools.zip').read_bytes()}
+            digest = lambda data: hashlib.sha256(data).hexdigest()
+            metadata = extra(sha256=digest(binary), size=len(binary),
+                             toolsSha256=digest(payloads['/internal/nodes/native-tools']), toolsSize=len(payloads['/internal/nodes/native-tools']),
+                             extraToolsSha256=digest(payloads['/internal/nodes/native-extra-tools']),
+                             extraToolsSize=len(payloads['/internal/nodes/native-extra-tools']))
+            requested = []
+
+            def request(_manager, endpoint, _payload=None, _token=None):
+                requested.append(endpoint)
+                return io.BytesIO(payloads[endpoint])
+
+            with patch.object(host, 'INSTALL', root / 'install'), patch.object(host, 'request', side_effect=request):
+                directory = host.prepare('https://manager.test', metadata, token='synthetic')
+            self.assertEqual(host.version_name(metadata), directory.name)
+            self.assertEqual(list(payloads), requested)
+            self.assertEqual(b'antigravity', (directory / 'tools/bin/agy').read_bytes())
+            self.assertFalse((directory / 'extra-tools.zip').exists())
+            host.verify_installed(directory, metadata)
+
+    def test_version_installed_without_the_extra_bundle_is_replaced(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            versions = Path(temporary)
+            metadata = extra()
+            legacy = versions / (metadata['sha256'] + '-' + metadata['toolsSha256'])
+            current = versions / host.version_name(metadata)
+            for directory in (legacy, current):
+                directory.mkdir()
+                # Supervisors record the full release they were offered, including fields they ignore.
+                (directory / 'release.json').write_text(json.dumps(metadata))
+            self.assertFalse(host.installed_matches(legacy, metadata))
+            self.assertTrue(host.installed_matches(current, metadata))
+            self.assertFalse(host.installed_matches(current, extra(extraToolsSha256='d' * 64)))
+            (legacy / 'release.json').write_text(json.dumps(release()))
+            self.assertTrue(host.installed_matches(legacy, release()))
+
+    def test_workload_probe_runs_extra_tools_without_self_updates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'tools').mkdir()
+            (root / 'tools/manifest.json').write_text(json.dumps(dict(version=1, os='linux', arch='x86_64',
+                                                                        files=[{'path': 'bin/' + name} for name in MAIN_TOOLS])))
+            (root / 'tools/extra-manifest.json').write_text(json.dumps(dict(version=1, os='linux', arch='x86_64', bundle='extra',
+                                                                              files=[{'path': 'bin/agy'}])))
+            with patch.object(host.pwd, 'getpwnam', return_value=Mock(pw_uid=1234, pw_gid=5678)), \
+                    patch.object(host.os, 'chown'), patch.object(host.subprocess, 'run') as run:
+                host.verify_workload_tools(root)
+            agy = run.call_args_list[-1]
+            self.assertEqual([str(root / 'tools/bin/agy'), '--version'], agy.args[0])
+            self.assertEqual('true', agy.kwargs['env']['AGY_CLI_DISABLE_AUTO_UPDATE'])
 
     def test_inventory_rejects_unlisted_companions_and_duplicate_entries(self):
         files = [{'path': 'bin/' + name} for name in ('codex', 'claude', 'opencode', 'node', 'gh', 'codex-code-mode-host')]
@@ -341,8 +469,8 @@ class NativeHostTests(unittest.TestCase):
             (data / 'state/native/run').mkdir(parents=True)
             (data / 'state/native/run/runtime.json').write_text(json.dumps(dict(runtimeId='pinned')))
             paths = []
-            for index, runtime in enumerate(('current', 'previous', 'pinned', 'unused')):
-                path = install / 'versions' / ((str(index) * 64) + '-' + (str(index) * 64))
+            for index, runtime in enumerate(('current', 'previous', 'pinned', 'unused', 'unused-extra')):
+                path = install / 'versions' / '-'.join([str(index) * 64] * (3 if index % 2 else 2))
                 path.mkdir()
                 (path / 'release.json').write_text(json.dumps(dict(runtimeId=runtime)))
                 paths.append(path)
@@ -350,6 +478,7 @@ class NativeHostTests(unittest.TestCase):
                 host.collect_versions(paths[0], paths[1])
             self.assertTrue(all(path.exists() for path in paths[:3]))
             self.assertFalse(paths[3].exists())
+            self.assertFalse(paths[4].exists())
 
     def test_failed_candidate_health_retains_candidate_for_restart(self):
         candidate = Path('/synthetic/candidate')

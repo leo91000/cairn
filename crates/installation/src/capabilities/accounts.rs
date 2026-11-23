@@ -336,15 +336,17 @@ impl AccountOperation {
                         "connect_coding_agent_account" => {
                             let input: ConnectAccountInput = decode(input)?;
                             let provider: crate::provider::Provider = input.provider.into();
-                            if !provider.driver().accepts_api_keys()
-                                && (input.api_key.is_some() || input.model_provider.is_some())
-                            {
+                            let with_key =
+                                input.api_key.is_some() || input.model_provider.is_some();
+                            if !provider.driver().accepts_api_keys() && with_key {
                                 ConnectAccountOutput::Unsupported {
                                     provider: input.provider,
                                     capability: "apiKey".into(),
                                     message: "This coding agent does not accept API keys.".into(),
                                 }
-                            } else if provider.driver().accepts_api_keys() {
+                            } else if provider.driver().accepts_api_keys()
+                                && (with_key || !provider.driver().signs_in(None))
+                            {
                                 ConnectAccountOutput::Connected {
                                     account: Box::new(
                                         s.accounts
@@ -369,7 +371,7 @@ impl AccountOperation {
                             let input: AccountInput = decode(input)?;
                             uuid(&input.account_id)?;
                             let account = s.accounts.account(s, &input.account_id).await?;
-                            if account.provider.driver().accepts_api_keys() {
+                            if !account.provider.driver().signs_in(Some(&account)) {
                                 ConnectAccountOutput::Unsupported {
                                     provider: account.provider.into(), capability: "signIn".into(),
                                     message: "Reconnect this coding agent by replacing its provider API key.".into(),
@@ -384,7 +386,9 @@ impl AccountOperation {
                             let input: ReplaceAccountKeyInput = decode(input)?;
                             uuid(&input.account_id)?;
                             let account = s.accounts.account(s, &input.account_id).await?;
-                            if !account.provider.driver().accepts_api_keys() {
+                            if !account.provider.driver().accepts_api_keys()
+                                || account.provider.driver().signs_in(Some(&account))
+                            {
                                 ConnectAccountOutput::Unsupported {
                                     provider: account.provider.into(),
                                     capability: "apiKey".into(),
@@ -548,6 +552,7 @@ mod tests {
             claude_bin: "/nonexistent-claude".into(),
             opencode_bin: "/nonexistent-opencode".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            antigravity_bin: "agy".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,

@@ -15,7 +15,14 @@ fn snapshot(db: &Connection) -> BTreeMap<String, (String, Vec<Vec<Value>>)> {
     let tables = db
         .prepare("SELECT name,sql FROM sqlite_schema WHERE type='table' ORDER BY name")
         .unwrap()
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        // Version 37 only adds Antigravity to coding-agent constraints; earlier
+        // upgrades are compared without it.
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?.replace(",'antigravity'", ""),
+            ))
+        })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
@@ -87,7 +94,7 @@ async fn upgrades_real_previous_store_with_order_privacy_and_unrelated_data_inta
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        36
+        37
     );
     for table in ["chat_messages", "chat_questions"] {
         assert_eq!(

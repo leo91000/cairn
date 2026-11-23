@@ -22,7 +22,9 @@ data class ChatSideQuestion(
 ) {
     init {
         require(createdAt in 0L..9007199254740991L)
-        provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        provider?.let {
+            require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(it))
+        }
         settledAt?.let { require(it in 0L..9007199254740991L) }
         require(Regex("^(pending|answered|failed|cancelled)\$").containsMatchIn(status))
     }

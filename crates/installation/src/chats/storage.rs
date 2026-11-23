@@ -193,7 +193,7 @@ CREATE TABLE chat_messages(
     chat_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     revision TEXT NOT NULL CHECK(length(revision)>0),
     text TEXT NOT NULL,
-    provider TEXT NOT NULL CHECK(provider IN ('','codex','claude','opencode')),
+    provider TEXT NOT NULL CHECK(provider IN ('','codex','claude','opencode','antigravity')),
     model TEXT NOT NULL,
     reasoning TEXT NOT NULL,
     speed TEXT NOT NULL,

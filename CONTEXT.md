@@ -126,7 +126,7 @@ Une conversation supprimée par l’utilisateur, masquée pendant l’effacement
 Retour d’une conversation à l’état actif, sans relancer l’agent, les envois annulés ni les liens publics révoqués.
 
 **Agent de code** :
-Le moteur qui exécute le travail d’un agent : Codex (OpenAI), Claude Code (Anthropic) ou OpenCode. Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre. Quand un quota bloque la demande en cours, l’utilisateur peut choisir un autre agent de code disposant d’un compte disponible pour reprendre cette même demande avec son historique et ses fichiers.
+Le moteur qui exécute le travail d’un agent : Codex (OpenAI), Claude Code (Anthropic), OpenCode ou Antigravity (Google). Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre. Quand un quota bloque la demande en cours, l’utilisateur peut choisir un autre agent de code disposant d’un compte disponible pour reprendre cette même demande avec son historique et ses fichiers.
 _À éviter_ : fournisseur, driver, assistant de code.
 
 **Configuration d’un agent de code** :
@@ -137,7 +137,7 @@ _À éviter_ : profil (qui suggère une configuration réutilisable indépendant
 Un réglage propre à un agent Cairn qui remplace la valeur de l’installation. Retirer cette personnalisation fait suivre à nouveau les changements du défaut de l’installation, même lorsque les deux valeurs étaient identiques.
 
 **Compte d’agent de code** :
-Un abonnement connecté à un agent de code (un compte ChatGPT pour Codex, un compte Claude pour Claude Code) ou une clé API liée à un fournisseur de modèles pour OpenCode (par exemple OpenCode Zen). Les exécutions consomment son usage. Un agent de code peut avoir plusieurs comptes ; un compte en pause n’est plus choisi pour les nouvelles exécutions.
+Un abonnement connecté à un agent de code (un compte ChatGPT pour Codex, un compte Claude pour Claude Code) ou une clé API liée à un fournisseur de modèles pour OpenCode (par exemple OpenCode Zen), ou, pour Antigravity, une clé API Gemini, des identifiants Google Cloud ou un compte Google (que les conditions d’Antigravity interdisent depuis une application tierce). Les exécutions consomment son usage. Un agent de code peut avoir plusieurs comptes ; un compte en pause n’est plus choisi pour les nouvelles exécutions.
 _À éviter_ : connexion Claude, compte Codex (sauf pour désigner un compte de cet agent de code).
 
 **Fenêtre d’usage** :
@@ -160,7 +160,7 @@ dans le même fil, avec les droits habituels de l’agent.
 _À éviter_ : plan de travail (la liste de progression d’un agent qui travaille).
 
 **Vitesse** :
-Le niveau de service Codex demandé pour un tour (Standard, Fast, Ultrafast…), choisi indépendamment du modèle et du raisonnement pour le prochain message ou par défaut sur un agent. Seuls les niveaux que le catalogue Codex d’un compte annonce pour le modèle sont proposés ; une vitesse plus rapide consomme plus vite l’usage du compte. Claude Code et OpenCode n’en proposent pas.
+Le niveau de service Codex demandé pour un tour (Standard, Fast, Ultrafast…), choisi indépendamment du modèle et du raisonnement pour le prochain message ou par défaut sur un agent. Seuls les niveaux que le catalogue Codex d’un compte annonce pour le modèle sont proposés ; une vitesse plus rapide consomme plus vite l’usage du compte. Claude Code, OpenCode et Antigravity n’en proposent pas.
 _À éviter_ : tier, mode rapide (sauf pour nommer le niveau Fast de Codex).
 
 **Question d’un agent** :
@@ -173,7 +173,7 @@ Un ensemble d’une ou plusieurs questions d’un agent auxquelles une personne,
 Le texte libre qu’une personne ajoute aux choix retenus pour une question d’un agent, afin de préciser sa réponse.
 
 **Question à côté** :
-Une question d’explication posée pendant qu’un agent travaille sur une réponse, sur l’une de ses réponses ou un passage choisi. Claude Code y répond depuis le contexte de la conversation en refusant les outils demandés ; les hooks de politique gérée par l’opérateur peuvent toutefois s’exécuter avant ce refus et produire des effets ; Codex et OpenCode ne le proposent pas, faute de pouvoir retirer leurs outils avant la réponse ; la réponse s’affiche à part, reliée à la réponse concernée. Elle ne dirige pas le travail en cours, n’entre pas dans la file d’attente et ne modifie pas l’historique de la conversation.
+Une question d’explication posée pendant qu’un agent travaille sur une réponse, sur l’une de ses réponses ou un passage choisi. Claude Code y répond depuis le contexte de la conversation en refusant les outils demandés ; les hooks de politique gérée par l’opérateur peuvent toutefois s’exécuter avant ce refus et produire des effets ; Antigravity y répond depuis une copie de la conversation enregistrée jusqu’à sa dernière étape terminée, en refusant tous les outils ; Codex et OpenCode ne le proposent pas, faute de pouvoir retirer leurs outils avant la réponse ; la réponse s’affiche à part, reliée à la réponse concernée. Elle ne dirige pas le travail en cours, n’entre pas dans la file d’attente et ne modifie pas l’historique de la conversation.
 _Avoid_ : steering, message, fork de conversation
 
 **Demandeur d’une mission** :

@@ -130,6 +130,9 @@ jobs:
       gh: ${{ steps.tools.outputs.gh }}
       claude: ${{ steps.tools.outputs.claude }}
       opencode: ${{ steps.tools.outputs.opencode }}
+      antigravity: ${{ steps.tools.outputs.antigravity }}
+      antigravity-url: ${{ steps.tools.outputs.antigravity-url }}
+      antigravity-sha512: ${{ steps.tools.outputs.antigravity-sha512 }}
       served-found: ${{ steps.served.outputs.found }}
       served-claude: ${{ steps.served.outputs.claude }}
       served-opencode: ${{ steps.served.outputs.opencode }}
@@ -155,6 +158,7 @@ jobs:
           GH_VERSION: ${{ steps.tools.outputs.gh }}
           CLAUDE_VERSION: ${{ steps.tools.outputs.claude }}
           OPENCODE_VERSION: ${{ steps.tools.outputs.opencode }}
+          ANTIGRAVITY_VERSION: ${{ steps.tools.outputs.antigravity }}
           SERVED_FOUND: ${{ steps.served.outputs.found }}
           SERVED_CLAUDE: ${{ steps.served.outputs.claude }}
           SERVED_OPENCODE: ${{ steps.served.outputs.opencode }}
@@ -477,6 +481,27 @@ jobs:
             qualify "$served" "$resolved"
             qualify "$resolved" "$served"
           fi
+      - name: Qualify the resolved Antigravity release against its native adapter
+        if: inputs.backend-only != true
+        env:
+          ANTIGRAVITY_VERSION: ${{ needs.resolve.outputs.antigravity }}
+          ANTIGRAVITY_URL: ${{ needs.resolve.outputs.antigravity-url }}
+          ANTIGRAVITY_SHA512: ${{ needs.resolve.outputs.antigravity-sha512 }}
+        run: |
+          # Google's updater publishes only its current release, so the release this build
+          # ships is the only one installable: no oldest-supported or rollback release.
+          # Install it exactly as the image does: the resolved archive, checked by SHA-512.
+          directory="$RUNNER_TEMP/antigravity-$ANTIGRAVITY_VERSION"
+          mkdir -p "$directory/bin" "$directory/home"
+          curl --fail --silent --show-error --location "$ANTIGRAVITY_URL" --output "$directory/cli.tar.gz"
+          printf '%s  %s\n' "$ANTIGRAVITY_SHA512" "$directory/cli.tar.gz" | sha512sum --check -
+          tar -xzf "$directory/cli.tar.gz" -C "$directory/bin" antigravity
+          mv "$directory/bin/antigravity" "$directory/bin/agy"
+          rm "$directory/cli.tar.gz"
+          export AGY_CLI_DISABLE_AUTO_UPDATE=true
+          test "$(HOME="$directory/home" "$directory/bin/agy" --version)" = "$ANTIGRAVITY_VERSION"
+          ANTIGRAVITY_NATIVE_BIN="$directory/bin/agy" \
+            node scripts/test-backend.mjs -p cairn-installation --test antigravity -- --ignored
       - name: Qualify plan turns of the resolved Claude Code and Codex releases
         # Backend-only runs resolve no engine release; full runs qualify the ones they ship.
         if: inputs.backend-only != true
@@ -1201,6 +1226,9 @@ jobs:
             GH_VERSION=${{ needs.resolve.outputs.gh }}
             CLAUDE_VERSION=${{ needs.resolve.outputs.claude }}
             OPENCODE_VERSION=${{ needs.resolve.outputs.opencode }}
+            ANTIGRAVITY_VERSION=${{ needs.resolve.outputs.antigravity }}
+            ANTIGRAVITY_URL=${{ needs.resolve.outputs.antigravity-url }}
+            ANTIGRAVITY_SHA512=${{ needs.resolve.outputs.antigravity-sha512 }}
           # Main and version tags preserve compiler layers for later qualifications.
           # Pull request refs restore this cache without uploading to it.
           cache-from: |
@@ -1297,6 +1325,7 @@ jobs:
           GH_VERSION: ${{ needs.resolve.outputs.gh }}
           CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
+          ANTIGRAVITY_VERSION: ${{ needs.resolve.outputs.antigravity }}
           CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
           CAIRN_SMOKE_BEACON_BINARY: beacon-smoke-bin/cairn-beacon
         run: |
@@ -1435,6 +1464,9 @@ jobs:
             GH_VERSION=${{ needs.resolve.outputs.gh }}
             CLAUDE_VERSION=${{ needs.resolve.outputs.claude }}
             OPENCODE_VERSION=${{ needs.resolve.outputs.opencode }}
+            ANTIGRAVITY_VERSION=${{ needs.resolve.outputs.antigravity }}
+            ANTIGRAVITY_URL=${{ needs.resolve.outputs.antigravity-url }}
+            ANTIGRAVITY_SHA512=${{ needs.resolve.outputs.antigravity-sha512 }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
           secrets: github_token=${{ github.token }}
@@ -1486,6 +1518,7 @@ jobs:
           GH_VERSION: ${{ needs.resolve.outputs.gh }}
           CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
+          ANTIGRAVITY_VERSION: ${{ needs.resolve.outputs.antigravity }}
           SERVED_FOUND: ${{ needs.resolve.outputs.served-found }}
           SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
           SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
@@ -1493,7 +1526,7 @@ jobs:
           mkdir -p release-evidence
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs'
-          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION, claude: process.env.CLAUDE_VERSION, opencode: process.env.OPENCODE_VERSION }, served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null }))
+          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION, claude: process.env.CLAUDE_VERSION, opencode: process.env.OPENCODE_VERSION, antigravity: process.env.ANTIGRAVITY_VERSION }, served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null }))
           JS
       - uses: actions/upload-artifact@v7.0.1
         if: github.ref == 'refs/heads/main' && github.event_name == 'schedule'

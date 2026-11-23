@@ -58,7 +58,7 @@ data class CodingAgentAccount(
     init {
         require(maxConcurrentRuns >= 0L)
         priority?.let { require(it >= 0L) }
-        require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+        require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
         require(Regex("^(pending|ready|error)\$").containsMatchIn(state))
         require(
             Regex("^(signIn|reconnect|paused|unavailable|waiting|full|next|low|ready)\$")

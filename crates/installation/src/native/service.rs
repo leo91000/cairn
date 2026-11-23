@@ -1653,7 +1653,7 @@ impl Controller {
             // Managed rootful Docker uses its own store and the workload cgroup.
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
-            for field in ["codexConfig", "claudeMcps", "opencodeConfig", "args"] {
+            for field in MCP_FIELDS {
                 if let Some(value) = plan["chat"].get_mut(field) {
                     replace_origin(value, &origin);
                 }
@@ -2490,6 +2490,15 @@ fn guest_data(plan: &Value, data: &Path) -> PathBuf {
         .as_str()
         .map_or_else(|| data.to_owned(), PathBuf::from)
 }
+
+/// The chat plan fields where coding agents carry MCP server URLs.
+const MCP_FIELDS: [&str; 5] = [
+    "codexConfig",
+    "claudeMcps",
+    "opencodeConfig",
+    "antigravityMcp",
+    "args",
+];
 
 fn replace_origin(value: &mut Value, origin: &str) {
     match value {
@@ -6436,5 +6445,36 @@ pub(crate) mod tests {
         controller.start(&existing).await.unwrap();
         controller.active.lock().await.remove(&existing);
         assert_ne!(controller.start(&attempt).await.unwrap_err().status, 503);
+    }
+}
+
+#[cfg(test)]
+mod mcp_field_tests {
+    use super::MCP_FIELDS;
+    use crate::{
+        coding_agent::mcp::{Configuration, Server},
+        provider::Provider,
+    };
+
+    #[test]
+    fn administrator_relays_rewrite_every_coding_agents_mcp_fields() {
+        let mut configuration = Configuration::new("token".into());
+        configuration.servers.insert(
+            "cairn_workspace".into(),
+            Server::Http {
+                url: format!("{}/mcp-workspace", crate::microvm::mcp::ORIGIN),
+                timeout: None,
+                enabled_tools: None,
+            },
+        );
+        for provider in Provider::ALL {
+            let adapter = provider.adapter();
+            let chat = adapter.chat_mcp(&adapter.mcp_configuration(&configuration).unwrap());
+            for (field, value) in chat.as_object().unwrap() {
+                if value.to_string().contains(crate::microvm::mcp::ORIGIN) {
+                    assert!(MCP_FIELDS.contains(&field.as_str()), "{provider:?} {field}");
+                }
+            }
+        }
     }
 }

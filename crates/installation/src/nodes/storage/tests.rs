@@ -22,6 +22,7 @@ async fn service_with_runner(root: &Path, runner_url: String) -> Arc<Service> {
         claude_bin: "false".into(),
         opencode_bin: "false".into(),
         opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+        antigravity_bin: "agy".into(),
         concurrency: 1,
         logger: false,
         worker_enabled: false,

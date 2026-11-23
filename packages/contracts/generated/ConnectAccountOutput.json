@@ -62,7 +62,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "state": {
@@ -279,7 +279,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "remainingPercent": {
@@ -401,7 +401,7 @@
           "type": "string"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },

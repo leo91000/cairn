@@ -18,6 +18,6 @@ data class EditCodingAgentConfigurationInput(
         agentId?.let { java.util.UUID.fromString(it) }
         require(changes.size <= 200)
         require(inheritPaths.size <= 1000)
-        require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+        require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
     }
 }

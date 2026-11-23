@@ -83,7 +83,10 @@ pub struct RunState {
     #[ts(optional = nullable)]
     pub account_wait_reason: Option<String>,
     #[serde(default)]
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     #[ts(optional = nullable)]
     pub account_required: Option<AgentProvider>,
     #[serde(default)]
@@ -164,7 +167,10 @@ pub struct Run {
     #[serde(default)]
     pub agent_name: String,
     #[serde(default)]
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     #[ts(optional = nullable)]
     pub provider: Option<AgentProvider>,
     #[serde(default)]

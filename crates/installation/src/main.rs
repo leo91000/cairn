@@ -96,6 +96,13 @@ where
             Err(_) => ExitCode::FAILURE,
         };
     }
+    // Antigravity refuses the tool unless this prints an allow decision.
+    if args.first().is_some_and(|arg| arg == "antigravity-hook") {
+        return match cairn_installation::antigravity::hook::main(&args[1..]) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     cairn_installation::tls::install_provider();
 
     if args.first().is_some_and(|arg| arg == "native-enclave")

@@ -367,6 +367,7 @@ impl Fixture {
             claude_bin: common::fixture("claude.mjs"),
             opencode_bin,
             opencode_go_usage_url: cairn_installation::accounts::opencode::USAGE_URL.into(),
+            antigravity_bin: "agy".into(),
             concurrency,
             worker_enabled: true,
             ..common::config(root.path())

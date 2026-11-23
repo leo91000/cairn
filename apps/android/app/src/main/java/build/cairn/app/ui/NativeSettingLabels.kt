@@ -40,6 +40,9 @@ internal fun CodingAgentSetting.inFrench(): CodingAgentSetting {
                 "Niveau des journaux natifs" to "Niveau de détail des diagnostics du moteur."
             "/default_agent" ->
                 "Agent natif" to "Nom d’un agent OpenCode disponible dans l’exécution."
+            "/enableTerminalSandbox" ->
+                "Sandbox du terminal" to
+                    "Exécuter les commandes shell dans le sandbox du terminal d’Antigravity. Ce n’est pas une limite réseau ni d’espace de travail : Antigravity 1.5.14 n’y refuse que l’accès direct par IP."
             "/model" -> "Modèle" to "Même valeur que dans les réglages de l’agent Cairn."
             "/model_reasoning_effort",
             "/effortLevel" ->
@@ -96,6 +99,12 @@ internal fun nativeManagedReason(path: String): String =
             "Les plugins natifs ne sont pas pris en charge. Utilisez les skills et les plugins Cairn."
         "compaction.auto" ->
             "La compaction automatique d’OpenCode n’est pas compatible avec la reprise des sessions dans Cairn."
+        "permissions.allow / toolPermission / agentMode" ->
+            "Le hook et les réglages de lancement de Cairn sont la limite. Les réglages natifs peuvent ajouter des règles deny, jamais autoriser davantage."
+        "modelProvider / model" ->
+            "Le type de compte et le modèle de l’agent Cairn choisissent le modèle natif."
+        "hooks / plugins / MCP" ->
+            "Cairn génère la politique du hook et les serveurs MCP autorisés. Utilisez les skills et les plugins Cairn."
         "autoupdate / share" ->
             "Cairn utilise des versions validées du moteur et désactive le partage natif."
         else -> path

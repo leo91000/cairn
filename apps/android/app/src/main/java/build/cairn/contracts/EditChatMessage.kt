@@ -21,7 +21,7 @@ data class EditChatMessage(
         require(attachmentIds.size <= 8)
         require(Regex("^(queue|steer)\$").containsMatchIn(mode))
         require(Regex("^[\\w./:\\[\\]-]*\$").containsMatchIn(model))
-        require(Regex("^(|codex|claude|opencode)\$").containsMatchIn(provider))
+        require(Regex("^(|codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(reasoning))
         speed?.let { require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(it)) }
     }

@@ -213,6 +213,13 @@ const COMMANDS: &[Command] = &[
         details: "Private stdin/stdout protocol. Started by Cairn; not an interactive command.",
         internal: true,
     },
+    Command {
+        name: "antigravity-hook",
+        arguments: "<policy-path>",
+        description: "Decide one Antigravity tool call for Cairn's hook policy.",
+        details: "Run by the Antigravity CLI before each tool call; not an interactive command.",
+        internal: true,
+    },
 ];
 
 const PLUGIN_HELP: &str = "Usage:

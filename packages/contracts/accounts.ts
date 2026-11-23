@@ -16,7 +16,8 @@ export const providers: Record<Provider, {
   label: string
   vendor: string
   subscription: string
-  connection: 'oauth' | 'apiKey'
+  /** `choice`: a provider key or credentials, or a sign-in with the vendor's account. */
+  connection: 'oauth' | 'apiKey' | 'choice'
   requiresModel: boolean
   /** Runs try accounts in the user's order instead of by remaining capacity. */
   ordered: boolean
@@ -50,6 +51,16 @@ export const providers: Record<Provider, {
     ordered: true,
     // OpenCode runs only in YOLO environments, without a sandbox Cairn could narrow.
     planTurns: false,
+  },
+  antigravity: {
+    label: 'Antigravity',
+    vendor: 'Google',
+    subscription: 'Gemini API or Google account',
+    connection: 'choice',
+    requiresModel: false,
+    ordered: true,
+    // Cairn's hook allows only reading tools during a plan turn, without a shell.
+    planTurns: true,
   },
 }
 

@@ -63,6 +63,28 @@ describe('coding-agent model catalogs', () => {
     expect(modelCatalogs.opencode.catalog.nativeDefaults).toBeUndefined()
   })
 
+  it('loads the Antigravity catalog with its reasoning levels from its own endpoint', async () => {
+    const gemini = {
+      model: 'gemini-4-neon',
+      displayName: 'Gemini 4 Neon',
+      description: 'Via Gemini API, Google Cloud',
+      isDefault: true,
+      defaultReasoningEffort: 'high',
+      supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }, { reasoningEffort: 'high', description: '' }],
+    }
+    request.mockResolvedValueOnce({
+      models: [gemini],
+      checkedAt: 1,
+      stale: false,
+      error: '',
+    })
+    const { modelCatalogs } = await import('../src/models')
+    await modelCatalogs.antigravity.load()
+    expect(request).toHaveBeenCalledWith('/antigravity/models', { method: 'GET' })
+    expect(modelCatalogs.antigravity.catalog.models).toEqual([gemini])
+    expect(localStorage.getItem('fixture-installation:cairn-models:antigravity')).toContain('gemini-4-neon')
+  })
+
   it('deduplicates requests per engine while refreshing different engines independently', async () => {
     let resolveCodex!: (value: unknown) => void
     const codex = new Promise(resolve => resolveCodex = resolve)

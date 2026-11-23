@@ -87,6 +87,7 @@ async function main() {
       gh: 'GH_VERSION',
       claude: 'CLAUDE_VERSION',
       opencode: 'OPENCODE_VERSION',
+      antigravity: 'ANTIGRAVITY_VERSION',
     })) {
       assert.match(version.tools[tool] ?? '', /^\d+\.\d+\.\d+$/, `${tool} version is recorded`)
       if (process.env[variable])
@@ -97,6 +98,13 @@ async function main() {
     assert.equal(claudeVersion, `${version.tools.claude} (Claude Code)`, 'official Claude Code CLI is installed')
     const opencodeVersion = (await docker('exec', name, 'opencode', '--version')).stdout.trim()
     assert.equal(opencodeVersion, version.tools.opencode, 'official OpenCode CLI is installed')
+    // Antigravity writes state under HOME even for --version; keep it out of the persistent home.
+    const antigravityVersion = (await docker('exec', name, 'sh', '-c', 'home=$(mktemp -d) && HOME="$home" agy --version && rm -rf "$home"')).stdout.trim()
+    assert.equal(antigravityVersion, version.tools.antigravity, 'official Antigravity CLI is installed')
+    assert.equal((await docker('exec', name, 'printenv', 'AGY_CLI_DISABLE_AUTO_UPDATE')).stdout.trim(), 'true', 'Antigravity never updates itself')
+    // Native nodes receive Antigravity in its own bundle, beside the first one.
+    const extraTools = (await docker('exec', name, 'python3', '-c', 'import json,zipfile; print(json.dumps(json.loads(zipfile.ZipFile("/opt/cairn-native-extra-tools.zip").read("manifest.json"))))')).stdout
+    assert.deepEqual(JSON.parse(extraTools).files.map(file => file.path), ['bin/agy'], 'native Antigravity bundle is published')
     assert.equal(typeof version.commit, 'string')
     const expectedCommit = process.env.SMOKE_COMMIT || process.env.GITHUB_SHA
     if (expectedCommit)

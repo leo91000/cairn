@@ -1514,3 +1514,26 @@ async fn codex_compaction_prompt_files_are_refused_and_never_attested_when_alrea
         .await
         .unwrap();
 }
+
+#[test]
+fn antigravity_settings_only_add_deny_rules_and_the_terminal_sandbox() {
+    let valid = json!({
+        "enableTerminalSandbox": true,
+        "permissions": { "deny": ["command(rm)", "write_file(/etc)"] },
+    });
+    assert!(validate(Provider::Antigravity, &valid).is_ok());
+    for refused in [
+        // agy runs an ask rule's tool anyway under Cairn's launch flags.
+        json!({ "permissions": { "ask": ["command(rm)"] } }),
+        json!({ "permissions": { "allow": ["command(*)"] } }),
+        json!({ "toolPermission": "always-proceed" }),
+        json!({ "modelProvider": "gemini" }),
+        json!({ "permissions": { "deny": ["rm"] } }),
+        json!({ "enableTerminalSandbox": "yes" }),
+    ] {
+        assert!(
+            validate(Provider::Antigravity, &refused).is_err(),
+            "{refused}"
+        );
+    }
+}
