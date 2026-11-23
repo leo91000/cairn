@@ -69,6 +69,21 @@ impl Process {
         }
         Err(io::Error::last_os_error())
     }
+
+    fn exit_is_waitable(&self) -> bool {
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // A readable pidfd alone is insufficient: a tracer can hold a zombie's
+        // exit status. Check that we can reap it without consuming that status.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PIDFD,
+                self.descriptor.as_raw_fd() as libc::id_t,
+                &raw mut status,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        result == 0 && unsafe { status.si_pid() > 0 }
+    }
 }
 
 /// Blocking entry point, invoked before starting a runtime or helper threads.
@@ -76,6 +91,10 @@ impl Process {
 /// The helper inherits the workload UID, namespaces, cgroup, cwd and environment.
 /// It does not accept credentials, paths or privileges in the job request.
 pub fn helper() -> io::Result<()> {
+    run_helper(Process::signal)
+}
+
+fn run_helper(signal_child: impl FnMut(&Process, i32) -> io::Result<()>) -> io::Result<()> {
     let mut kind = 0;
     let mut length = std::mem::size_of::<i32>() as libc::socklen_t;
     if unsafe {
@@ -108,7 +127,7 @@ pub fn helper() -> io::Result<()> {
     let request = read_request(&mut control)?;
     control.set_read_timeout(None)?;
     control.set_nonblocking(true)?;
-    let receipt = supervise(&mut control, &request)?;
+    let receipt = supervise(&mut control, &request, signal_child)?;
     control.set_nonblocking(false)?;
     control.set_write_timeout(Some(Duration::from_secs(2)))?;
     serde_json::to_writer(&mut control, &receipt)?;
@@ -190,7 +209,11 @@ fn read_request(control: &mut UnixStream) -> io::Result<Request> {
     Ok(request)
 }
 
-fn supervise(control: &mut UnixStream, request: &Request) -> io::Result<Receipt> {
+fn supervise(
+    control: &mut UnixStream,
+    request: &Request,
+    mut signal_child: impl FnMut(&Process, i32) -> io::Result<()>,
+) -> io::Result<Receipt> {
     let start = Instant::now();
     let initial_time = boot_ms()?;
     if initial_time >= request.deadline_boot_ms || cancelled(control)? {
@@ -258,19 +281,6 @@ fn supervise(control: &mut UnixStream, request: &Request) -> io::Result<Receipt>
         // An incomplete inventory cannot prove termination. Let the trusted
         // environment observe helper failure and fence its owned cgroup.
         collect_owned(std::process::id(), &mut known)?;
-        if (stopped || timed_out || root_status.is_some()) && terminating.is_none() {
-            terminating = Some(Instant::now());
-        }
-        if let Some(since) = terminating {
-            let signal = if since.elapsed() < TERMINATION_GRACE {
-                libc::SIGTERM
-            } else {
-                libc::SIGKILL
-            };
-            for process in known.values() {
-                process.signal(signal)?;
-            }
-        }
         // Reap only after acquiring descendant identities. A shell may exit
         // while a detached child is being adopted by this subreaper.
         let mut has_children = true;
@@ -310,6 +320,32 @@ fn supervise(control: &mut UnixStream, request: &Request) -> io::Result<Receipt>
                     .into_owned(),
                 log_truncated: tail.truncated,
             });
+        }
+        if stopped || timed_out || root_status.is_some() {
+            let since = terminating.get_or_insert_with(Instant::now);
+            let within_grace = since.elapsed() < TERMINATION_GRACE;
+            let signal = if within_grace {
+                libc::SIGTERM
+            } else {
+                libc::SIGKILL
+            };
+            for process in known.values() {
+                if let Err(error) = signal_child(process, signal) {
+                    // A child with a different UID can deny signals even just after
+                    // exiting. Give it the normal grace period and let waitpid reap
+                    // exits that raced the forced signal. A live child that still
+                    // denies the forced signal requires the outer fence.
+                    if error.raw_os_error() == Some(libc::EPERM)
+                        && (within_grace || process.exit_is_waitable())
+                    {
+                        continue;
+                    }
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("Could not send signal {signal} to a job child: {error}"),
+                    ));
+                }
+            }
         }
         let mut poll = libc::pollfd {
             fd: control.as_raw_fd(),
@@ -441,16 +477,54 @@ mod tests {
         helper().unwrap();
     }
 
+    #[test]
+    #[ignore = "isolated helper process"]
+    fn helper_with_denied_signals() {
+        let release = std::env::var_os("CAIRN_TEST_RELEASE_JOB_CHILD").unwrap();
+        let release_signal: i32 = std::env::var("CAIRN_TEST_RELEASE_JOB_SIGNAL")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut released = false;
+        run_helper(|process, signal| {
+            if signal == release_signal && !released {
+                fs::write(&release, []).unwrap();
+                released = true;
+            }
+            if signal == libc::SIGKILL {
+                // Make the child exit after waitpid, before returning the denial.
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while !process.exit_is_waitable() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                assert!(process.exit_is_waitable());
+            }
+            Err(io::Error::from_raw_os_error(libc::EPERM))
+        })
+        .unwrap();
+        assert!(released);
+    }
+
     fn launch(command: &str, remaining_ms: u64) -> (std::process::Child, UnixStream) {
+        launch_with_helper("helper_child", command, remaining_ms, HashMap::new())
+    }
+
+    fn launch_with_helper(
+        helper: &str,
+        command: &str,
+        remaining_ms: u64,
+        environment: crate::process::Environment,
+    ) -> (std::process::Child, UnixStream) {
         let (mut parent, child) = UnixStream::pair().unwrap();
         let fd = child.as_raw_fd();
         let mut process = Command::new(std::env::current_exe().unwrap());
         process
             .args([
                 "--exact",
-                "background_jobs::process::tests::helper_child",
+                &format!("background_jobs::process::tests::{helper}"),
                 "--ignored",
             ])
+            .envs(&environment)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         unsafe {
@@ -468,7 +542,7 @@ mod tests {
             &Request {
                 command: command.into(),
                 program: None,
-                environment: crate::process::Environment::new(),
+                environment,
                 deadline_boot_ms: boot_ms().unwrap() + remaining_ms,
             },
         )
@@ -567,6 +641,40 @@ mod tests {
         let pid: u32 = fs::read_to_string(marker).unwrap().trim().parse().unwrap();
         assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
         assert!(result.elapsed_ms < 4000);
+    }
+
+    #[test]
+    fn reaps_child_that_exits_after_signal_is_denied() {
+        assert_denied_child_exit(libc::SIGTERM);
+    }
+
+    #[test]
+    fn reaps_child_that_exits_during_denied_forced_signal() {
+        assert_denied_child_exit(libc::SIGKILL);
+    }
+
+    fn assert_denied_child_exit(release_signal: i32) {
+        let directory = tempfile::tempdir().unwrap();
+        let release = directory.path().join("release");
+        let command = "(i=0; while [ ! -f \"$CAIRN_TEST_RELEASE_JOB_CHILD\" ] && [ \"$i\" -lt 250 ]; \
+                       do sleep 0.02; i=$((i+1)); done) & exit 0";
+        let environment = [
+            (
+                "CAIRN_TEST_RELEASE_JOB_CHILD".into(),
+                release.to_string_lossy().into_owned(),
+            ),
+            (
+                "CAIRN_TEST_RELEASE_JOB_SIGNAL".into(),
+                release_signal.to_string(),
+            ),
+        ]
+        .into();
+        let (child, control) =
+            launch_with_helper("helper_with_denied_signals", command, 8000, environment);
+        let result = receipt(child, control);
+        assert_eq!(result.exit_code, Some(0));
+        assert!(!result.stopped);
+        assert!(!result.timed_out);
     }
 
     #[test]
