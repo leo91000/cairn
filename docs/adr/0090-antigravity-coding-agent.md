@@ -24,6 +24,10 @@ Les mesures suivantes ont été faites sur 1.5.14 avec un faux serveur Gemini lo
   `always-proceed` ; une règle `ask` n'arrête rien dans ce mode : l'outil s'exécute.
 - Les commandes passent par bash, chacune dans sa propre session. Interrompu (y
   compris par SIGTERM), `agy` les laisse tourner.
+- `agy` reprend une conversation à partir de sa seule base
+  (`conversations/<id>.db`) dans un HOME neuf, et ne charge pas `~/.agents`. Il
+  charge en revanche des plugins et réglages de son état, qu'un tour précédent peut
+  modifier.
 - `agy` charge `.agents/hooks.json` et `.agents/mcp_config.json` du répertoire de
   travail ou de la racine git. Les commandes de ces hooks s'exécutent même quand le
   hook de Cairn refuse l'outil ; `trustedWorkspaces` n'y change rien et aucun réglage
@@ -71,12 +75,16 @@ dépôt, comme pour les autres moteurs.
 - question à côté : tout outil est refusé.
 
 Un tour de plan reçoit aussi `--mode plan` pour guider le modèle ; ce mode n'est
-pas une frontière. Un tour de plan ou une question à côté est refusé, avec le chemin en cause, quand
+pas une frontière. Un tour de plan tourne dans un HOME neuf qui ne contient que sa conversation :
+rien de ce qu'un tour YOLO a écrit dans l'état natif ne s'y applique. La
+conversation est recopiée dans l'état natif à la fin du tour, quand un tour arrêté
+est abandonné, avant le tour de plan suivant et au nettoyage du bail ; un HOME de
+tour de plan qui ne peut pas être effacé fait échouer le tour suivant. Un tour de plan ou une question à côté est refusé, avec le chemin en cause, quand
 le répertoire de travail ou l'un de ses parents contient `.agents/hooks.json` ou
 `.agents/mcp_config.json` : ces commandes du dépôt ne peuvent pas être bornées.
 
 **Questions à côté.** `/btw` n'existe que dans l'interface interactive. L'adaptateur
-copie l'état natif de la conversation dans un HOME temporaire, lance un second
+copie la seule base de la conversation dans un HOME temporaire neuf, lance un second
 `agy --conversation <id>` avec le hook qui refuse tout, puis supprime la copie.
 Le processus principal et son historique ne sont pas touchés. La réponse voit le
 contexte enregistré jusqu'à la dernière étape terminée, pas l'étape en cours.

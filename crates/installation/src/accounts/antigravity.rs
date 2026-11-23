@@ -538,7 +538,13 @@ impl Driver for Antigravity {
     async fn clear(&self, home: &Path) -> Result<()> {
         // Side-question copies hold the run's credentials too.
         super::remove_directory(&home.join(crate::antigravity::SIDE_QUESTIONS)).await?;
-        super::remove_directory(&home.join(crate::antigravity::PLAN_HOME)).await?;
+        // A stopped or crashed plan turn's conversation goes back to the native state.
+        let (state, bounded) = (home.to_owned(), home.join(crate::antigravity::PLAN_HOME));
+        tokio::task::spawn_blocking(move || {
+            crate::antigravity::settle_bounded_home(&state, &bounded)
+        })
+        .await
+        .map_err(Error::internal)??;
         remove_file(&home.join(ADC_FILE)).await?;
         remove_file(&home.join(TOKEN_FILE)).await
     }

@@ -316,7 +316,11 @@ pub(super) async fn spawn(
 /// native state never load there. `agy` resumes a conversation from its database
 /// alone (measured on 1.5.14).
 pub(super) async fn bounded_home(state: &Path, fresh: &Path, conversation: &str) -> Result<()> {
-    let _ = tokio::fs::remove_dir_all(fresh).await;
+    // A plan turn's earlier copy is brought back before the home is replaced.
+    let (state_dir, fresh_dir) = (state.to_owned(), fresh.to_owned());
+    tokio::task::spawn_blocking(move || settle_bounded_home(&state_dir, &fresh_dir))
+        .await
+        .map_err(Error::internal)??;
     private_dir(&fresh.join(".gemini/antigravity-cli/conversations")).await?;
     if conversation.is_empty() {
         return Ok(());
@@ -328,26 +332,66 @@ pub(super) async fn bounded_home(state: &Path, fresh: &Path, conversation: &str)
         .map_err(Error::internal)?
 }
 
-/// Brings a plan turn's conversation back into the run's native state.
-async fn restore_conversation(bounded: &Path, state: &Path, conversation: &str) -> Result<()> {
-    if conversation.is_empty() {
-        return Ok(());
+const CONVERSATIONS: &str = ".gemini/antigravity-cli/conversations";
+
+/// Brings every conversation a plan turn's home holds back into the run's native
+/// state, then removes that home. Called at the end of a plan turn, when a stopped
+/// one is dropped, before the next one and when the lease is cleared, so a stopped
+/// or crashed plan turn never loses its conversation. A home that cannot be removed
+/// is an error: the next bounded turn must not start on what an earlier turn left.
+pub(crate) fn settle_bounded_home(state: &Path, bounded: &Path) -> Result<()> {
+    let conversations = bounded.join(CONVERSATIONS);
+    if let Ok(entries) = std::fs::read_dir(&conversations) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(id) = name.strip_suffix(".db") else {
+                continue;
+            };
+            if crate::validation::uuid(id).is_err() {
+                continue;
+            }
+            let target = state.join(CONVERSATIONS).join(name);
+            std::fs::create_dir_all(target.parent().unwrap())?;
+            let staged = target.with_extension("db.restoring");
+            let _ = std::fs::remove_file(&staged);
+            super::side::copy_conversation(&entry.path(), &staged)?;
+            // The rename replaces the database atomically; SQLite ignores the old
+            // journal files, removed afterwards.
+            std::fs::rename(&staged, &target)?;
+            for suffix in ["db-wal", "db-shm"] {
+                let _ = std::fs::remove_file(target.with_extension(suffix));
+            }
+        }
     }
-    let database = format!(".gemini/antigravity-cli/conversations/{conversation}.db");
-    let target = state.join(&database);
-    private_dir(target.parent().unwrap()).await?;
-    let staged = target.with_extension("db.restoring");
-    let _ = tokio::fs::remove_file(&staged).await;
-    let from = bounded.join(&database);
-    let copy = staged.clone();
-    tokio::task::spawn_blocking(move || super::side::copy_conversation(&from, &copy))
-        .await
-        .map_err(Error::internal)??;
-    for suffix in ["db-wal", "db-shm"] {
-        let _ = tokio::fs::remove_file(target.with_extension(suffix)).await;
+    match std::fs::remove_dir_all(bounded) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(Error::unavailable(
+            "Cairn could not reset Antigravity's private plan-turn state. Working files were preserved.",
+        )),
     }
-    tokio::fs::rename(&staged, &target).await?;
-    Ok(())
+}
+
+/// Settles a plan turn's home however its launch ends, including a dropped future.
+struct BoundedHome {
+    state: PathBuf,
+    bounded: Option<PathBuf>,
+}
+
+impl BoundedHome {
+    fn settle(&mut self) -> Result<()> {
+        match self.bounded.take() {
+            Some(bounded) => settle_bounded_home(&self.state, &bounded),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for BoundedHome {
+    fn drop(&mut self) {
+        let _ = self.settle();
+    }
 }
 
 /// Removes the credential files `agy` read when its launch ends, on every exit path:
@@ -845,6 +889,10 @@ async fn execute(
         } else {
             state.clone()
         };
+        let mut settle = BoundedHome {
+            state: state.clone(),
+            bounded: (mode == Mode::Plan).then(|| home.clone()),
+        };
         // Credential files never stay on an execution node's disk after this launch.
         let _files = CredentialFiles(home.clone());
         super::prepare_native_home(config, &home, Some(&credentials)).await?;
@@ -935,10 +983,7 @@ async fn execute(
             let _ = child.wait().await;
         }
         group.finish();
-        if mode == Mode::Plan {
-            restore_conversation(&home, &state, &conversation).await?;
-            let _ = crate::accounts::remove_directory(&home).await;
-        }
+        settle.settle()?;
         drain.abort();
         reader.abort();
         match outcome? {

@@ -5,7 +5,7 @@ pub mod hook;
 mod side;
 
 pub(crate) use side::SIDE_QUESTIONS;
-pub(crate) use turn::PLAN_HOME;
+pub(crate) use turn::{PLAN_HOME, settle_bounded_home};
 
 mod turn;
 

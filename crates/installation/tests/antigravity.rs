@@ -721,6 +721,131 @@ async fn runs_wait_with_an_explanation_when_no_account_offers_the_model() {
     );
 }
 
+/// A copy of `input` that sends `text` as message `id`, writing its own output.
+fn next_message(root: &TempDir, input: &Value, id: &str, text: &str) -> Value {
+    let mut next = input.clone();
+    next["execution"]["messageId"] = id.into();
+    next["execution"]["text"] = text.into();
+    next["output"] = root
+        .path()
+        .join(format!("{id}.md"))
+        .to_string_lossy()
+        .into_owned()
+        .into();
+    next
+}
+
+#[tokio::test]
+async fn plan_turns_resume_in_a_fresh_home_and_hand_their_steps_back() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let first = plan(&root, "gemini-4-neon-high", "Build the status panel");
+    let (result, events) = run(&s, first.clone()).await;
+    result.unwrap();
+    let conversation = thread(&events);
+
+    let mut planning = next_message(&root, &first, "plan", "Plan the next step");
+    planning["sessionId"] = conversation.clone().into();
+    planning["planning"] = true.into();
+    planning["sandbox"] = "read-only".into();
+    let (result, events) = run(&s, planning).await;
+    result.unwrap();
+    assert_eq!(thread(&events), conversation);
+    // The fresh home resumed the conversation: it saw the first turn's two steps.
+    assert!(
+        std::fs::read_to_string(root.path().join("plan.md"))
+            .unwrap()
+            .ends_with("Earlier steps in this conversation: 2.")
+    );
+    assert!(!native_home(&s).join("plan-turn").exists());
+
+    // The plan turn's steps are back in the run's native state.
+    let mut follow_up = next_message(&root, &first, "after-plan", "Implement it");
+    follow_up["sessionId"] = conversation.clone().into();
+    let (result, _) = run(&s, follow_up).await;
+    result.unwrap();
+    assert!(
+        std::fs::read_to_string(root.path().join("after-plan.md"))
+            .unwrap()
+            .ends_with("Earlier steps in this conversation: 4.")
+    );
+}
+
+#[tokio::test]
+async fn a_stopped_first_plan_turn_hands_its_conversation_back() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let mut planning = plan(
+        &root,
+        "gemini-4-neon-high",
+        "fixture:agy-slow=60000 Plan the status panel",
+    );
+    planning["planning"] = true.into();
+    planning["sandbox"] = "read-only".into();
+    let lease = s
+        .accounts
+        .acquire(&s, RUN, Provider::Antigravity, MODEL)
+        .await
+        .unwrap()
+        .expect("an Antigravity account is leased");
+    let broker = broker::serve(&s, &lease).await.unwrap();
+    let mut config = s.config.clone();
+    config.home = lease.home.parent().unwrap().to_owned();
+    let (tx, mut rx) = mpsc::channel(256);
+    let stop = CancellationToken::new();
+    let cancel = stop.clone();
+    let input = planning.clone();
+    let task = tokio::spawn(async move { antigravity::run(&config, input, tx, cancel).await });
+    // Stop once the native conversation exists, as a user pressing Stop would.
+    let conversation = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "chat.delivered" {
+                break;
+            }
+        }
+        let conversations = lease
+            .home
+            .join("plan-turn/.gemini/antigravity-cli/conversations");
+        loop {
+            if let Some(name) = std::fs::read_dir(&conversations)
+                .ok()
+                .and_then(|mut entries| entries.next())
+                .and_then(Result::ok)
+            {
+                return name.file_name().to_string_lossy().replace(".db", "");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the plan turn starts its conversation");
+    stop.cancel();
+    assert!(task.await.unwrap().is_err());
+    drop(broker);
+    s.accounts.release(&s, &lease).await.unwrap();
+    assert!(
+        lease
+            .home
+            .join(format!(
+                ".gemini/antigravity-cli/conversations/{conversation}.db"
+            ))
+            .exists(),
+        "the stopped plan turn lost its conversation"
+    );
+    assert!(!lease.home.join("plan-turn").exists());
+
+    // The next ordinary turn resumes it.
+    let mut follow_up = next_message(&root, &planning, "after-stop", "Build it");
+    follow_up["planning"] = Value::Null;
+    follow_up["sandbox"] = "yolo".into();
+    follow_up["sessionId"] = conversation.clone().into();
+    let (result, events) = run(&s, follow_up).await;
+    result.unwrap();
+    assert_eq!(thread(&events), conversation);
+}
+
 #[tokio::test]
 async fn native_configuration_adds_rules_to_ordinary_turns() {
     let root = TempDir::new().unwrap();
@@ -1306,6 +1431,53 @@ async fn native_cli_runs_and_resumes_a_conversation() {
                 && contents.contains("Continue in the same conversation")
         }),
         "the resumed request did not carry the first turn"
+    );
+}
+
+/// Optional native qualification of plan-turn isolation: the real release resumes a
+/// conversation in a fresh home holding only its database, and the plan turn's steps
+/// return to the run's native state for the next turn.
+#[tokio::test]
+#[ignore = "requires a native Antigravity binary"]
+async fn native_plan_turns_resume_the_conversation_in_a_fresh_home() {
+    let root = TempDir::new().unwrap();
+    let (url, requests, server) = gemini_server(root.path()).await;
+    let s = native_service(&root, Some(&url)).await;
+    connect(&s, "gemini", KEY).await;
+    let (model, slug) = native_model(&s).await;
+    let mut input = plan(&root, &slug, "FIRST-TURN Reply without tools.");
+    input["model"] = model.into();
+    let (result, events) = run(&s, input.clone()).await;
+    result.unwrap();
+    let conversation = thread(&events);
+
+    let mut planning = next_message(&root, &input, "plan", "PLAN-RESUME Propose a plan.");
+    planning["sessionId"] = conversation.clone().into();
+    planning["planning"] = true.into();
+    planning["sandbox"] = "read-only".into();
+    let (result, events) = run(&s, planning).await;
+    result.unwrap();
+    assert_eq!(thread(&events), conversation);
+
+    let mut follow_up = next_message(&root, &input, "after", "AFTER-PLAN Continue.");
+    follow_up["sessionId"] = conversation.clone().into();
+    let (result, _) = run(&s, follow_up).await;
+    server.abort();
+    result.unwrap();
+    let requests = requests.lock().unwrap();
+    let carried = |marker: &str, earlier: &[&str]| {
+        requests.iter().any(|request| {
+            let contents = request["contents"].to_string();
+            contents.contains(marker) && earlier.iter().all(|e| contents.contains(e))
+        })
+    };
+    assert!(
+        carried("PLAN-RESUME", &["FIRST-TURN"]),
+        "the plan turn lost the history"
+    );
+    assert!(
+        carried("AFTER-PLAN", &["FIRST-TURN", "PLAN-RESUME"]),
+        "the plan turn's steps did not return"
     );
 }
 
