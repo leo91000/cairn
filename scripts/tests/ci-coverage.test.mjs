@@ -899,4 +899,19 @@ describe('parallel CI coverage', () => {
       expect(android.jobs.publish.if).toContain(`needs.${job}.result == 'success'`)
     }
   })
+
+  it('sets up the shared Robolectric SDK cache before both Android unit-test commands', () => {
+    const setupAction = './.github/actions/setup-robolectric'
+    const prSteps = pr.jobs.android.steps
+    const prSetup = prSteps.findIndex(step => step.uses === setupAction)
+    expect(prSetup).toBeGreaterThan(-1)
+    expect(prSteps[prSetup].if).toBeUndefined()
+    expect(prSetup).toBeLessThan(prSteps.findIndex(step => step.run === 'pnpm validate:pr android'))
+
+    const fullSteps = android.jobs.check.steps
+    const fullSetup = fullSteps.findIndex(step => step.uses === setupAction)
+    expect(fullSetup).toBeGreaterThan(-1)
+    expect(fullSteps[fullSetup].if).toBe('matrix.task == \'testDebugUnitTest\'')
+    expect(fullSetup).toBeLessThan(fullSteps.findIndex(step => step.name === 'Unit tests or lint'))
+  })
 })
