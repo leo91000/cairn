@@ -24,5 +24,8 @@ export function documentSignal(signal?: AbortSignal | null) {
 
 if (typeof window !== 'undefined') {
   window.addEventListener('pagehide', departDocument)
-  window.addEventListener('pageshow', resumeDocument)
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted)
+      resumeDocument()
+  })
 }
