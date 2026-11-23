@@ -454,6 +454,7 @@ async fn unknown_go_usage_can_recover_and_resume_the_same_native_session() {
     let s = Service::new(Config {
         opencode_bin: common::fixture("opencode.mjs"),
         opencode_go_usage_url: format!("http://{address}/usage"),
+        antigravity_bin: "agy".into(),
         ..common::config(root.path())
     })
     .await

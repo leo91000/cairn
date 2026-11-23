@@ -177,7 +177,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "reasoning": {
@@ -268,7 +268,7 @@
       "properties": {
         "accountRequired": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -471,7 +471,7 @@
         },
         "provider": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -620,6 +620,10 @@
             "integer",
             "null"
           ]
+        },
+        "turnReturned": {
+          "description": "The last turn's own message went back to its author: that turn cannot be resumed,\nand sending the message again continues the conversation (ADR-0091).",
+          "type": "boolean"
         },
         "unread": {
           "default": false,
@@ -831,7 +835,7 @@
         },
         "provider": {
           "default": "",
-          "pattern": "^(|codex|claude|opencode)$",
+          "pattern": "^(|codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "questionId": {
@@ -843,6 +847,13 @@
         "reasoning": {
           "default": "",
           "type": "string"
+        },
+        "returnedTo": {
+          "description": "The person a failed or stopped turn returned this unsent message to. Only their\ncomposer restores it; messages from rules and agents are returned to nobody.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "revision": {
           "default": "",
@@ -969,7 +980,7 @@
         },
         "provider": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -1144,7 +1155,7 @@
           ]
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },
@@ -1381,7 +1392,7 @@
           "type": "string"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "revision": {
@@ -1671,7 +1682,7 @@
         },
         "accountRequired": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -1866,7 +1877,7 @@
         },
         "provider": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"

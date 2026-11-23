@@ -561,7 +561,7 @@ fn version_32_adds_the_engine_tables_and_reopens_without_changing_them() {
         assert_eq!(
             db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            36
+            37
         );
         for table in [
             "hook_rule_triggerings",

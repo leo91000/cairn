@@ -3,14 +3,16 @@
 Every application CI run, including tag releases, uses
 `node scripts/cli-updates.mjs build-versions` to resolve the agent tool versions
 before deciding whether to reuse an image. It prints JSON and, when
-`GITHUB_OUTPUT` is set, appends the exact `codex`, `gh`, `claude` and `opencode`
-outputs consumed by `ci.yaml`.
+`GITHUB_OUTPUT` is set, appends the exact `codex`, `gh`, `claude`, `opencode` and
+`antigravity` outputs consumed by `ci.yaml`, plus `antigravity-url` and
+`antigravity-sha512`, the archive the image installs.
 
 | Tool | Official source | Channel | Native check in CI |
 | --- | --- | --- | --- |
 | Codex | npm `@openai/codex` | dist-tag `latest` | plan-turn boundary |
 | Claude Code | npm `@anthropic-ai/claude-code` | exact `2.1.311` | catalog, usage, turn, resumption, plan-turn boundary |
 | OpenCode | npm `opencode-ai` | dist-tag `latest` | catalog, turn, resumption |
+| Antigravity | Google updater manifest `linux_amd64.json` | current release only | `tests/antigravity.rs` |
 | GitHub CLI | GitHub `cli/cli` latest release | not draft or prerelease | none |
 
 Tools configured with a dist-tag follow it into new minor and major releases.
@@ -35,6 +37,19 @@ speaks the HTTP session protocol of OpenCode 1.19.0 and later, and rejects older
 releases at startup (`opencode::MINIMUM`). A `latest` release older than that
 fails resolution.
 
+Antigravity (`agy`) has no npm package. Google's CLI updater publishes one
+manifest per platform,
+`https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json`,
+with the current `version`, the `url` of its tarball and the tarball's `sha512`.
+The tarball holds a single executable, `antigravity`, which the image installs as
+`/usr/local/bin/agy`. The URL contains a build identifier, so only the current
+release can be downloaded: there is no channel to pin, no `legacy` release and no
+rollback qualification. Resolution accepts only a plain `MAJOR.MINOR.PATCH`
+release at or after `antigravity::MINIMUM` (1.5.14). The URL must be the official
+`linux-x64` archive of that release in Google's `antigravity-public` bucket, and
+the digest must be a SHA-512. Anything else fails the `resolve` job. The image is
+built for linux/amd64 only, so the arm64 manifest is not read.
+
 Each resolved version must be a plain `MAJOR.MINOR.PATCH` release, so prereleases
 and snapshots are rejected, and must not be deprecated on npm. A missing channel,
 an unreachable registry, malformed metadata, a prerelease, or a deprecated channel
@@ -45,13 +60,21 @@ CI also tests that sessions of the release production serves resume on the older
 resolved one, and back.
 
 There are no default agent tool versions in the Dockerfile. CI passes the resolved
-`CODEX_VERSION`, `GH_VERSION`, `CLAUDE_VERSION` and `OPENCODE_VERSION` build
-arguments. The image build installs each tool at that exact version and fails
-unless its `--version` output matches. The image records the versions as
+`CODEX_VERSION`, `GH_VERSION`, `CLAUDE_VERSION`, `OPENCODE_VERSION` and
+`ANTIGRAVITY_VERSION` build arguments, with `ANTIGRAVITY_URL` and
+`ANTIGRAVITY_SHA512`. The image build installs each tool at that exact version and
+fails unless its `--version` output matches. The Antigravity archive must match
+its SHA-512 first. The image records the versions as
 `APP_*_VERSION`. `/health` reports them under `tools`. The container smoke test
 checks that they equal the versions CI resolved. Native node bundles
 (`deploy/nodes/bundle-native-tools.mjs`) refuse an executable whose version
-differs from the image's resolved version. MicroVM guests are built from the same
+differs from the image's resolved version. Antigravity ships in a second native
+bundle, `/opt/cairn-native-extra-tools.zip`, because the first one must stay
+within the 1 GiB extraction limit of installed supervisors. The second bundle has
+its own manifest (`"bundle": "extra"`, only `bin/agy`) and its own limits:
+512 MiB extracted, 256 MiB downloaded. Antigravity 1.5.14 is 261 MiB extracted
+and 97 MiB compressed. Only supervisors that know the second bundle install it;
+see [deployment](DEPLOYMENT.md). MicroVM guests are built from the same
 runtime stage.
 Direct Docker builds must pass these build arguments too; see
 [deployment setup](DEPLOYMENT.md) and the [agent toolkit](TOOLKIT.md).
@@ -76,6 +99,10 @@ production, the CLIs may still contact their vendors' public endpoints:
   its `legacy` release resume on the resolved one.
 - For both engines, sessions move both ways between the resolved release and the
   release production serves, as after an update or a rollback.
+- Antigravity: the job downloads the resolved archive, checks its SHA-512 and
+  version, and runs the ignored tests in `tests/antigravity.rs` with
+  `ANTIGRAVITY_NATIVE_BIN`. Only the current release can be downloaded, so no
+  older or served release is checked.
 - Claude Code and Codex each run a plan turn through their adapter
   (`tests/native_plan_turns.rs`) against a local model that asks for writes,
   network access, escalation and subagents. None may take effect, the proposed plan
@@ -102,14 +129,15 @@ engine release, set that engine's `minimum`: an older served release is then
 skipped, with a warning. Main and tags reuse evidence only when its served
 versions still match the release production serves.
 
-Validation evidence (`image.json`, schema 3) records all four versions under
+Validation evidence (`image.json`, schema 3) records every resolved version under
 `tools`, and the served versions the rollback checks used under `served`. An image
 can be reused for the same source tree only when every resolved version matches
 its evidence. Evidence recorded before Claude Code and OpenCode were resolved
 names only Codex and GitHub CLI. It is never reused: such a tree validates a new
-image. Tools never change after image validation:
-Claude Code runs with `DISABLE_AUTOUPDATER=1` and OpenCode with automatic updates
-disabled.
+image. The same applies to evidence recorded before Antigravity was resolved.
+Tools never change after image validation:
+Claude Code runs with `DISABLE_AUTOUPDATER=1`, OpenCode with automatic updates
+disabled, and Antigravity with `AGY_CLI_DISABLE_AUTO_UPDATE=true`, set in the image, exported by the microVM init and passed by Cairn's adapter to every `agy` it starts.
 
 Installations follow approved, paired immutable images through
 `cairn-installation-update.timer`. This host updater retains the persisted
@@ -153,6 +181,8 @@ following checks before merge:
   a permission prompt reaches Cairn, and that an MCP tool call completes. With a
   test account, check `claude auth login --claudeai`, `get_usage` quota values and
   resuming a subscription session.
+- Antigravity: run the native adapter tests with the candidate binary:
+  `ANTIGRAVITY_NATIVE_BIN=/path/to/agy pnpm test:backend -p cairn-installation --test antigravity -- --include-ignored`.
 - Plan turns (Claude Code and Codex): CI runs `native_plan_turns` for the resolved
   releases. To run it elsewhere:
   `CLAUDE_NATIVE_BIN=… CODEX_NATIVE_BIN=… pnpm test:backend -p cairn-installation --test native_plan_turns -- --ignored`.

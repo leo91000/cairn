@@ -31,9 +31,9 @@ export const shortcutGroups: Array<{ title: string, items: Array<{ keys: string[
     title: 'Conversation',
     items: [
       { keys: ['R'], label: 'Reply' },
-      { keys: ['Enter'], label: 'Send, or queue while the agent works' },
+      { keys: ['Enter'], label: 'Send, steering while the agent works' },
       { keys: ['Shift', 'Enter'], label: 'New line' },
-      { keys: ['Alt', 'Enter'], label: 'Steer the running turn' },
+      { keys: ['Alt', 'Enter'], label: 'Send after this turn' },
       { keys: ['Esc'], label: 'Leave the message field' },
     ],
   },

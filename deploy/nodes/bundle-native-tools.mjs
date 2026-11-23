@@ -5,28 +5,49 @@ import {
   chmod,
   copyFile,
   mkdir,
+  mkdtemp,
   readdir,
   readFile,
   realpath,
+  rm,
   stat,
   writeFile,
 } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
 // These are the admission limits of already installed native supervisors.
 // A newer image must remain installable before its supervisor can be updated.
-export function validateNativeToolBundleBudget({ extractedBytes, manifestBytes, compressedBytes }) {
+export const nativeToolBundle = {
+  noun: 'Native tool',
+  extractedBytes: 1024 ** 3,
+  manifestBytes: 65536,
+  compressedBytes: 512 * 1024 ** 2,
+  manifest: {},
+}
+
+// Tools the first bundle has no room for. Only supervisors that know this bundle
+// fetch it (native-host.py `extraToolsPath`), and they enforce these same limits.
+export const extraToolBundle = {
+  noun: 'Extra native tool',
+  extractedBytes: 512 * 1024 ** 2,
+  manifestBytes: 65536,
+  compressedBytes: 256 * 1024 ** 2,
+  manifest: { bundle: 'extra' },
+}
+
+export function validateNativeToolBundleBudget({ extractedBytes, manifestBytes, compressedBytes }, bundle = nativeToolBundle) {
   const sizes = [extractedBytes, manifestBytes, ...(compressedBytes === undefined ? [] : [compressedBytes])]
   if (sizes.some(size => !Number.isSafeInteger(size) || size <= 0))
     throw new Error('Invalid native tool bundle sizes.')
-  if (extractedBytes > 1024 ** 3)
-    throw new Error('Native tools exceed extracted size budget.')
-  if (manifestBytes > 65536)
-    throw new Error('Native tool manifest exceeds limit.')
-  if (compressedBytes > 512 * 1024 ** 2)
-    throw new Error('Native tools exceed download size budget.')
+  if (extractedBytes > bundle.extractedBytes)
+    throw new Error(`${bundle.noun}s exceed extracted size budget.`)
+  if (manifestBytes > bundle.manifestBytes)
+    throw new Error(`${bundle.noun} manifest exceeds limit.`)
+  if (compressedBytes > bundle.compressedBytes)
+    throw new Error(`${bundle.noun}s exceed download size budget.`)
 }
 
 function nodeElf(bytes) {
@@ -94,16 +115,17 @@ export async function copyNativeTool(name, source, destination) {
   return { path: `bin/${name}`, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }
 }
 
-export async function createNativeToolsArchive(target, files) {
+export async function createNativeToolsArchive(target, files, bundle = nativeToolBundle) {
   const manifest = `${JSON.stringify({
     version: 1,
     os: 'linux',
     arch: 'x86_64',
+    ...bundle.manifest,
     files,
   })}\n`
   const manifestBytes = Buffer.byteLength(manifest)
   const extractedBytes = files.reduce((total, entry) => total + entry.size, manifestBytes)
-  validateNativeToolBundleBudget({ extractedBytes, manifestBytes })
+  validateNativeToolBundleBudget({ extractedBytes, manifestBytes }, bundle)
   const archive = path.resolve(`${target}.zip`)
   try {
     await stat(archive)
@@ -124,7 +146,7 @@ p=pathlib.Path(sys.argv[1])
 with zipfile.ZipFile(p) as z:
  print(json.dumps(dict(extractedBytes=sum(x.file_size for x in z.infolist()),manifestBytes=z.getinfo('manifest.json').file_size,compressedBytes=p.stat().st_size,names=z.namelist())))
 `, archive], { encoding: 'utf8' }))
-  validateNativeToolBundleBudget(metadata)
+  validateNativeToolBundleBudget(metadata, bundle)
   const expected = new Set(['bin/', 'manifest.json', ...files.map(entry => entry.path)])
   if (metadata.extractedBytes !== extractedBytes || metadata.manifestBytes !== manifestBytes
     || metadata.names.length !== expected.size || metadata.names.some(name => !expected.has(name))) {
@@ -203,8 +225,26 @@ export function pinnedVersion(name, output, resolved) {
   return version
 }
 
+// Antigravity writes state under HOME even for --version; keep it out of the image.
+async function antigravityVersion() {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cairn-antigravity-'))
+  try {
+    const output = execFileSync('agy', ['--version'], { encoding: 'utf8', env: { ...process.env, HOME: home, AGY_CLI_DISABLE_AUTO_UPDATE: 'true' } })
+    return pinnedVersion('agy', output, process.env.APP_ANTIGRAVITY_VERSION)
+  }
+  finally {
+    await rm(home, { recursive: true, force: true })
+  }
+}
+
+export function assertNativeExecutable(name, bytes) {
+  if (bytes.length < 20 || !bytes.subarray(0, 4).equals(Buffer.from([0x7F, 0x45, 0x4C, 0x46])) || bytes.readUInt16LE(18) !== 62)
+    throw new Error(`Not an x86-64 native executable: ${name}`)
+}
+
 async function main() {
   const target = process.env.CAIRN_NATIVE_BUNDLE_OUTPUT || '/opt/cairn-native-tools'
+  const extra = process.env.CAIRN_NATIVE_EXTRA_BUNDLE_OUTPUT || '/opt/cairn-native-extra-tools'
   await mkdir(`${target}/bin`, { recursive: true })
   const versions = new Map(['codex', 'claude', 'opencode'].map((name) => {
     const output = execFileSync(name, ['--version'], { encoding: 'utf8' })
@@ -220,6 +260,12 @@ async function main() {
   }
 
   await createNativeToolsArchive(target, files)
+
+  // Antigravity is the official single-binary release the image installed as agy.
+  await antigravityVersion()
+  await mkdir(`${extra}/bin`, { recursive: true })
+  assertNativeExecutable('agy', await readFile('/usr/local/bin/agy'))
+  await createNativeToolsArchive(extra, [await copyNativeTool('agy', '/usr/local/bin/agy', `${extra}/bin/agy`)], extraToolBundle)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

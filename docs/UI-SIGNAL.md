@@ -32,7 +32,7 @@ back to it.
 | G then F / M / A | Fil / Missions / Atelier |
 | J / K, Enter, E, / | Move in the Fil, open, mark finished work as read, filter |
 | R, Esc | Reply in the open conversation, leave the field |
-| Enter, Shift+Enter, Alt+Enter | Send or queue, new line, steer |
+| Enter, Shift+Enter, Alt+Enter | Send (steering while the agent works), new line, queue for the next turn |
 | ? | Shortcut sheet |
 
 Single keys never fire while typing or while a dialog is open (`apps/web/src/shortcuts.ts`).

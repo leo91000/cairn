@@ -133,7 +133,7 @@ fn action(kind: &str) -> (&'static str, &'static str, bool) {
         ),
         "steerConversation" => (
             "Steer a conversation",
-            "Sends a message to the conversation bound to a key, after its current turn. Fails while it is paused, until a person resumes it.",
+            "Sends a message to the conversation bound to a key, after its current turn. Fails while it is paused, until a person resumes it, and after a failed turn, until its next turn starts.",
             true,
         ),
         "cancelConversation" => (
@@ -143,7 +143,7 @@ fn action(kind: &str) -> (&'static str, &'static str, bool) {
         ),
         "answerQuestion" => (
             "Answer a question",
-            "Answers the oldest pending question of the conversation bound to a key: a text for every question, or an object by question id. Fails while it is paused, until a person resumes it.",
+            "Answers the oldest pending question of the conversation bound to a key: a text for every question, or an object by question id. Fails while it is paused, until a person resumes it, and after a failed turn, until its next turn starts.",
             false,
         ),
         "storeValue" => (

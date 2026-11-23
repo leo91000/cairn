@@ -13,6 +13,8 @@ data class CodingAgentOptions(
     val turnId: String? = null,
 ) {
     init {
-        provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        provider?.let {
+            require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(it))
+        }
     }
 }

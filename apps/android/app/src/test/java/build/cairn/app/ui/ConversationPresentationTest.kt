@@ -476,24 +476,153 @@ class ConversationPresentationTest {
     }
 
     @Test
-    fun `paused and failed runs keep messages waiting`() {
-        listOf(
-                Chat(id = "chat", paused = true),
-                Chat(
-                    id = "chat",
-                    run =
-                        Run(
-                            id = "r",
-                            status = "failed",
-                            taskId = "",
-                        ),
-                ),
+    fun `a paused conversation keeps messages waiting`() {
+        val result =
+            chatDelivery(Chat(id = "chat", paused = true, messages = listOf(first)), emptyList())
+        assertTrue(result.sending.isEmpty())
+        assertEquals(first, result.queued.single())
+    }
+
+    @Test
+    fun `returned messages come back only to their author with their choices`() {
+        val plan =
+            ChatMessage(
+                id = "plan",
+                text = "Plan it",
+                status = "cancelled",
+                returnedTo = "alice",
+                plan = true,
+                provider = "claude",
+                model = "opus",
+                reasoning = "high",
+                speed = "priority",
             )
-            .forEach {
-                val result = chatDelivery(it.copy(messages = listOf(first)), emptyList())
-                assertTrue(result.sending.isEmpty())
-                assertEquals(first, result.queued.single())
-            }
+        val followUp =
+            ChatMessage(
+                id = "follow",
+                text = "Then this",
+                status = "cancelled",
+                returnedTo = "alice",
+            )
+        val chat =
+            Chat(
+                id = "chat",
+                messages =
+                    listOf(
+                        plan,
+                        followUp,
+                        ChatMessage(
+                            id = "bob",
+                            text = "Bob",
+                            status = "cancelled",
+                            returnedTo = "bob",
+                        ),
+                        ChatMessage(id = "deleted", text = "Gone", status = "cancelled"),
+                    ),
+            )
+        assertEquals(listOf("plan", "follow"), returnedMessages(chat, "alice").map { it.id })
+        assertEquals(listOf("follow"), returnedMessages(chat, "alice", setOf("plan")).map { it.id })
+        assertTrue(returnedMessages(chat, null).isEmpty())
+        val restored = restoredComposer(listOf(plan, followUp), " brouillon ")
+        assertEquals("Plan it\n\nThen this\n\nbrouillon", restored.text)
+        assertEquals("claude", restored.provider)
+        assertEquals("opus", restored.model)
+        assertEquals("high", restored.reasoning)
+        assertEquals("priority", restored.speed)
+        assertTrue(restored.plan)
+        assertEquals(
+            "Plan it\n\nThen this",
+            restoredComposer(listOf(plan, followUp), "Plan it\n\nThen this").text,
+        )
+        // Only whole blocks count: a short message inside another word still comes back.
+        assertEquals(
+            "ok\n\nTokens look wrong",
+            restoredComposer(listOf(followUp.copy(text = "ok")), "Tokens look wrong").text,
+        )
+    }
+
+    @Test
+    fun `a held queue is resumed rather than written to`() {
+        val run =
+            Run(
+                id = "r",
+                status = "failed",
+                taskId = "",
+                error = "Process exited with status 1.",
+            )
+        val held = Chat(id = "chat", paused = true, run = run, messages = listOf(first))
+        assertEquals(
+            "Process exited with status 1. Reprenez la file pour continuer.",
+            conversationError(held),
+        )
+        assertEquals(
+            "Process exited with status 1.",
+            conversationError(held.copy(messages = emptyList())),
+        )
+        assertEquals(
+            "La réponse s’est arrêtée avant la fin. Reprenez la file pour continuer.",
+            conversationError(held.copy(run = run.copy(error = null))),
+        )
+        // Someone without access to the agent is told nothing to do.
+        assertEquals("Process exited with status 1.", conversationError(held, readOnly = true))
+        assertEquals(
+            "La réponse s’est arrêtée avant la fin.",
+            conversationError(held.copy(run = run.copy(error = null)), readOnly = true),
+        )
+    }
+
+    @Test
+    fun `the next message resumes only an empty queue paused by a stop or failure`() {
+        listOf("failed", "interrupted", "cancelled").forEach {
+            val chat =
+                Chat(id = "chat", paused = true, run = Run(id = "r", status = it, taskId = ""))
+            assertTrue(resumesOnSend(chat, 0))
+            assertFalse(resumesOnSend(chat, 1))
+        }
+        val succeeded =
+            Chat(id = "chat", paused = true, run = Run(id = "r", status = "succeeded", taskId = ""))
+        assertFalse(resumesOnSend(succeeded, 0))
+        // A Stop still settling: the run has not ended yet.
+        val stopping =
+            Chat(
+                id = "chat",
+                paused = true,
+                run = Run(id = "r", status = "running", taskId = "", cancelRequestedAt = 1),
+            )
+        assertTrue(resumesOnSend(stopping, 0))
+        // Its own message still starting, or steering it already claimed, may be held: Resume
+        // then replays the turn first.
+        val starting =
+            stopping.copy(
+                run =
+                    stopping.run?.copy(
+                        chatExecution = ChatExecution(messageId = "turn", text = "Turn")
+                    ),
+                messages = listOf(ChatMessage(id = "turn", text = "Turn", status = "sending")),
+            )
+        assertFalse(resumesOnSend(starting, 0))
+        val steering =
+            stopping.copy(
+                messages =
+                    listOf(
+                        ChatMessage(
+                            id = "steer",
+                            text = "Steer",
+                            status = "sending",
+                            mode = "steer",
+                        )
+                    )
+            )
+        assertFalse(resumesOnSend(steering, 0))
+    }
+
+    @Test
+    fun `a message written after a failed or stopped turn starts the next one`() {
+        listOf("failed", "interrupted", "cancelled").forEach {
+            val run = Run(id = "r", status = it, taskId = "")
+            val chat = Chat(id = "chat", run = run, messages = listOf(first))
+            assertEquals(first, chatDelivery(chat, emptyList()).sending.single().message)
+        }
     }
 
     @Test
@@ -647,7 +776,7 @@ class ConversationPresentationTest {
                 taskId = "",
             )
         assertEquals(
-            "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer.",
+            "La réponse s’est arrêtée avant la fin. Envoyez un message pour continuer.",
             conversationError(Chat(id = "chat", run = run)),
         )
         assertEquals(

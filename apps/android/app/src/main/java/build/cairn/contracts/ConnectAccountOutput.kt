@@ -42,7 +42,7 @@ sealed interface ConnectAccountOutput {
         val provider: String,
     ) : ConnectAccountOutput {
         init {
-            require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+            require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
         }
     }
 }

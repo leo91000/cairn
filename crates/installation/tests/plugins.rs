@@ -975,6 +975,7 @@ async fn finish_turn(s: &Service, delivery: &Value, answer: &str) {
 #[tokio::test]
 async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is_needed() {
     let (_root, s, connection) = fixture().await;
+    s.plugins.fix_rate_limit_time(now());
     let (mock, server) = mock(&s).await;
     let support = s
         .agent_fixture(
@@ -1177,6 +1178,7 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
 #[tokio::test]
 async fn access_requests_wait_for_approval_without_storing_content() {
     let (_root, s, connection) = fixture().await;
+    s.plugins.fix_rate_limit_time(now());
     let (mock, server) = mock(&s).await;
     let saved = common::save_plugin(
         &s,
@@ -1321,6 +1323,7 @@ async fn access_requests_wait_for_approval_without_storing_content() {
 #[tokio::test]
 async fn rate_limits_and_changed_agent_access_stop_admission() {
     let (root, s, connection) = fixture().await;
+    s.plugins.fix_rate_limit_time(now());
     let event = |id: &str| {
         json!({
             "name": "message",

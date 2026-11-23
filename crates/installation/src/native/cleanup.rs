@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     io::Write,
-    os::unix::fs::DirBuilderExt,
+    os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -36,28 +36,31 @@ pub(super) enum Outcome {
 }
 
 #[derive(Clone)]
-pub(super) struct Ticket(watch::Receiver<Outcome>);
+pub(super) struct Ticket {
+    attempt: String,
+    outcome: watch::Receiver<Outcome>,
+}
 
 impl Ticket {
     pub fn current(&self) -> Outcome {
-        self.0.borrow().clone()
+        self.outcome.borrow().clone()
     }
 
     pub async fn wait(&mut self, duration: Duration) -> Outcome {
         let waiting = async {
             loop {
-                let current = self.0.borrow_and_update().clone();
+                let current = self.outcome.borrow_and_update().clone();
                 if matches!(current, Outcome::Complete) {
                     return current;
                 }
-                if self.0.changed().await.is_err() {
-                    return self.0.borrow().clone();
+                if self.outcome.changed().await.is_err() {
+                    return self.outcome.borrow().clone();
                 }
             }
         };
         tokio::time::timeout(duration, waiting)
             .await
-            .unwrap_or_else(|_| self.0.borrow().clone())
+            .unwrap_or_else(|_| self.outcome.borrow().clone())
     }
 }
 
@@ -213,15 +216,76 @@ pub(super) fn quarantine(state: &Path, run: &str, attempt: &str) -> Result<()> {
     publish(state, run, attempt).map(|_| ())
 }
 
+pub(super) async fn read_attempt_evidence(
+    path: &Path,
+    limit: usize,
+    allow_unlinked_snapshot: bool,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let file = match tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .await
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    read_evidence(file, limit, allow_unlinked_snapshot)
+        .await
+        .map(Some)
+}
+
+async fn read_evidence(
+    file: tokio::fs::File,
+    limit: usize,
+    allow_unlinked_snapshot: bool,
+) -> std::io::Result<Vec<u8>> {
+    let metadata = file.metadata().await?;
+    let links = metadata.nlink();
+    if !metadata.is_file()
+        || metadata.len() > limit as u64
+        || links > 1
+        || (links == 0 && !allow_unlinked_snapshot)
+    {
+        return Err(std::io::Error::other("Invalid native cleanup evidence."));
+    }
+    crate::process::read_bounded(file, limit)
+        .await
+        .map_err(std::io::Error::other)
+}
+
+async fn quarantine_retired(path: &Path, run: &str, attempt: Option<&str>) -> bool {
+    let Some(attempt) = attempt else {
+        return matches!(
+            tokio::fs::symlink_metadata(path).await,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        );
+    };
+    // Reading an opened quarantine snapshot is safe across atomic replacement
+    // or unlink. The ticket check still observes a same-attempt worker.
+    let bytes = match read_attempt_evidence(path, 16384, true).await {
+        Ok(None) => return true,
+        Ok(Some(bytes)) => bytes,
+        Err(_) => return false,
+    };
+    // A later attempt's quarantine cannot undo this attempt's retirement.
+    serde_json::from_slice::<Record>(&bytes).is_ok_and(|record| {
+        record.version == 1
+            && record.run == run
+            && uuid(&record.attempt).is_ok()
+            && uuid(&record.boot).is_ok()
+            && record.message.len() <= 8192
+            && record.attempt != attempt
+    })
+}
+
 impl Registry {
-    pub(super) async fn retired(&self, state: &Path, run: &str) -> bool {
+    pub(super) async fn retired(&self, state: &Path, run: &str, attempt: Option<&str>) -> bool {
         if !tokio::fs::symlink_metadata(directory(state))
             .await
             .is_ok_and(|metadata| metadata.is_dir())
-            || !matches!(
-                tokio::fs::symlink_metadata(marker(state, run)).await,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound
-            )
+            || !quarantine_retired(&marker(state, run), run, attempt).await
         {
             return false;
         }
@@ -229,9 +293,10 @@ impl Registry {
         // A live worker unlinks quarantine before syncing the directory and
         // dropping its leases. Observe its completion after checking the path.
         self.tickets.lock().is_ok_and(|tickets| {
-            tickets
-                .get(run)
-                .is_none_or(|ticket| matches!(*ticket.0.borrow(), Outcome::Complete))
+            tickets.get(run).is_none_or(|ticket| {
+                attempt.is_some_and(|attempt| ticket.attempt != attempt)
+                    || matches!(*ticket.outcome.borrow(), Outcome::Complete)
+            })
         })
     }
 
@@ -243,17 +308,20 @@ impl Registry {
         let (sender, receiver) = watch::channel(Outcome::Pending(
             "Native disk cleanup registration is in progress.".into(),
         ));
-        let ticket = Ticket(receiver);
+        let ticket = Ticket {
+            attempt: attempt.into(),
+            outcome: receiver,
+        };
         {
             let mut tickets = self.tickets.lock().map_err(Error::internal)?;
             if let Some(ticket) = tickets.get(run)
-                && !matches!(*ticket.0.borrow(), Outcome::Complete)
+                && !matches!(*ticket.outcome.borrow(), Outcome::Complete)
             {
                 return Err(Error::conflict(
                     "This native disk already has a cleanup worker; retained ownership cannot be replaced.",
                 ));
             }
-            tickets.retain(|_, ticket| !matches!(*ticket.0.borrow(), Outcome::Complete));
+            tickets.retain(|_, ticket| !matches!(*ticket.outcome.borrow(), Outcome::Complete));
             tickets.insert(run.into(), ticket.clone());
         }
 
@@ -585,10 +653,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quarantine_snapshot_survives_unlink_with_the_descriptor_open() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        quarantine(state.path(), &run, &attempt).unwrap();
+        let path = marker(state.path(), &run);
+        let alias = path.with_extension("alias");
+        tokio::fs::hard_link(&path, &alias).await.unwrap();
+        assert!(read_attempt_evidence(&path, 16384, true).await.is_err());
+        tokio::fs::remove_file(alias).await.unwrap();
+
+        let snapshot = tokio::fs::File::open(&path).await.unwrap();
+        let strict = tokio::fs::File::open(&path).await.unwrap();
+        tokio::fs::remove_file(&path).await.unwrap();
+        let bytes = read_evidence(snapshot, 16384, true).await.unwrap();
+        let record = serde_json::from_slice::<Record>(&bytes).unwrap();
+        assert_eq!(record.attempt, attempt);
+        assert!(read_evidence(strict, 16384, false).await.is_err());
+    }
+
+    #[tokio::test]
     async fn a_missing_quarantine_does_not_override_a_live_cleanup_worker() {
         let state = tempfile::tempdir().unwrap();
         let registry = Registry::default();
         let run = crate::config::id();
+        let attempt = crate::config::id();
+        let other = crate::config::id();
         let lock = state.path().join("physical.lock");
         let (entered, received) = mpsc::channel();
         let (release, released) = mpsc::channel();
@@ -596,7 +687,7 @@ mod tests {
             .start(
                 state.path(),
                 &run,
-                &crate::config::id(),
+                &attempt,
                 Blocking {
                     _owner: crate::file_lock::exclusive(&lock, "busy").unwrap(),
                     entered,
@@ -609,7 +700,9 @@ mod tests {
         // Reproduce the observable state between quarantine unlink and lease release.
         std::fs::remove_file(marker(state.path(), &run)).unwrap();
         assert!(crate::file_lock::exclusive(&lock, "busy").is_err());
-        assert!(!registry.retired(state.path(), &run).await);
+        assert!(!registry.retired(state.path(), &run, None).await);
+        assert!(!registry.retired(state.path(), &run, Some(&attempt)).await);
+        assert!(registry.retired(state.path(), &run, Some(&other)).await);
         release.send(()).unwrap();
         assert!(matches!(
             ticket.wait(Duration::from_secs(3)).await,
@@ -633,7 +726,7 @@ mod tests {
             released.recv_timeout(Duration::from_secs(5)).unwrap();
         });
         received.await.unwrap();
-        let retired = registry.retired(state.path(), &run).await;
+        let retired = registry.retired(state.path(), &run, None).await;
         release.send(()).unwrap();
         registration.await.unwrap();
         assert!(retired);
@@ -645,17 +738,17 @@ mod tests {
         let registry = Registry::default();
         let run = crate::config::id();
         let root = directory(state.path());
-        assert!(!registry.retired(state.path(), &run).await);
+        assert!(!registry.retired(state.path(), &run, None).await);
 
         let target = state.path().join("different-directory");
         std::os::unix::fs::symlink(&target, &root).unwrap();
-        assert!(!registry.retired(state.path(), &run).await);
+        assert!(!registry.retired(state.path(), &run, None).await);
         std::fs::create_dir(&target).unwrap();
-        assert!(!registry.retired(state.path(), &run).await);
+        assert!(!registry.retired(state.path(), &run, None).await);
 
         std::fs::remove_file(&root).unwrap();
         std::fs::create_dir(&root).unwrap();
-        assert!(registry.retired(state.path(), &run).await);
+        assert!(registry.retired(state.path(), &run, None).await);
     }
 
     #[tokio::test(flavor = "current_thread")]

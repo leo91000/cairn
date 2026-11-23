@@ -20,6 +20,6 @@ data class CodingAgentConfiguration(
 ) {
     init {
         agentId?.let { java.util.UUID.fromString(it) }
-        require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+        require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
     }
 }

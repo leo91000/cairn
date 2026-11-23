@@ -37,6 +37,59 @@ async fn native_cleanup_cause_survives_checkpoint_roundtrip_without_claiming_phy
 }
 
 #[tokio::test]
+async fn accepted_cancellation_blocks_publication_of_deferred_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            db.add_run_fixture(
+                &json!({"id":"cancelled-cleanup", "taskId":"task", "status":"running"}),
+                None,
+            )?;
+            let mut saved = RunCheckpoint::from_value(json!({
+                "runnerId":"attempt", "prepared":{"backend":"native", "isolated":true},
+            }))?;
+            let pending = crate::runner::ControllerResult {
+                code: crate::runner::CONTROLLER_FAILED,
+                finalization_failed: true,
+                physical_finalized: false,
+                terminal_reason: None,
+                native_cleanup: Some("Pending cleanup.".into()),
+            };
+            saved.record_controller_observation(
+                db,
+                "cancelled-cleanup",
+                "attempt",
+                Some(pending.clone()),
+            )?;
+            db.change_run(
+                "cancelled-cleanup",
+                crate::runs::RunChanges {
+                    cancel_requested_at: Some(Some(now())),
+                    ..Default::default()
+                },
+            )?;
+            saved.publish_cleanup_observation(
+                db,
+                "cancelled-cleanup",
+                "attempt",
+                Some(crate::runner::ControllerResult {
+                    physical_finalized: true,
+                    finalization_failed: false,
+                    native_cleanup: Some("Cleanup completed.".into()),
+                    ..pending
+                }),
+            )?;
+            assert_eq!(saved.finalization_error(), Some("Pending cleanup."));
+            assert!(saved.cleanup_observation_pending());
+            assert!(db.events_fixture("cancelled-cleanup", 0, 100)?.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn unrelated_provider_error_does_not_replace_vm_flush_failure() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path()).unwrap();

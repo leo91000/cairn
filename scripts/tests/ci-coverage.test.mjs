@@ -233,6 +233,7 @@ describe('parallel CI coverage', () => {
     expect(qualifications.map(step => step.name)).toEqual([
       'Qualify the resolved OpenCode release against its native adapter',
       'Qualify the resolved Claude Code release against its native adapter',
+      'Qualify the resolved Antigravity release against its native adapter',
       'Qualify plan turns of the resolved Claude Code and Codex releases',
     ])
     for (const step of qualifications) {
@@ -252,11 +253,16 @@ describe('parallel CI coverage', () => {
       SERVED_CLAUDE: '${{ needs.resolve.outputs.served-claude }}',
     })
     expect(qualifications[2].env).toEqual({
+      ANTIGRAVITY_VERSION: '${{ needs.resolve.outputs.antigravity }}',
+      ANTIGRAVITY_URL: '${{ needs.resolve.outputs.antigravity-url }}',
+      ANTIGRAVITY_SHA512: '${{ needs.resolve.outputs.antigravity-sha512 }}',
+    })
+    expect(qualifications[3].env).toEqual({
       CLAUDE_VERSION: '${{ needs.resolve.outputs.claude }}',
       CODEX_VERSION: '${{ needs.resolve.outputs.codex }}',
     })
     /* eslint-enable no-template-curly-in-string */
-    expect(qualifications[2].run).toContain('--test native_plan_turns -- --ignored --test-threads 1')
+    expect(qualifications[3].run).toContain('--test native_plan_turns -- --ignored --test-threads 1')
     expect(quality.jobs.backend.steps.find(step => step.run?.includes('--nextest --test-threads')).run).toContain('--nextest --test-threads 8 --no-fail-fast --color never --status-level all')
   })
 
@@ -892,5 +898,20 @@ describe('parallel CI coverage', () => {
       expect(android.jobs.publish.needs).toContain(job)
       expect(android.jobs.publish.if).toContain(`needs.${job}.result == 'success'`)
     }
+  })
+
+  it('sets up the shared Robolectric SDK cache before both Android unit-test commands', () => {
+    const setupAction = './.github/actions/setup-robolectric'
+    const prSteps = pr.jobs.android.steps
+    const prSetup = prSteps.findIndex(step => step.uses === setupAction)
+    expect(prSetup).toBeGreaterThan(-1)
+    expect(prSteps[prSetup].if).toBeUndefined()
+    expect(prSetup).toBeLessThan(prSteps.findIndex(step => step.run === 'pnpm validate:pr android'))
+
+    const fullSteps = android.jobs.check.steps
+    const fullSetup = fullSteps.findIndex(step => step.uses === setupAction)
+    expect(fullSetup).toBeGreaterThan(-1)
+    expect(fullSteps[fullSetup].if).toBe('matrix.task == \'testDebugUnitTest\'')
+    expect(fullSetup).toBeLessThan(fullSteps.findIndex(step => step.name === 'Unit tests or lint'))
   })
 })

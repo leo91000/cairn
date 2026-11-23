@@ -67,6 +67,8 @@ jobs:
       - name: Check Kotlin formatting
         working-directory: apps/android
         run: ./gradlew spotlessCheck --no-daemon
+      - uses: ./.github/actions/setup-robolectric
+        if: matrix.task == 'testDebugUnitTest'
       - name: Unit tests or lint
         env:
           GRADLE_TASK: ${{ matrix.task }}

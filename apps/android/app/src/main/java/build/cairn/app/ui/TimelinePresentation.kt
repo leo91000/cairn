@@ -24,7 +24,7 @@ private val FAILURE_TITLES =
     mapOf(
         "turn" to "L’agent a rencontré une erreur",
         "run" to "Exécution en échec",
-        "engine" to "L’agent a rencontré une erreur",
+        "engine" to "Cairn n’a pas pu exécuter l’agent",
         "runner" to "L’exécuteur a échoué",
     )
 

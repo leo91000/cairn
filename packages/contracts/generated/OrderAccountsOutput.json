@@ -62,7 +62,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "state": {
@@ -279,7 +279,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "remainingPercent": {
@@ -346,7 +346,7 @@
         "required": {
           "default": [],
           "items": {
-            "pattern": "^(codex|claude|opencode)$",
+            "pattern": "^(codex|claude|opencode|antigravity)$",
             "type": "string"
           },
           "type": "array"
@@ -396,7 +396,7 @@
           "type": "string"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },

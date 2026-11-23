@@ -1118,7 +1118,7 @@ fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
         assert_eq!(
             db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            36
+            37
         );
         for table in [
             "hook_rule_conversations",
@@ -1417,6 +1417,17 @@ async fn a_rule_cannot_resume_even_its_own_cancellation_without_a_person() {
     let latest = &triggerings(&f, &steering).await[0];
     assert_eq!(latest["status"], "failed", "{latest}");
     assert!(text(latest, "error").contains("paused"), "{latest}");
+
+    // A failed turn no longer pauses the conversation, yet rules still wait for a person.
+    f.s.chat_pause(&chat, false).await.unwrap();
+    emit(&f, "failed-unpaused", message("alice", "still there?")).await;
+    engine::tick(&f.s).await.unwrap();
+    let latest = &triggerings(&f, &steering).await[0];
+    assert_eq!(latest["status"], "failed", "{latest}");
+    assert!(
+        text(latest, "error").contains("last turn failed"),
+        "{latest}"
+    );
 }
 
 async fn set_status(f: &Fixture, run: &str, status: cairn_contracts::RunStatus) {

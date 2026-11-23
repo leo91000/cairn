@@ -32,7 +32,8 @@ pub(crate) fn progress(
 }
 
 pub(crate) fn quota_blocked(db: &Db<'_>, run: &Value) -> Result<bool> {
-    if run["environmentState"].is_string() {
+    // A turn whose message went back to its author is over: the next message picks the agent.
+    if run["environmentState"].is_string() || super::turn_returned(db, text(run, "id"))? {
         return Ok(false);
     }
     if is_compaction(run)

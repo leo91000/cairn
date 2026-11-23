@@ -283,9 +283,7 @@ abstract class ConversationLifecycleCases {
                     }
                     compose.onNodeWithText("Nouvelle session agent ?").assertDoesNotExist()
                     compose
-                        .onNodeWithText(
-                            "Écrivez un nouveau message, puis reprenez la file pour continuer."
-                        )
+                        .onNodeWithText("Votre prochain message démarre la nouvelle session.")
                         .assertIsDisplayed()
                     captureFreshSession("accepted")
                     restarts.forEach {

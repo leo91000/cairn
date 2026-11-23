@@ -61,6 +61,12 @@ result only after the observation deadline. Ordinary completed recovery retains
 the existing interrupted-attempt result and retry policy. A dead backend can require an owned I/O abort before a
 D-state workload can stop; this fallback cannot publish a workload-fenced result
 until the subsequent stop succeeds. Diagnostic updates retain that proof without claiming retirement.
+The manager persists the attempt's fenced cleanup response before asking for
+optional retirement evidence. A second wait on the same attempt can confirm
+physical closure after the disk flushes and retires. Recovery resumes an
+interrupted cleanup observation and commits its diagnostic with publication.
+The recorded execution failure continues to block automatic replay because
+the workload's exit status remains unknown.
 The live manager checkpoint serializes fencing and reloads its durable evidence
 before heartbeat or output persistence can overwrite it; placement lease renewal
 continues independently while the fence waits.

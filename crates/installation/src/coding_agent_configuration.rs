@@ -19,7 +19,7 @@ mod tests;
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS coding_agent_configurations(
  scope TEXT NOT NULL,
- provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode')),
+ provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode','antigravity')),
  agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
  document TEXT NOT NULL,
  presentation TEXT NOT NULL,
@@ -49,14 +49,16 @@ pub(crate) fn parse(provider: Provider, document: &str) -> Result<Value> {
                 .map_err(|error| Error::bad(format!("Invalid TOML: {}", error.message())))?;
             serde_json::to_value(value)?
         }
-        Provider::Claude if document.trim().is_empty() => json!({}),
-        Provider::Claude => serde_json::from_str(document).map_err(|error| {
-            Error::bad(format!(
-                "Invalid JSON at line {}, column {}.",
-                error.line(),
-                error.column()
-            ))
-        })?,
+        Provider::Claude | Provider::Antigravity if document.trim().is_empty() => json!({}),
+        Provider::Claude | Provider::Antigravity => {
+            serde_json::from_str(document).map_err(|error| {
+                Error::bad(format!(
+                    "Invalid JSON at line {}, column {}.",
+                    error.line(),
+                    error.column()
+                ))
+            })?
+        }
         Provider::Opencode if document.trim().is_empty() => json!({}),
         Provider::Opencode => {
             jsonc_parser::parse_to_serde_value(document, &document::options(provider)).map_err(
@@ -211,6 +213,8 @@ fn mappings(provider: Provider) -> &'static [(&'static str, &'static str)] {
         ],
         Provider::Claude => &[("/model", "model"), ("/effortLevel", "reasoning")],
         Provider::Opencode => &[("/model", "model")],
+        // `agy` takes its model from Cairn's launch arguments, never from settings.
+        Provider::Antigravity => &[],
     }
 }
 
@@ -661,6 +665,20 @@ fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
                 "Custom executable commands and their environments are not supported. Use Cairn skills and plugins.",
             ));
         }
+        Provider::Antigravity => {
+            entries.push((
+                "permissions.allow / toolPermission / agentMode",
+                "Cairn's hook and launch settings are the limit. Native settings may add deny rules, never allow more.",
+            ));
+            entries.push((
+                "modelProvider / model",
+                "The account kind and the Cairn agent's model select the native model.",
+            ));
+            entries.push((
+                "hooks / plugins / MCP",
+                "Cairn generates the hook policy and authorized MCP servers. Use Cairn skills and plugins.",
+            ));
+        }
     }
     entries
         .into_iter()
@@ -735,6 +753,9 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             }
         }
     }
+    if provider == Provider::Antigravity {
+        validate_antigravity(value)?;
+    }
     if provider == Provider::Opencode && !profile.model.is_empty() {
         crate::opencode::model_id(&profile.model)?;
     }
@@ -803,6 +824,7 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             "/tools",
             "/small_model",
         ],
+        Provider::Antigravity => &[],
     };
     for path in blocked {
         if value.pointer(path).is_some() {
@@ -945,6 +967,54 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
                 "Enter a valid value for {} ({}).",
                 setting.label, setting.path
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Antigravity settings may only restrict: deny rules and its terminal sandbox. Under
+/// Cairn's launch flags `agy` 1.5.14 runs an `ask` rule's tool anyway (measured), so
+/// an ask rule would look like a restriction without being one.
+fn validate_antigravity(value: &Value) -> Result<()> {
+    for (key, setting) in value.as_object().into_iter().flatten() {
+        match key.as_str() {
+            "enableTerminalSandbox" if setting.is_boolean() => {}
+            "permissions" => {
+                let rules = setting.as_object().ok_or_else(|| {
+                    Error::bad("Antigravity permissions must be an object of deny rules.")
+                })?;
+                for (list, entries) in rules {
+                    if list != "deny" {
+                        return Err(Error::bad(
+                            "Antigravity permissions may only add deny rules. Ask rules do not stop a tool in Cairn's managed execution. Change access on the Cairn agent page.",
+                        ));
+                    }
+                    let valid = entries.as_array().is_some_and(|entries| {
+                        entries.len() <= 200
+                            && entries.iter().all(|rule| {
+                                rule.as_str().is_some_and(|rule| {
+                                    !rule.is_empty()
+                                        && rule.len() <= 500
+                                        && rule.ends_with(')')
+                                        && rule.contains('(')
+                                })
+                            })
+                    });
+                    if !valid {
+                        return Err(Error::bad(format!(
+                            "Antigravity permissions.{list} must list rules such as command(rm) or write_file(/etc)."
+                        )));
+                    }
+                }
+            }
+            "enableTerminalSandbox" => {
+                return Err(Error::bad("enableTerminalSandbox must be true or false."));
+            }
+            _ => {
+                return Err(Error::bad(format!(
+                    "{key} is managed by Cairn or not supported for Antigravity. Supported settings are permissions.deny and enableTerminalSandbox."
+                )));
+            }
         }
     }
     Ok(())
@@ -1098,6 +1168,14 @@ fn settings(
                 &[],
             ),
         ],
+        Provider::Antigravity => &[(
+            "/enableTerminalSandbox",
+            "Terminal sandbox",
+            "Run shell commands in Antigravity's own terminal sandbox. It is not a network or workspace boundary: Antigravity 1.5.14 refuses only direct IP access there.",
+            "Workspace",
+            "boolean",
+            &[],
+        )],
     };
     let mut output: Vec<_> = definitions
         .iter()
@@ -1155,7 +1233,7 @@ pub(crate) fn view(
     Ok(CodingAgentConfiguration {
         provider: input.provider, agent_id: input.agent_id, agent_name: agent.map(|a| a.settings.name),
         revision: format!("{}:{sources}", record.revision),
-        filename: match provider { Provider::Codex => "config.toml", Provider::Claude => "settings.json", Provider::Opencode => "opencode.jsonc" }.into(),
+        filename: match provider { Provider::Codex => "config.toml", Provider::Claude => "settings.json", Provider::Opencode => "opencode.jsonc", Provider::Antigravity => "settings.json" }.into(),
         document, inherited_document: render(provider, &inherited)?, customized_paths: customized.iter().cloned().collect(),
         settings: settings(provider, &value, &customized), managed: managed(provider),
         notices: vec!["Changes apply to the next message, including existing conversations. An active turn keeps its current configuration.".into(), "The native process may restart between messages to load the new settings. The saved conversation and workspace are preserved.".into()],
@@ -1602,6 +1680,7 @@ pub(crate) fn apply(plan: &mut Value, frozen: &Value) -> Result<()> {
         Provider::Codex => "codexConfig",
         Provider::Claude => "claudeSettings",
         Provider::Opencode => "opencodeConfig",
+        Provider::Antigravity => "antigravitySettings",
     };
     let managed = plan[key].clone();
     if managed.is_object() {

@@ -31,7 +31,9 @@ data class DelegatedTask(
     init {
         require(Regex("^(active|trash|purging)\$").containsMatchIn(lifecycle))
         require(pendingQuestions >= 0L)
-        provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        provider?.let {
+            require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(it))
+        }
         require(
             Regex("^(idle|queued|running|waiting|succeeded|failed|cancelled|interrupted)\$")
                 .containsMatchIn(status)

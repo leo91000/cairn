@@ -117,7 +117,9 @@ fn detail(db: &Db<'_>, args: &Value) -> Result<Value> {
         let message: cairn_contracts::ChatMessage = serde_json::from_value(value.clone())?;
         let size = serde_json::to_vec(&message)?.len();
         let item = if size <= PAGE_BYTES {
-            ChatMessagePage::Complete { message }
+            ChatMessagePage::Complete {
+                message: Box::new(message),
+            }
         } else {
             ChatMessagePage::Truncated {
                 preview: ChatMessagePreview {
@@ -425,19 +427,32 @@ pub(crate) async fn invoke(
                     if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
                         return Err(Error::conflict("This conversation has been deleted."));
                     }
+                    let waiting = match chat
+                        .run_id
+                        .as_deref()
+                        .map(|run| db.run(run))
+                        .transpose()?
+                        .flatten()
+                    {
+                        Some(run) => chats::skips_replay(db, &chat_id, &run)?,
+                        None => false,
+                    };
                     Ok((
                         chat.clone(),
                         match chat.run_id.as_deref() {
                             Some(run) => Some(required(db.run_state(run)?, "Run not found")?),
                             None => None,
                         },
+                        waiting,
                     ))
                 }
             })
             .await?;
+        // A message written since the turn stopped starts the next turn instead of a replay.
         if !paused
             && !record.0.cancelled_by_deletion
             && !record.0.session_restart_requested
+            && !record.2
             && let Some(run) = record.1.filter(|run| run.status.is_resumable())
         {
             s.worker

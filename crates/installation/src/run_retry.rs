@@ -17,8 +17,7 @@ pub fn startup_failure(error: &crate::error::Error) -> Option<Value> {
         .iter()
         .any(|method| error.message == format!("Codex {method} request timed out."));
     let disconnected = error.status == 503
-        && error.message
-            == "Codex disconnected before finishing the operation. Try again or resume the conversation.";
+        && error.message == "Codex disconnected before finishing the operation.";
     if !timeout && !disconnected {
         return None;
     }

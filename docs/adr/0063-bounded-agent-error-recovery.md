@@ -1,3 +1,5 @@
+> Statut : Mise à jour par [ADR-0091](0091-failed-turns-return-unsent-messages.md) : après l'épuisement des nouvelles tentatives, une conversation n'est plus mise en pause, sauf si elle retient des messages (que l'agent a peut-être reçus, ou venant de règles, d'agents, de plugins ou de réponses à un questionnaire) ; un nouveau message démarre un tour avec un nouveau budget. La reprise manuelle d'un tour dont le message est revenu à son auteur est refusée.
+
 # Bounded recovery after transient agent failures
 
 Date: 2026-10-06.

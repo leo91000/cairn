@@ -33,9 +33,9 @@ that process and marks the attempt failed instead of accepting a later successfu
 turn result. The error's raw environment exports are not included in the activity
 log, and no completion receipt is written for that attempt.
 
-Repair the affected script in the conversation's retained Claude home, then resume
-the same conversation. Resume starts a fresh process so cached corrupted text is
-discarded. Léo preserves the script, transcript and workspace; it does not guess
+Repair the affected script in the conversation's retained Claude home, then continue
+the same conversation: its next turn, whether resumed or started by a new message,
+starts a fresh process so cached corrupted text is discarded. Léo preserves the script, transcript and workspace; it does not guess
 replacement shell code, delete hooks, or retry automatically. This detects and
 contains corruption but does not identify or repair the cause of the invalid bytes.
 

@@ -95,6 +95,7 @@ describe('codex speeds', () => {
     expect(showsSpeed('codex', model({}), 'priority')).toBe(true)
     expect(showsSpeed('claude', astra, 'priority')).toBe(false)
     expect(showsSpeed('opencode', astra, '')).toBe(false)
+    expect(showsSpeed('antigravity', astra, 'priority')).toBe(false)
   })
 
   it('uses the speed shown for the selected model when resuming', () => {

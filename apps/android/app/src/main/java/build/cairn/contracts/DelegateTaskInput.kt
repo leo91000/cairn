@@ -25,7 +25,9 @@ data class DelegateTaskInput(
     init {
         agentId?.let { java.util.UUID.fromString(it) }
         model?.let { require(Regex("^[\\w./:\\[\\]-]*\$").containsMatchIn(it)) }
-        provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        provider?.let {
+            require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(it))
+        }
         reasoning?.let { require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(it)) }
         requestId?.let { java.util.UUID.fromString(it) }
     }

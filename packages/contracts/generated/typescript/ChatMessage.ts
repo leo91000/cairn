@@ -21,4 +21,9 @@ export interface ChatMessage {
   createdAt: number
   attachments: Array<ChatAttachment>
   questionId?: string
+  /**
+   * The person a failed or stopped turn returned this unsent message to. Only their
+   * composer restores it; messages from rules and agents are returned to nobody.
+   */
+  returnedTo?: string
 }

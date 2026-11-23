@@ -4,6 +4,7 @@
 //! limits, selection by remaining capacity, run leases, usage polling and sign-in
 //! orchestration. Each coding agent's [`Driver`] owns what differs: its official CLI's sign-in
 //! protocol, credential storage, usage reading and the credentials handed to a run.
+pub mod antigravity;
 pub mod broker;
 pub mod claude;
 pub mod codex;
@@ -59,6 +60,11 @@ pub struct Lease {
 pub trait Driver: Send + Sync {
     fn accepts_api_keys(&self) -> bool {
         false
+    }
+
+    /// Whether `account`, or a new account when `None`, connects through the CLI's sign-in.
+    fn signs_in(&self, _account: Option<&Account>) -> bool {
+        !self.accepts_api_keys()
     }
 
     async fn api_key_providers(&self, _s: &Service) -> Result<Value> {
@@ -152,6 +158,7 @@ impl Provider {
             Provider::Codex => &codex::Codex,
             Provider::Claude => &claude::Claude,
             Provider::Opencode => &opencode::Opencode,
+            Provider::Antigravity => &antigravity::Antigravity,
         }
     }
 }
@@ -583,7 +590,7 @@ impl Accounts {
         let ready = accounts.iter().filter(|a| a.is_ready()).collect::<Vec<_>>();
         let mut compatible = Vec::new();
         for account in ready.iter().copied().filter(|a| a.enabled) {
-            if provider != Provider::Opencode
+            if !matches!(provider, Provider::Opencode | Provider::Antigravity)
                 || provider
                     .driver()
                     .supports(s, &account.id, model, "")
@@ -604,6 +611,11 @@ impl Accounts {
         } else if provider == Provider::Opencode && compatible.is_empty() {
             format!(
                 "No enabled {label} account supports model {model}. Choose a model available through your connections or connect its model provider."
+            )
+        } else if provider == Provider::Antigravity && compatible.is_empty() {
+            // Model inventories come from each account kind and can be briefly unavailable.
+            format!(
+                "No enabled {label} account supports model {model} right now. Choose another model, connect an account that offers it, or check its accounts in Connections."
             )
         } else if compatible.iter().any(full) {
             format!(
@@ -885,11 +897,9 @@ impl Accounts {
         id: Option<&str>,
     ) -> Result<CodingAgentAccount> {
         let name = valid_name(name)?;
+        // Each driver validates the format of its own credentials.
         let api_key = api_key.trim();
-        if api_key.is_empty()
-            || api_key.len() > 8192
-            || api_key.chars().any(|c| c.is_whitespace() || c.is_control())
-        {
+        if api_key.is_empty() || api_key.len() > 65_536 {
             return Err(Error::bad("Enter a valid provider API key."));
         }
         self.initialize(s).await?;

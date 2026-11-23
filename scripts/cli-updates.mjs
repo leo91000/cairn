@@ -26,6 +26,16 @@ export const engines = {
     minimum: '1.19.0',
     legacy: '1.19.0',
   },
+  // Antigravity has no npm package. Google's updater manifest names only its
+  // current release, as one tarball per platform with its SHA-512; earlier
+  // releases are not addressable, so it has no channel, legacy or rollback.
+  antigravity: {
+    name: 'Antigravity',
+    manifest: 'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json',
+    archive: 'linux-x64/cli_linux_x64.tar.gz',
+    // The oldest release the adapter supports (antigravity::MINIMUM).
+    minimum: '1.5.14',
+  },
 }
 
 async function json(url, options = {}) {
@@ -67,12 +77,33 @@ async function engineVersion(engine, { request }) {
   return version
 }
 
+// The image installs exactly the tarball the manifest names after checking its
+// SHA-512, so the URL is restricted to Google's release bucket and this release.
+async function antigravityRelease(engine, { request }) {
+  const release = await request(engine.manifest)
+  const { version, url, sha512 } = release ?? {}
+  if (typeof version !== 'string' || !stable.test(version))
+    throw new Error(`${engine.name} manifest does not name a stable release.`)
+  if (newer(engine.minimum, version))
+    throw new Error(`${engine.name} ${version} is older than ${engine.minimum}, the oldest release its adapter supports.`)
+  const prefix = `https://storage.googleapis.com/antigravity-public/antigravity-cli/${version}-`
+  const build = typeof url === 'string' && url.startsWith(prefix) && url.endsWith(`/${engine.archive}`)
+    ? url.slice(prefix.length, -engine.archive.length - 1)
+    : ''
+  if (!/^\d+$/.test(build))
+    throw new Error(`${engine.name} ${version} manifest does not name its official linux-x64 archive.`)
+  if (typeof sha512 !== 'string' || !/^[0-9a-f]{128}$/.test(sha512))
+    throw new Error(`${engine.name} ${version} manifest does not carry a SHA-512 digest.`)
+  return { version, url, sha512 }
+}
+
 export async function buildVersions({ request = json, githubToken } = {}) {
   const githubRelease = request('https://api.github.com/repos/cli/cli/releases/latest', { headers: { Accept: 'application/vnd.github+json', ...(githubToken ? { authorization: `Bearer ${githubToken}` } : {}) } })
-  const [codex, claude, opencode, github] = await Promise.all([
+  const [codex, claude, opencode, antigravity, github] = await Promise.all([
     engineVersion(engines.codex, { request }),
     engineVersion(engines.claude, { request }),
     engineVersion(engines.opencode, { request }),
+    antigravityRelease(engines.antigravity, { request }),
     githubRelease,
   ])
   if (github.draft || github.prerelease)
@@ -83,13 +114,15 @@ export async function buildVersions({ request = json, githubToken } = {}) {
     gh: github.tag_name?.replace(/^v/, ''),
     claude,
     opencode,
+    antigravity: antigravity.version,
   }
   for (const version of Object.values(versions)) {
     if (typeof version !== 'string' || !stable.test(version))
       throw new Error('CLI versions must be stable semantic versions.')
   }
 
-  return versions
+  // Antigravity's archive is not derivable from its version, so the build receives it too.
+  return { ...versions, 'antigravity-url': antigravity.url, 'antigravity-sha512': antigravity.sha512 }
 }
 
 if (import.meta.main) {

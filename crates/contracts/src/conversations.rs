@@ -248,7 +248,7 @@ pub struct ChatMessage {
     #[serde(default)]
     pub text: String,
     #[serde(default)]
-    #[schemars(pattern("^(|codex|claude|opencode)$"))]
+    #[schemars(pattern("^(|codex|claude|opencode|antigravity)$"))]
     #[ts(type = r#""" | import('../../accounts').Provider"#)]
     pub provider: String,
     #[serde(default)]
@@ -277,6 +277,11 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub question_id: Option<String>,
+    /// The person a failed or stopped turn returned this unsent message to. Only their
+    /// composer restores it; messages from rules and agents are returned to nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub returned_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -330,7 +335,7 @@ pub struct ContextUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct CodingAgentSwitch {
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     pub error: Option<String>,
 }
@@ -405,6 +410,11 @@ pub struct Chat {
     pub session_restart_requested: bool,
     #[serde(default)]
     pub can_request_new_session: bool,
+    /// The last turn's own message went back to its author: that turn cannot be resumed,
+    /// and sending the message again continues the conversation (ADR-0091).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(as = "Option<bool>", optional)]
+    pub turn_returned: bool,
     #[serde(default)]
     pub unread: bool,
     #[serde(default)]
@@ -436,7 +446,10 @@ pub struct Chat {
     pub requester: Option<ChatRequester>,
     #[serde(default)]
     #[ts(optional = nullable)]
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     pub provider: Option<AgentProvider>,
     #[serde(default)]
     #[ts(optional = nullable)]
@@ -458,7 +471,10 @@ pub struct Chat {
     pub account_wait_reason: Option<String>,
     #[serde(default)]
     #[ts(optional = nullable)]
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     pub account_required: Option<AgentProvider>,
     #[serde(default)]
     pub pending_questions: u32,
@@ -608,7 +624,7 @@ pub struct ChatMessageInput {
     #[schemars(with = "String", pattern("^(queue|steer)$"))]
     pub mode: MessageMode,
     #[serde(default)]
-    #[schemars(pattern("^(|codex|claude|opencode)$"))]
+    #[schemars(pattern("^(|codex|claude|opencode|antigravity)$"))]
     pub provider: String,
     #[serde(default)]
     #[schemars(length(max = 120), pattern(r"^[\w./:\[\]-]*$"))]
@@ -649,7 +665,10 @@ impl ChatMessageInput {
         if self.text.is_empty() && self.attachment_ids.is_empty() {
             return Err("Write a message or attach a file".into());
         }
-        if !matches!(self.provider.as_str(), "" | "codex" | "claude" | "opencode") {
+        if !matches!(
+            self.provider.as_str(),
+            "" | "codex" | "claude" | "opencode" | "antigravity"
+        ) {
             return Err("Invalid coding agent.".into());
         }
         if !self
@@ -736,7 +755,7 @@ pub struct EditChatMessage {
     #[schemars(with = "String", pattern("^(queue|steer)$"))]
     pub mode: MessageMode,
     #[serde(default)]
-    #[schemars(pattern("^(|codex|claude|opencode)$"))]
+    #[schemars(pattern("^(|codex|claude|opencode|antigravity)$"))]
     pub provider: String,
     #[serde(default)]
     #[schemars(length(max = 120), pattern(r"^[\w./:\[\]-]*$"))]
@@ -851,7 +870,7 @@ pub struct DeleteChatMessageOutput {
 )]
 pub enum ChatMessagePage {
     Complete {
-        message: ChatMessage,
+        message: Box<ChatMessage>,
     },
     Truncated {
         preview: ChatMessagePreview,
@@ -935,7 +954,7 @@ pub struct CompactionReply {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct CodingAgentChoice {
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     pub label: String,
 }
@@ -948,7 +967,10 @@ pub struct CodingAgentOptions {
     #[serde(default)]
     pub turn_id: Option<String>,
     #[serde(default)]
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     pub provider: Option<AgentProvider>,
     #[serde(default)]
     pub choices: Vec<CodingAgentChoice>,
@@ -966,7 +988,7 @@ pub struct SwitchChatCodingAgentInput {
     pub request_id: String,
     #[schemars(length(min = 1, max = 200))]
     pub turn_id: String,
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
 }
 

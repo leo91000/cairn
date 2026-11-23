@@ -133,7 +133,11 @@ pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
         Err(error) if error.is_conflict() => return Ok(false),
         Err(error) => return Err(error),
     }
-    let message = "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; resume when ready.";
+    let message = if run.trigger == "chat" {
+        "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved."
+    } else {
+        "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; resume when ready."
+    };
     let mut retry = run.retry;
     if let Some(retry) = &mut retry {
         retry.next_attempt_at = None;

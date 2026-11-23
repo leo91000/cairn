@@ -38,6 +38,7 @@ impl Fixture {
             runner_url: "http://unused-runner:4311".into(),
             opencode_bin: common::fixture("opencode.mjs"),
             opencode_go_usage_url: "http://127.0.0.1:1/usage".into(),
+            antigravity_bin: "agy".into(),
             ..common::config(root.path())
         })
         .await

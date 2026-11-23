@@ -20,7 +20,9 @@ Le plugin GitHub livré en ajoute deux :
   jamais programmer une reprise avant la date demandée.
 - `run_finished` : une exécution Cairn autorisée atteint un état terminal. Une
   conversation dont le tour a réussi mais qui possède encore un réveil ou des
-  messages à traiter reste une dépendance en attente. Cette source exige l’accès
+  messages à traiter reste une dépendance en attente, de même qu'une conversation
+  non mise en pause dont le tour a échoué ou été arrêté et qui a des messages à
+  traiter (ADR-0091). Cette source exige l’accès
   à l’installation et peut viser les exécutions d’autres agents de cette
   installation, selon la délégation du propriétaire décrite dans
   [l’accès agent](AGENT-ACCESS.md).

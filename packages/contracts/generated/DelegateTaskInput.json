@@ -79,7 +79,7 @@
       "description": "Omission inherits the requester project. An explicit choice can clear it."
     },
     "provider": {
-      "pattern": "^(codex|claude|opencode)$",
+      "pattern": "^(codex|claude|opencode|antigravity)$",
       "type": [
         "string",
         "null"

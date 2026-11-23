@@ -935,7 +935,7 @@ impl Execution<'_> {
         self.close_account_output(auth_broker).await;
         let exit = result?;
         let saved = self.checkpoint.snapshot().await;
-        let observation_pending = saved.managed() && saved.terminal_code.is_none();
+        let observation_pending = saved.terminal_observation_pending();
         if s.shutdown.is_cancelled()
             && !self.cancel.is_cancelled()
             && !exit.timed_out
@@ -1015,9 +1015,12 @@ impl Execution<'_> {
             if has_live_environment(&saved, self.retained, &workspace.env) {
                 // A failed provider turn must not implicitly replay jobs or
                 // resume a controller that account rotation would fence.
-                return Err(Error::conflict(
-                    "Provider account exhausted in a live environment. Background work will stop; resume explicitly with an available account.",
-                ));
+                // A conversation continues with its next message (ADR-0091); a mission is resumed.
+                return Err(Error::conflict(if self.run["trigger"] == "chat" {
+                    "Provider account exhausted in a live environment. Background work will stop."
+                } else {
+                    "Provider account exhausted in a live environment. Background work will stop; resume explicitly with an available account."
+                }));
             }
             // This adapter has exited; its side questions cannot wait for a different
             // account, even though the run and turn remain running during the switch.
@@ -1275,6 +1278,16 @@ impl Execution<'_> {
         plan["mcpEnv"] = workspace.mcp["env"].clone();
         plan["turnId"] = self.turn.clone().into();
         atomic_write(&plan_path, &serde_json::to_vec(&plan)?).await?;
+        // The environment starts the turn as soon as it accepts it: unless it refuses, its
+        // message may be read even if this launch fails before the runner client is recorded
+        // (ADR-0091).
+        let turn = launched_turn(self.run);
+        self.checkpoint
+            .update(|c| {
+                c.launched_turn_before = c.launched_turn.take();
+                c.launched_turn = turn;
+            })
+            .await?;
         match super::held::request(
             self.s,
             self.run,
@@ -1287,7 +1300,12 @@ impl Execution<'_> {
         .await?
         {
             Event::Accepted { .. } => {}
-            Event::Refused { message, .. } => return Err(Error::conflict(message)),
+            Event::Refused { message, .. } => {
+                self.checkpoint
+                    .update(|c| c.launched_turn = c.launched_turn_before.take())
+                    .await?;
+                return Err(Error::conflict(message));
+            }
             _ => {
                 return Err(Error::unavailable(
                     "Invalid environment continuation acknowledgement.",
@@ -1692,6 +1710,7 @@ impl Execution<'_> {
         )
         .await?;
         let identity = recovery::process_identity(child.child.id().unwrap()).await?;
+        let launched_turn = launched_turn(self.run);
         if self.run["chatExecution"].is_object() {
             self.run["chatExecution"]["recovery"] = true.into();
             let patch = json!({ "chatExecution": self.run["chatExecution"] });
@@ -1712,10 +1731,12 @@ impl Execution<'_> {
                 c.turn_pending = None;
                 c.recovery_deadline_ms = None;
                 c.launched = Some(true);
+                c.launched_turn_before = c.launched_turn.take();
+                c.launched_turn = launched_turn.clone();
                 c.start_rejected = Some(false);
                 c.output_interrupted = None;
                 c.provider_failure_attempt = None;
-                c.finalization_failure_attempt = None;
+                c.reset_finalization_observation();
                 c.retry_cause = Some(None);
                 c.completed = Some(false);
                 c.terminal_code = None;
@@ -2072,9 +2093,12 @@ impl Execution<'_> {
         }
         let id = self.id.clone();
         let deadline = self.checkpoint.deadline();
+        // The fenced workload already stopped. Time spent confirming optional
+        // cleanup retirement must not replace its recorded failure.
+        let report_expiration = exit.timed_out || !saved.native_cleanup_failure();
         s.store.transaction(move |db| {
             let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
-            let expired = deadline.is_some_and(|deadline| now() >= deadline);
+            let expired = report_expiration && deadline.is_some_and(|deadline| now() >= deadline);
             let status = if !current["cancelRequestedAt"].is_null() {
                 RunStatus::Cancelled
             } else if expired {
@@ -2114,7 +2138,7 @@ impl Execution<'_> {
         if self.cancel.is_cancelled() {
             return "Run stopped. You can resume this conversation.".into();
         }
-        if exit.timed_out || self.checkpoint.expired() {
+        if exit.timed_out || (self.checkpoint.expired() && !saved.native_cleanup_failure()) {
             return "Run exceeded its time limit.".into();
         }
         if let Some(error) = saved.output_error() {
@@ -2129,17 +2153,22 @@ impl Execution<'_> {
         if !saved.last_error().is_empty() {
             return saved.last_error().to_owned();
         }
+        // A conversation shows what continues it: its returned message or its held queue
+        // (ADR-0091). A mission is resumed.
+        let next = if self.run["trigger"] == "chat" {
+            ""
+        } else {
+            " Resume the conversation to continue."
+        };
         match exit.code {
             Some(crate::runner::CONTROLLER_FAILED) => {
                 format!(
-                    "{} failed while running this attempt. Resume the conversation to continue.",
+                    "{} failed while running this attempt.{next}",
                     controller_name(self.run)
                 )
             }
-            Some(code) => {
-                format!("Process exited with status {code}. Resume the conversation to continue.")
-            }
-            None => "Process stopped before finishing. Resume the conversation to continue.".into(),
+            Some(code) => format!("Process exited with status {code}.{next}"),
+            None => format!("Process stopped before finishing.{next}"),
         }
     }
 }
@@ -2153,6 +2182,18 @@ async fn close_output_readers(out: AbortOnDropHandle<()>, err: AbortOnDropHandle
     }
     let _ = out.await;
     let _ = err.await;
+}
+
+/// The turn a launch serves, recorded so a failure can tell whether the agent may have its
+/// message (ADR-0091). A launch without a chat message, such as a mission's, records an
+/// empty turn: a later chat message was not delivered by it.
+fn launched_turn(run: &Value) -> Option<String> {
+    Some(
+        run["chatExecution"]["messageId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    )
 }
 
 fn has_live_environment(saved: &RunCheckpoint, retained: bool, env: &Environment) -> bool {
@@ -2457,6 +2498,87 @@ mod tests {
                 })
                 .await
                 .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_native_cleanup_survives_expiry_during_observation_without_hiding_a_real_timeout()
+     {
+        use crate::run_fixture::DbRunFixture;
+        for timed_out in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (service, mut run) = preparation_fixture(root.path()).await;
+            let id = text(&run, "id").to_owned();
+            let authority = Authority::for_run(&service, &run).await.unwrap();
+            let workspace = Workspace {
+                prepared: json!({}),
+                state_home: root.path().into(),
+                env: Environment::new(),
+                mcp: json!({}),
+                authorization: crate::plugins::run_credentials::Authorization::new(
+                    &service,
+                    authority,
+                    &RunCredentials::default(),
+                ),
+            };
+            let saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "native", "isolated": true },
+                "runnerId": "attempt",
+                "finalizationFailureAttempt": "attempt",
+                "lastError": "Native cleanup: Disk cleanup is pending.",
+                "remainingMs": 0
+            }))
+            .unwrap();
+            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved.clone());
+            assert!(checkpoint.expired());
+            let cancel = CancellationToken::new();
+            let sensitive = History::default();
+            let execution = Execution {
+                s: &service,
+                id: id.clone(),
+                admission_revision: run["environmentAdmissionRevision"].clone(),
+                run: &mut run,
+                account: &mut None,
+                preparation: None,
+                cancel: &cancel,
+                checkpoint: &checkpoint,
+                sensitive: &sensitive,
+                observation: None,
+                provider: Provider::Codex,
+                directory: root.path().join("run"),
+                attempt_id: "attempt".into(),
+                reservation: None,
+                retained: false,
+                turn: String::new(),
+                output_probe: None,
+            };
+            let exit = Exit {
+                code: Some(crate::runner::CONTROLLER_FAILED),
+                timed_out,
+                exhausted: false,
+            };
+            execution
+                .finish(&workspace, &exit, &saved, true)
+                .await
+                .unwrap();
+
+            let expected = if timed_out {
+                "Run exceeded its time limit."
+            } else {
+                "Disk cleanup is pending."
+            };
+            let state = service.store.run_state(&id).await.unwrap();
+            assert_eq!(state.error.as_deref(), Some(expected));
+            let events = service
+                .store
+                .read(move |db| db.events_fixture(&id, 0, 100))
+                .await
+                .unwrap();
+            let status = events
+                .iter()
+                .find(|event| event["type"] == "status")
+                .unwrap();
+            assert_eq!(status["payload"]["error"]["message"], expected);
         }
     }
 
@@ -2931,6 +3053,7 @@ mod tests {
             claude_bin: "claude".into(),
             opencode_bin: "opencode".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            antigravity_bin: "agy".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,
@@ -3052,6 +3175,7 @@ mod tests {
             claude_bin: "/bin/false".into(),
             opencode_bin: "/bin/false".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            antigravity_bin: "agy".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,

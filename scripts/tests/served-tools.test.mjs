@@ -48,12 +48,13 @@ function registry({
 
 describe('served release tools', () => {
   it('reads the tool versions recorded in the installation image production serves', async () => {
-    const fetch = registry({ env: ['PATH=/usr/bin', 'APP_CODEX_VERSION=0.164.0', 'APP_GH_VERSION=2.103.2', 'APP_CLAUDE_VERSION=2.1.308', 'APP_OPENCODE_VERSION=1.19.4', 'APP_COMMIT=abc'] })
+    const fetch = registry({ env: ['PATH=/usr/bin', 'APP_CODEX_VERSION=0.164.0', 'APP_GH_VERSION=2.103.2', 'APP_CLAUDE_VERSION=2.1.308', 'APP_OPENCODE_VERSION=1.19.4', 'APP_ANTIGRAVITY_VERSION=1.5.14', 'APP_COMMIT=abc'] })
     expect(await servedTools('https://cairn.example', { fetch })).toEqual({
       codex: '0.164.0',
       gh: '2.103.2',
       claude: '2.1.308',
       opencode: '1.19.4',
+      antigravity: '1.5.14',
     })
   })
 

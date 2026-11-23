@@ -13,7 +13,7 @@ pub struct CodingAgentPreferences {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodingAgentConfigurationInput {
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     #[serde(default)]
     pub agent_id: Option<AgentId>,
@@ -33,7 +33,7 @@ pub struct CodingAgentSettingChange {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EditCodingAgentConfigurationInput {
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     #[serde(default)]
     pub agent_id: Option<AgentId>,
@@ -77,7 +77,7 @@ pub struct ManagedCodingAgentSetting {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodingAgentConfiguration {
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     pub agent_id: Option<AgentId>,
     pub agent_name: Option<String>,
@@ -99,7 +99,7 @@ pub struct NativeConfigurationSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub agent_id: Option<AgentId>,
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     pub document: String,
     pub revision: String,

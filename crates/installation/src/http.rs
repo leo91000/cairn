@@ -81,6 +81,10 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
             any(crate::native::releases::download),
         )
         .route(
+            "/internal/nodes/native-extra-tools",
+            any(crate::native::releases::download),
+        )
+        .route(
             "/internal/nodes/native-host.py",
             any(crate::nodes::maintenance::downloads),
         )
@@ -533,6 +537,7 @@ struct Tools {
     gh: Option<String>,
     claude: Option<String>,
     opencode: Option<String>,
+    antigravity: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -607,6 +612,7 @@ async fn health(State(app): State<App>, request: Request) -> Result<Response> {
             gh: env("APP_GH_VERSION"),
             claude: env("APP_CLAUDE_VERSION"),
             opencode: env("APP_OPENCODE_VERSION"),
+            antigravity: env("APP_ANTIGRAVITY_VERSION"),
         },
         toolkit: &app.toolkit,
         execution,

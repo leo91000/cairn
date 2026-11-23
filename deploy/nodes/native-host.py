@@ -328,6 +328,27 @@ def json_request(manager, endpoint, payload=None, token=None):
         return json.loads(data)
 
 
+# The first tool bundle is capped by the limits of supervisors installed before
+# this one. Tools that do not fit it ship in a separate bundle with its own limits.
+EXTRA_FIELDS = ('extraToolsSha256', 'extraToolsSize', 'extraToolsPath')
+EXTRA_EXTRACTED = 512 * 1024 * 1024
+EXTRA_COMPRESSED = 256 * 1024 * 1024
+ARTIFACTS = {
+    'binary': ('sha256', 'size', 'binaryPath', 'cairn', 0o555),
+    'tools': ('toolsSha256', 'toolsSize', 'toolsPath', 'tools.zip', 0o400),
+    'extra': ('extraToolsSha256', 'extraToolsSize', 'extraToolsPath', 'extra-tools.zip', 0o400),
+}
+
+
+def has_extra_tools(release):
+    return 'extraToolsSha256' in release
+
+
+def version_name(release):
+    name = release['sha256'] + '-' + release['toolsSha256']
+    return name + '-' + release['extraToolsSha256'] if has_extra_tools(release) else name
+
+
 def validate_release(value):
     for field in ('sha256', 'toolsSha256'):
         if not re.fullmatch('[0-9a-f]{64}', value.get(field, '')):
@@ -339,16 +360,25 @@ def validate_release(value):
     for field, maximum in (('size', 256 * 1024 * 1024), ('toolsSize', 512 * 1024 * 1024)):
         if not isinstance(value.get(field), int) or not 0 < value[field] <= maximum:
             raise ValueError('Invalid native artifact size.')
+    # Managers older than the extra tool bundle omit it; a release that names it names all of it.
+    if any(field in value for field in EXTRA_FIELDS):
+        if not re.fullmatch('[0-9a-f]{64}', value.get('extraToolsSha256', '')):
+            raise ValueError('Invalid native release digest.')
+        if value.get('extraToolsPath') != '/internal/nodes/native-extra-tools':
+            raise ValueError('Unexpected native artifact endpoint.')
+        if not isinstance(value.get('extraToolsSize'), int) or not 0 < value['extraToolsSize'] <= EXTRA_COMPRESSED:
+            raise ValueError('Invalid native artifact size.')
     if not re.fullmatch('[A-Za-z0-9._-]{1,100}', value.get('runtimeId', '')):
         raise ValueError('Invalid native runtime identifier.')
     return value
 
 
-def download(manager, release, directory, tools=False, code=None, token=None):
-    digest = release['toolsSha256' if tools else 'sha256']
-    size = release['toolsSize' if tools else 'size']
-    endpoint = release['toolsPath' if tools else 'binaryPath']
-    target = directory / ('tools.zip' if tools else 'cairn')
+def download(manager, release, directory, tools=False, code=None, token=None, extra=False):
+    digest_field, size_field, endpoint_field, name, mode = ARTIFACTS['extra' if extra else 'tools' if tools else 'binary']
+    digest = release[digest_field]
+    size = release[size_field]
+    endpoint = release[endpoint_field]
+    target = directory / name
     hasher = hashlib.sha256()
     received = 0
     with request(manager, endpoint, {'code': code} if code else {}, token) as response, target.open('xb') as output:
@@ -365,7 +395,7 @@ def download(manager, release, directory, tools=False, code=None, token=None):
         os.fsync(output.fileno())
     if received != size or hasher.hexdigest() != digest:
         raise ValueError('Native download integrity check failed.')
-    target.chmod(0o555 if not tools else 0o400)
+    target.chmod(mode)
     return target
 
 
@@ -380,24 +410,45 @@ def tool_inventory(manifest):
     return entries
 
 
+def extra_tool_inventory(manifest):
+    if manifest.get('version') != 1 or manifest.get('os') != 'linux' or manifest.get('arch') != 'x86_64' \
+            or manifest.get('bundle') != 'extra':
+        raise ValueError('Unknown native tool manifest.')
+    entries = manifest.get('files', [])
+    paths = {entry.get('path') for entry in entries}
+    if paths != {'bin/agy'} or len(entries) != len(paths):
+        raise ValueError('Incomplete native tool inventory.')
+    return entries
+
+
 def unpack_tools(archive, directory):
     destination = directory / 'tools'
     destination.mkdir(mode=0o755)
     destination.chmod(0o755)
+    (destination / 'bin').mkdir(mode=0o755)
+    (destination / 'bin').chmod(0o755)
+    extract_tools(archive, destination, tool_inventory, 1024 * 1024 * 1024, 'manifest.json')
+
+
+def unpack_extra_tools(archive, directory):
+    # Extra tools join the first bundle's bin directory, which workloads already
+    # receive, but never replace one of its files.
+    extract_tools(archive, directory / 'tools', extra_tool_inventory, EXTRA_EXTRACTED, 'extra-manifest.json')
+
+
+def extract_tools(archive, destination, inventory, budget, manifest_name):
     with zipfile.ZipFile(archive) as bundle:
         records = bundle.infolist()
         names = [record.filename for record in records]
-        if sum(record.file_size for record in records) > 1024 * 1024 * 1024:
+        if sum(record.file_size for record in records) > budget:
             raise ValueError('Native tools exceed extracted size budget.')
         if bundle.getinfo('manifest.json').file_size > 65536:
             raise ValueError('Native tool manifest exceeds limit.')
         manifest = json.loads(bundle.read('manifest.json'))
-        entries = tool_inventory(manifest)
+        entries = inventory(manifest)
         expected = {entry['path'] for entry in entries}
         if len(names) != len(set(names)) or set(names) != expected | {'bin/', 'manifest.json'}:
             raise ValueError('Unexpected native tool bundle files.')
-        (destination / 'bin').mkdir(mode=0o755)
-        (destination / 'bin').chmod(0o755)
         for entry in entries:
             record = bundle.getinfo(entry['path'])
             if stat.S_ISLNK(record.external_attr >> 16) or record.is_dir() or record.file_size != entry.get('size'):
@@ -415,7 +466,7 @@ def unpack_tools(archive, directory):
             if hasher.hexdigest() != entry.get('sha256'):
                 raise ValueError('Native tool integrity check failed.')
             (destination / entry['path']).chmod(0o555)
-        atomic_json(destination / 'manifest.json', manifest)
+        atomic_json(destination / manifest_name, manifest)
 
 
 def verify_installed(directory, release):
@@ -428,8 +479,18 @@ def verify_installed(directory, release):
     verified(directory / 'cairn', release['size'], release['sha256'])
     manifest = json.loads((directory / 'tools/manifest.json').read_text())
     entries = tool_inventory(manifest)
+    if has_extra_tools(release):
+        entries = entries + extra_tool_inventory(json.loads((directory / 'tools/extra-manifest.json').read_text()))
     for entry in entries:
         verified(directory / 'tools' / entry['path'], entry['size'], entry['sha256'])
+
+
+def installed_matches(current, release):
+    installed = json.loads((current / 'release.json').read_text())
+    # A supervisor that predates the extra tool bundle installed its version without
+    # it, under a name without its digest, while recording the release it was offered.
+    return all(release.get(field) == installed.get(field) for field in ('sha256', 'toolsSha256', 'extraToolsSha256')) \
+        and current.name == version_name(release)
 
 
 def collect_versions(current, previous=None):
@@ -444,7 +505,7 @@ def collect_versions(current, previous=None):
     if previous:
         keep.add(previous.resolve())
     for directory in (INSTALL / 'versions').iterdir():
-        if directory.is_symlink() or not directory.is_dir() or not re.fullmatch('[0-9a-f]{64}-[0-9a-f]{64}', directory.name):
+        if directory.is_symlink() or not directory.is_dir() or not re.fullmatch('[0-9a-f]{64}-[0-9a-f]{64}(-[0-9a-f]{64})?', directory.name):
             continue
         release = json.loads((directory / 'release.json').read_text())
         if directory.resolve() not in keep and release['runtimeId'] not in pinned:
@@ -456,8 +517,7 @@ def prepare(manager, release, code=None, token=None):
     versions = INSTALL / 'versions'
     versions.mkdir(mode=0o755, parents=True, exist_ok=True)
     versions.chmod(0o755)
-    name = release['sha256'] + '-' + release['toolsSha256']
-    destination = versions / name
+    destination = versions / version_name(release)
     if destination.exists():
         if json.loads((destination / 'release.json').read_text()) != release:
             raise ValueError('Installed native release metadata changed.')
@@ -469,6 +529,10 @@ def prepare(manager, release, code=None, token=None):
         archive = download(manager, release, temporary, tools=True, code=code, token=token)
         unpack_tools(archive, temporary)
         archive.unlink()
+        if has_extra_tools(release):
+            archive = download(manager, release, temporary, code=code, token=token, extra=True)
+            unpack_extra_tools(archive, temporary)
+            archive.unlink()
         # Version checks catch ABI/library mismatches before stopping an active node.
         subprocess.run([str(binary), '--version'], check=True, timeout=15, stdout=subprocess.DEVNULL)
         atomic_json(temporary / 'release.json', release)
@@ -485,10 +549,13 @@ def verify_workload_tools(directory):
     with tempfile.TemporaryDirectory(prefix='cairn-native-probe-') as temporary:
         home = Path(temporary)
         os.chown(home, workload.pw_uid, workload.pw_gid)
-        environment = {'PATH': str(directory / 'tools/bin') + ':/usr/bin:/bin', 'HOME': str(home), 'LANG': 'C.UTF-8'}
+        environment = {'PATH': str(directory / 'tools/bin') + ':/usr/bin:/bin', 'HOME': str(home), 'LANG': 'C.UTF-8',
+                       'AGY_CLI_DISABLE_AUTO_UPDATE': 'true'}
         executables = [(directory / 'cairn', '--version')]
-        manifest = json.loads((directory / 'tools/manifest.json').read_text())
-        for entry in tool_inventory(manifest):
+        entries = tool_inventory(json.loads((directory / 'tools/manifest.json').read_text()))
+        if (directory / 'tools/extra-manifest.json').exists():
+            entries = entries + extra_tool_inventory(json.loads((directory / 'tools/extra-manifest.json').read_text()))
+        for entry in entries:
             argument = '--help' if entry['path'] == 'bin/codex-code-mode-host' else '--version'
             executables.append((directory / 'tools' / entry['path'], argument))
         for executable, argument in executables:
@@ -712,9 +779,7 @@ def run():
             try:
                 complete_update(manager, token, current)
                 release = validate_release(json_request(manager, '/internal/nodes/native-release', token=token))
-                installed = json.loads((current / 'release.json').read_text())
-                same = release['sha256'] == installed['sha256'] and release['toolsSha256'] == installed['toolsSha256']
-                if not same:
+                if not installed_matches(current, release):
                     require_storage()
                     candidate = prepare(manager, release, token=token)
                     require_docker_host()

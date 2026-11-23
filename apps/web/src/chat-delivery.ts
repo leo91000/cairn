@@ -33,9 +33,11 @@ export function chatDelivery(chat: ChatDetail | null, cards: TimelineEntry[], ou
   const messages = (chat?.messages ?? []).filter(message => message.status === 'queued' || message.status === 'sending')
   if (outgoing && !messages.some(message => message.id === outgoing.id))
     messages.push(outgoing)
-  const active = !!chat?.run && ['queued', 'running'].includes(chat.run.status)
-  // A scheduled wait resumes the task before queued follow-ups start.
-  const canStart = !chat?.paused && (!chat?.run || chat.run.status === 'succeeded') && !scheduledWakeup(chat)
+  // As on Android, a run waiting on its background work is still active.
+  const active = !!chat?.run && ['queued', 'running', 'waiting'].includes(chat.run.status)
+  // A scheduled wait resumes the task before queued follow-ups start. After a turn that failed
+  // or stopped, the next message starts a new one: what it never delivered came back unsent.
+  const canStart = !chat?.paused && !active && !scheduledWakeup(chat)
   const first = messages[0]
   const sending: SendingMessage[] = []
   const queued: ChatMessage[] = []
@@ -60,4 +62,51 @@ export function chatDelivery(chat: ChatDetail | null, cards: TimelineEntry[], ou
   }
 
   return { sending, queued }
+}
+
+/** Messages a failed or stopped turn returned to this person, oldest first, not yet restored. */
+export function returnedMessages(chat: ChatDetail | null | undefined, account: string, restored: ReadonlySet<string> = new Set()) {
+  if (!chat || !account)
+    return []
+  return chat.messages.filter(message => message.status === 'cancelled' && message.returnedTo === account && !restored.has(message.id))
+}
+
+/**
+ * The composer state a set of returned messages restores: their text ahead of the draft, and the
+ * choices of the oldest one. A plan request stays one, so a returned plan never changes files.
+ */
+export function restoredComposer(returned: ChatMessage[], draft: string) {
+  const first = returned[0]
+  // A restore repeated after a reload does not add a block the draft already holds whole.
+  const blocks = new Set(draft.split('\n\n').map(block => block.trim()))
+  const texts = returned.map(message => message.text.trim()).filter(text => text && !blocks.has(text))
+  return {
+    text: [...texts, draft.trim()].filter(Boolean).join('\n\n'),
+    attachments: returned.flatMap(message => message.attachments ?? []),
+    provider: first?.provider ?? '',
+    model: first?.model ?? '',
+    reasoning: first?.reasoning ?? '',
+    speed: first?.speed ?? '',
+    plan: returned.some(message => message.plan === true),
+  }
+}
+
+/** After a Stop, even one still settling, or a failed turn, the next message resumes an empty paused queue. */
+export function resumesOnSend(chat: ChatDetail | null | undefined, queued: number) {
+  const stopped = ['failed', 'interrupted', 'cancelled'].includes(chat?.run?.status ?? '') || !!chat?.run?.cancelRequestedAt
+  // A turn message still unacknowledged when it stopped, or steering already claimed by it,
+  // may be held for a replay first.
+  const turn = chat?.run?.chatExecution?.messageId
+  const starting = chat?.messages.some(message => message.status === 'sending' || (message.id === turn && message.status === 'queued'))
+  return !!chat?.paused && !queued && stopped && !starting
+}
+
+/**
+ * A failed conversation's reason, worded for what continues it: a held queue is resumed, as a
+ * message written now would wait behind it (ADR-0091).
+ */
+export function failureReason(chat: ChatDetail | null | undefined, reason: string, readOnly = false) {
+  // Someone without access to the agent cannot resume: they are told nothing to do.
+  const held = !readOnly && !!chat?.paused && chat.messages.some(message => message.status === 'queued')
+  return held ? `${reason.replace(/\s*Send a message to continue\.$/, '')} Resume the queue to continue.` : reason
 }

@@ -605,7 +605,7 @@ abstract class ChatJourneyCases {
             screenshot("chat-draft-dark")
             compose.runOnIdle { compact = true }
             compose.waitForIdle()
-            compose.onNodeWithContentDescription("Ajouter à la file").assertIsDisplayed()
+            compose.onNodeWithContentDescription("Envoyer maintenant").assertIsDisplayed()
             compose.onNodeWithContentDescription("Options de la conversation").assertIsDisplayed()
             System.getProperty("cairn.screenshots.dir")?.let { dir ->
                 compose
@@ -619,7 +619,7 @@ abstract class ChatJourneyCases {
                     )
             }
             compose.runOnIdle { compact = false }
-            compose.onNodeWithContentDescription("Intervenir maintenant").performClick()
+            compose.onNodeWithContentDescription("Envoyer maintenant").performClick()
             compose.waitUntil(10000) {
                 calls.any {
                     it.second.endsWith("/messages") &&
