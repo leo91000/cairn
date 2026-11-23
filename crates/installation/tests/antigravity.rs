@@ -627,6 +627,28 @@ async fn plan_turns_refuse_shell_and_writes_in_the_hook_and_native_rules() {
 }
 
 #[tokio::test]
+async fn plan_turns_refuse_repositories_that_define_antigravity_commands() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    std::fs::create_dir_all(root.path().join(".agents")).unwrap();
+    std::fs::write(root.path().join(".agents/hooks.json"), "{}").unwrap();
+    let mut input = plan(&root, "gemini-4-neon-high", "Plan the workspace changes");
+    input["planning"] = true.into();
+    input["sandbox"] = "read-only".into();
+    let (result, _) = run(&s, input).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.status, 409);
+    assert!(
+        error.message.contains(".agents/hooks.json"),
+        "{}",
+        error.message
+    );
+    // agy never started: its repository hooks could not run.
+    assert!(records(&native_home(&s), "launch").is_empty());
+}
+
+#[tokio::test]
 async fn native_configuration_adds_rules_to_ordinary_turns() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

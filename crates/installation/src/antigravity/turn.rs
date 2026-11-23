@@ -309,6 +309,18 @@ pub(super) async fn spawn(
         .map_err(|_| Error::unavailable("Unable to start the Antigravity CLI."))
 }
 
+/// Removes the credential files `agy` read when its launch ends, on every exit path:
+/// the run's home may be a native node's or a microVM's durable disk.
+struct CredentialFiles(PathBuf);
+
+impl Drop for CredentialFiles {
+    fn drop(&mut self) {
+        for file in [super::ADC_FILE, super::TOKEN_FILE] {
+            let _ = std::fs::remove_file(self.0.join(file));
+        }
+    }
+}
+
 /// Stops a native process tree when its owner ends, including when a cancelled
 /// execution future is dropped: commands `agy` started must not outlive the turn.
 /// `agy` 1.5.14 runs each command in its own session and leaves it running when it
@@ -757,6 +769,11 @@ async fn execute(
     } else {
         Mode::Turn
     };
+    if mode == Mode::Plan
+        && let Some(path) = super::repository_commands(Path::new(text(&plan, "cwd")))
+    {
+        return Err(super::repository_commands_refusal(&path));
+    }
     let mut receipt = saved.unwrap_or_else(|| Receipt {
         message_id: initial.into(),
         ..Receipt::default()
@@ -779,6 +796,8 @@ async fn execute(
     let mut attachments = plan["execution"]["attachments"].clone();
     for renewal in 0.. {
         let (home, credentials) = credentials(config).await?;
+        // Credential files never stay on an execution node's disk after this launch.
+        let _files = CredentialFiles(home.clone());
         super::prepare_native_home(config, &home, Some(&credentials)).await?;
         configure(&home, &plan, &policy(&plan, mode)).await?;
         let mut launch = args(&plan, &credentials, mode)?;

@@ -590,7 +590,7 @@ impl Accounts {
         let ready = accounts.iter().filter(|a| a.is_ready()).collect::<Vec<_>>();
         let mut compatible = Vec::new();
         for account in ready.iter().copied().filter(|a| a.enabled) {
-            if provider != Provider::Opencode
+            if !matches!(provider, Provider::Opencode | Provider::Antigravity)
                 || provider
                     .driver()
                     .supports(s, &account.id, model, "")

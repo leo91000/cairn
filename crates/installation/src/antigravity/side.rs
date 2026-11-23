@@ -221,6 +221,9 @@ impl Task {
                 "The agent is still starting. Ask again in a moment.",
             ));
         }
+        if let Some(path) = super::repository_commands(Path::new(text(&self.plan, "cwd"))) {
+            return Err(super::repository_commands_refusal(&path));
+        }
         let home = side_home(&self.home, &self.id);
         let _ = tokio::fs::remove_dir_all(&home).await;
         private_dir(&home).await?;

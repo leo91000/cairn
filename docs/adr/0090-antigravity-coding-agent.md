@@ -24,6 +24,10 @@ Les mesures suivantes ont été faites sur 1.5.14 avec un faux serveur Gemini lo
   `always-proceed` ; une règle `ask` n'arrête rien dans ce mode : l'outil s'exécute.
 - Les commandes passent par bash, chacune dans sa propre session. Interrompu (y
   compris par SIGTERM), `agy` les laisse tourner.
+- `agy` charge `.agents/hooks.json` et `.agents/mcp_config.json` du répertoire de
+  travail ou de la racine git. Les commandes de ces hooks s'exécutent même quand le
+  hook de Cairn refuse l'outil ; `trustedWorkspaces` n'y change rien et aucun réglage
+  ne les désactive.
 - Un hook `PreToolUse` reçoit le nom et les arguments de chaque outil, y compris
   `call_mcp_tool` (`ServerName`, `ToolName`). Un hook qui échoue, dépasse son délai
   ou répond un JSON invalide refuse l'outil.
@@ -67,7 +71,9 @@ dépôt, comme pour les autres moteurs.
 - question à côté : tout outil est refusé.
 
 Un tour de plan reçoit aussi `--mode plan` pour guider le modèle ; ce mode n'est
-pas une frontière.
+pas une frontière. Un tour de plan ou une question à côté est refusé, avec le chemin en cause, quand
+le répertoire de travail ou l'un de ses parents contient `.agents/hooks.json` ou
+`.agents/mcp_config.json` : ces commandes du dépôt ne peuvent pas être bornées.
 
 **Questions à côté.** `/btw` n'existe que dans l'interface interactive. L'adaptateur
 copie l'état natif de la conversation dans un HOME temporaire, lance un second
@@ -89,7 +95,7 @@ contexte enregistré jusqu'à la dernière étape terminée, pas l'étape en cou
 Les secrets restent dans le coffre chiffré et ne passent que par le courtier
 existant du run. Les identifiants Google Cloud sont fournis tels quels au run : un
 fichier `authorized_user` contient donc son refresh token, choisi par l'utilisateur.
-Le manager liste les modèles dans un répertoire privé temporaire, supprimé ensuite. Mesuré avec un compte de test : sans D-Bus, `agy` écrit le jeton
+Le manager liste les modèles dans un répertoire privé temporaire, supprimé ensuite. Sur le nœud d'exécution, le fichier d'identifiants Google Cloud et le jeton d'accès sont supprimés à la fin de chaque lancement, annulation comprise : le HOME du run peut être un disque durable de node native ou de microVM. Mesuré avec un compte de test : sans D-Bus, `agy` écrit le jeton
 OAuth (format `oauth2.Token` : `access_token`, `refresh_token`, `expiry`) dans
 `~/.gemini/antigravity-cli/antigravity-oauth-token`, et fonctionne avec le seul jeton
 d'accès. **Le refresh token reste sur le manager** : un run reçoit un fichier sans

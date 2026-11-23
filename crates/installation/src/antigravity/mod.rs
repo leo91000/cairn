@@ -243,6 +243,30 @@ fn without_level(slug: &str, level: &str) -> Option<String> {
     ))
 }
 
+/// Repository configuration `agy` loads from the working directory or any parent
+/// (the git root): its hooks run commands and its MCP servers start commands, even
+/// when Cairn's hook refuses the tool (measured on 1.5.14). No setting disables it.
+const REPOSITORY_COMMANDS: &[&str] = &[".agents/hooks.json", ".agents/mcp_config.json"];
+
+/// The repository file that would run commands during a turn that must have no
+/// effect, if any.
+pub(crate) fn repository_commands(cwd: &Path) -> Option<std::path::PathBuf> {
+    cwd.ancestors()
+        .flat_map(|directory| {
+            REPOSITORY_COMMANDS
+                .iter()
+                .map(move |file| directory.join(file))
+        })
+        .find(|path| path.exists())
+}
+
+pub(crate) fn repository_commands_refusal(path: &Path) -> Error {
+    Error::conflict(format!(
+        "{} defines commands that Antigravity runs even when Cairn refuses a tool, so this plan turn or side question cannot be bounded. Remove or rename that file, or ask in an ordinary turn.",
+        path.display()
+    ))
+}
+
 pub fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 100
@@ -681,6 +705,20 @@ mod tests {
             "gemini-3.1-pro-high-thinking"
         );
         assert!(without_level("gemini-4-neon-higher", "high").is_none());
+    }
+
+    #[test]
+    fn repository_hooks_and_mcp_servers_are_found_in_parents() {
+        let root = tempfile::TempDir::new().unwrap();
+        let nested = root.path().join("crate/src");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(repository_commands(&nested).is_none());
+        std::fs::create_dir_all(root.path().join(".agents")).unwrap();
+        std::fs::write(root.path().join(".agents/mcp_config.json"), "{}").unwrap();
+        assert_eq!(
+            repository_commands(&nested).unwrap(),
+            root.path().join(".agents/mcp_config.json")
+        );
     }
 
     #[test]
