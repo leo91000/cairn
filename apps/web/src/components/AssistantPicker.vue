@@ -439,7 +439,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                   <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span class="flex flex-wrap items-center gap-2">
                       <span class="text-sm font-semibold">{{ option.label }}</span>
-                      <span v-if="option.recommended" class="rounded-full bg-accent/12 px-2 py-px text-3xs font-semibold text-accent">{{ provider === 'opencode' ? 'Provider default' : 'Recommended' }}</span>
+                      <span v-if="option.recommended" class="rounded-full bg-accent/12 px-2 py-px text-3xs font-semibold text-accent">{{ provider === 'opencode' || provider === 'antigravity' ? 'Provider default' : 'Recommended' }}</span>
                     </span>
                     <span
                       v-if="option.description"

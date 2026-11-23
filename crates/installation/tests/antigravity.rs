@@ -147,6 +147,17 @@ async fn run_with(
     .await;
     collected.expect("native turn must finish or fail without hanging");
     let result = task.await.unwrap();
+    // The launch removed its credential files itself: on an execution node the lease's
+    // manager-side cleanup never reaches that disk.
+    for file in [
+        "cairn-adc.json",
+        ".gemini/antigravity-cli/antigravity-oauth-token",
+    ] {
+        assert!(
+            !lease.home.join(file).exists(),
+            "{file} outlived the launch"
+        );
+    }
     drop(broker);
     s.accounts.release(s, &lease).await.unwrap();
     (result, events)
@@ -620,10 +631,16 @@ async fn plan_turns_refuse_shell_and_writes_in_the_hook_and_native_rules() {
     assert_eq!(launch["settings"]["enableTerminalSandbox"], true);
     let message = text(&records(&home, "message")[0], "content").to_owned();
     assert!(message.starts_with("Shell commands, file changes and subagents are unavailable"));
-    let policy: Value =
-        serde_json::from_slice(&std::fs::read(home.join("cairn-hook-policy.json")).unwrap())
-            .unwrap();
-    assert_eq!(policy["mode"], "plan");
+    // The plan turn ran in a fresh native HOME, removed with its credentials afterwards,
+    // while the run's own native state kept its ordinary hook policy untouched.
+    assert!(
+        launch["env"]["HOME"]
+            .as_str()
+            .unwrap()
+            .ends_with("/plan-turn")
+    );
+    assert!(!home.join("plan-turn").exists());
+    assert!(!home.join("cairn-hook-policy.json").exists());
 }
 
 #[tokio::test]
@@ -646,6 +663,62 @@ async fn plan_turns_refuse_repositories_that_define_antigravity_commands() {
     );
     // agy never started: its repository hooks could not run.
     assert!(records(&native_home(&s), "launch").is_empty());
+}
+
+#[tokio::test]
+async fn side_questions_refuse_repositories_that_define_antigravity_commands() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    std::fs::create_dir_all(root.path().join(".agents")).unwrap();
+    std::fs::write(root.path().join(".agents/mcp_config.json"), "{}").unwrap();
+    let input = plan(
+        &root,
+        "gemini-4-neon-high",
+        "fixture:agy-slow=3000 Build the status panel",
+    );
+    let mut asked = false;
+    let (result, events) = run_with(&s, input, |event| {
+        if event["type"] == "chat.delivered" && !asked {
+            asked = true;
+            write_inbox(
+                &root,
+                &json!([{ "id": "side-message", "sideQuestion": { "id": "side-1", "text": "Why?" } }]),
+            );
+        }
+    })
+    .await;
+    // The ordinary turn runs: YOLO turns may use repository configuration.
+    result.unwrap();
+    let failed = events
+        .iter()
+        .find(|e| e["type"] == "chat.side.failed")
+        .unwrap_or_else(|| panic!("no side failure: {events:?}"));
+    assert!(
+        text(failed, "error").contains(".agents/mcp_config.json"),
+        "{failed}"
+    );
+    assert!(events.iter().all(|e| e["type"] != "chat.side.answered"));
+}
+
+#[tokio::test]
+async fn runs_wait_with_an_explanation_when_no_account_offers_the_model() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    s.antigravity.models(&s).await.unwrap();
+    let error = s
+        .accounts
+        .acquire(&s, RUN, Provider::Antigravity, "gemini-unknown")
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("No enabled Antigravity account supports model gemini-unknown"),
+        "{}",
+        error.message
+    );
 }
 
 #[tokio::test]

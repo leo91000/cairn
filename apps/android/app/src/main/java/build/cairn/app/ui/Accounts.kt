@@ -1120,6 +1120,18 @@ internal fun AccountSignInSheet(
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     )
+                    var retryWarning by remember { mutableStateOf(false) }
+                    fun retry() = vm.perform {
+                        api.reconnectCodingAgentAccount(AccountInput(flow.accountId))
+                            .requireConnection()
+                        changed()
+                    }
+                    // Trying again starts another Google sign-in: the same warning applies.
+                    if (retryWarning)
+                        GoogleSignInWarningDialog(dismiss = { retryWarning = false }) {
+                            retryWarning = false
+                            retry()
+                        }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         SignalButton(
                             "Réessayer",
@@ -1127,11 +1139,7 @@ internal fun AccountSignInSheet(
                             content = MaterialTheme.colorScheme.onPrimary,
                             enabled = !state.busy,
                         ) {
-                            vm.perform {
-                                api.reconnectCodingAgentAccount(AccountInput(flow.accountId))
-                                    .requireConnection()
-                                changed()
-                            }
+                            if (flow.provider == "antigravity") retryWarning = true else retry()
                         }
                         TextButton(onClick = ::dismiss, enabled = !state.busy) { Text("Fermer") }
                     }

@@ -21,9 +21,6 @@ use tokio::{io::AsyncWriteExt, io::BufReader, sync::mpsc, task::JoinHandle};
 
 const TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Native state never copied into a side question's private home.
-const SKIPPED: &[&str] = &["conversations", "presence", "log", "crashes", "updater"];
-
 pub(super) struct Sides {
     config: Config,
     home: PathBuf,
@@ -181,28 +178,8 @@ struct Task {
     id: String,
 }
 
-/// Copies the native state except conversations and live process markers.
-fn copy_state(from: &Path, to: &Path, root: bool) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if root && SKIPPED.iter().any(|skipped| name == *skipped) {
-            continue;
-        }
-        let kind = entry.file_type()?;
-        let target = to.join(&name);
-        if kind.is_dir() {
-            copy_state(&entry.path(), &target, false)?;
-        } else if kind.is_file() {
-            std::fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
-}
-
 /// A consistent copy of the conversation database, even while `agy` writes to it.
-fn copy_conversation(from: &Path, to: &Path) -> Result<()> {
+pub(super) fn copy_conversation(from: &Path, to: &Path) -> Result<()> {
     let source = rusqlite::Connection::open_with_flags(
         from,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -227,19 +204,9 @@ impl Task {
         let home = side_home(&self.home, &self.id);
         let _ = tokio::fs::remove_dir_all(&home).await;
         private_dir(&home).await?;
-        let (state, copy, conversation) = (
-            self.home.join(".gemini/antigravity-cli"),
-            home.join(".gemini/antigravity-cli"),
-            self.conversation.clone(),
-        );
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            copy_state(&state, &copy, true)?;
-            std::fs::create_dir_all(copy.join("conversations"))?;
-            let database = format!("conversations/{conversation}.db");
-            copy_conversation(&state.join(&database), &copy.join(&database))
-        })
-        .await
-        .map_err(Error::internal)??;
+        // Only the conversation: nothing an earlier turn left in the native state
+        // (plugins, configuration) applies while every tool is refused.
+        super::turn::bounded_home(&self.home, &home, &self.conversation).await?;
         super::prepare_native_home(&self.config, &home, Some(&self.credentials)).await?;
         configure(&home, &self.plan, &policy(&self.plan, Mode::Side)).await?;
         let mut launch = args(&self.plan, &self.credentials, Mode::Side)?;

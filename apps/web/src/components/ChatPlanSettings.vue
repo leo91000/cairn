@@ -45,7 +45,7 @@ onMounted(load)
   <section class="panel border-b border-line settings-section mb-5.5 px-0 py-7 phone:py-5">
     <h2>Chat Plan mode</h2>
     <p class="text-sm text-muted my-3">
-      Allow Plan in the chat composer for this installation. Disabled by default. With Codex or Claude Code, Plan explores and proposes an approach before you choose to implement it. Already accepted plan requests keep their restrictions when disabled.
+      Allow Plan in the chat composer for this installation. Disabled by default. With Codex, Claude Code or Antigravity, Plan explores and proposes an approach before you choose to implement it. Already accepted plan requests keep their restrictions when disabled.
     </p>
     <UiAlert v-if="error" class="my-3">
       {{ error }}

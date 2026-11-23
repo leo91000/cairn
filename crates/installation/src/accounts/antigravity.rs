@@ -538,6 +538,7 @@ impl Driver for Antigravity {
     async fn clear(&self, home: &Path) -> Result<()> {
         // Side-question copies hold the run's credentials too.
         super::remove_directory(&home.join(crate::antigravity::SIDE_QUESTIONS)).await?;
+        super::remove_directory(&home.join(crate::antigravity::PLAN_HOME)).await?;
         remove_file(&home.join(ADC_FILE)).await?;
         remove_file(&home.join(TOKEN_FILE)).await
     }

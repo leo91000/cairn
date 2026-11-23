@@ -9,7 +9,8 @@
 //   fixture:agy-command       a long command in its own session, its pid in $HOME/agy-command.pid
 //   fixture:agy-expired       a Google access token that expires during the turn (once per token)
 // Environment:
-//   CAIRN_AGY_FIXTURE_LOG     JSON-lines record of what each process received (default $HOME/agy-fixture.jsonl)
+//   CAIRN_AGY_FIXTURE_LOG     JSON-lines record of what each process received (default $HOME/agy-fixture.jsonl,
+//                             in the run's native state also for a plan turn's fresh HOME)
 //   CAIRN_AGY_FIXTURE_EMAIL   the Google account a sign-in completes for
 //   CAIRN_AGY_FIXTURE_VERSION the release `--version` prints
 import { spawn } from 'node:child_process'
@@ -33,7 +34,8 @@ const args = process.argv.slice(2)
 const home = process.env.HOME
 const state = path.join(home, '.gemini/antigravity-cli')
 const tokenFile = path.join(state, 'antigravity-oauth-token')
-const logFile = process.env.CAIRN_AGY_FIXTURE_LOG || path.join(home, 'agy-fixture.jsonl')
+const logFile = process.env.CAIRN_AGY_FIXTURE_LOG
+  || path.join(path.basename(home) === 'plan-turn' ? path.dirname(home) : home, 'agy-fixture.jsonl')
 
 function log(record) {
   try {

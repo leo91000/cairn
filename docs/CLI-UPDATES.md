@@ -137,7 +137,7 @@ names only Codex and GitHub CLI. It is never reused: such a tree validates a new
 image. The same applies to evidence recorded before Antigravity was resolved.
 Tools never change after image validation:
 Claude Code runs with `DISABLE_AUTOUPDATER=1`, OpenCode with automatic updates
-disabled, and Antigravity with `AGY_CLI_DISABLE_AUTO_UPDATE=true`, set in the image.
+disabled, and Antigravity with `AGY_CLI_DISABLE_AUTO_UPDATE=true`, set in the image, exported by the microVM init and passed by Cairn's adapter to every `agy` it starts.
 
 Installations follow approved, paired immutable images through
 `cairn-installation-update.timer`. This host updater retains the persisted

@@ -641,7 +641,7 @@ const planAvailable = computed(() => providers[chosenProvider.value].planTurns)
 // Availability can block submission, but must not erase the requested boundary.
 const planRequested = computed(() => planning.value)
 const planBlocked = computed(() => planRequested.value && (!planAllowed.value || !planAvailable.value))
-const planUnavailableMessage = computed(() => planEnabled.value ? 'Plan requires Codex or Claude Code. Choose a compatible agent, or turn Plan off to send an ordinary request.' : 'Plan is disabled for this installation. Enable it in installation settings, or turn Plan off to send an ordinary request.')
+const planUnavailableMessage = computed(() => planEnabled.value ? 'Plan requires Codex, Claude Code or Antigravity. Choose a compatible agent, or turn Plan off to send an ordinary request.' : 'Plan is disabled for this installation. Enable it in installation settings, or turn Plan off to send an ordinary request.')
 const canSend = computed(() => !readOnly.value && !noAgent.value && !planBlocked.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 // A plan request cannot join a turn that can already change files.
 const steerBlocked = computed(() => planRequested.value && !detail.value?.run?.chatExecution?.plan)

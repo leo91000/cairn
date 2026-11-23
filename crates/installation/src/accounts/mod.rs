@@ -608,11 +608,14 @@ impl Accounts {
             format!("Connect a {label} account in Connections before running this agent.")
         } else if ready.iter().all(|a| !a.enabled) {
             format!("Every {label} account is paused. Resume one in Connections to continue.")
-        } else if matches!(provider, Provider::Opencode | Provider::Antigravity)
-            && compatible.is_empty()
-        {
+        } else if provider == Provider::Opencode && compatible.is_empty() {
             format!(
                 "No enabled {label} account supports model {model}. Choose a model available through your connections or connect its model provider."
+            )
+        } else if provider == Provider::Antigravity && compatible.is_empty() {
+            // Model inventories come from each account kind and can be briefly unavailable.
+            format!(
+                "No enabled {label} account supports model {model} right now. Choose another model, connect an account that offers it, or check its accounts in Connections."
             )
         } else if compatible.iter().any(full) {
             format!(

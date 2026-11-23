@@ -388,8 +388,23 @@ async function close() {
         <p role="alert" class="text-sm text-danger">
           {{ flow.error || 'Sign-in did not finish.' }}
         </p>
+        <!-- Trying again starts another Google sign-in: the same warning applies. -->
+        <div v-if="flow.provider === 'antigravity'" class="grid gap-3 rounded-xl border border-warning/40 bg-warning/8 px-3.5 py-3" role="alert">
+          <p class="text-sm text-ink">
+            {{ antigravityTermsWarning }}
+          </p>
+          <label class="flex-row items-start gap-2.5 text-sm text-ink">
+            <input
+              v-model="acceptedTerms"
+              type="checkbox"
+              class="mt-0.5"
+              :disabled="busy"
+            >
+            <span>I understand that Google may suspend this account and want to sign in anyway.</span>
+          </label>
+        </div>
         <div class="flex flex-wrap gap-2">
-          <UiButton variant="primary" :disabled="busy" @click="accounts.reconnect(flow.accountId)">
+          <UiButton variant="primary" :disabled="busy || (flow.provider === 'antigravity' && !acceptedTerms)" @click="accounts.reconnect(flow.accountId)">
             Try again
           </UiButton>
           <UiButton :disabled="busy" @click="close">

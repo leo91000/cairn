@@ -299,6 +299,12 @@ internal fun ColumnScope.SideQuestionPanel(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        else if (chat.provider == "antigravity")
+            Text(
+                "Antigravity répond à partir de la conversation enregistrée jusqu’à sa dernière étape terminée, pas de l’étape en cours.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         if (chat.canAskSideQuestion) {
             if (side.itemId.isNotEmpty())
                 TextButton(onClick = { side.ask("", "") }) { Text("Poser une question générale") }

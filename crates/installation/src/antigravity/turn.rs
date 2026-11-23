@@ -27,6 +27,8 @@ use tokio_util::sync::CancellationToken;
 const LIMIT: usize = 2_000_000;
 const LINE_LIMIT: usize = 16_000_000;
 const STOPPED: &str = "Antigravity execution stopped.";
+/// The fresh native HOME of a plan turn, inside the run's native state.
+pub(crate) const PLAN_HOME: &str = "plan-turn";
 /// A Google account's access token outlives no more than one hour of work; `agy` cannot
 /// renew it without the refresh token the manager keeps.
 const RENEWALS: usize = 48;
@@ -307,6 +309,45 @@ pub(super) async fn spawn(
     command
         .spawn()
         .map_err(|_| Error::unavailable("Unable to start the Antigravity CLI."))
+}
+
+/// A fresh native HOME holding only `conversation`, for turns that must have no
+/// effect: plugins or configuration an earlier YOLO turn wrote into the run's
+/// native state never load there. `agy` resumes a conversation from its database
+/// alone (measured on 1.5.14).
+pub(super) async fn bounded_home(state: &Path, fresh: &Path, conversation: &str) -> Result<()> {
+    let _ = tokio::fs::remove_dir_all(fresh).await;
+    private_dir(&fresh.join(".gemini/antigravity-cli/conversations")).await?;
+    if conversation.is_empty() {
+        return Ok(());
+    }
+    let database = format!(".gemini/antigravity-cli/conversations/{conversation}.db");
+    let (from, to) = (state.join(&database), fresh.join(&database));
+    tokio::task::spawn_blocking(move || super::side::copy_conversation(&from, &to))
+        .await
+        .map_err(Error::internal)?
+}
+
+/// Brings a plan turn's conversation back into the run's native state.
+async fn restore_conversation(bounded: &Path, state: &Path, conversation: &str) -> Result<()> {
+    if conversation.is_empty() {
+        return Ok(());
+    }
+    let database = format!(".gemini/antigravity-cli/conversations/{conversation}.db");
+    let target = state.join(&database);
+    private_dir(target.parent().unwrap()).await?;
+    let staged = target.with_extension("db.restoring");
+    let _ = tokio::fs::remove_file(&staged).await;
+    let from = bounded.join(&database);
+    let copy = staged.clone();
+    tokio::task::spawn_blocking(move || super::side::copy_conversation(&from, &copy))
+        .await
+        .map_err(Error::internal)??;
+    for suffix in ["db-wal", "db-shm"] {
+        let _ = tokio::fs::remove_file(target.with_extension(suffix)).await;
+    }
+    tokio::fs::rename(&staged, &target).await?;
+    Ok(())
 }
 
 /// Removes the credential files `agy` read when its launch ends, on every exit path:
@@ -795,7 +836,15 @@ async fn execute(
     }
     let mut attachments = plan["execution"]["attachments"].clone();
     for renewal in 0.. {
-        let (home, credentials) = credentials(config).await?;
+        let (state, credentials) = credentials(config).await?;
+        // A plan turn runs in a fresh native HOME with only its conversation.
+        let home = if mode == Mode::Plan {
+            let bounded = state.join(PLAN_HOME);
+            bounded_home(&state, &bounded, &conversation).await?;
+            bounded
+        } else {
+            state.clone()
+        };
         // Credential files never stay on an execution node's disk after this launch.
         let _files = CredentialFiles(home.clone());
         super::prepare_native_home(config, &home, Some(&credentials)).await?;
@@ -886,6 +935,10 @@ async fn execute(
             let _ = child.wait().await;
         }
         group.finish();
+        if mode == Mode::Plan {
+            restore_conversation(&home, &state, &conversation).await?;
+            let _ = crate::accounts::remove_directory(&home).await;
+        }
         drain.abort();
         reader.abort();
         match outcome? {
