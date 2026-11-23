@@ -20,7 +20,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
-import kotlin.math.abs
+import androidx.compose.ui.layout.positionInRoot
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -77,10 +77,13 @@ internal fun Modifier.pressSurvivingMoves(
                 // it. Once it moved, the finger may be over the visible control where it is now or
                 // within touch slop of where it was pressed.
                 val slop = viewConfiguration.touchSlop
+                // Moved means its origin moved: a chip that resizes or that the row clips
+                // differently in place is still where it was pressed.
+                val pressedOrigin = pressedLayout.positionInRoot()
                 fun movedLayout() =
                     layout[0]
                         ?.takeIf { it.isAttached }
-                        ?.takeUnless { it.touchBounds(padding.width, padding.height).near(pressed) }
+                        ?.takeUnless { (it.positionInRoot() - pressedOrigin).getDistance() < 1f }
                 fun overControl(change: PointerInputChange): Boolean {
                     val current = layout[0]?.takeIf { it.isAttached } ?: return false
                     val moved =
@@ -126,12 +129,6 @@ private fun LayoutCoordinates.touchBounds(horizontal: Float, vertical: Float): R
     boundsInRoot().let {
         Rect(it.left - horizontal, it.top - vertical, it.right + horizontal, it.bottom + vertical)
     }
-
-private fun Rect.near(other: Rect): Boolean =
-    abs(left - other.left) < 1f &&
-        abs(top - other.top) < 1f &&
-        abs(right - other.right) < 1f &&
-        abs(bottom - other.bottom) < 1f
 
 /** Compose's wait for a tap's release, judging the pointer by [overControl] instead of bounds. */
 private suspend fun AwaitPointerEventScope.releaseOrCancel(

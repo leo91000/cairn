@@ -412,6 +412,7 @@ class SubagentViewsTest {
         val seen = mutableListOf<String>()
         var opened = 0
         var queued by mutableStateOf(false)
+        var wide by mutableStateOf(false)
         compose.setContent {
             LaunchedEffect(interactions) {
                 interactions.interactions.collect {
@@ -429,7 +430,7 @@ class SubagentViewsTest {
                     Surface(onClick = { opened++ }, interactionSource = interactions) {
                         Box(
                             Modifier.pressSurvivingMoves(interactions) { opened++ }
-                                .size(200.dp, 48.dp)
+                                .size(if (wide) 210.dp else 200.dp, 48.dp)
                                 .testTag("probe")
                         )
                     }
@@ -462,6 +463,20 @@ class SubagentViewsTest {
         assertEquals(1, opened)
         assertEquals(listOf("press", "release", "press", "cancel"), seen)
 
+        // A control that grows in place has not moved: a short excursion still cancels.
+        probe.performTouchInput { down(Offset(centerX, height - 2f)) }
+        wide = true
+        compose.waitForIdle()
+        probe.performTouchInput {
+            moveTo(Offset(centerX, height + slop / 2f))
+            up()
+        }
+        compose.waitForIdle()
+        wide = false
+        compose.waitForIdle()
+        assertEquals(1, opened)
+        assertEquals(listOf("press", "release", "press", "cancel", "press", "cancel"), seen)
+
         // A moved control's lift outside both positions cancels too.
         probe.performTouchInput { down(center) }
         queued = true
@@ -472,7 +487,10 @@ class SubagentViewsTest {
         }
         compose.waitForIdle()
         assertEquals(1, opened)
-        assertEquals(listOf("press", "release", "press", "cancel", "press", "cancel"), seen)
+        assertEquals(
+            listOf("press", "release", "press", "cancel", "press", "cancel", "press", "cancel"),
+            seen,
+        )
     }
 
     @Test

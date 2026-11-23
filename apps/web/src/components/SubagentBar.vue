@@ -126,7 +126,7 @@ function ignoreFollowingClick(button: HTMLButtonElement) {
 function guardNativeTap(id: string, button: HTMLButtonElement, released: Box) {
   let opened = false
   watchFollowingClick(() => {
-    if (sameBox(released, shownBox(button)))
+    if (!opened && sameBox(released, shownBox(button)))
       return false
 
     if (!opened) {
