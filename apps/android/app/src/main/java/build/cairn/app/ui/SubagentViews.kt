@@ -12,6 +12,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -368,10 +369,12 @@ internal fun SubagentBar(agents: List<Subagent>, active: Boolean, open: (String)
                     ) {
                         agents.forEach { agent ->
                             val state = agent.state(active)
+                            val interactions = remember { MutableInteractionSource() }
                             Surface(
                                 onClick = { open(agent.id) },
                                 shape = RoundedCornerShape(10.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant,
+                                interactionSource = interactions,
                                 modifier =
                                     Modifier.testTag("subagent-chip").semantics {
                                         contentDescription =
@@ -379,7 +382,13 @@ internal fun SubagentBar(agents: List<Subagent>, active: Boolean, open: (String)
                                     },
                             ) {
                                 Row(
-                                    Modifier.heightIn(min = 40.dp)
+                                    Modifier.pressSurvivingMoves(
+                                            interactions,
+                                            inScrollContainer = true,
+                                        ) {
+                                            open(agent.id)
+                                        }
+                                        .heightIn(min = 40.dp)
                                         .padding(start = 4.dp, end = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
@@ -411,17 +420,25 @@ internal fun SubagentBar(agents: List<Subagent>, active: Boolean, open: (String)
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            else
+            else {
+                // A queued message grows the composer below and moves this button mid-press.
+                val interactions = remember { MutableInteractionSource() }
                 Surface(
                     onClick = { open(first.id) },
                     color = Color.Transparent,
+                    interactionSource = interactions,
                     modifier =
                         Modifier.fillMaxWidth().semantics {
                             contentDescription = "$label au travail. Ouvrir leur activité"
                         },
                 ) {
                     Row(
-                        Modifier.heightIn(min = 48.dp).padding(horizontal = 10.dp),
+                        // The bar can sit in the swipeable conversation pager.
+                        Modifier.pressSurvivingMoves(interactions, inScrollContainer = true) {
+                                open(first.id)
+                            }
+                            .heightIn(min = 48.dp)
+                            .padding(horizontal = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Row(horizontalArrangement = Arrangement.spacedBy((-6).dp)) {
@@ -454,6 +471,7 @@ internal fun SubagentBar(agents: List<Subagent>, active: Boolean, open: (String)
                         StateDot(SubagentState.RUNNING)
                     }
                 }
+            }
         }
     }
 }

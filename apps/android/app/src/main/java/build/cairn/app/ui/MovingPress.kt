@@ -1,0 +1,145 @@
+package build.cairn.app.ui
+
+import android.view.ViewConfiguration
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+/**
+ * Lets a tap survive live content moving its control between press and release, as when a queued
+ * message grows the composer under the subagent bar. Compose's click handling cancels at the first
+ * move outside the control's new bounds. While the control stays put, this behaves as Compose's
+ * tap; once it moved, the press survives and opens over the visible control where it is now or
+ * within touch slop of where it was pressed, as on the web.
+ *
+ * Apply it to the content of a clickable Surface sharing [interactions], which draws the ripple.
+ * Consuming the press leaves keyboard, accessibility and focus activation to that Surface.
+ */
+@Composable
+internal fun Modifier.pressSurvivingMoves(
+    interactions: MutableInteractionSource,
+    inScrollContainer: Boolean = false,
+    onClick: () -> Unit,
+): Modifier {
+    val click by rememberUpdatedState(onClick)
+    val source by rememberUpdatedState(interactions)
+    val scope = rememberCoroutineScope()
+    val layout = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    return onGloballyPositioned { layout[0] = it }
+        .pointerInput(inScrollContainer) {
+            awaitEachGesture {
+                val down = awaitFirstDown()
+                val pressedLayout = layout[0]?.takeIf { it.isAttached } ?: return@awaitEachGesture
+                // The Surface keeps the taps on its minimum touch target around this content.
+                val position = down.position
+                if (
+                    position.x !in 0f..size.width.toFloat() ||
+                        position.y !in 0f..size.height.toFloat()
+                )
+                    return@awaitEachGesture
+
+                down.consume()
+                // Like Compose's clickable, a release in the minimum touch target still counts.
+                val padding = extendedTouchPadding
+                val pressed = pressedLayout.touchBounds(padding.width, padding.height)
+                val press = PressInteraction.Press(position)
+                val pressSource = source
+                var shown = false
+                // Like Compose's clickable, a scroll container shows the press once it is not a
+                // scroll.
+                val showing = scope.launch {
+                    if (inScrollContainer) delay(ViewConfiguration.getTapTimeout().toLong())
+                    pressSource.emit(press)
+                    shown = true
+                }
+
+                // While the control stays put, leaving it cancels the press as with Compose's tap:
+                // its whole size plus the minimum touch target, even where a scrolling row clips
+                // it. Once it moved, the finger may be over the visible control where it is now or
+                // within touch slop of where it was pressed.
+                val slop = viewConfiguration.touchSlop
+                // Moved means its origin moved: a chip that resizes or that the row clips
+                // differently in place is still where it was pressed.
+                val pressedOrigin = pressedLayout.positionInRoot()
+                fun movedLayout() =
+                    layout[0]
+                        ?.takeIf { it.isAttached }
+                        ?.takeUnless { (it.positionInRoot() - pressedOrigin).getDistance() < 1f }
+                fun overControl(change: PointerInputChange): Boolean {
+                    val current = layout[0]?.takeIf { it.isAttached } ?: return false
+                    val moved =
+                        movedLayout()
+                            ?: return change.position.x in
+                                -padding.width..size.width + padding.width &&
+                                change.position.y in -padding.height..size.height + padding.height
+                    val point = current.localToRoot(change.position)
+                    return point in moved.touchBounds(padding.width, padding.height) ||
+                        point in pressed.inflate(slop)
+                }
+
+                var up: PointerInputChange? = null
+                var accepted = false
+                try {
+                    up = releaseOrCancel(::overControl)
+                    // A release the press survived counts on an unmoved control, as with Compose's
+                    // tap; a moved control judges it by the same rule as the moves.
+                    accepted = up != null && (movedLayout() == null || overControl(up))
+                } finally {
+                    showing.cancel()
+                    val opens = accepted
+                    scope.launch {
+                        if (opens) {
+                            if (!shown) pressSource.emit(press)
+                            pressSource.emit(PressInteraction.Release(press))
+                        } else if (shown) {
+                            pressSource.emit(PressInteraction.Cancel(press))
+                        }
+                    }
+                }
+
+                val release = up
+                if (accepted && release != null) {
+                    release.consume()
+                    click()
+                }
+            }
+        }
+}
+
+private fun LayoutCoordinates.touchBounds(horizontal: Float, vertical: Float): Rect =
+    boundsInRoot().let {
+        Rect(it.left - horizontal, it.top - vertical, it.right + horizontal, it.bottom + vertical)
+    }
+
+/** Compose's wait for a tap's release, judging the pointer by [overControl] instead of bounds. */
+private suspend fun AwaitPointerEventScope.releaseOrCancel(
+    overControl: (PointerInputChange) -> Boolean
+): PointerInputChange? {
+    while (true) {
+        val event = awaitPointerEvent()
+        if (event.changes.all { it.changedToUp() }) return event.changes[0]
+        if (event.changes.any { it.isConsumed || !overControl(it) }) return null
+
+        // A scrolling ancestor consumes the move after this node sees it.
+        if (awaitPointerEvent(PointerEventPass.Final).changes.any { it.isConsumed }) return null
+    }
+}
