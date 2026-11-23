@@ -1249,9 +1249,12 @@ fn never_received(db: &Db<'_>, run: &Value) -> Result<bool> {
     let Some(checkpoint) = RunCheckpoint::load_in(db, text(run, "id"))? else {
         return Ok(run["startedAt"].is_null());
     };
-    let turn = run["chatExecution"]["messageId"].as_str();
+    // A launch without a chat message, such as a mission or a wakeup, records an empty turn.
+    let turn = run["chatExecution"]["messageId"]
+        .as_str()
+        .unwrap_or_default();
     Ok(match &checkpoint.launched_turn {
-        Some(launched) => Some(launched.as_str()) != turn,
+        Some(launched) => launched != turn,
         None => !checkpoint.launched(),
     })
 }
@@ -2801,6 +2804,57 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     assert!(!skips_replay(db, "chat", &run)?);
                     assert!(conversation(db, "chat")?.paused);
                     assert!(!turn_returned(db, "run")?);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn launches_without_a_message_are_not_this_turns() {
+        use crate::conversation_writers::{EntryWriter, record_message};
+
+        // A mission continued in chat: its launch delivered none of the chat's messages.
+        // A wakeup that launched may have read the steering it claimed.
+        for (message_id, returned) in [(Some("turn"), true), (None, false)] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            store
+                .transaction(move |db| {
+                    let mut execution = json!({ "text": "", "attachments": [], "recovery": false });
+                    if let Some(id) = message_id {
+                        execution["messageId"] = id.into();
+                    }
+                    let run = db.add_run_fixture(
+                        &json!({
+                            "id": "run",
+                            "taskId": "chat",
+                            "createdAt": 0,
+                            "startedAt": 1,
+                            "status": "cancelled",
+                            "cancelRequestedAt": 500,
+                            "finishedAt": 900,
+                            "chatExecution": execution,
+                            "snapshot": { "agent": { "provider": "codex" } },
+                        }),
+                        None,
+                    )?;
+                    db.save_checkpoint_boundary("run", &json!({ "launched": true, "launchedTurn": "" }))?;
+                    db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                    if message_id.is_some() {
+                        db.put_message(&json!({ "id": "turn", "chatId": "chat", "text": "turn", "status": "sending", "createdAt": 100 }))?;
+                        record_message(db, "chat", "turn", &EntryWriter::Person("alice".into()))?;
+                    }
+                    db.put_message(&json!({ "id": "steering", "chatId": "chat", "text": "steer", "mode": "steer", "status": "sending", "createdAt": 200 }))?;
+                    record_message(db, "chat", "steering", &EntryWriter::Person("alice".into()))?;
+                    settle_turn(db, "chat", &run)?;
+                    let expected = if returned { MessageStatus::Cancelled } else { MessageStatus::Queued };
+                    assert_eq!(find_message(db, "chat", "steering")?.unwrap().status, expected, "{message_id:?}");
+                    if returned {
+                        assert_eq!(find_message(db, "chat", "turn")?.unwrap().status, MessageStatus::Cancelled);
+                        assert!(turn_returned(db, "run")?);
+                    }
                     Ok(())
                 })
                 .await

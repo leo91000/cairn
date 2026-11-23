@@ -1281,17 +1281,13 @@ impl Execution<'_> {
         // The environment starts the turn as soon as it accepts it: unless it refuses, its
         // message may be read even if this launch fails before the runner client is recorded
         // (ADR-0090).
-        let turn = self.run["chatExecution"]["messageId"]
-            .as_str()
-            .map(str::to_owned);
-        if turn.is_some() {
-            self.checkpoint
-                .update(|c| {
-                    c.launched_turn_before = c.launched_turn.take();
-                    c.launched_turn = turn.clone();
-                })
-                .await?;
-        }
+        let turn = launched_turn(self.run);
+        self.checkpoint
+            .update(|c| {
+                c.launched_turn_before = c.launched_turn.take();
+                c.launched_turn = turn;
+            })
+            .await?;
         match super::held::request(
             self.s,
             self.run,
@@ -1305,11 +1301,9 @@ impl Execution<'_> {
         {
             Event::Accepted { .. } => {}
             Event::Refused { message, .. } => {
-                if turn.is_some() {
-                    self.checkpoint
-                        .update(|c| c.launched_turn = c.launched_turn_before.take())
-                        .await?;
-                }
+                self.checkpoint
+                    .update(|c| c.launched_turn = c.launched_turn_before.take())
+                    .await?;
                 return Err(Error::conflict(message));
             }
             _ => {
@@ -1716,9 +1710,7 @@ impl Execution<'_> {
         )
         .await?;
         let identity = recovery::process_identity(child.child.id().unwrap()).await?;
-        let launched_turn = self.run["chatExecution"]["messageId"]
-            .as_str()
-            .map(str::to_owned);
+        let launched_turn = launched_turn(self.run);
         if self.run["chatExecution"].is_object() {
             self.run["chatExecution"]["recovery"] = true.into();
             let patch = json!({ "chatExecution": self.run["chatExecution"] });
@@ -2190,6 +2182,18 @@ async fn close_output_readers(out: AbortOnDropHandle<()>, err: AbortOnDropHandle
     }
     let _ = out.await;
     let _ = err.await;
+}
+
+/// The turn a launch serves, recorded so a failure can tell whether the agent may have its
+/// message (ADR-0090). A launch without a chat message (a mission or a wakeup) records an
+/// empty turn: a later chat message was not delivered by it.
+fn launched_turn(run: &Value) -> Option<String> {
+    Some(
+        run["chatExecution"]["messageId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    )
 }
 
 fn has_live_environment(saved: &RunCheckpoint, retained: bool, env: &Environment) -> bool {
