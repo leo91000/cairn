@@ -23,6 +23,7 @@ const LOCAL_OUTPUT_FAILURE: &str = "Local output forwarding failed.";
 const TURN_START_TIMEOUT: Duration = Duration::from_secs(180);
 /// Terminal reconciliation after output EOF is bounded independently of execution.
 pub(crate) const RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const NATIVE_CLEANUP_RETIREMENT_QUERY: &str = "cleanupRetirement=1";
 
 struct Controller {
     http: reqwest::Client,
@@ -488,8 +489,30 @@ pub(crate) async fn wait_for_exit(
     url: &str,
     token: &str,
 ) -> Result<ControllerResult> {
+    wait_result(http, url, token, "").await
+}
+
+pub(crate) async fn observe_cleanup_retirement(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<ControllerResult> {
+    wait_result(http, url, token, NATIVE_CLEANUP_RETIREMENT_QUERY).await
+}
+
+async fn wait_result(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+    query: &str,
+) -> Result<ControllerResult> {
+    let wait_url = if query.is_empty() {
+        format!("{url}/wait")
+    } else {
+        format!("{url}/wait?{query}")
+    };
     let response = http
-        .post(format!("{url}/wait"))
+        .post(wait_url)
         .bearer_auth(token)
         .send()
         .await
@@ -506,17 +529,23 @@ pub(crate) async fn wait_for_exit(
         .filter(|n| (0..=255).contains(n))
         .map(|n| n as i32)
         .ok_or_else(|| Error::bad("Invalid execution exit status."))?;
+    let expected = url.rsplit('/').next().unwrap_or_default();
+    let cleanup = cleanup_result(&value, expected);
+    let retired = cleanup.is_some() && value["NativeCleanup"]["retired"] == true;
     let finalization_failed =
-        value["FinalizationFailed"] == true && code == super::CONTROLLER_FAILED;
+        value["FinalizationFailed"] == true && code == super::CONTROLLER_FAILED && !retired;
     let physical_finalized =
-        value["PhysicalFinalized"] == true && value["FinalizationFailed"] != true;
-    let terminal_reason = if code == super::CONTROLLER_FAILED && physical_finalized {
+        retired || (value["PhysicalFinalized"] == true && value["FinalizationFailed"] != true);
+    let terminal_reason = if code == super::CONTROLLER_FAILED && physical_finalized && !retired {
         serde_json::from_value(value["TerminalReason"].clone()).ok()
     } else {
         None
     };
-    let expected = url.rsplit('/').next().unwrap_or_default();
-    let native_cleanup = cleanup_result(&value, expected).and_then(|result| result.native_cleanup);
+    let native_cleanup = if retired {
+        Some("Native disk cleanup completed. The attempt's exit status is unknown, and automatic replay was stopped.".into())
+    } else {
+        cleanup.and_then(|result| result.native_cleanup)
+    };
     Ok(ControllerResult {
         native_cleanup,
         code,
@@ -983,6 +1012,32 @@ mod physical_result_tests {
     async fn exit_code_and_legacy_markers_never_substitute_for_a_physical_certificate() {
         use axum::{Router, routing::post};
         for (value, confirmed) in [
+            (
+                json!({
+                    "StatusCode": 70,
+                    "FinalizationFailed": true,
+                    "NativeCleanup": {
+                        "attemptId": "another-attempt",
+                        "workloadFenced": true,
+                        "message": "Pending cleanup",
+                        "retired": true
+                    }
+                }),
+                false,
+            ),
+            (
+                json!({
+                    "StatusCode": 70,
+                    "FinalizationFailed": true,
+                    "NativeCleanup": {
+                        "attemptId": "fixture",
+                        "workloadFenced": false,
+                        "message": "Pending cleanup",
+                        "retired": true
+                    }
+                }),
+                false,
+            ),
             (json!({"StatusCode":0}), false),
             (json!({"StatusCode":0,"PhysicalFinalized":false}), false),
             (json!({"StatusCode":17,"PhysicalFinalized":true}), true),
@@ -992,8 +1047,10 @@ mod physical_result_tests {
                 false,
             ),
         ] {
+            let expected_failure = value["StatusCode"] == super::super::CONTROLLER_FAILED
+                && value["FinalizationFailed"] == true;
             let app = Router::new().route(
-                "/wait",
+                "/runs/fixture/wait",
                 post(move || {
                     let value = value.clone();
                     async move { axum::Json(value) }
@@ -1006,12 +1063,14 @@ mod physical_result_tests {
             });
             let result = wait_for_exit(
                 &reqwest::Client::new(),
-                &format!("http://{address}"),
+                &format!("http://{address}/runs/fixture"),
                 "fixture",
             )
             .await
             .unwrap();
             assert_eq!(result.physical_finalized, confirmed);
+            assert_eq!(result.finalization_failed, expected_failure);
+            assert!(result.native_cleanup.is_none());
             server.abort();
         }
     }

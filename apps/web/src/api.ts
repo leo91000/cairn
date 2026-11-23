@@ -297,7 +297,9 @@ async function requestOnce<T = any>(
   catch (error) {
     if (response.status >= 502 && response.status <= 504)
       throw new ConnectionError(error)
-    throw error
+    // A rate limiter outside Cairn may respond without a JSON error.
+    if (response.status !== 429)
+      throw error
   }
 
   if (!response.ok) {

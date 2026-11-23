@@ -2441,10 +2441,10 @@ impl Controller {
     }
 
     /// Match the VM wait protocol: headers and spaces keep relayed waits alive.
-    fn wait(&self, id: &str) -> Response {
+    fn wait(&self, id: &str, observe_retirement: bool) -> Response {
         let stream = futures_util::stream::unfold(
             (self.clone(), id.to_owned(), false),
-            |(controller, id, done)| async move {
+            move |(controller, id, done)| async move {
                 if done {
                     return None;
                 }
@@ -2456,11 +2456,19 @@ impl Controller {
                 if released
                     && let Ok(code) = tokio::fs::read_to_string(controller.file(&id, "exit")).await
                 {
-                    let result = match code.parse::<i32>() {
-                        Ok(code) => Ok(Bytes::from(json!({ "StatusCode": code }).to_string())),
-                        Err(_) => serde_json::from_str::<Value>(&code)
-                            .map(|value| Bytes::from(value.to_string()))
-                            .map_err(std::io::Error::other),
+                    let result = code
+                        .parse::<i32>()
+                        .map(|code| json!({ "StatusCode": code }))
+                        .or_else(|_| serde_json::from_str::<Value>(&code));
+                    let result = match result {
+                        Ok(value) if observe_retirement => Ok(Bytes::from(
+                            controller
+                                .reconcile_wait_result(&id, value)
+                                .await
+                                .to_string(),
+                        )),
+                        Ok(value) => Ok(Bytes::from(value.to_string())),
+                        Err(error) => Err(std::io::Error::other(error)),
                     };
                     return Some((result, (controller, id, true)));
                 }
@@ -2781,7 +2789,9 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("POST", ["runs", id, "wait"]) => {
             uuid(id)?;
-            return Ok(controller.wait(id));
+            let observe_retirement =
+                request.uri().query() == Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY);
+            return Ok(controller.wait(id, observe_retirement));
         }
         ("GET", ["exclusive"]) => controller.inspect_exclusive().await?,
         ("POST", ["exclusive", "acquire"]) => {
@@ -3470,6 +3480,38 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+        authenticated_wait_result(controller, attempt, false).await
+    }
+
+    pub(crate) async fn retired_cleanup_completion(
+        attempt: &str,
+    ) -> crate::runner::ControllerResult {
+        let (_root, controller) = fixture().await;
+        let run = crate::config::id();
+        private_dir(&controller.state.join("native-cleanup"))
+            .await
+            .unwrap();
+        atomic_write(&controller.file(attempt, "run"), run.as_bytes())
+            .await
+            .unwrap();
+        controller
+            .record_cleanup_pending(attempt, "Native cleanup was pending.")
+            .await
+            .unwrap();
+        atomic_write(
+            &controller.file(attempt, "cleanup-result"),
+            br#"{"completion":"Flushed"}"#,
+        )
+        .await
+        .unwrap();
+        authenticated_wait_result(controller, attempt, true).await
+    }
+
+    async fn authenticated_wait_result(
+        controller: Controller,
+        attempt: &str,
+        observe_retirement: bool,
+    ) -> crate::runner::ControllerResult {
         let router = Router::new().fallback(any(handler)).with_state(controller);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -3478,11 +3520,23 @@ pub(crate) mod tests {
         let http = reqwest::Client::new();
         let unauthorized = http.post(format!("{url}/wait")).send().await.unwrap();
         assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
-        let result =
-            crate::runner::wait_for_exit(&http, &url, "synthetic-private-controller-token").await;
+        let token = "synthetic-private-controller-token";
+        let initial = crate::runner::wait_for_exit(&http, &url, token)
+            .await
+            .unwrap();
+        let result = if observe_retirement {
+            assert!(initial.finalization_failed);
+            assert!(!initial.physical_finalized);
+            assert!(initial.native_cleanup.is_some());
+            crate::runner::observe_cleanup_retirement(&http, &url, token)
+                .await
+                .unwrap()
+        } else {
+            initial
+        };
         server.abort();
         let _ = server.await;
-        result.unwrap()
+        result
     }
 
     #[tokio::test]

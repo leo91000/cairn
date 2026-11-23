@@ -264,22 +264,27 @@ fn origin(context: &Context) -> crate::native::policy::Origin {
 }
 
 /// Hourly counters to increment when the submission is accepted.
-struct Counters(Vec<(String, u64)>);
+struct Counters {
+    counts: Vec<(String, u64)>,
+    expires_at: i64,
+}
 
 impl Counters {
     fn increment(&self, db: &Db<'_>) -> Result<()> {
-        let hour = now() / 3_600_000;
-        for (key, count) in &self.0 {
-            db.set(key, &json!(count + 1), Some((hour + 1) * 3_600_000))?;
+        for (key, count) in &self.counts {
+            db.set(key, &json!(count + 1), Some(self.expires_at))?;
         }
         Ok(())
     }
 }
 
-fn limits(db: &Db<'_>, connection: &Connection, author: &str) -> Result<Counters> {
-    let hour = now() / 3_600_000;
+fn limits(db: &Db<'_>, connection: &Connection, author: &str, time: i64) -> Result<Counters> {
+    let hour = time / 3_600_000;
     let used = |key: &str| -> Result<u64> {
-        Ok(db.kv(key)?.and_then(|value| value.as_u64()).unwrap_or(0))
+        Ok(db
+            .kv_as_at::<Value>(key, time)?
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0))
     };
     let rate_key = format!("plugin-rate:{}:{hour}", connection.id);
     let count = used(&rate_key)?;
@@ -304,7 +309,10 @@ fn limits(db: &Db<'_>, connection: &Connection, author: &str) -> Result<Counters
             "Connection has too much pending work.",
         ));
     }
-    Ok(Counters(counters))
+    Ok(Counters {
+        counts: counters,
+        expires_at: (hour + 1) * 3_600_000,
+    })
 }
 
 /// Files a person attached, fetched from hosts the plugin declares (at most four,
@@ -390,6 +398,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
 
     // Resolve (or start) the conversation first, so attachments can be stored in it.
     let resolved = {
+        let plugins = s.plugins.clone();
         let (expected, event, dedupe, thread, origin) = (
             expected.clone(),
             event.clone(),
@@ -403,7 +412,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                 if let Some(receipt) = db.kv(&dedupe)? {
                     return Ok(Err(receipt));
                 }
-                limits(db, &connection, &author)?;
+                limits(db, &connection, &author, plugins.rate_limit_now())?;
                 let binding_key = binding(&connection, &author, &thread, shared);
                 let bound = db.kv(&binding_key)?.and_then(|value| value.as_str().map(str::to_owned));
                 let usable = bound
@@ -491,6 +500,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     }
     let expected = expected.clone();
     let event = event.clone();
+    let plugins = s.plugins.clone();
     let result = s
         .store
         .transaction(move |db| {
@@ -503,7 +513,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             crate::conversation_lifecycle::require_active(&chat)?;
             chat["paused"] = json!(false);
             db.save_conversation_boundary(&chat)?;
-            let counters = limits(db, &connection, &author)?;
+            let counters = limits(db, &connection, &author, plugins.rate_limit_now())?;
             let message_id = id();
             let queued = crate::chats::send_as_in(
                 db,

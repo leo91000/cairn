@@ -190,6 +190,7 @@ pub(super) async fn reconcile(
         saved.node_id.as_ref().and_then(|node| node.as_deref()),
         cancel,
         Duration::from_millis(remaining_ms as u64),
+        false,
         |action| {
             let attempt = attempt.to_owned();
             let shutdown = s.shutdown.clone();
@@ -222,7 +223,14 @@ pub(super) async fn reconcile(
                                     && current.settled().is_none()
                                     && (!shutdown.is_cancelled() || code.is_some())
                                 {
-                                    current.record_controller_result(_db, &id, &attempt, code)?;
+                                    current
+                                        .record_controller_observation(_db, &id, &attempt, code)?;
+                                }
+                            }
+                            recovery::ObservationAction::PublishCleanup(result) => {
+                                if !shutdown.is_cancelled() {
+                                    current
+                                        .publish_cleanup_observation(_db, &id, &attempt, result)?;
                                 }
                             }
                         }
@@ -276,8 +284,7 @@ async fn record_failure_for_revision(
         })
     });
     let error = provider_error.as_ref().unwrap_or(error);
-    let observation_deferred =
-        s.shutdown.is_cancelled() && saved.managed() && saved.terminal_code.is_none();
+    let observation_deferred = s.shutdown.is_cancelled() && saved.terminal_observation_pending();
     if !cancel.is_cancelled()
         && !observation_deferred
         && ((saved.terminal_code() == Some(0) && !saved.provider_failed())
@@ -316,7 +323,8 @@ async fn record_failure_for_revision(
                 .run_record(&id)?
                 .ok_or_else(|| Error::not_found("Run not found"))?;
             let cancelled = cancel.is_cancelled() || run.state.cancel_requested_at.is_some();
-            let expired = matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)));
+            let restart_cleanup = shutdown.is_cancelled() && saved.cleanup_observation_pending();
+            let expired = matches!(saved.remaining_ms, Some(Some(i64::MIN..=0))) && !restart_cleanup;
             let selection_replaced = admission_revision.as_ref().is_some_and(|revision| run.boundary["environmentAdmissionRevision"] != *revision)
                 && run.boundary["environmentState"] == "expired"
                 && !crate::environment_expiration::pending(db, &id)?;
@@ -530,7 +538,13 @@ async fn release(
 ) -> Result<()> {
     let run_id = checkpoint.id.as_str();
     let saved = checkpoint.snapshot().await;
-    if fenced && (saved.settled().is_some() || saved.finalization_failure_attempt.is_some()) {
+    let restart_cleanup = s.shutdown.is_cancelled()
+        && saved.cleanup_observation_pending()
+        && saved.settled().is_none();
+    if fenced
+        && !restart_cleanup
+        && (saved.settled().is_some() || saved.finalization_failure_attempt.is_some())
+    {
         let id = run_id.to_owned();
         let mut expected = saved.clone();
         expected.process = None;
@@ -701,6 +715,80 @@ mod tests {
         );
         service.shutdown.cancel();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn live_shutdown_defers_cleanup_observation_even_after_fencing() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(
+            serde_json::from_value(json!({
+                "dataDir": root.path().join("data"), "home": root.path().join("home"),
+                "workspaceRoots": [root.path()], "publicUrl": "http://localhost:4310",
+                "host": "127.0.0.1", "port": 0, "codexBin": "unused", "concurrency": 1,
+                "runnerUrl": "", "workerEnabled": false, "logger": false
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let id = crate::config::id();
+        let owner = id.clone();
+        let saved = service
+            .store
+            .transaction(move |db| {
+                db.add_run_fixture(
+                    &json!({ "id": owner, "taskId": owner, "status": "running", "isolated": true }),
+                    None,
+                )?;
+                let mut saved = RunCheckpoint::from_value(json!({
+                    "runnerId": "old", "prepared": { "backend": "native", "isolated": true },
+                    "remainingMs": 0
+                }))?;
+                saved.record_controller_observation(
+                    db,
+                    &owner,
+                    "old",
+                    Some(crate::runner::ControllerResult {
+                        code: crate::runner::CONTROLLER_FAILED,
+                        finalization_failed: true,
+                        physical_finalized: false,
+                        terminal_reason: None,
+                        native_cleanup: Some("Disk cleanup is pending.".into()),
+                    }),
+                )?;
+                saved.store_in(db, &owner)?;
+                Ok(saved)
+            })
+            .await
+            .unwrap();
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+        service.shutdown.cancel();
+        record_failure_fixture(
+            &service,
+            &checkpoint,
+            &CancellationToken::new(),
+            &Error::conflict("Worker is restarting"),
+            &[],
+        )
+        .await
+        .unwrap();
+        release(&service, &checkpoint, None, true).await.unwrap();
+
+        let state = service.store.run_state(&id).await.unwrap();
+        assert_eq!(state.status, RunStatus::Queued);
+        assert!(state.recovery_pending);
+        let saved = RunCheckpoint::load(&service.store, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.cleanup_observation_pending());
+        assert_eq!(saved.finalization_error(), Some("Disk cleanup is pending."));
+        let events = service
+            .store
+            .read(move |db| db.events_fixture(&id, 0, 100))
+            .await
+            .unwrap();
+        assert!(events.iter().all(|event| event["type"] != "error"));
     }
 
     #[tokio::test]

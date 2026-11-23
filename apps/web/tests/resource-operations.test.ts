@@ -6,7 +6,7 @@ import {
 } from 'vitest'
 import { listPluginResources } from '../../../packages/contracts/generated/listPluginResources'
 import { resolvePluginResource } from '../../../packages/contracts/generated/resolvePluginResource'
-import { api } from '../src/api'
+import { api, ApiError } from '../src/api'
 import { pluginRequest } from '../src/plugin-operations'
 
 vi.mock('../src/api', async (original) => {
@@ -74,4 +74,54 @@ it.each(['list', 'resolve'])('awaits a generated resource %s read through the po
   expect(output).toEqual(value)
   expect(vi.mocked(api).mock.calls[0]![1]).toEqual({ method: 'GET' })
   expect(vi.mocked(api).mock.calls[1]![0]).toBe('/plugins/packages/operations/job')
+})
+
+it('continues polling a resource read after a temporary HTTP rate limit', async () => {
+  const resource = {
+    resourceType: 'channel',
+    id: 'support',
+    name: '#support',
+    parent: null,
+  }
+  const resolution = { resource, ancestors: [] }
+  vi.mocked(api)
+    .mockResolvedValueOnce({ operation: 'job' })
+    .mockResolvedValueOnce({ state: 'running' })
+    .mockRejectedValueOnce(new ApiError('Too many requests. Try again later.', 429))
+    .mockResolvedValueOnce({ state: 'completed', result: { kind: 'resourceAncestry', resolution } })
+
+  await expect(resolvePluginResource(pluginRequest, {
+    pluginId: 'forge',
+    instanceId: 'instance',
+    resourceType: 'channel',
+    id: 'support',
+  })).resolves.toEqual(resolution)
+  const pollPath = '/plugins/packages/operations/job'
+  expect(vi.mocked(api).mock.calls.slice(1)).toEqual([
+    [pollPath, { method: 'GET' }],
+    [pollPath, { method: 'GET' }],
+    [pollPath, { method: 'GET' }],
+  ])
+})
+
+it('does not repeat a submission rejected by the rate limiter', async () => {
+  const error = new ApiError('Too many requests. Try again later.', 429)
+  vi.mocked(api).mockRejectedValueOnce(error)
+
+  await expect(pluginRequest('/resource', { method: 'POST' })).rejects.toBe(error)
+  expect(api).toHaveBeenCalledTimes(1)
+})
+
+it('reports a completed operation failure with its original 429 status', async () => {
+  vi.mocked(api).mockResolvedValueOnce({ operation: 'job' }).mockResolvedValueOnce({
+    state: 'failed',
+    error: 'Provider rate limit reached.',
+    errorStatus: 429,
+  })
+
+  await expect(pluginRequest('/resource', { method: 'POST' })).rejects.toMatchObject({
+    status: 429,
+    message: 'Provider rate limit reached.',
+  })
+  expect(api).toHaveBeenCalledTimes(2)
 })

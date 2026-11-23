@@ -13,8 +13,24 @@ export async function pluginRequest<T>(path: string, options: RequestInit): Prom
     return result
 
   const deadline = Date.now() + 10 * 60 * 1000
+  let rateLimitDelay = 1000
   while (Date.now() < deadline) {
-    const operation = await getPluginOperation(api, { operationId: result.operation })
+    let operation
+    try {
+      operation = await getPluginOperation(api, { operationId: result.operation })
+    }
+    catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 429)
+        throw error
+
+      // The manager already accepted the operation. Retry its status read without restarting it.
+      const delay = Math.min(rateLimitDelay, Math.max(0, deadline - Date.now()))
+      await new Promise(resolve => setTimeout(resolve, delay))
+      rateLimitDelay = Math.min(rateLimitDelay * 2, 8000)
+      continue
+    }
+
+    rateLimitDelay = 1000
     if (operation.state === 'completed')
       return operationResult(operation.result!) as T
     if (operation.state === 'failed' || operation.state === 'cancelled')

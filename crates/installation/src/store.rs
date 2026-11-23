@@ -735,9 +735,13 @@ impl Db<'_> {
 
     /// Typed variant of [`Db::kv`].
     pub fn kv_as<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        self.kv_as_at(key, now())
+    }
+
+    pub(crate) fn kv_as_at<T: DeserializeOwned>(&self, key: &str, time: i64) -> Result<Option<T>> {
         self.json_row(
             "SELECT data FROM kv WHERE key=? AND (expires IS NULL OR expires>?)",
-            params![key, now()],
+            params![key, time],
         )
     }
 
