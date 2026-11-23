@@ -5,6 +5,7 @@ import {
   expectSingleScroll,
   grantFullAccess,
   initializeRepository,
+  isolatedWorkspaceTest,
   openAgentSection,
   test,
   workspacePath,
@@ -177,21 +178,37 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
   expect(workspace.service.chats.detail(chatId).run?.snapshot.agent).toMatchObject({ model: 'fixture-deep', speed: 'priority' })
 })
 
-test('points coding agents without an account to Connections instead of offering them', async ({ page, workspace }) => {
-  test.setTimeout(60000)
+// A fresh installation, so accounts other journeys of this worker connected cannot offer agents.
+isolatedWorkspaceTest('points coding agents without an account to Connections instead of offering them', async ({ page, workspace }) => {
+  isolatedWorkspaceTest.setTimeout(90000)
+  const labels = {
+    codex: 'Codex',
+    claude: 'Claude Code',
+    opencode: 'OpenCode',
+    antigravity: 'Antigravity',
+  }
+  const unconnected = async () => {
+    const providers = Object.keys(labels) as (keyof typeof labels)[]
+    const catalogs = await Promise.all(providers.map(provider => workspace.api(`/api/${provider}/models`)))
+    return providers.filter((provider, index) => provider !== 'codex' && catalogs[index].connected === false).map(provider => labels[provider])
+  }
+
   await page.goto(workspacePath('/chats'))
   await authenticateWorkspace(page)
   const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
+  const hidden = await unconnected()
+  expect(hidden).toEqual(expect.arrayContaining(['OpenCode', 'Antigravity']))
   await picker.click()
   await expect(menu.getByRole('radio', { name: 'Codex', exact: true })).toHaveAttribute('aria-checked', 'true')
-  await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveCount(0)
-  await expect(menu.getByRole('radio', { name: 'OpenCode', exact: true })).toHaveCount(0)
-  await expect(menu.getByText(/OpenCode, Antigravity$/)).toBeVisible()
+  for (const label of Object.values(labels).filter(label => label !== 'Codex'))
+    await expect(menu.getByRole('radio', { name: label, exact: true })).toHaveCount(hidden.includes(label) ? 0 : 1)
+  await expect(menu.getByText(hidden.join(', '), { exact: true })).toBeVisible()
   await menu.getByRole('link', { name: 'Connect more →', exact: true }).click()
   await expect(page).toHaveURL(/\/connections$/)
   await expect(menu).toHaveCount(0)
 
+  // An account connected meanwhile is offered when the picker opens again.
   await workspace.api('/api/accounts', 'POST', {
     provider: 'antigravity',
     name: 'Picker Gemini key',
@@ -202,5 +219,5 @@ test('points coding agents without an account to Connections instead of offering
   await picker.click()
   await menu.getByRole('radio', { name: 'Antigravity', exact: true }).click()
   await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
-  await expect(menu.getByText(/OpenCode$/)).toBeVisible()
+  await expect(menu.getByText(hidden.filter(label => label !== 'Antigravity').join(', '), { exact: true })).toBeVisible()
 })

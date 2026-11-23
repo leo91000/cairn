@@ -63,6 +63,27 @@ describe('coding-agent model catalogs', () => {
     expect(modelCatalogs.opencode.catalog.nativeDefaults).toBeUndefined()
   })
 
+  it('keeps whether an agent is connected across reloads and forgets it for an older installation', async () => {
+    const response = {
+      models: [],
+      checkedAt: null,
+      stale: false,
+      error: 'Connect an OpenCode model-provider API key in Connections to choose a model.',
+    }
+    request.mockResolvedValueOnce({ ...response, connected: false })
+    let { modelCatalogs } = await import('../src/models')
+    expect(modelCatalogs.opencode.catalog.connected).toBeUndefined()
+    await modelCatalogs.opencode.load()
+    expect(modelCatalogs.opencode.catalog.connected).toBe(false)
+
+    vi.resetModules()
+    ;({ modelCatalogs } = await import('../src/models'))
+    expect(modelCatalogs.opencode.catalog.connected).toBe(false)
+    request.mockResolvedValueOnce(response)
+    await modelCatalogs.opencode.load()
+    expect(modelCatalogs.opencode.catalog.connected).toBeUndefined()
+  })
+
   it('loads the Antigravity catalog with its reasoning levels from its own endpoint', async () => {
     const gemini = {
       model: 'gemini-4-neon',

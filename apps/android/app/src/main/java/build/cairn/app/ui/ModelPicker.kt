@@ -180,7 +180,9 @@ private val GeminiMark by lazy {
  * set, the sheet also switches between Codex and Claude Code; the caller supplies that provider's
  * catalog. When [changeSpeed] is set, Codex models listing speeds offer them; the speed is kept
  * across model changes. With [catalogs], agents whose catalog says no account can run are not
- * offered: the sheet names them and, with [openConnections], leads to Connections.
+ * offered: the sheet names them and, with [openConnections], leads to Connections. Opening the
+ * sheet refreshes the other agents' catalogs with [refreshCatalog], so an account connected or
+ * removed meanwhile shows.
  */
 @Composable
 internal fun ModelPicker(
@@ -203,6 +205,7 @@ internal fun ModelPicker(
     changeSpeed: ((String) -> Unit)? = null,
     onReasoningIntent: (ResumeReasoningIntent) -> Unit = {},
     catalogs: Map<String, ModelCatalog>? = null,
+    refreshCatalog: (suspend (String) -> Unit)? = null,
     openConnections: (() -> Unit)? = null,
     change: (String, String) -> Unit,
 ) {
@@ -303,6 +306,12 @@ internal fun ModelPicker(
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
             if (refresh != null) Poll(provider, 300_000) { reload() }
+            if (refreshCatalog != null)
+                LaunchedEffect(Unit) {
+                    codingAgents
+                        .filter { it.provider != provider }
+                        .forEach { launch { refreshCatalog(it.provider) } }
+                }
             var query by rememberSaveable { mutableStateOf("") }
             // Claude lists its own "default" alias. When the default row already resolves to it,
             // show one row instead of two equivalent choices.
@@ -790,6 +799,7 @@ private fun UnconnectedAgents(providers: List<String>, openConnections: (() -> U
     Row(
         Modifier.fillMaxWidth()
             .testTag("unconnected-agents")
+            .semantics(mergeDescendants = true) {}
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
             .padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
             .heightIn(min = 44.dp),

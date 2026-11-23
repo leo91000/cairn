@@ -168,7 +168,7 @@
       ]
     },
     "connected": {
-      "description": "Whether the coding agent has a signed-in, enabled account that can run.\nAbsent from installations that predate it, where clients assume it can.",
+      "description": "Whether runs of the coding agent can start without connecting or resuming an account.\nAbsent from installations that predate it, where clients assume it can.",
       "type": [
         "boolean",
         "null"

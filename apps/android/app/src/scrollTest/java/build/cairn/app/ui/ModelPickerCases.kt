@@ -490,6 +490,8 @@ abstract class ModelPickerCases {
         var provider by mutableStateOf("codex")
         var owner by mutableStateOf(true)
         var connections = 0
+        val refreshed = mutableListOf<String>()
+        val tile = { name: String -> hasText(name) and hasClickAction() }
         compose.setContent {
             CairnTheme {
                 SurfaceForTest {
@@ -500,6 +502,7 @@ abstract class ModelPickerCases {
                         provider = provider,
                         changeProvider = { provider = it },
                         catalogs = catalogs,
+                        refreshCatalog = { refreshed += it },
                         openConnections = if (owner) ({ connections++ }) else null,
                     ) { _, _ ->
                     }
@@ -507,9 +510,13 @@ abstract class ModelPickerCases {
             }
         }
         compose.onNodeWithTag("model-picker").performClick()
-        compose.onNodeWithText("Antigravity").assertExists()
-        compose.onNodeWithText("OpenCode").assertDoesNotExist()
-        compose.onNodeWithTag("unconnected-agents").assertTextContains("OpenCode", substring = true)
+        // Opening refreshes the other agents, so an account connected meanwhile shows.
+        compose.runOnIdle {
+            assertEquals(setOf("claude", "opencode", "antigravity"), refreshed.toSet())
+        }
+        compose.onNode(tile("Antigravity")).assertExists()
+        compose.onNode(tile("OpenCode")).assertDoesNotExist()
+        compose.onNodeWithTag("unconnected-agents").assertTextContains("OpenCode")
         compose.onNodeWithText("Connecter").performClick()
         compose.runOnIdle { assertEquals(1, connections) }
         compose.onNodeWithTag("model-settings-sheet").assertDoesNotExist()
@@ -518,7 +525,7 @@ abstract class ModelPickerCases {
         owner = false
         provider = "opencode"
         compose.onNodeWithTag("model-picker").performClick()
-        compose.onNodeWithText("OpenCode").assertExists()
+        compose.onNode(tile("OpenCode")).assertExists()
         compose.onNodeWithTag("unconnected-agents").assertDoesNotExist()
         compose.onNodeWithText("Connecter").assertDoesNotExist()
         provider = "codex"

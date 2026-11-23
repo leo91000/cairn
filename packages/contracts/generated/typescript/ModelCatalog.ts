@@ -9,7 +9,7 @@ export interface ModelCatalog {
   stale: boolean
   error: string
   /**
-   * Whether the coding agent has a signed-in, enabled account that can run.
+   * Whether runs of the coding agent can start without connecting or resuming an account.
    * Absent from installations that predate it, where clients assume it can.
    */
   connected?: boolean
