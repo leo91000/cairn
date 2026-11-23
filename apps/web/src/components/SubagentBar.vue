@@ -9,6 +9,7 @@ import {
 } from 'vue'
 import {
   releasedOnControl,
+  sameBox,
   stopsRowFling,
   touchSlop,
   visibleBox,
@@ -85,9 +86,16 @@ function releasePress(event: PointerEvent) {
 
   cancelPress()
   const { id, button } = held
+  const current = shownBox(button)
+  // An unmoved touch or pen press stays the browser's own tap, as before: its click opens the
+  // activity, and the activity's focus then follows the pointer. A mouse press is captured,
+  // so its click would reach the button even when dragged away; the release decides instead.
+  if (event.pointerType !== 'mouse' && sameBox(held.box, current))
+    return
+
   ignoreNextClick(button)
   const slop = event.pointerType === 'mouse' ? 0 : touchSlop
-  if (!releasedOnControl(held.box, shownBox(button), event.clientX, event.clientY, slop))
+  if (!releasedOnControl(held.box, current, event.clientX, event.clientY, slop))
     return
 
   // The browser's own mouse-down may land beside a button that moved, so focus it here.

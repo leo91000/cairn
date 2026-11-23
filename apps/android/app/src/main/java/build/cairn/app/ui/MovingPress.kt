@@ -70,9 +70,19 @@ internal fun Modifier.pressSurvivingMoves(
                     shown = true
                 }
 
+                // Like Compose's clickable, leaving the control cancels the press; here only once
+                // the finger is beyond touch slop of both where it was pressed and where it is now.
+                val slop = viewConfiguration.touchSlop
+                fun overControl(change: PointerInputChange): Boolean {
+                    val current = layout[0]?.takeIf { it.isAttached } ?: return false
+                    val point = current.localToRoot(change.position)
+                    return point in pressed.inflate(slop) ||
+                        point in current.touchBounds(padding.width, padding.height).inflate(slop)
+                }
+
                 var up: PointerInputChange? = null
                 try {
-                    up = releaseOrCancel()
+                    up = releaseOrCancel(::overControl)
                 } finally {
                     showing.cancel()
                     val released = up != null
@@ -104,12 +114,14 @@ private fun LayoutCoordinates.touchBounds(horizontal: Float, vertical: Float): R
         Rect(it.left - horizontal, it.top - vertical, it.right + horizontal, it.bottom + vertical)
     }
 
-/** Compose's wait for a tap's release, without cancelling when the pointer leaves the control. */
-private suspend fun AwaitPointerEventScope.releaseOrCancel(): PointerInputChange? {
+/** Compose's wait for a tap's release, judging the pointer by [overControl] instead of bounds. */
+private suspend fun AwaitPointerEventScope.releaseOrCancel(
+    overControl: (PointerInputChange) -> Boolean
+): PointerInputChange? {
     while (true) {
         val event = awaitPointerEvent()
         if (event.changes.all { it.changedToUp() }) return event.changes[0]
-        if (event.changes.any { it.isConsumed }) return null
+        if (event.changes.any { it.isConsumed || !overControl(it) }) return null
 
         // A scrolling ancestor consumes the move after this node sees it.
         if (awaitPointerEvent(PointerEventPass.Final).changes.any { it.isConsumed }) return null

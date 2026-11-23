@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   releasedOnControl,
+  sameBox,
   stopsRowFling,
   touchSlop,
   visibleBox,
@@ -83,5 +84,12 @@ describe('stopsRowFling', () => {
 
   it('always counts a mouse press, even right after a wheel scroll', () => {
     expect(stopsRowFling('mouse', 1010, 1000)).toBe(false)
+  })
+})
+
+describe('sameBox', () => {
+  it('treats sub-pixel rounding as unmoved and a queued row as moved', () => {
+    expect(sameBox(pressed, { ...pressed, top: 500.4, bottom: 544.4 })).toBe(true)
+    expect(sameBox(pressed, moved)).toBe(false)
   })
 })

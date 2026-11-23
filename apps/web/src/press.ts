@@ -35,3 +35,9 @@ export const touchSlop = 16
 export function stopsRowFling(pointerType: string, pressedAt: number, rowScrolledAt: number): boolean {
   return pointerType !== 'mouse' && pressedAt - rowScrolledAt < 100
 }
+
+// Whether live content left a control where it was pressed, give or take a pixel of rounding.
+export function sameBox(a: Box, b: Box): boolean {
+  return Math.abs(a.left - b.left) < 1 && Math.abs(a.top - b.top) < 1
+    && Math.abs(a.right - b.right) < 1 && Math.abs(a.bottom - b.bottom) < 1
+}

@@ -1015,6 +1015,8 @@ test('a touch on working subagents opens them even when the queue moves the butt
     await input.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...near, y: near.y - 5 }] })
     await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
     await expect(drawer).toBeVisible()
+    // The browser's own tap opened it, so the drawer's focus shows no keyboard ring.
+    await expect.poll(() => page.evaluate(() => document.activeElement?.matches(':focus-visible'))).toBe(false)
     await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
     await expect(drawer).toHaveCount(0)
 

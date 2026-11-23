@@ -198,10 +198,16 @@ class SubagentViewsTest {
         }
         assertEquals(3, opened.size)
 
-        // A press dragged away from both positions opens nothing.
+        // A press dragged away from both positions opens nothing, even when it comes back.
         button.performTouchInput {
             down(center)
             moveBy(Offset(0f, -height * 4f))
+            up()
+        }
+        button.performTouchInput {
+            down(center)
+            moveBy(Offset(0f, -height * 4f))
+            moveTo(center)
             up()
         }
         assertEquals(3, opened.size)
