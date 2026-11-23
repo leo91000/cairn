@@ -73,21 +73,31 @@ internal fun Modifier.pressSurvivingMoves(
                 // Like Compose's clickable, leaving the control cancels the press. Once the control
                 // moved, the finger may also stay within touch slop of where it was pressed.
                 val slop = viewConfiguration.touchSlop
+                fun touchBoundsNow() =
+                    layout[0]
+                        ?.takeIf { it.isAttached }
+                        ?.let {
+                            it to it.touchBounds(padding.width, padding.height)
+                        }
                 fun overControl(change: PointerInputChange): Boolean {
-                    val current = layout[0]?.takeIf { it.isAttached } ?: return false
-                    val now = current.touchBounds(padding.width, padding.height)
+                    val (current, now) = touchBoundsNow() ?: return false
                     val point = current.localToRoot(change.position)
                     return point in now || (now != pressed && point in pressed.inflate(slop))
                 }
 
                 var up: PointerInputChange? = null
+                var accepted = false
                 try {
                     up = releaseOrCancel(::overControl)
+                    // A release the press survived counts on an unmoved control, as with Compose's
+                    // tap; a moved control judges it by the same rule as the moves.
+                    accepted =
+                        up != null && (touchBoundsNow()?.second == pressed || overControl(up))
                 } finally {
                     showing.cancel()
-                    val released = up != null
+                    val opens = accepted
                     scope.launch {
-                        if (released) {
+                        if (opens) {
                             if (!shown) pressSource.emit(press)
                             pressSource.emit(PressInteraction.Release(press))
                         } else if (shown) {
@@ -96,12 +106,8 @@ internal fun Modifier.pressSurvivingMoves(
                     }
                 }
 
-                val release = up ?: return@awaitEachGesture
-                val current = layout[0]?.takeIf { it.isAttached } ?: return@awaitEachGesture
-                val point = current.localToRoot(release.position)
-                if (
-                    point in pressed || point in current.touchBounds(padding.width, padding.height)
-                ) {
+                val release = up
+                if (accepted && release != null) {
                     release.consume()
                     click()
                 }

@@ -22,6 +22,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -222,6 +223,49 @@ class SubagentViewsTest {
             up()
         }
         assertEquals(3, opened.size)
+    }
+
+    @Test
+    fun `a press near the bar's edge opens when it lifts just past it, moved or not`() {
+        val opened = mutableListOf<String>()
+        var queued by mutableStateOf(false)
+        compose.setContent {
+            CairnTheme("light") {
+                Column(
+                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+                    verticalArrangement = Arrangement.Bottom,
+                ) {
+                    SubagentBar(team, active = true) { opened += it }
+                    if (queued) Spacer(Modifier.height(72.dp))
+                    Spacer(Modifier.height(56.dp))
+                }
+            }
+        }
+        val button =
+            compose.onNodeWithContentDescription("1 sous-agent au travail. Ouvrir leur activité")
+
+        // As with Compose's tap, a lift just past the unmoved edge still counts.
+        button.performTouchInput {
+            down(Offset(centerX, height - 2f))
+            // The lift itself lands there, with no move event before it.
+            updatePointerTo(0, Offset(centerX, height + 3f))
+            up()
+        }
+        assertEquals(1, opened.size)
+
+        // Pressed near the top edge, then the button moves up and the finger drifts a few pixels
+        // past where that edge was: still within touch slop of the press, so it opens.
+        val before = button.getBoundsInRoot().top
+        button.performTouchInput { down(Offset(centerX, 2f)) }
+        queued = true
+        compose.waitForIdle()
+        val moved = with(compose.density) { (before - button.getBoundsInRoot().top).toPx() }
+        assertTrue(moved > 0f)
+        button.performTouchInput {
+            moveTo(Offset(centerX, moved - 3f))
+            up()
+        }
+        assertEquals(2, opened.size)
     }
 
     @Test
