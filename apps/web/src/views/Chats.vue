@@ -669,8 +669,8 @@ const changesRunningAgent = computed(() => {
 // A turn being stopped or compacting reads no steering: a message waits for the next turn.
 const steerable = computed(() => !detail.value?.run?.cancelRequestedAt && detail.value?.run?.chatExecution?.operation !== 'compact')
 const steers = computed(() => active.value && steerable.value && !detail.value?.paused && !changesRunningAgent.value && !steerBlocked.value)
-// Saving an edit keeps the queued message where it was.
-const editedMode = computed(() => pending.value.find(message => message.id === editing.value)?.mode ?? 'queue')
+// Saving an edit keeps the queued message where it was, unless its new choices must wait for the next turn.
+const editedMode = computed(() => changesRunningAgent.value || steerBlocked.value ? 'queue' : pending.value.find(message => message.id === editing.value)?.mode ?? 'queue')
 // After a Stop or a failed turn, the next message resumes an empty queue, whoever paused it. A
 // queue paused after a successful turn, or holding messages, keeps holding what is added to it.
 const resumesOnSend = computed(() => resumesOnSendFor(detail.value, pending.value.length))

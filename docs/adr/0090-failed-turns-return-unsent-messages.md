@@ -80,4 +80,6 @@ While the agent works, the composer sends into its turn (steer) by default.
 Queueing for the next turn is the secondary action (Alt+Enter on web). A message
 that changes the coding agent, model, reasoning or speed, or requests a plan
 during a turn that can change files, is queued, as the installation requires.
-Saving an edit keeps the queued message's mode.
+Saving an edit keeps the queued message's mode, unless the edit changes the
+agent or requests a plan that the running turn cannot take: it then waits for
+the next turn.
