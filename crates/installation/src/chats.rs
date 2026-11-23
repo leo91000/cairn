@@ -2608,7 +2608,13 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     "nativeProvenanceUnknown": false,
                 }))?;
                 let message = |id: &str, status: &str, created_at: i64| {
-                    json!({ "id": id, "chatId": "chat", "text": id, "status": status, "createdAt": created_at })
+                    json!({
+                        "id": id,
+                        "chatId": "chat",
+                        "text": id,
+                        "status": status,
+                        "createdAt": created_at,
+                    })
                 };
                 db.put_message(&message("delivered", "delivered", 10))?;
                 // The turn's own message, never acknowledged, was written before others.
@@ -2732,15 +2738,31 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     }),
                     None,
                 )?;
-                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
-                db.put_message(&json!({ "id": "person", "chatId": "chat", "text": "Next", "status": "queued", "createdAt": 100 }))?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": "agent",
+                }))?;
+                db.put_message(&json!({
+                    "id": "person",
+                    "chatId": "chat",
+                    "text": "Next",
+                    "status": "queued",
+                    "createdAt": 100,
+                }))?;
                 crate::conversation_writers::record_message(
                     db,
                     "chat",
                     "person",
                     &crate::conversation_writers::EntryWriter::Person("alice".into()),
                 )?;
-                db.put_message(&json!({ "id": "rule", "chatId": "chat", "text": "From a rule", "status": "queued", "createdAt": 200 }))?;
+                db.put_message(&json!({
+                    "id": "rule",
+                    "chatId": "chat",
+                    "text": "From a rule",
+                    "status": "queued",
+                    "createdAt": 200,
+                }))?;
                 // Nothing is returned: a person's message follows the compaction, while a
                 // rule's waits behind a pause for a person, as after any failure.
                 let unsent = unsent(db, "chat", &run)?;
@@ -2777,14 +2799,31 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                         None,
                     )?;
                     db.save_checkpoint_boundary("run", &json!({ "launched": launched }))?;
-                    db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
-                    let mut turn = json!({ "id": "turn", "chatId": "chat", "text": "turn", "status": "sending", "createdAt": 600 });
+                    db.save_conversation_boundary(&json!({
+                        "id": "chat",
+                        "runId": "run",
+                        "agentId": "agent",
+                    }))?;
+                    let mut turn = json!({
+                        "id": "turn",
+                        "chatId": "chat",
+                        "text": "turn",
+                        "status": "sending",
+                        "createdAt": 600,
+                    });
                     if answer {
                         turn["questionId"] = "question".into();
                     }
                     db.put_message(&turn)?;
                     record_message(db, "chat", "turn", &EntryWriter::Person("alice".into()))?;
-                    let steering = json!({ "id": "steering", "chatId": "chat", "text": "steer", "mode": "steer", "status": "sending", "createdAt": 650 });
+                    let steering = json!({
+                        "id": "steering",
+                        "chatId": "chat",
+                        "text": "steer",
+                        "mode": "steer",
+                        "status": "sending",
+                        "createdAt": 650,
+                    });
                     db.put_message(&steering)?;
                     record_message(db, "chat", "steering", &EntryWriter::Person("alice".into()))?;
 
@@ -2800,7 +2839,13 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     assert_eq!(steering.status, expected, "launched {launched}");
                     // A message written since does not skip the replay of the held turn, which
                     // tells the agent to check what it already did.
-                    db.put_message(&json!({ "id": "since", "chatId": "chat", "text": "since", "status": "queued", "createdAt": 1000 }))?;
+                    db.put_message(&json!({
+                        "id": "since",
+                        "chatId": "chat",
+                        "text": "since",
+                        "status": "queued",
+                        "createdAt": 1000,
+                    }))?;
                     assert!(!skips_replay(db, "chat", &run)?);
                     assert!(conversation(db, "chat")?.paused);
                     assert!(!turn_returned(db, "run")?);
@@ -2840,19 +2885,53 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                         }),
                         None,
                     )?;
-                    db.save_checkpoint_boundary("run", &json!({ "launched": true, "launchedTurn": "" }))?;
-                    db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                    db.save_checkpoint_boundary(
+                        "run",
+                        &json!({
+                            "launched": true,
+                            "launchedTurn": "",
+                        }),
+                    )?;
+                    db.save_conversation_boundary(&json!({
+                        "id": "chat",
+                        "runId": "run",
+                        "agentId": "agent",
+                    }))?;
                     if message_id.is_some() {
-                        db.put_message(&json!({ "id": "turn", "chatId": "chat", "text": "turn", "status": "sending", "createdAt": 100 }))?;
+                        db.put_message(&json!({
+                            "id": "turn",
+                            "chatId": "chat",
+                            "text": "turn",
+                            "status": "sending",
+                            "createdAt": 100,
+                        }))?;
                         record_message(db, "chat", "turn", &EntryWriter::Person("alice".into()))?;
                     }
-                    db.put_message(&json!({ "id": "steering", "chatId": "chat", "text": "steer", "mode": "steer", "status": "sending", "createdAt": 200 }))?;
+                    db.put_message(&json!({
+                        "id": "steering",
+                        "chatId": "chat",
+                        "text": "steer",
+                        "mode": "steer",
+                        "status": "sending",
+                        "createdAt": 200,
+                    }))?;
                     record_message(db, "chat", "steering", &EntryWriter::Person("alice".into()))?;
                     settle_turn(db, "chat", &run)?;
-                    let expected = if returned { MessageStatus::Cancelled } else { MessageStatus::Queued };
-                    assert_eq!(find_message(db, "chat", "steering")?.unwrap().status, expected, "{message_id:?}");
+                    let expected = if returned {
+                        MessageStatus::Cancelled
+                    } else {
+                        MessageStatus::Queued
+                    };
+                    assert_eq!(
+                        find_message(db, "chat", "steering")?.unwrap().status,
+                        expected,
+                        "{message_id:?}"
+                    );
                     if returned {
-                        assert_eq!(find_message(db, "chat", "turn")?.unwrap().status, MessageStatus::Cancelled);
+                        assert_eq!(
+                            find_message(db, "chat", "turn")?.unwrap().status,
+                            MessageStatus::Cancelled
+                        );
                         assert!(turn_returned(db, "run")?);
                     }
                     Ok(())
@@ -2882,12 +2961,39 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     }),
                     None,
                 )?;
-                db.save_checkpoint_boundary("run", &json!({ "launched": true, "launchedTurn": "turn" }))?;
-                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
-                db.put_message(&json!({ "id": "turn", "chatId": "chat", "text": "turn", "status": "delivered", "createdAt": 100 }))?;
+                db.save_checkpoint_boundary("run", &json!({
+                    "launched": true,
+                    "launchedTurn": "turn",
+                }))?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": "agent",
+                }))?;
+                db.put_message(&json!({
+                    "id": "turn",
+                    "chatId": "chat",
+                    "text": "turn",
+                    "status": "delivered",
+                    "createdAt": 100,
+                }))?;
                 // Answered while the turn was being stopped: the stopping agent claimed it.
-                db.put_message(&json!({ "id": "answer", "chatId": "chat", "text": "answer", "questionId": "question", "mode": "steer", "status": "sending", "createdAt": 600 }))?;
-                db.put_message(&json!({ "id": "since", "chatId": "chat", "text": "since", "status": "queued", "createdAt": 1000 }))?;
+                db.put_message(&json!({
+                    "id": "answer",
+                    "chatId": "chat",
+                    "text": "answer",
+                    "questionId": "question",
+                    "mode": "steer",
+                    "status": "sending",
+                    "createdAt": 600,
+                }))?;
+                db.put_message(&json!({
+                    "id": "since",
+                    "chatId": "chat",
+                    "text": "since",
+                    "status": "queued",
+                    "createdAt": 1000,
+                }))?;
                 settle_turn(db, "chat", &run)?;
                 // The agent may have read the answer: it is held, and resuming replays the
                 // turn first, as a recovery, before the message written since.
@@ -2925,10 +3031,23 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     }),
                     None,
                 )?;
-                db.save_checkpoint_boundary("run", &json!({ "launched": true, "launchedTurn": "first" }))?;
-                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                db.save_checkpoint_boundary("run", &json!({
+                    "launched": true,
+                    "launchedTurn": "first",
+                }))?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": "agent",
+                }))?;
                 let message = |id: &str, status: &str, created_at: i64| {
-                    json!({ "id": id, "chatId": "chat", "text": id, "status": status, "createdAt": created_at })
+                    json!({
+                        "id": id,
+                        "chatId": "chat",
+                        "text": id,
+                        "status": status,
+                        "createdAt": created_at,
+                    })
                 };
                 db.put_message(&message("first", "delivered", 10))?;
                 db.put_message(&message("second", "sending", 400))?;
@@ -3000,7 +3119,13 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     expires_at: 1,
                 });
                 saved.store_in(db, "run")?;
-                let message = db.put_message(&json!({ "id": "next", "chatId": "chat", "text": "Again", "status": "queued", "createdAt": 1000 }))?;
+                let message = db.put_message(&json!({
+                    "id": "next",
+                    "chatId": "chat",
+                    "text": "Again",
+                    "status": "queued",
+                    "createdAt": 1000,
+                }))?;
                 launch_turn(db, "chat", Some(run.clone()), message, run)?;
                 // Like a manual resume: the expired hold goes, recovery fences it, and the new
                 // turn has a full budget instead of the old deadline.

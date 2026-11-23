@@ -20,8 +20,9 @@ received: the turn's own message when no attempt launched a process for that tur
 such a turn, and queued messages written before the turn ended or before Stop was
 pressed. Steering sent to a turn whose process launched may have been read, so it
 is held; steering or an answer the stopping turn claimed after Stop stays claimed and
-held, so resuming replays the turn and delivers it again. Steering is claimed only once a process runs: a run waiting for
-admission, an account or an automatic retry leaves it queued. Returned messages come back in order; a resent message follows any held
+held, so resuming replays the turn and delivers it again. Steering is claimed only once the run is running: a run waiting for
+admission, an account or an automatic retry leaves it queued, and steering
+claimed before a process launched goes back with the turn. Returned messages come back in order; a resent message follows any held
 message that waited behind it. They become `cancelled` and name the person
 they go back to (`returnedTo`). Everything else is held behind a pause, queued
 again, as every failure did before: messages from rules and agents, which have no

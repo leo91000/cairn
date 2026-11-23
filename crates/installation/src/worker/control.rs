@@ -1060,7 +1060,13 @@ mod tests {
         store
             .transaction(|db| {
                 db.add_run_fixture(
-                    &json!({"id":"run", "taskId":"chat", "status":"running", "trigger":"chat", "createdAt": 0}),
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "status": "running",
+                        "trigger": "chat",
+                        "createdAt": 0,
+                    }),
                     None,
                 )?;
                 db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
@@ -1075,7 +1081,13 @@ mod tests {
         store
             .transaction(|db| {
                 db.add_run_fixture(
-                    &json!({"id":"waiting", "taskId":"waiting-chat", "status":"succeeded", "trigger":"chat", "createdAt": 0}),
+                    &json!({
+                        "id": "waiting",
+                        "taskId": "waiting-chat",
+                        "status": "succeeded",
+                        "trigger": "chat",
+                        "createdAt": 0,
+                    }),
                     None,
                 )?;
                 db.save_conversation_boundary(&json!({

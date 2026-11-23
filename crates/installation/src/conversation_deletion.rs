@@ -628,7 +628,13 @@ mod tests {
                     db.set(key, &json!({ "messageId": "message" }), None)?;
                 }
                 // A message returned to its author keeps its mark until the conversation goes.
-                db.put_message(&json!({ "id": "returned", "chatId": "chat", "text": "Back", "status": "cancelled", "createdAt": 1 }))?;
+                db.put_message(&json!({
+                    "id": "returned",
+                    "chatId": "chat",
+                    "text": "Back",
+                    "status": "cancelled",
+                    "createdAt": 1,
+                }))?;
                 db.set("message-returned:returned", &json!("alice"), None)?;
                 db.set("message-returned:elsewhere", &json!("alice"), None)?;
                 forget(db, "chat", "run")?;
