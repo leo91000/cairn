@@ -48,7 +48,7 @@ pub(crate) const SETTINGS_OPERATIONS: &[SettingsOperation] = &[
     SettingsOperation {
         name: "get_coding_agent_configuration",
         scope: "read",
-        description: "Read effective editable native Codex, Claude Code or OpenCode configuration, installation inheritance, form fields, revision and managed restrictions. Credentials are never included.",
+        description: "Read effective editable native Codex, Claude Code, OpenCode or Antigravity configuration, installation inheritance, form fields, revision and managed restrictions. Credentials are never included.",
     },
     SettingsOperation {
         name: "preview_coding_agent_configuration",

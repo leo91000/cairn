@@ -90,7 +90,7 @@ Builds and tests that write files fail. Claude Code runs in its plan permission 
 `plan` collaboration preset it lists. Subagents of either engine stay inside the
 same boundary, including Codex subagents an earlier turn started: the resident Codex
 process is replaced for a plan turn and the turn after it. Claude Code's auto-mode
-classifier never decides in place of Cairn. Antigravity has no read-only sandbox: its plan turns have no shell, Cairn's hook allows only reading and searching, and they run in a fresh private home holding only the conversation, copied back afterwards. They are refused in a repository whose working directory or a parent defines `.agents/hooks.json` or `.agents/mcp_config.json`, because Antigravity runs those commands even when Cairn refuses the tool. OpenCode cannot run plan turns. A plan request cannot steer a running turn
+classifier never decides in place of Cairn. Antigravity has no read-only sandbox: its plan turns have no shell, Cairn's hook allows only reading and searching, and they run in a fresh private home that shares only the conversation with the agent's usual state. They are refused in a repository whose working directory or a parent defines `.agents/hooks.json` or `.agents/mcp_config.json`, because Antigravity runs those commands even when Cairn refuses the tool. OpenCode cannot run plan turns. A plan request cannot steer a running turn
 that may change files: queue it. One sent to steer while no turn runs waits for its
 own plan turn rather than joining a later turn. See
 [the plan-turn decision](adr/0080-plan-turns.md), which also records the native

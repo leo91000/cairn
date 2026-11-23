@@ -133,6 +133,12 @@ watch([() => flow.value?.code, () => flow.value?.state], () => {
   submitted.value = false
 })
 
+// Each retry consumes its confirmation, even if it fails before any pending state.
+function retry(accountId: string) {
+  acceptedTerms.value = false
+  void props.accounts.reconnect(accountId)
+}
+
 async function readCredentials(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
   if (!file)
@@ -407,7 +413,7 @@ async function close() {
           </label>
         </div>
         <div class="flex flex-wrap gap-2">
-          <UiButton variant="primary" :disabled="busy || (flow.provider === 'antigravity' && !acceptedTerms)" @click="accounts.reconnect(flow.accountId)">
+          <UiButton variant="primary" :disabled="busy || (flow.provider === 'antigravity' && !acceptedTerms)" @click="retry(flow.accountId)">
             Try again
           </UiButton>
           <UiButton :disabled="busy" @click="close">

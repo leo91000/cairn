@@ -202,18 +202,19 @@ impl Task {
             return Err(super::repository_commands_refusal(&path));
         }
         let home = side_home(&self.home, &self.id);
-        // A side question never starts on what an earlier one left behind.
-        if let Err(error) = tokio::fs::remove_dir_all(&home).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(Error::unavailable(
-                "Cairn could not reset Antigravity's private side-question state.",
-            ));
-        }
-        private_dir(&home).await?;
-        // Only the conversation: nothing an earlier turn left in the native state
-        // (plugins, configuration) applies while every tool is refused.
-        super::turn::bounded_home(&self.home, &home, &self.conversation).await?;
+        // Only a copy of the conversation: nothing an earlier turn left in the native
+        // state (plugins, configuration) applies, and the side question never writes
+        // the conversation itself.
+        super::turn::fresh_home(&home).await?;
+        let database = format!(
+            ".gemini/antigravity-cli/conversations/{}.db",
+            self.conversation
+        );
+        private_dir(home.join(&database).parent().unwrap()).await?;
+        let (from, to) = (self.home.join(&database), home.join(&database));
+        tokio::task::spawn_blocking(move || copy_conversation(&from, &to))
+            .await
+            .map_err(Error::internal)??;
         super::prepare_native_home(&self.config, &home, Some(&self.credentials)).await?;
         configure(&home, &self.plan, &policy(&self.plan, Mode::Side)).await?;
         let mut launch = args(&self.plan, &self.credentials, Mode::Side)?;

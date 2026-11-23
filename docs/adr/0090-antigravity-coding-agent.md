@@ -25,7 +25,8 @@ Les mesures suivantes ont été faites sur 1.5.14 avec un faux serveur Gemini lo
 - Les commandes passent par bash, chacune dans sa propre session. Interrompu (y
   compris par SIGTERM), `agy` les laisse tourner.
 - `agy` reprend une conversation à partir de sa seule base
-  (`conversations/<id>.db`) dans un HOME neuf, et ne charge pas `~/.agents`. Il
+  (`conversations/<id>.db`) dans un HOME neuf, y compris quand ce dossier est un lien
+  symbolique, et ne charge pas `~/.agents`. Il
   charge en revanche des plugins et réglages de son état, qu'un tour précédent peut
   modifier.
 - `agy` charge `.agents/hooks.json` et `.agents/mcp_config.json` du répertoire de
@@ -75,11 +76,12 @@ dépôt, comme pour les autres moteurs.
 - question à côté : tout outil est refusé.
 
 Un tour de plan reçoit aussi `--mode plan` pour guider le modèle ; ce mode n'est
-pas une frontière. Un tour de plan tourne dans un HOME neuf qui ne contient que sa conversation :
-rien de ce qu'un tour YOLO a écrit dans l'état natif ne s'y applique. La
-conversation est recopiée dans l'état natif à la fin du tour, quand un tour arrêté
-est abandonné, avant le tour de plan suivant et au nettoyage du bail ; un HOME de
-tour de plan qui ne peut pas être effacé fait échouer le tour suivant. Un tour de plan ou une question à côté est refusé, avec le chemin en cause, quand
+pas une frontière. Un tour de plan tourne dans un HOME neuf : rien de ce qu'un tour YOLO a écrit dans
+l'état natif (plugins, réglages) ne s'y applique. Seul son dossier
+`conversations` est un lien vers celui de l'état natif, où `agy` reprend et
+enregistre directement la conversation : rien n'est recopié, et un tour de plan
+arrêté ne perd rien. Un HOME de tour de plan qui ne peut pas être effacé fait
+échouer le tour. Un tour de plan ou une question à côté est refusé, avec le chemin en cause, quand
 le répertoire de travail ou l'un de ses parents contient `.agents/hooks.json` ou
 `.agents/mcp_config.json` : ces commandes du dépôt ne peuvent pas être bornées.
 
