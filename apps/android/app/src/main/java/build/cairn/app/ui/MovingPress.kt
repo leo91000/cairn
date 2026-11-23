@@ -70,14 +70,14 @@ internal fun Modifier.pressSurvivingMoves(
                     shown = true
                 }
 
-                // Like Compose's clickable, leaving the control cancels the press; here only once
-                // the finger is beyond touch slop of both where it was pressed and where it is now.
+                // Like Compose's clickable, leaving the control cancels the press. Once the control
+                // moved, the finger may also stay within touch slop of where it was pressed.
                 val slop = viewConfiguration.touchSlop
                 fun overControl(change: PointerInputChange): Boolean {
                     val current = layout[0]?.takeIf { it.isAttached } ?: return false
+                    val now = current.touchBounds(padding.width, padding.height)
                     val point = current.localToRoot(change.position)
-                    return point in pressed.inflate(slop) ||
-                        point in current.touchBounds(padding.width, padding.height).inflate(slop)
+                    return point in now || (now != pressed && point in pressed.inflate(slop))
                 }
 
                 var up: PointerInputChange? = null

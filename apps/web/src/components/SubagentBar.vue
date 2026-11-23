@@ -45,7 +45,7 @@ let press: {
   box: Box
 } | undefined
 // Not cleared on unmount: opening can navigate away before the browser's click arrives.
-let stopIgnoringClick: (() => void) | undefined
+let stopWatching: (() => void) | undefined
 onBeforeUnmount(() => cancelPress())
 
 function shownBox(button: HTMLButtonElement) {
@@ -72,8 +72,11 @@ function holdPress(id: string, event: PointerEvent, inScrollingRow = false) {
     pointerId: event.pointerId,
     box: shownBox(button),
   }
-  button.setPointerCapture(event.pointerId)
-  // WebKit can send a touch release to what moved under the finger despite the capture.
+  // A mouse has no implicit capture: without it, the release and click of a moved button go
+  // to whatever moved under the pointer. Touch and pen keep the browser's own targeting.
+  if (event.pointerType === 'mouse')
+    button.setPointerCapture(event.pointerId)
+  // The release may reach what moved under the pointer, as WebKit does even for touch.
   window.addEventListener('pointerup', releasePress, true)
   // A later press means this one ended without a release this bar saw.
   window.addEventListener('pointerdown', cancelPress, true)
@@ -88,12 +91,13 @@ function releasePress(event: PointerEvent) {
   const { id, button } = held
   const current = shownBox(button)
   // An unmoved touch or pen press stays the browser's own tap, as before: its click opens the
-  // activity, and the activity's focus then follows the pointer. A mouse press is captured,
-  // so its click would reach the button even when dragged away; the release decides instead.
-  if (event.pointerType !== 'mouse' && sameBox(held.box, current))
+  // activity, and the activity's focus then follows the pointer.
+  if (event.pointerType !== 'mouse' && sameBox(held.box, current)) {
+    guardNativeTap(id, button, current)
     return
+  }
 
-  ignoreNextClick(button)
+  ignoreFollowingClick(button)
   const slop = event.pointerType === 'mouse' ? 0 : touchSlop
   if (!releasedOnControl(held.box, current, event.clientX, event.clientY, slop))
     return
@@ -110,23 +114,47 @@ function cancelPress() {
   window.removeEventListener('pointerdown', cancelPress, true)
 }
 
-const ignoredEvents = ['mousedown', 'mouseup', 'click'] as const
-
 // The release decided; the compatibility mouse events and click that follow may target
 // another control, or move focus inside the activity that just opened.
-function ignoreNextClick(button: HTMLButtonElement) {
-  stopIgnoringClick?.()
-  const ignore = (event: MouseEvent) => {
+function ignoreFollowingClick(button: HTMLButtonElement) {
+  // A touch's mouse-down on the unmoved button still focuses it, as before.
+  watchFollowingClick(event => !(event.type === 'mousedown' && button.contains(event.target as Node)))
+}
+
+// The browser taps an unmoved button after the release. If a queued message moves the button
+// first, that tap would land on the row instead: open the activity and ignore it.
+function guardNativeTap(id: string, button: HTMLButtonElement, released: Box) {
+  let opened = false
+  watchFollowingClick(() => {
+    if (sameBox(released, shownBox(button)))
+      return false
+
+    if (!opened) {
+      opened = true
+      button.focus({ preventScroll: true, focusVisible: false })
+      emit('open', id, button)
+    }
+
+    return true
+  })
+}
+
+const followingEvents = ['mousedown', 'mouseup', 'click'] as const
+
+// Watches the compatibility mouse events and click the browser sends after a release, ignoring
+// those [ignore] picks, until that click, the next press or a second has passed.
+function watchFollowingClick(ignore: (event: MouseEvent) => boolean) {
+  stopWatching?.()
+  const watch = (event: MouseEvent) => {
     // Keyboard and assistive activation report no click count.
     if (event.detail === 0)
       return
 
-    // A touch's mouse-down on the unmoved button still focuses it, as before.
-    if (event.type === 'mousedown' && button.contains(event.target as Node))
-      return
+    if (ignore(event)) {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+    }
 
-    event.preventDefault()
-    event.stopImmediatePropagation()
     if (event.type === 'click')
       stop()
   }
@@ -138,16 +166,16 @@ function ignoreNextClick(button: HTMLButtonElement) {
 
   function stop() {
     clearTimeout(timer)
-    for (const type of ignoredEvents)
-      window.removeEventListener(type, ignore, true)
+    for (const type of followingEvents)
+      window.removeEventListener(type, watch, true)
     window.removeEventListener('pointerdown', next, true)
-    stopIgnoringClick = undefined
+    stopWatching = undefined
   }
 
-  for (const type of ignoredEvents)
-    window.addEventListener(type, ignore, true)
+  for (const type of followingEvents)
+    window.addEventListener(type, watch, true)
   window.addEventListener('pointerdown', next, true)
-  stopIgnoringClick = stop
+  stopWatching = stop
 }
 
 // Keyboard, assistive and other non-primary activation; primary presses open on release.

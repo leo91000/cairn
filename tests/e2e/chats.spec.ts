@@ -1020,6 +1020,23 @@ test('a touch on working subagents opens them even when the queue moves the butt
     await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
     await expect(drawer).toHaveCount(0)
 
+    // Content that moves the button after the release, before the browser's tap, takes no tap.
+    await page.evaluate(() => window.addEventListener('pointerup', () => {
+      const shift = document.createElement('div')
+      shift.dataset.testid = 'late-shift'
+      shift.style.height = '80px'
+      document.querySelector('[data-testid="subagent-bar"]')!.after(shift)
+    }, { once: true }))
+    const center = { x: edge.x + edge.width / 2, y: edge.y + edge.height / 2 }
+    await input.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [center] })
+    await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await expect(page.getByTestId('late-shift')).toHaveCount(1)
+    await expect.poll(async () => Math.abs((await phoneButton.boundingBox())!.y - edge.y)).toBeGreaterThan(10)
+    await expect(drawer).toBeVisible()
+    await page.evaluate(() => document.querySelector('[data-testid="late-shift"]')?.remove())
+    await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
+    await expect(drawer).toHaveCount(0)
+
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep going while I check the panel.')
     await holdNextSubmission(page, chat.id, submission)
     await page.getByRole('button', { name: 'Queue', exact: true }).click()

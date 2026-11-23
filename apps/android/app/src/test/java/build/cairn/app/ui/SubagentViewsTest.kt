@@ -198,6 +198,17 @@ class SubagentViewsTest {
         }
         assertEquals(3, opened.size)
 
+        // As with Compose's tap, a press that leaves the unmoved button and comes back opens
+        // nothing, however short the excursion.
+        val slop = compose.onRoot().fetchSemanticsNode().layoutInfo.viewConfiguration.touchSlop
+        button.performTouchInput {
+            down(center)
+            moveTo(Offset(centerX, -slop / 2f))
+            moveTo(center)
+            up()
+        }
+        assertEquals(3, opened.size)
+
         // A press dragged away from both positions opens nothing, even when it comes back.
         button.performTouchInput {
             down(center)
