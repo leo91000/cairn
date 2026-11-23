@@ -103,7 +103,7 @@ export function resumesOnSend(chat: ChatDetail | null | undefined, queued: numbe
 
 /**
  * A failed conversation's reason, worded for what continues it: a held queue is resumed, as a
- * message written now would wait behind it (ADR-0090).
+ * message written now would wait behind it (ADR-0091).
  */
 export function failureReason(chat: ChatDetail | null | undefined, reason: string, readOnly = false) {
   // Someone without access to the agent cannot resume: they are told nothing to do.

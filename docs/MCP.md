@@ -217,7 +217,7 @@ while that turn still holds a message: one from before it ended, or steering or 
 answer it claimed after Stop. `resume_chat` resumes a
 stopped/failed execution under the existing recovery rules, and is refused once the
 turn's message was returned (`turnReturned`)
-([ADR-0090](adr/0090-failed-turns-return-unsent-messages.md)). A failed
+([ADR-0091](adr/0091-failed-turns-return-unsent-messages.md)). A failed
 restored session can use `restart_chat_session` with `confirm: true` to keep its
 history and files but start a fresh native session. Chat summaries report
 `contextUsage` (latest request tokens, window, cache share, estimate flag; `null` when

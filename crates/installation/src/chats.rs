@@ -877,7 +877,7 @@ pub(crate) fn send(
             ));
         }
         // A retry must not report a message that went back to its author, or was withdrawn,
-        // as accepted (ADR-0090).
+        // as accepted (ADR-0091).
         if existing.status == MessageStatus::Cancelled {
             return Err(Error::conflict(
                 "This message was cancelled. Send it again as a new message.",

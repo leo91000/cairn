@@ -691,7 +691,7 @@ fn native_result(
             let status = RunStatus::of(&target)
                 .ok_or_else(|| Error::bad_gateway("Unknown target run state."))?;
             // A conversation continues while input waits: after a success, or after a
-            // failure that no longer pauses it (ADR-0090).
+            // failure that no longer pauses it (ADR-0091).
             if !status.is_active()
                 && target["trigger"] == "chat"
                 && let Some(chat) = db.conversation_for_run(run_id)?

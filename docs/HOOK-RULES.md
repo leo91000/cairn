@@ -227,7 +227,7 @@ Every action on the conversation of a key needs its creator's current access to 
 conversation's agent. Steering queues a message that Cairn delivers after the current
 turn, as for a person who writes again. A paused conversation cannot be steered or
 answered until a person resumes it, nor can a conversation whose last turn failed until
-its next turn starts ([ADR-0090](adr/0090-failed-turns-return-unsent-messages.md)).
+its next turn starts ([ADR-0091](adr/0091-failed-turns-return-unsent-messages.md)).
 `cancelConversation` stops the current turn like Stop in Cairn, which pauses the
 conversation. Only a person can resume it, including after a rule's cancellation.
 With nothing working, `cancelConversation` cancels scheduled wakeups and pending

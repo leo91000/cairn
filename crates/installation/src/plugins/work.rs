@@ -467,7 +467,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     };
     // A stopped turn whose own message is still held is recovered by Cairn's resume path,
     // which also restores the checkpoint budget. Otherwise the plugin's message starts the
-    // next turn, as a person's does (ADR-0090).
+    // next turn, as a person's does (ADR-0091).
     let chat = s.conversation_boundary(&chat_id).await?;
     if let Some(run_id) = chat["runId"].as_str() {
         let run = s.store.run(run_id).await?;

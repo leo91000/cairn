@@ -1015,7 +1015,7 @@ impl Execution<'_> {
             if has_live_environment(&saved, self.retained, &workspace.env) {
                 // A failed provider turn must not implicitly replay jobs or
                 // resume a controller that account rotation would fence.
-                // A conversation continues with its next message (ADR-0090); a mission is resumed.
+                // A conversation continues with its next message (ADR-0091); a mission is resumed.
                 return Err(Error::conflict(if self.run["trigger"] == "chat" {
                     "Provider account exhausted in a live environment. Background work will stop."
                 } else {
@@ -1280,7 +1280,7 @@ impl Execution<'_> {
         atomic_write(&plan_path, &serde_json::to_vec(&plan)?).await?;
         // The environment starts the turn as soon as it accepts it: unless it refuses, its
         // message may be read even if this launch fails before the runner client is recorded
-        // (ADR-0090).
+        // (ADR-0091).
         let turn = launched_turn(self.run);
         self.checkpoint
             .update(|c| {
@@ -2154,7 +2154,7 @@ impl Execution<'_> {
             return saved.last_error().to_owned();
         }
         // A conversation shows what continues it: its returned message or its held queue
-        // (ADR-0090). A mission is resumed.
+        // (ADR-0091). A mission is resumed.
         let next = if self.run["trigger"] == "chat" {
             ""
         } else {
@@ -2185,7 +2185,7 @@ async fn close_output_readers(out: AbortOnDropHandle<()>, err: AbortOnDropHandle
 }
 
 /// The turn a launch serves, recorded so a failure can tell whether the agent may have its
-/// message (ADR-0090). A launch without a chat message, such as a mission's, records an
+/// message (ADR-0091). A launch without a chat message, such as a mission's, records an
 /// empty turn: a later chat message was not delivered by it.
 fn launched_turn(run: &Value) -> Option<String> {
     Some(

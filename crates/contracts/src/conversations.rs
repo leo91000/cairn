@@ -411,7 +411,7 @@ pub struct Chat {
     #[serde(default)]
     pub can_request_new_session: bool,
     /// The last turn's own message went back to its author: that turn cannot be resumed,
-    /// and sending the message again continues the conversation (ADR-0090).
+    /// and sending the message again continues the conversation (ADR-0091).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[ts(as = "Option<bool>", optional)]
     pub turn_returned: bool,

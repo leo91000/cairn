@@ -33,7 +33,7 @@ pub struct RunCheckpoint {
     pub launched: Option<bool>,
     /// The chat message (or wakeup) whose turn last launched a process, empty for a launch
     /// without one, such as a mission's. A turn's own message the agent never received goes
-    /// back to its author (ADR-0090).
+    /// back to its author (ADR-0091).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launched_turn: Option<String>,
     /// `launched_turn` before the current attempt's launch, put back if the controller

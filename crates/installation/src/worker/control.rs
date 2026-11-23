@@ -299,7 +299,7 @@ pub(crate) fn stop_chat_in(
 }
 
 /// Cancelling a conversation's run or its wakeup pauses it as Stop does, in the same
-/// transaction: no rule or later writer slips in before a person continues it (ADR-0090).
+/// transaction: no rule or later writer slips in before a person continues it (ADR-0091).
 fn pause_conversation(db: &Db<'_>, run: &str) -> Result<()> {
     if let Some(chat) = db.conversation_for_run(run)?
         && !chat.paused
