@@ -543,13 +543,24 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
     }
     let after = cursor(&input)?;
     let account = crate::reads::account(&input)?;
-    if kind == "chats" {
-        crate::reads::begin(&s, account).await?;
-    }
     let scope = Scope {
         with_list: input.query.get("list").is_some_and(|v| v == "1"),
         ..Scope::new(kind, id, account)
     };
+    // Only these streams carry conversation cards. Transport compatibility alone
+    // does not establish that a reader can present their timeline semantics.
+    // Refuse before starting account read state or subscribing; JSON history and
+    // agent tools retain their own, unchanged contracts.
+    if !scope.list() && input.query.get("timeline").is_none_or(|v| v != "1") {
+        return Err(Error::coded(
+            426,
+            "update_required",
+            "Update required: update the app to read timeline cards.",
+        ));
+    }
+    if kind == "chats" {
+        crate::reads::begin(&s, account).await?;
+    }
     // Subscribe before reading: commits during replay remain observable.
     let changes = s.store.subscribe();
     let expected = input.query.get("history").cloned();

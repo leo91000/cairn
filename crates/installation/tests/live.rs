@@ -72,6 +72,13 @@ impl Fixture {
     }
 
     async fn open_path(&self, path: &str, last: Option<i64>) -> Stream {
+        let list = path.split('?').next() == Some("/api/chats/stream");
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let path = if list {
+            path.to_owned()
+        } else {
+            format!("{path}{separator}timeline=1")
+        };
         let mut request = reqwest::Client::new()
             .get(format!("{}{path}", self.url))
             .header("x-test-relay-token", &self.token)
@@ -1013,7 +1020,10 @@ async fn metadata_shutdown_and_invalid_requests() {
             StatusCode::BAD_REQUEST,
         ),
         ("/api/runs/not-an-id/stream".into(), StatusCode::BAD_REQUEST),
-        (format!("/api/runs/{}/stream", id()), StatusCode::NOT_FOUND),
+        (
+            format!("/api/runs/{}/stream?timeline=1", id()),
+            StatusCode::NOT_FOUND,
+        ),
     ] {
         assert_eq!(
             client
@@ -1513,8 +1523,8 @@ async fn paginated_chat_metadata_keeps_pending_messages_without_replaying_delive
         1
     );
     assert_eq!(batch["state"]["chat"]["messages"][0]["status"], "queued");
-    let mut legacy = f.open_path(&format!("/api/chats/{id}/stream"), None).await;
-    let (_, batch) = legacy.batch().await;
+    let mut unwindowed = f.open_path(&format!("/api/chats/{id}/stream"), None).await;
+    let (_, batch) = unwindowed.batch().await;
     assert_eq!(
         batch["state"]["chat"]["messages"].as_array().unwrap().len(),
         2
@@ -2290,4 +2300,57 @@ async fn installation_plan_policy_reaches_open_chat_streams_without_text_events(
         assert_eq!(batch["state"]["planTurnsEnabled"], enabled);
         assert!(batch["events"].as_array().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn conversation_stream_refuses_missing_card_capability_after_authentication() {
+    let f = Fixture::new().await;
+    let chat = f.service.chat_create(json!({})).await.unwrap();
+    let client = reqwest::Client::new();
+    for path in [
+        format!("/api/runs/{}/stream", f.run),
+        format!("/api/chats/{}/stream", text(&chat, "id")),
+    ] {
+        for query in ["", "?timeline=0", "?timeline=2"] {
+            let url = format!("{}{path}{query}", f.url);
+            let anonymous = client.get(&url).send().await.unwrap();
+            assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+            let response = client
+                .get(url)
+                .header("x-test-relay-token", &f.token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+            let error: Value = response.json().await.unwrap();
+            assert_eq!(error["code"], "update_required");
+            assert!(text(&error, "error").contains("Update required"));
+        }
+    }
+    for path in [
+        format!("/api/runs/{}/stream", f.run),
+        format!("/api/chats/{}/stream", text(&chat, "id")),
+    ] {
+        let mut current = f.open_path(&path, None).await;
+        let (_, batch) = current.batch().await;
+        assert!(text(&batch, "history").starts_with("v2:"));
+        assert!(batch["entries"].is_array());
+
+        // JSON history keeps its existing revision requirement, without a UI capability.
+        let history_path = path.strip_suffix("/stream").unwrap();
+        let response = client
+            .get(format!("{}{history_path}/history", f.url))
+            .query(&[("history", text(&batch, "history"))])
+            .header("x-test-relay-token", &f.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let history: Value = response.json().await.unwrap();
+        assert!(history["entries"].is_array());
+    }
+    // The metadata-only Fil remains usable without a UI capability.
+    let mut list = f.open_path("/api/chats/stream", None).await;
+    let (_, batch) = list.batch().await;
+    assert!(batch["state"]["chats"].is_array());
 }

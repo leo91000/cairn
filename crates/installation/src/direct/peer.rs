@@ -455,10 +455,26 @@ async fn serve_peer(
         let rejected = output.clone();
         let dispatcher = traffic.serve(router, lease.clone(), input, output);
 
+        let protocol_refused = CancellationToken::new();
         let writer = async {
             let mut transfer = 1_u32;
             while let Some(frame) = frames.recv().await {
+                // A distributed UI understands this existing terminal control, but
+                // its old SSE reader may treat a StreamStart 426 as a network error.
+                // Translate only the actual authenticated handler's upgrade refusal;
+                // the HTTP relay keeps its ordinary status and body.
+                let frame = match frame {
+                    cairn_protocol::Frame::StreamStart(response) if response.status == 426 => {
+                        cairn_protocol::Frame::UpdateRequired {
+                            message: "Protocol mismatch. Update required: update the app and installation.".into(),
+                        }
+                    }
+                    frame => frame,
+                };
                 let refusal = matches!(&frame, cairn_protocol::Frame::UpdateRequired { .. });
+                if refusal {
+                    protocol_refused.cancel();
+                }
                 let encoded = cairn_protocol::data_channel::EncodedFrame::new(transfer, &frame)
                     .map_err(Error::bad)?;
                 transfer = transfer.wrapping_add(1).max(1);
@@ -511,6 +527,7 @@ async fn serve_peer(
                 tokio::select! {
                     biased;
                     () = lease.closed.cancelled() => return Ok(()),
+                    () = protocol_refused.cancelled() => return std::future::pending().await,
                     Some(_) = incoming.recv() => return Err(Error::bad("Only one DataChannel is allowed.")),
                     signal = signals.recv() => apply_signal(peer.as_ref(), &aliases, signal).await?,
                     _ = timeout.tick() => {

@@ -237,7 +237,10 @@ async fn member_identity_can_create_and_stream_conversations_without_a_local_ses
 
     for path in [
         "/api/chats/stream".to_owned(),
-        format!("/api/chats/{}/stream", chat["id"].as_str().unwrap()),
+        format!(
+            "/api/chats/{}/stream?timeline=1",
+            chat["id"].as_str().unwrap()
+        ),
     ] {
         let mut request = json_request("GET", &path).body(Body::empty()).unwrap();
         request
@@ -860,7 +863,10 @@ async fn exhausting_writes_does_not_block_reading_the_conversation() {
         &app,
         json_request(
             "GET",
-            &format!("/api/chats/{}/stream", chat["id"].as_str().unwrap()),
+            &format!(
+                "/api/chats/{}/stream?timeline=1",
+                chat["id"].as_str().unwrap()
+            ),
         )
         .extension(identity)
         .body(Body::empty())

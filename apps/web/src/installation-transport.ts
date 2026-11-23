@@ -216,6 +216,10 @@ export class InstallationTransport {
     this.grant = undefined
   }
 
+  rejectProtocol(error = new ProtocolMismatch()) {
+    this.failed(error)
+  }
+
   private failed(error?: unknown) {
     if (error instanceof ProtocolMismatch) {
       this.context.protocolError = error.message
@@ -304,7 +308,7 @@ export class InstallationTransport {
       const fingerprint = /^a=fingerprint:(sha-256 [A-Fa-f0-9:]+)\r?$/m.exec(offer.sdp || '')?.[1]?.toUpperCase().replace('SHA-256', 'sha-256')
       if (!fingerprint)
         throw new Error('Missing DTLS fingerprint')
-      const authorization = { fingerprint, version: 4 }
+      const authorization = { fingerprint, version: 4, timeline: 1 }
       const grant = await this.control('/authorize', authorization) as GrantResponse
       if (!current())
         return
@@ -471,13 +475,20 @@ export class InstallationTransport {
     if (this.context.protocolError)
       throw new ProtocolMismatch(this.context.protocolError)
     const traffic = this.context.transportRoute === 'direct' ? this.traffic : undefined
-    const source = !traffic
+    const relay = () => path.split('?')[0] === '/chats/stream'
       ? Object.assign(new EventSource(url), { transportRoute: 'relay' as const })
+      : Object.assign(new DirectSource(signal => fetch(url, {
+        signal,
+        headers: { accept: 'text/event-stream' },
+        cache: 'no-store',
+      })), { transportRoute: 'relay' as const }) as unknown as EventSource
+    const source = !traffic
+      ? relay()
       : new DirectSource(
         signal => traffic.request(`/api${path}`, { signal, headers: { accept: 'text/event-stream' } }),
         () => {
           signal.throwIfAborted()
-          return new EventSource(url)
+          return relay()
         },
       ) as unknown as EventSource
     const close = source.close.bind(source)

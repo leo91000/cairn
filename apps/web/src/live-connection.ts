@@ -5,7 +5,7 @@ import { ProtocolMismatch } from './direct-channel'
 import { documentLifetime } from './document-lifetime'
 import { observeTransport } from './transport-observation'
 
-export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
+export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline' | 'update-required'
 
 // The cursor advances only after the consumer accepts a complete batch. Every
 // connection owns its cursor, optionally restored with a matching cached snapshot.
@@ -59,7 +59,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     status(failures ? 'reconnecting' : 'connecting', true)
     const windowed = path !== '/chats/stream'
     const recent = windowed && cursor !== '0' && followsLatest?.()
-    const route = `${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${windowed ? '&window=1' : ''}${recent ? '&recent=1' : ''}${query}`
+    const route = `${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${windowed ? '&window=1&timeline=1' : ''}${recent ? '&recent=1' : ''}${query}`
     let current: EventSource
     try {
       current = installationTransport.source(route, apiUrl(route))
@@ -67,7 +67,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     catch (error) {
       if (error instanceof ProtocolMismatch) {
         stopped = true
-        status('offline')
+        status('update-required')
         return
       }
 
@@ -80,6 +80,17 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     abort = controller
     let pending: Promise<void> | undefined
     alive()
+    current.addEventListener('update_required', requireUpdate)
+
+    function requireUpdate() {
+      if (source !== current || stopped)
+        return
+      stopped = true
+      disconnect()
+      status('update-required')
+      installationTransport.rejectProtocol(new ProtocolMismatch('Timeline protocol mismatch. Update required: update the app and installation.'))
+    }
+
     current.addEventListener('ping', () => {
       if (source === current && !stopped)
         alive()
@@ -93,6 +104,11 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
         const batch = JSON.parse(event.data) as LiveBatch
         if (!Array.isArray(batch.events) || typeof batch.reset !== 'boolean' || typeof batch.more !== 'boolean')
           throw new Error('Invalid stream batch')
+        if (windowed && (typeof batch.history !== 'string' || !/^v2:[^:]*:\d+$/.test(batch.history) || !Array.isArray(batch.entries))) {
+          requireUpdate()
+          return
+        }
+
         if (history && !batch.history) {
           cursor = '0'
           history = undefined
@@ -163,6 +179,8 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
   }
 
   function offline() {
+    if (stopped)
+      return
     disconnect()
     status('offline')
   }

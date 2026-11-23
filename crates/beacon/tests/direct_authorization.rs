@@ -275,7 +275,7 @@ async fn owner_receives_a_session_bound_grant_verified_by_the_real_installation(
             Method::POST,
             &format!("/api/installations/{id}/direct/authorize"),
         )
-        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
         .send()
         .await
         .unwrap();
@@ -321,7 +321,7 @@ async fn authorization(
             Method::POST,
             &format!("/api/installations/{id}/direct/authorize"),
         )
-        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
         .send()
         .await
         .unwrap();
@@ -366,7 +366,7 @@ async fn a_refused_renewal_preserves_the_peer_and_allows_a_verified_retry() {
         relay
             .app
             .authenticated(&relay.cookie, &relay.session, Method::POST, &route)
-            .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+            .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
     };
     assert_eq!(
         request().send().await.unwrap().status(),
@@ -535,7 +535,7 @@ async fn only_current_owner_or_member_sessions_can_obtain_a_grant() {
     let response = relay
         .app
         .authenticated(&foreign_cookie, &foreign_session, Method::POST, &route)
-        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
         .send()
         .await
         .unwrap();
@@ -545,7 +545,7 @@ async fn only_current_owner_or_member_sessions_can_obtain_a_grant() {
         .client
         .post(format!("{}{route}", relay.app.url))
         .header("origin", &relay.app.url)
-        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
         .send()
         .await
         .unwrap();
@@ -564,7 +564,7 @@ async fn only_current_owner_or_member_sessions_can_obtain_a_grant() {
             .header("cookie", &relay.cookie)
             .header("origin", origin)
             .header("x-csrf-token", csrf)
-            .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+            .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
             .send()
             .await
             .unwrap();
@@ -615,7 +615,7 @@ async fn only_current_owner_or_member_sessions_can_obtain_a_grant() {
     let response = relay
         .app
         .authenticated(member_cookie, &member_session, Method::POST, &route)
-        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
         .send()
         .await
         .unwrap();
@@ -691,7 +691,7 @@ async fn session_revocation_preserves_other_devices_and_denies_further_grants_or
         let foreign_renewal = relay
             .app
             .authenticated(&relay.cookie, &relay.session, Method::POST, &renew_route)
-            .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+            .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
             .send()
             .await
             .unwrap();
@@ -744,7 +744,7 @@ async fn session_revocation_preserves_other_devices_and_denies_further_grants_or
             let response = relay
                 .app
                 .authenticated(&other_cookie, &other_session, Method::POST, &route)
-                .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+                .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
                 .send()
                 .await
                 .unwrap();
@@ -856,7 +856,7 @@ async fn installation_removal_rotation_and_owner_deletion_send_only_installation
                     Method::POST,
                     &format!("/api/installations/{id}/direct/authorize"),
                 )
-                .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+                .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
                 .send()
                 .await
                 .unwrap();
@@ -922,7 +922,7 @@ async fn authorization_and_signaling_limits_preserve_the_fallback_relay() {
     let response = relay
         .app
         .authenticated(&relay.cookie, &relay.session, Method::POST, &route)
-        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
         .send()
         .await
         .unwrap();
@@ -981,7 +981,7 @@ async fn installation_verification_rejects_wire_tampering_and_replayed_nonces() 
         let response = relay
             .app
             .authenticated(&relay.cookie, &relay.session, Method::POST, &route)
-            .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+            .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
             .send()
             .await
             .unwrap();
@@ -1068,7 +1068,7 @@ async fn tunnel_loss_denies_new_peers_and_existing_leases_expire_without_renewal
                 grant.claims.installation_id
             ),
         )
-        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
         .send()
         .await
         .unwrap();
@@ -1138,7 +1138,7 @@ async fn direct_capacity_is_bounded_without_using_fallback_request_or_stream_slo
                 Method::POST,
                 &format!("/api/installations/{id}/direct/authorize"),
             )
-            .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+            .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
             .send()
             .await
             .unwrap();
@@ -1184,7 +1184,7 @@ async fn direct_capacity_is_bounded_without_using_fallback_request_or_stream_slo
             Method::POST,
             &format!("/api/installations/{id}/direct/authorize"),
         )
-        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
         .send()
         .await
         .unwrap();
@@ -1408,7 +1408,7 @@ async fn a_lost_renewal_acknowledgement_does_not_hide_the_peer_from_logout() {
                 grant.claims.installation_id, grant.claims.connection_id
             ),
         )
-        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
         .send()
         .await
         .unwrap();
@@ -1624,7 +1624,7 @@ async fn beacon_restart_closes_old_leases_and_new_grants_remain_revocable() {
                 grant.claims.installation_id, grant.claims.connection_id
             ),
         )
-        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
         .send()
         .await
         .unwrap();
@@ -1718,7 +1718,7 @@ async fn installation_accepts_bounded_signing_clock_skew_but_rejects_long_lived_
         let response = relay
             .app
             .authenticated(&relay.cookie, &relay.session, Method::POST, &route)
-            .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+            .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }))
             .send()
             .await
             .unwrap();
@@ -1917,7 +1917,7 @@ async fn saturated_direct_signaling_preserves_credited_fallback_streams() {
                 Method::POST,
                 &format!("{prefix}/{}/renew", grant.claims.connection_id),
             )
-            .json(&json!({ "fingerprint": fingerprint(), "version": 4 }));
+            .json(&json!({ "fingerprint": fingerprint(), "version": 4, "timeline": 1 }));
         renewals.spawn(async move { request.send().await.unwrap().status() });
     }
     let busy = tokio::time::timeout(Duration::from_secs(2), renewals.join_next()).await;
@@ -2058,5 +2058,57 @@ async fn candidate_policy_drops_local_special_addresses_but_preserves_lan_and_vp
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(signals.try_recv().is_err());
     }
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn ui_timeline_capability_refusal_is_authenticated_and_precedes_peer_setup() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let route = format!(
+        "/api/installations/{}/direct/authorize",
+        relay.session["installations"][0]["id"].as_str().unwrap()
+    );
+    // Old apps know 426 on these HTTPS controls even when UDP cannot connect.
+    for value in [None, Some(0), Some(2)] {
+        let mut input = json!({ "fingerprint": fingerprint(), "version": 4 });
+        if let Some(value) = value {
+            input["timeline"] = json!(value);
+        }
+        let anonymous = reqwest::Client::new()
+            .post(format!("{}{}", relay.app.url, route))
+            .header("origin", &relay.app.url)
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        let response = relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, Method::POST, &route)
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+        assert!(response.text().await.unwrap().contains("update the app"));
+    }
+    let grant = authorization(&relay, &relay.cookie, &relay.session).await;
+    let renew = format!(
+        "/api/installations/{}/direct/{}/renew",
+        grant.claims.installation_id, grant.claims.connection_id
+    );
+    let response = relay
+        .app
+        .authenticated(&relay.cookie, &relay.session, Method::POST, &renew)
+        .json(&json!({ "fingerprint": fingerprint(), "version": 4 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+    assert!(response.text().await.unwrap().contains("update the app"));
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
     relay.close().await;
 }

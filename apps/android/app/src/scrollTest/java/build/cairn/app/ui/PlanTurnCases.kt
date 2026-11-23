@@ -783,6 +783,7 @@ abstract class PlanTurnCases {
                     true,
                     false,
                     entries = cards,
+                    history = "v2:fixture:1",
                 )
             )
         server.dispatcher =

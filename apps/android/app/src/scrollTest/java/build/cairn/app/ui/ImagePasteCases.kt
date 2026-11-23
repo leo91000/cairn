@@ -78,7 +78,7 @@ abstract class ImagePasteCases {
                                 "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
                         ) {
                             val frame =
-                                "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false))}\n\n"
+                                "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false, history = "v2:fixture:1"))}\n\n"
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(frame + ": keepalive\n\n".repeat(10000))

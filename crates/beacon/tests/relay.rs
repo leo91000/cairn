@@ -73,7 +73,7 @@ async fn history_compression_is_negotiated_and_preserved_through_the_relay() {
     assert!(!plain.headers().contains_key("content-encoding"));
     assert_eq!(plain.json::<Value>().await.unwrap(), page);
     let stream = relay
-        .get(&format!("/runs/{run_id}/stream?window=1"))
+        .get(&format!("/runs/{run_id}/stream?window=1&timeline=1"))
         .header("accept-encoding", "gzip")
         .send()
         .await
