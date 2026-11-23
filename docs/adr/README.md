@@ -94,6 +94,7 @@ for current behavior.
 | 0083 | [Disques de conversation locaux à leur node, sans S3](0083-local-conversation-disks-without-s3.md) |
 | 0084 | [Drain native filesystem access per attempt](0084-native-attempt-access-drain.md) |
 | 0091 | [Failed turns return unsent messages](0091-failed-turns-return-unsent-messages.md) |
+| 0092 | [Instant native environment start](0092-instant-native-environment-start.md) |
 
 ## Renumbered collisions
 
