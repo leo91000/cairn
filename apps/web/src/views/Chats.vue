@@ -1379,6 +1379,9 @@ watch([() => detail.value?.messages, readOnly, inactive, editing, busy], ([messa
     return
   for (const message of returned)
     restored.add(message.id)
+  // A send whose response was lost and whose message came back starts over with a new identifier.
+  if (returned.some(message => message.id === submission?.message.id))
+    submission = undefined
   // The message comes back as written: its plan request and agent choices included.
   // A draft already written keeps its own agent choices; a plan request stays one either way.
   const empty = !hasDraft.value

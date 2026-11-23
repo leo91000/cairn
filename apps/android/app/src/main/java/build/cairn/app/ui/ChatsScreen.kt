@@ -1021,6 +1021,12 @@ internal fun ChatPage(
             }
         if (editing != null) return@LaunchedEffect
         returned.forEach { restored += it.id }
+        // A send whose response was lost and whose message came back starts over with a new
+        // identifier.
+        if (returned.any { it.id == submissionId }) {
+            submissionKey = ""
+            submissionId = ""
+        }
         // The message comes back as written: its plan request and agent choices included.
         // A draft already written keeps its own agent choices; a plan request stays one.
         val empty = draft.isBlank() && attachments.isEmpty()

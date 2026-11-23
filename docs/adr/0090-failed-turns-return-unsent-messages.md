@@ -50,7 +50,8 @@ OpenCode retry, and for agents through `set_chat_paused` and `resume_chat`. Afte
 Stop or a failure with nothing held, neither app offers to resume: the next
 message continues the conversation. Unpausing replays a stopped turn whose message is held, as a
 recovery that tells the agent to check what it already did, and messages written
-since follow it. When no message from before the turn ended is held, a message
+since follow it. When no message from before the turn ended is held, and the
+turn claimed nothing after Stop (steering or an answer it may have read), a message
 written after the turn ended is sent instead of a replay. A queue that holds messages says
 so: the apps ask to resume the queue rather than to send a message.
 

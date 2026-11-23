@@ -876,6 +876,13 @@ pub(crate) fn send(
                 "This message identifier has already been used.",
             ));
         }
+        // A retry must not report a message that went back to its author, or was withdrawn,
+        // as accepted (ADR-0090).
+        if existing.status == MessageStatus::Cancelled {
+            return Err(Error::conflict(
+                "This message was cancelled. Send it again as a new message.",
+            ));
+        }
         return Ok(serde_json::to_value(existing)?);
     }
     if let Some(approval) = approval {
@@ -1220,17 +1227,17 @@ pub(crate) fn skips_replay(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bo
     Ok(written_since && !turn_held(db, chat_id, run)?)
 }
 
-/// The stopped turn still holds a message from before it ended: its own, steering the agent
-/// may have read, or a message held for a person. Resuming replays the turn first, as a
-/// recovery that tells the agent to check what it did, and held messages follow it.
+/// The stopped turn still holds a message: its own, steering or an answer it claimed, even
+/// after Stop was pressed, which the agent may have read, or a message from before it ended
+/// held for a person. Resuming replays the turn first, as a recovery that tells the agent to
+/// check what it did, and held messages follow it.
 pub(crate) fn turn_held(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bool> {
     let turn = run["chatExecution"]["messageId"].as_str();
     let ended_at = turn_end(run);
     Ok(db.conversation_messages(chat_id)?.iter().any(|message| {
-        matches!(
-            message.status,
-            MessageStatus::Queued | MessageStatus::Sending
-        ) && (Some(message.id.as_str()) == turn || message.created_at <= ended_at)
+        message.status == MessageStatus::Sending
+            || (message.status == MessageStatus::Queued
+                && (Some(message.id.as_str()) == turn || message.created_at <= ended_at))
     }))
 }
 
@@ -2589,6 +2596,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                     "id": "chat",
                     "runId": "run",
                     "agentId": crate::config::MAIN_AGENT_ID,
+                    "nativeProvenanceUnknown": false,
                 }))?;
                 let message = |id: &str, status: &str, created_at: i64| {
                     json!({ "id": id, "chatId": "chat", "text": id, "status": status, "createdAt": created_at })
@@ -2647,6 +2655,17 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 let refused = crate::worker::control::requeue(db, "run", None, None, None, None)
                     .unwrap_err();
                 assert!(refused.message.contains("went back"), "{}", refused.message);
+
+                // Retrying a send whose message came back queues nothing: it is refused.
+                let retried = send(
+                    db,
+                    "chat",
+                    json!({ "id": "follow-up", "text": "follow-up" }),
+                    None,
+                    &crate::native::policy::Origin::Human("alice".into()),
+                )
+                .unwrap_err();
+                assert!(retried.message.contains("cancelled"), "{}", retried.message);
 
                 // The composer that restores a returned message withdraws it and its mark.
                 edit_as(db, "chat", "turn", None, &crate::native::policy::Origin::Human("alice".into()))?;
@@ -2781,6 +2800,43 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 .await
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn an_answer_claimed_after_stop_replays_the_stopped_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "startedAt": 1,
+                        "status": "cancelled",
+                        "cancelRequestedAt": 500,
+                        "finishedAt": 900,
+                        "chatExecution": { "messageId": "turn", "text": "Turn", "attachments": [], "recovery": false },
+                        "snapshot": { "agent": { "provider": "codex" } },
+                    }),
+                    None,
+                )?;
+                db.save_checkpoint_boundary("run", &json!({ "launched": true, "launchedTurn": "turn" }))?;
+                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "agentId": "agent" }))?;
+                db.put_message(&json!({ "id": "turn", "chatId": "chat", "text": "turn", "status": "delivered", "createdAt": 100 }))?;
+                // Answered while the turn was being stopped: the stopping agent claimed it.
+                db.put_message(&json!({ "id": "answer", "chatId": "chat", "text": "answer", "questionId": "question", "mode": "steer", "status": "sending", "createdAt": 600 }))?;
+                db.put_message(&json!({ "id": "since", "chatId": "chat", "text": "since", "status": "queued", "createdAt": 1000 }))?;
+                settle_turn(db, "chat", &run)?;
+                // The agent may have read the answer: resuming replays the turn first, as a
+                // recovery, before the message written since.
+                assert!(turn_held(db, "chat", &run)?);
+                assert!(!skips_replay(db, "chat", &run)?);
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
