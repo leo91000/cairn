@@ -108,7 +108,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "send_chat_message",
         scope: "run",
-        description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries, unless the message was cancelled or returned: send it again with a new id. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed or stopped turn that holds nothing, a new message starts the next turn; after a stop, send the message first, then call set_chat_paused(false). If the turn still holds a message from before it ended (one the agent may have received, an answer, or a rule's or agent's message), the conversation is paused and set_chat_paused(false) replays that turn first, then sends what was written since. Ordinary messages a person wrote that a failed or stopped turn never delivered are cancelled and returned to them (returnedTo); others stay queued behind a pause.",
+        description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries, unless the message was cancelled or returned: send it again with a new id. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed or stopped turn that holds nothing, a new message starts the next turn; after a stop, send the message first, then call set_chat_paused(false). If the turn still holds a message (one the agent may have received, including steering or an answer claimed after Stop, an answer, or a rule's or agent's message from before it ended), the conversation is paused and set_chat_paused(false) replays that turn first, then sends what was written since. Ordinary messages a person wrote that a failed or stopped turn never delivered are cancelled and returned to them (returnedTo); others stay queued behind a pause.",
     },
     ChatOperation {
         name: "edit_chat_message",
@@ -128,7 +128,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "set_chat_paused",
         scope: "run",
-        description: "Pause or resume the follow-up queue. Pausing lets the current turn finish; resuming permits queued agent work. Resuming a stopped or failed turn replays it, unless its message was returned to its author, or a message was written since it ended while nothing from before it is held: that message is sent instead. Use stop_chat to interrupt the current turn.",
+        description: "Pause or resume the follow-up queue. Pausing lets the current turn finish; resuming permits queued agent work. Resuming a stopped or failed turn replays it, unless its message was returned to its author, or a message was written since it ended while the turn holds nothing (no message from before it ended, and no steering or answer it claimed after Stop): that message is sent instead. Use stop_chat to interrupt the current turn.",
     },
     ChatOperation {
         name: "stop_chat",

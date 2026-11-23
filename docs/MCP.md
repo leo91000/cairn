@@ -213,7 +213,8 @@ follow-up queue while letting a current turn finish. `stop_chat` interrupts that
 turn, cancels a scheduled wakeup and pauses follow-ups: messages a person wrote that
 it never delivered return to them, others stay queued. After a stop, send the next
 message, then call `set_chat_paused(false)`; it replays the stopped turn first only
-while that turn still holds a message from before it ended. `resume_chat` resumes a
+while that turn still holds a message: one from before it ended, or steering or an
+answer it claimed after Stop. `resume_chat` resumes a
 stopped/failed execution under the existing recovery rules, and is refused once the
 turn's message was returned (`turnReturned`)
 ([ADR-0090](adr/0090-failed-turns-return-unsent-messages.md)). A failed

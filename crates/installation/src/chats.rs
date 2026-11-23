@@ -1271,7 +1271,10 @@ fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
             MessageStatus::Queued | MessageStatus::Sending
         );
         let own = !operation && Some(message.id.as_str()) == turn;
-        if !pending || (message.created_at > ended_at && !own) {
+        // Steering or an answer the stopping turn claimed after Stop belongs to it too.
+        if !pending
+            || (message.created_at > ended_at && !own && message.status != MessageStatus::Sending)
+        {
             continue;
         }
         if operation {
@@ -1334,8 +1337,11 @@ fn settle_turn(db: &Db<'_>, chat_id: &str, ended: &Value) -> Result<()> {
     let unsent = unsent(db, chat_id, &run)?;
     // A cancellation already paused the conversation when it was requested.
     let held = !unsent.held.is_empty();
+    let ended_at = turn_end(&run);
     for mut message in unsent.held {
-        if message.status == MessageStatus::Sending {
+        // A message claimed after Stop stays claimed: the turn holds it, so resuming replays
+        // the turn first and delivers it again.
+        if message.status == MessageStatus::Sending && message.created_at <= ended_at {
             message.status = MessageStatus::Queued;
             db.save_message(&message)?;
         }
@@ -2829,8 +2835,10 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 db.put_message(&json!({ "id": "answer", "chatId": "chat", "text": "answer", "questionId": "question", "mode": "steer", "status": "sending", "createdAt": 600 }))?;
                 db.put_message(&json!({ "id": "since", "chatId": "chat", "text": "since", "status": "queued", "createdAt": 1000 }))?;
                 settle_turn(db, "chat", &run)?;
-                // The agent may have read the answer: resuming replays the turn first, as a
-                // recovery, before the message written since.
+                // The agent may have read the answer: it is held, and resuming replays the
+                // turn first, as a recovery, before the message written since.
+                assert_eq!(find_message(db, "chat", "answer")?.unwrap().status, MessageStatus::Sending);
+                assert!(conversation(db, "chat")?.paused);
                 assert!(turn_held(db, "chat", &run)?);
                 assert!(!skips_replay(db, "chat", &run)?);
                 Ok(())
