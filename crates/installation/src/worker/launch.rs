@@ -1278,6 +1278,20 @@ impl Execution<'_> {
         plan["mcpEnv"] = workspace.mcp["env"].clone();
         plan["turnId"] = self.turn.clone().into();
         atomic_write(&plan_path, &serde_json::to_vec(&plan)?).await?;
+        // The environment starts the turn as soon as it accepts it: unless it refuses, its
+        // message may be read even if this launch fails before the runner client is recorded
+        // (ADR-0090).
+        let turn = self.run["chatExecution"]["messageId"]
+            .as_str()
+            .map(str::to_owned);
+        if turn.is_some() {
+            self.checkpoint
+                .update(|c| {
+                    c.launched_turn_before = c.launched_turn.take();
+                    c.launched_turn = turn.clone();
+                })
+                .await?;
+        }
         match super::held::request(
             self.s,
             self.run,
@@ -1290,22 +1304,19 @@ impl Execution<'_> {
         .await?
         {
             Event::Accepted { .. } => {}
-            Event::Refused { message, .. } => return Err(Error::conflict(message)),
+            Event::Refused { message, .. } => {
+                if turn.is_some() {
+                    self.checkpoint
+                        .update(|c| c.launched_turn = c.launched_turn_before.take())
+                        .await?;
+                }
+                return Err(Error::conflict(message));
+            }
             _ => {
                 return Err(Error::unavailable(
                     "Invalid environment continuation acknowledgement.",
                 ));
             }
-        }
-        // The environment starts the turn as soon as it accepts it: its message may be read
-        // even if this launch fails before the runner client is recorded (ADR-0090).
-        let turn = self.run["chatExecution"]["messageId"]
-            .as_str()
-            .map(str::to_owned);
-        if turn.is_some() {
-            self.checkpoint
-                .update(|c| c.launched_turn = turn.clone())
-                .await?;
         }
         workspace.env.insert(
             "RUNNER_URL".into(),
