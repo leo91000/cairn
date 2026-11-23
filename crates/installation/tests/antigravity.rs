@@ -846,6 +846,47 @@ async fn a_stopped_first_plan_turn_hands_its_conversation_back() {
     assert_eq!(thread(&events), conversation);
 }
 
+/// A plan turn after a first ordinary turn, in the run of `root`.
+fn plan_after(root: &TempDir, first: &Value, conversation: &str) -> Value {
+    let mut planning = next_message(root, first, "plan", "Plan the next step");
+    planning["sessionId"] = conversation.into();
+    planning["planning"] = true.into();
+    planning["sandbox"] = "read-only".into();
+    planning
+}
+
+#[tokio::test]
+async fn plan_turns_refuse_conversations_redirected_by_a_link() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let first = plan(&root, "gemini-4-neon-high", "Build the status panel");
+    let (result, events) = run(&s, first.clone()).await;
+    result.unwrap();
+    let conversation = thread(&events);
+    // An earlier YOLO turn replaced the conversation database with a link elsewhere.
+    let database = native_home(&s).join(format!(
+        ".gemini/antigravity-cli/conversations/{conversation}.db"
+    ));
+    let elsewhere = root.path().join("elsewhere.db");
+    std::fs::rename(&database, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &database).unwrap();
+    let launches = records(&native_home(&s), "launch").len();
+    let (result, _) = run(&s, plan_after(&root, &first, &conversation)).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.status, 409, "{}", error.message);
+    assert!(
+        error.message.contains("replaced by a link"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        records(&native_home(&s), "launch").len(),
+        launches,
+        "agy never started"
+    );
+}
+
 #[tokio::test]
 async fn native_configuration_adds_rules_to_ordinary_turns() {
     let root = TempDir::new().unwrap();
@@ -1435,8 +1476,8 @@ async fn native_cli_runs_and_resumes_a_conversation() {
 }
 
 /// Optional native qualification of plan-turn isolation: the real release resumes a
-/// conversation in a fresh home holding only its database, and the plan turn's steps
-/// return to the run's native state for the next turn.
+/// conversation in a fresh home whose `conversations` directory links to the run's,
+/// and records the plan turn's steps there for the next turn.
 #[tokio::test]
 #[ignore = "requires a native Antigravity binary"]
 async fn native_plan_turns_resume_the_conversation_in_a_fresh_home() {

@@ -318,10 +318,30 @@ pub(super) async fn fresh_home(fresh: &Path) -> Result<()> {
         && error.kind() != std::io::ErrorKind::NotFound
     {
         return Err(Error::unavailable(
-            "Cairn could not reset Antigravity's private state for this turn. Working files were preserved.",
+            "Cairn could not reset Antigravity's private state for this plan turn or side question. Working files were preserved.",
         ));
     }
     private_dir(&fresh.join(".gemini/antigravity-cli")).await
+}
+
+/// Whether every existing component of `path` below `root`, and `path` itself, is a
+/// real directory or file: an earlier YOLO turn could redirect one with a link.
+pub(super) fn redirected(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    let mut current = root.to_owned();
+    for component in relative.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(metadata) if !metadata.is_dir() && !metadata.is_file() => return true,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 const CONVERSATIONS: &str = ".gemini/antigravity-cli/conversations";
@@ -331,9 +351,19 @@ const CONVERSATIONS: &str = ".gemini/antigravity-cli/conversations";
 /// through a link. `agy` resumes and records the conversation there directly
 /// (measured on 1.5.14), so nothing is copied back and a stopped plan turn loses
 /// nothing.
-async fn plan_home(state: &Path, bounded: &Path) -> Result<()> {
+async fn plan_home(state: &Path, bounded: &Path, conversation: &str) -> Result<()> {
     fresh_home(bounded).await?;
     let conversations = state.join(CONVERSATIONS);
+    let database = conversations.join(format!("{conversation}.db"));
+    // The link must lead to the run's own conversations, never where a link planted
+    // by an earlier turn would send the plan turn's writes.
+    if redirected(state, &conversations)
+        || (!conversation.is_empty() && redirected(state, &database))
+    {
+        return Err(Error::conflict(
+            "Antigravity's saved conversations were replaced by a link, so this plan turn cannot be bounded. Start a new conversation.",
+        ));
+    }
     private_dir(&conversations).await?;
     tokio::fs::symlink(&conversations, bounded.join(CONVERSATIONS)).await?;
     Ok(())
@@ -829,7 +859,7 @@ async fn execute(
         // A plan turn runs in a fresh native HOME with only its conversation.
         let home = if mode == Mode::Plan {
             let bounded = state.join(PLAN_HOME);
-            plan_home(&state, &bounded).await?;
+            plan_home(&state, &bounded, &conversation).await?;
             bounded
         } else {
             state.clone()
@@ -1068,6 +1098,24 @@ mod tests {
         ];
         assert_eq!(tree_groups(10, &processes), [10, 20]);
         assert_eq!(tree_groups(30, &processes), [30, 31]);
+    }
+
+    #[test]
+    fn links_planted_in_the_native_state_are_detected() {
+        let root = tempfile::TempDir::new().unwrap();
+        let state = root.path().join("state");
+        let conversations = state.join(CONVERSATIONS);
+        assert!(!redirected(&state, &conversations));
+        std::fs::create_dir_all(&conversations).unwrap();
+        assert!(!redirected(&state, &conversations));
+        let database = conversations.join("conversation.db");
+        std::fs::write(root.path().join("elsewhere.db"), "").unwrap();
+        std::os::unix::fs::symlink(root.path().join("elsewhere.db"), &database).unwrap();
+        assert!(redirected(&state, &database));
+        std::fs::remove_dir_all(state.join(".gemini")).unwrap();
+        std::fs::create_dir_all(state.join(".gemini")).unwrap();
+        std::os::unix::fs::symlink(root.path(), state.join(".gemini/antigravity-cli")).unwrap();
+        assert!(redirected(&state, &conversations));
     }
 
     #[test]
