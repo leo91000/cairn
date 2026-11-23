@@ -50,7 +50,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 use tokio::sync::Notify;
 
@@ -62,6 +62,7 @@ pub struct Plugins {
     test_origin: Mutex<Option<String>>,
     socket_origin: Mutex<Option<String>>,
     worker: Mutex<Option<std::path::PathBuf>>,
+    rate_limit_time: OnceLock<i64>,
     programs: Mutex<HashMap<(String, String), PathBuf>>,
     pub(crate) program_installation: tokio::sync::Mutex<()>,
     pub(crate) program_caches: program_cache::Caches,
@@ -89,6 +90,7 @@ impl Default for Plugins {
             test_origin: Mutex::new(None),
             socket_origin: Mutex::new(None),
             worker: Mutex::new(None),
+            rate_limit_time: OnceLock::new(),
             programs: Mutex::new(HashMap::new()),
             program_installation: tokio::sync::Mutex::new(()),
             program_caches: program_cache::Caches::default(),
@@ -128,6 +130,21 @@ impl Plugins {
     #[doc(hidden)]
     pub fn use_worker(&self, path: std::path::PathBuf) {
         *self.worker.lock().unwrap() = Some(path);
+    }
+
+    /// Tests only: keep admission in the same quota window for this installation.
+    #[doc(hidden)]
+    pub fn fix_rate_limit_time(&self, time: i64) {
+        self.rate_limit_time
+            .set(time)
+            .expect("fixture rate limit clock already set");
+    }
+
+    pub(crate) fn rate_limit_now(&self) -> i64 {
+        self.rate_limit_time
+            .get()
+            .copied()
+            .unwrap_or_else(crate::config::now)
     }
 
     /// Workers are this same binary in its private `plugin-worker` mode.
