@@ -930,19 +930,18 @@ test('working subagents stay in sight beside the composer and open as a drawer o
     await panel.getByRole('button', { name: 'Close subagent activity' }).click()
     await expect(chip).toBeFocused()
     // A click just inside a chip's left edge opens it. WebKit truncates mouse coordinates, so with
-    // the edge on a half pixel the click reads as a quarter pixel left of the chip.
-    const second = bar.getByTestId('subagent-chip').filter({ hasText: 'Check the panel accessibility' })
-    await second.evaluate((element) => {
+    // the edge on a half pixel the click reads as a quarter pixel left of the chip. The first
+    // chip's edge only follows the static label: later chips shift as running timers tick.
+    await expect(bar.getByTestId('subagent-chip').first()).toContainText('Review the keyboard handling')
+    await chip.evaluate((element) => {
       const left = element.getBoundingClientRect().left
       element.style.marginLeft = `${(1.5 - (left % 1)) % 1}px`
     })
-    const secondBounds = (await second.boundingBox())!
-    expect(secondBounds.x % 1).toBeCloseTo(0.5)
-    await page.mouse.click(secondBounds.x + 0.25, secondBounds.y + secondBounds.height / 2)
-    await expect(second).toHaveAttribute('aria-pressed', 'true')
-    await second.evaluate(element => element.style.removeProperty('margin-left'))
-    await chip.click()
+    const chipBounds = (await chip.boundingBox())!
+    expect(chipBounds.x % 1).toBeCloseTo(0.5)
+    await page.mouse.click(chipBounds.x + 0.25, chipBounds.y + chipBounds.height / 2)
     await expect(chip).toHaveAttribute('aria-pressed', 'true')
+    await chip.evaluate(element => element.style.removeProperty('margin-left'))
     await page.screenshot({ path: test.info().outputPath('subagent-bar-1440.png'), animations: 'disabled' })
 
     await page.setViewportSize({ width: 390, height: 844 })
