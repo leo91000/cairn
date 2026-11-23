@@ -132,7 +132,7 @@ impl Plugins {
         *self.worker.lock().unwrap() = Some(path);
     }
 
-    /// Tests only: keep admission in the same quota window for this installation.
+    /// Tests only: keep admission and usage reads in one quota window for this installation.
     #[doc(hidden)]
     pub fn fix_rate_limit_time(&self, time: i64) {
         self.rate_limit_time
