@@ -1,0 +1,13 @@
+name: Set up Robolectric SDKs
+description: Cache instrumented SDK jars and use a Maven Central mirror for cache misses.
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v5
+      with:
+        path: ~/.m2/repository/org/robolectric/android-all-instrumented
+        # Update the key when Robolectric or the SDKs used by the suite change.
+        key: robolectric-sdk-${{ runner.os }}-4.17-api-26-28-32-35-36-37
+    - name: Configure the SDK download repository
+      shell: bash
+      run: echo 'CAIRN_ROBOLECTRIC_REPOSITORY_URL=https://maven-central.storage-download.googleapis.com/maven2' >> "$GITHUB_ENV"

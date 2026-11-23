@@ -1,7 +1,14 @@
 > Current policy: PRs run targeted unit/lint checks; full device, release and
 > publication qualification runs nightly, manually and on version tags. Local
 > validation before merge is mandatory; see [PR validation](../../docs/agents/pr-validation.md).
-> The entries below are historical validation records.
+
+The PR and full Android workflows share a cache for Robolectric's instrumented
+SDKs. Cold caches and missing jars are filled on demand from Google's Maven
+Central mirror. Robolectric validates the downloads with SHA-512 checksums.
+When updating Robolectric or changing the SDKs used by unit tests, update the
+key in [setup-robolectric](../../.github/actions/setup-robolectric/action.yaml).
+
+The entries below are historical validation records.
 
 # Android 0.39.2 — inverted infinite history scroll
 
