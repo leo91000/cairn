@@ -1276,9 +1276,11 @@ where
 
 /// Owner view: configuration, live state, usage and recent exchanges. Never secrets.
 pub async fn overview(s: &Service) -> Result<Vec<cairn_contracts::PluginConnection>> {
-    let hour = now() / 3_600_000;
+    let plugins = s.plugins.clone();
     s.store
         .read(move |db| {
+            let time = plugins.rate_limit_now();
+            let hour = time / 3_600_000;
             let requests = db.plugin_requests()?;
             let activity = db.plugin_activity()?;
             let statuses = db.plugin_statuses()?;
@@ -1287,7 +1289,7 @@ pub async fn overview(s: &Service) -> Result<Vec<cairn_contracts::PluginConnecti
                 let mut view = public_view(&connection)?;
                 view.status = statuses.get(&connection.id).cloned().unwrap_or_default();
                 view.usage.hour = db
-                    .kv(&format!("plugin-rate:{}:{hour}", connection.id))?
+                    .kv_as_at::<Value>(&format!("plugin-rate:{}:{hour}", connection.id), time)?
                     .and_then(|value| value.as_u64())
                     .unwrap_or(0)
                     .min(u32::MAX.into()) as u32;
