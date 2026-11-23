@@ -153,6 +153,7 @@ internal fun ProviderMark(provider: String, size: Dp = 20.dp, tint: Color? = nul
         when (provider) {
             "claude" -> ClaudeMark
             "opencode" -> OpenCodeMark
+            "antigravity" -> GeminiMark
             else -> OpenAiMark
         },
         null,
@@ -163,6 +164,14 @@ internal fun ProviderMark(provider: String, size: Dp = 20.dp, tint: Color? = nul
 
 private val OpenCodeMark by lazy {
     brandMark("OpenCode", "M22 24H2V0h20zM17 4.8H7v14.4h10z")
+}
+
+// Simple Icons has no Antigravity mark; Antigravity runs Google's Gemini models.
+private val GeminiMark by lazy {
+    brandMark(
+        "Antigravity",
+        "M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68q.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58a12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68q-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96q2.19.93 3.81 2.55t2.55 3.81",
+    )
 }
 
 /**
@@ -381,22 +390,14 @@ internal fun ModelPicker(
                 }
                 if (changeProvider != null) {
                     SectionLabel("Assistant de code")
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.height(IntrinsicSize.Min),
-                    ) {
-                        codingAgents.forEach { (value, vendor) ->
-                            ProviderTile(
-                                value,
-                                vendor,
-                                provider == value,
-                                enabled,
-                                Modifier.weight(1f).fillMaxHeight(),
-                            ) {
-                                if (provider != value) {
-                                    query = ""
-                                    changeProvider(value)
-                                }
+                    ProviderTiles(codingAgents.map { it.provider to it.vendor }) {
+                        value,
+                        vendor,
+                        tileModifier ->
+                        ProviderTile(value, vendor, provider == value, enabled, tileModifier) {
+                            if (provider != value) {
+                                query = ""
+                                changeProvider(value)
                             }
                         }
                     }
@@ -426,7 +427,7 @@ internal fun ModelPicker(
                     Spacer(Modifier.height(4.dp))
                 }
                 SectionLabel("Modèle")
-                if (provider == "opencode")
+                if (provider == "opencode" || provider == "antigravity")
                     Surface(
                         shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -440,7 +441,10 @@ internal fun ModelPicker(
                                 style = MaterialTheme.typography.labelLarge,
                             )
                             Text(
-                                "L’accès dépend de l’offre, du solde et des réglages Privacy du fournisseur. Un modèle affiché peut rester bloqué à l’utilisation.",
+                                if (provider == "antigravity")
+                                    "Chaque modèle passe par une connexion de son type : clé API Gemini, Google Cloud ou compte Google."
+                                else
+                                    "L’accès dépend de l’offre, du solde et des réglages Privacy du fournisseur. Un modèle affiché peut rester bloqué à l’utilisation.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -521,7 +525,8 @@ internal fun ModelPicker(
                         enabled,
                         badge =
                             if (item.isDefault) {
-                                if (provider == "opencode") "Défaut du fournisseur"
+                                if (provider == "opencode" || provider == "antigravity")
+                                    "Défaut du fournisseur"
                                 else "Recommandé"
                             } else "",
                         reasoning = {
@@ -737,6 +742,27 @@ private fun SectionLabel(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 4.dp).semantics { heading() },
     )
+}
+
+/** Coding-agent tiles two per row, so four agents keep readable labels on a phone. */
+@Composable
+internal fun ProviderTiles(
+    tiles: List<Pair<String, String>>,
+    tile: @Composable (String, String, Modifier) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        tiles.chunked(2).forEach { row ->
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.height(IntrinsicSize.Min),
+            ) {
+                row.forEach { (value, detail) ->
+                    tile(value, detail, Modifier.weight(1f).fillMaxHeight())
+                }
+                if (row.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+    }
 }
 
 @Composable

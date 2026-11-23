@@ -38,7 +38,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 36;
+pub(crate) const DATABASE_VERSION: i64 = 37;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -278,6 +278,10 @@ impl Store {
         }
         if !fresh && version == 35 {
             crate::worker::jobs::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 36 {
+            crate::provider::upgrade_storage(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -1719,6 +1723,72 @@ mod schema_tests {
     }
 
     #[test]
+    fn version_thirty_six_upgrade_admits_antigravity_without_rewriting_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("manager.db");
+        drop(Store::open(root.path()).unwrap());
+        // Restore the version 36 constraints that exclude Antigravity.
+        let db = Connection::open(&file).unwrap();
+        db.pragma_update(None, "writable_schema", true).unwrap();
+        db.execute(
+            "UPDATE sqlite_schema SET sql=replace(sql,?1,'') WHERE type='table'",
+            [",'antigravity'"],
+        )
+        .unwrap();
+        let schema: i64 = db
+            .pragma_query_value(None, "schema_version", |r| r.get(0))
+            .unwrap();
+        db.pragma_update(None, "schema_version", schema + 1)
+            .unwrap();
+        db.pragma_update(None, "writable_schema", false).unwrap();
+        db.pragma_update(None, "user_version", 36).unwrap();
+        drop(db);
+        let db = Connection::open(&file).unwrap();
+        let insert = "INSERT INTO coding_agent_accounts(id,provider,name,enabled,state,error,revision,updated_at) VALUES(?1,?2,'Account',1,'ready','','r',0)";
+        db.execute(insert, ["codex-account", "codex"]).unwrap();
+        assert!(db.execute(insert, ["refused", "antigravity"]).is_err());
+        drop(db);
+
+        drop(Store::open(root.path()).unwrap());
+        // A second startup sees version 37 and changes nothing.
+        drop(Store::open(root.path()).unwrap());
+        let db = Connection::open(&file).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            DATABASE_VERSION
+        );
+        db.execute(insert, ["antigravity-account", "antigravity"])
+            .unwrap();
+        assert!(db.execute(insert, ["unknown", "gemini"]).is_err());
+        let providers: Vec<String> = db
+            .prepare("SELECT provider FROM coding_agent_accounts ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(providers, ["antigravity", "codex"]);
+        for table in [
+            "agents",
+            "account_leases",
+            "coding_agent_configurations",
+            "runs",
+            "chat_messages",
+            "conversation_engine_switches",
+        ] {
+            let sql: String = db
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(sql.contains("'antigravity'"), "{table}");
+        }
+    }
+
+    #[test]
     fn version_nineteen_upgrade_adds_hook_queues_without_touching_existing_work() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("manager.db");
@@ -1849,7 +1919,7 @@ mod schema_tests {
     #[test]
     fn startup_steps_accept_a_database_upgraded_by_another_startup() {
         type Upgrade = fn(&mut Connection) -> Result<()>;
-        let steps: [(&str, Upgrade); 13] = [
+        let steps: [(&str, Upgrade); 14] = [
             ("accounts", crate::accounts::migration::upgrade),
             ("conversations", crate::chats::migration::upgrade),
             ("questions", crate::chats::question_migration::upgrade),
@@ -1866,6 +1936,7 @@ mod schema_tests {
                 crate::rules::engine::conversations::upgrade,
             ),
             ("background jobs", crate::worker::jobs::upgrade),
+            ("antigravity storage", crate::provider::upgrade_storage),
         ];
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());

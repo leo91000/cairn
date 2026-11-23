@@ -155,7 +155,7 @@ const commands = computed<Command[]>(() => {
       group: 'Actions',
       label: 'Connections',
       icon: Plug,
-      keywords: 'codex claude opencode accounts',
+      keywords: 'codex claude opencode antigravity gemini google accounts',
       run: go('/connections'),
     },
     {

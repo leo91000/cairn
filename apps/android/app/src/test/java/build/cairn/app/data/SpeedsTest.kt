@@ -61,6 +61,7 @@ class SpeedsTest {
         assertTrue(showsSpeed("codex", astra.copy(serviceTiers = null), "priority"))
         assertFalse(showsSpeed("claude", astra, "priority"))
         assertFalse(showsSpeed("opencode", astra, ""))
+        assertFalse(showsSpeed("antigravity", astra, "priority"))
     }
 
     @Test

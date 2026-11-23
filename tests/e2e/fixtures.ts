@@ -125,6 +125,7 @@ async function withWorkspace(
     claudeBin: path.resolve('tests/fixtures/claude.mjs'),
     opencodeBin: path.resolve('tests/fixtures/opencode.mjs'),
     opencodeGoUsageUrl: `http://127.0.0.1:${goPort}/usage`,
+    antigravityBin: path.resolve('tests/fixtures/antigravity.mjs'),
   }))
   await writeFile(usageFile, '{}')
   // A developer may rebuild Cargo while this fixture is active. Keep the

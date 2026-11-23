@@ -32,7 +32,9 @@ data class RunState(
     val workspaceCleanedAt: Long?,
 ) {
     init {
-        accountRequired?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        accountRequired?.let {
+            require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(it))
+        }
         require(resumeCount >= 0L)
         require(
             Regex("^(queued|running|waiting|succeeded|failed|cancelled|interrupted)\$")

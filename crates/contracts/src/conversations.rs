@@ -248,7 +248,7 @@ pub struct ChatMessage {
     #[serde(default)]
     pub text: String,
     #[serde(default)]
-    #[schemars(pattern("^(|codex|claude|opencode)$"))]
+    #[schemars(pattern("^(|codex|claude|opencode|antigravity)$"))]
     #[ts(type = r#""" | import('../../accounts').Provider"#)]
     pub provider: String,
     #[serde(default)]
@@ -330,7 +330,7 @@ pub struct ContextUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct CodingAgentSwitch {
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     pub error: Option<String>,
 }
@@ -436,7 +436,10 @@ pub struct Chat {
     pub requester: Option<ChatRequester>,
     #[serde(default)]
     #[ts(optional = nullable)]
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     pub provider: Option<AgentProvider>,
     #[serde(default)]
     #[ts(optional = nullable)]
@@ -458,7 +461,10 @@ pub struct Chat {
     pub account_wait_reason: Option<String>,
     #[serde(default)]
     #[ts(optional = nullable)]
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     pub account_required: Option<AgentProvider>,
     #[serde(default)]
     pub pending_questions: u32,
@@ -608,7 +614,7 @@ pub struct ChatMessageInput {
     #[schemars(with = "String", pattern("^(queue|steer)$"))]
     pub mode: MessageMode,
     #[serde(default)]
-    #[schemars(pattern("^(|codex|claude|opencode)$"))]
+    #[schemars(pattern("^(|codex|claude|opencode|antigravity)$"))]
     pub provider: String,
     #[serde(default)]
     #[schemars(length(max = 120), pattern(r"^[\w./:\[\]-]*$"))]
@@ -649,7 +655,10 @@ impl ChatMessageInput {
         if self.text.is_empty() && self.attachment_ids.is_empty() {
             return Err("Write a message or attach a file".into());
         }
-        if !matches!(self.provider.as_str(), "" | "codex" | "claude" | "opencode") {
+        if !matches!(
+            self.provider.as_str(),
+            "" | "codex" | "claude" | "opencode" | "antigravity"
+        ) {
             return Err("Invalid coding agent.".into());
         }
         if !self
@@ -736,7 +745,7 @@ pub struct EditChatMessage {
     #[schemars(with = "String", pattern("^(queue|steer)$"))]
     pub mode: MessageMode,
     #[serde(default)]
-    #[schemars(pattern("^(|codex|claude|opencode)$"))]
+    #[schemars(pattern("^(|codex|claude|opencode|antigravity)$"))]
     pub provider: String,
     #[serde(default)]
     #[schemars(length(max = 120), pattern(r"^[\w./:\[\]-]*$"))]
@@ -935,7 +944,7 @@ pub struct CompactionReply {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct CodingAgentChoice {
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
     pub label: String,
 }
@@ -948,7 +957,10 @@ pub struct CodingAgentOptions {
     #[serde(default)]
     pub turn_id: Option<String>,
     #[serde(default)]
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     pub provider: Option<AgentProvider>,
     #[serde(default)]
     pub choices: Vec<CodingAgentChoice>,
@@ -966,7 +978,7 @@ pub struct SwitchChatCodingAgentInput {
     pub request_id: String,
     #[schemars(length(min = 1, max = 200))]
     pub turn_id: String,
-    #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
 }
 

@@ -82,6 +82,8 @@
   --color-power-surface: light-dark(#f1ecfa, var(--dark-purple-surface));
   /* Claude Code's brand mark, beside the ink mark of Codex. */
   --color-claude: light-dark(#d97757, #e08a6c);
+  /* Antigravity uses the Gemini mark: Google publishes no Antigravity icon. */
+  --color-gemini: light-dark(#3367d6, #8ab4f8);
   --shadow-lift: 0 10px 30px -12px light-dark(#16151d33, #000c);
   --shadow-pop: 0 24px 70px -20px light-dark(#16151d55, #000);
   --color-bubble: light-dark(#16151d, #21354c);

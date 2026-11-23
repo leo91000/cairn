@@ -758,12 +758,13 @@ class SignalJourneyTest {
             compose.onNodeWithContentDescription("Atelier").performClick()
             waitText("Compte Claude Code requis")
             waitText("1/1 prêt · 64 % restant")
-            // Claude Code and OpenCode; 1Password is listed with the plugins, which load after.
+            // Claude Code, OpenCode and Antigravity; 1Password is listed with the plugins, which
+            // load after.
             compose.waitUntil(15000) {
                 compose
                     .onAllNodesWithText("Aucun compte", useUnmergedTree = true)
                     .fetchSemanticsNodes()
-                    .size == 2 &&
+                    .size == 3 &&
                     compose
                         .onAllNodesWithText("À configurer", useUnmergedTree = true)
                         .fetchSemanticsNodes()

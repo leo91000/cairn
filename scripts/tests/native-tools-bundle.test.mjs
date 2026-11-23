@@ -73,6 +73,7 @@ it.each([183, 0])('rejects a companion for a different ELF machine: %s', async (
 it('bundles only the engine versions resolved for this image', () => {
   expect(pinnedVersion('claude', '2.1.308 (Claude Code)\n', '2.1.308')).toBe('2.1.308')
   expect(pinnedVersion('codex', 'codex-cli 0.164.0\n', undefined)).toBe('0.164.0')
+  expect(pinnedVersion('agy', '1.5.14\n', '1.5.14')).toBe('1.5.14')
   expect(() => pinnedVersion('opencode', '1.19.0\n', '1.19.4')).toThrow('Installed opencode 1.19.0 is not the resolved 1.19.4')
   expect(() => pinnedVersion('claude', 'unknown\n', '2.1.308')).toThrow('Cannot identify pinned CLI version: claude')
 })
@@ -152,6 +153,60 @@ host['unpack_tools'](pathlib.Path(sys.argv[2]),pathlib.Path(sys.argv[3]))
   }
 
   await expect(bundler.createNativeToolsArchive(target, files)).rejects.toThrow('Native tool archive already exists.')
+})
+
+it('ships Antigravity in a separate bundle because the first one cannot hold it', async () => {
+  // Antigravity 1.5.14's single linux-x64 executable: 273240776 bytes, 101197286 zipped.
+  const agy = { extractedBytes: 273240776 + 200, manifestBytes: 200, compressedBytes: 101197286 }
+  expect(() => bundler.validateNativeToolBundleBudget({ ...agy, extractedBytes: agy.extractedBytes + 1006 * 1024 ** 2 })).toThrow('Native tools exceed extracted size budget.')
+  expect(() => bundler.validateNativeToolBundleBudget(agy, bundler.extraToolBundle)).not.toThrow()
+})
+
+it('keeps the extra bundle limits inclusive and rejects each next byte', () => {
+  const limits = { extractedBytes: 512 * 1024 ** 2, manifestBytes: 65536, compressedBytes: 256 * 1024 ** 2 }
+  const validate = sizes => bundler.validateNativeToolBundleBudget(sizes, bundler.extraToolBundle)
+  expect(() => validate(limits)).not.toThrow()
+  expect(() => validate({ ...limits, extractedBytes: limits.extractedBytes + 1 })).toThrow('Extra native tools exceed extracted size budget.')
+  expect(() => validate({ ...limits, manifestBytes: limits.manifestBytes + 1 })).toThrow('Extra native tool manifest exceeds limit.')
+  expect(() => validate({ ...limits, compressedBytes: limits.compressedBytes + 1 })).toThrow('Extra native tools exceed download size budget.')
+})
+
+it('publishes an extra ZIP the native supervisor installs beside the first bundle', async () => {
+  const { root, target, files } = await archivedFixture()
+  const archive = await bundler.createNativeToolsArchive(target, files)
+  const extra = path.join(root, 'extra')
+  await mkdir(extra)
+  const agy = await executable(extra, 'bin/agy')
+  const bytes = await readFile(agy)
+  const entry = { path: 'bin/agy', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }
+  const extraArchive = await bundler.createNativeToolsArchive(extra, [entry], bundler.extraToolBundle)
+  expect(JSON.parse(await readFile(path.join(extra, 'manifest.json'), 'utf8'))).toEqual({
+    version: 1,
+    os: 'linux',
+    arch: 'x86_64',
+    bundle: 'extra',
+    files: [entry],
+  })
+  const consumer = fileURLToPath(new URL('../../deploy/nodes/native-host.py', import.meta.url))
+  const installed = path.join(root, 'installed')
+  await mkdir(installed)
+  execFileSync('python3', ['-c', `
+import pathlib,runpy,sys
+host=runpy.run_path(sys.argv[1],run_name='bundle_contract_test')
+host['unpack_tools'](pathlib.Path(sys.argv[2]),pathlib.Path(sys.argv[4]))
+host['unpack_extra_tools'](pathlib.Path(sys.argv[3]),pathlib.Path(sys.argv[4]))
+`, consumer, archive, extraArchive, installed])
+  for (const file of [...files, entry]) {
+    const installedBytes = await readFile(path.join(installed, 'tools', file.path))
+    expect(createHash('sha256').update(installedBytes).digest('hex')).toBe(file.sha256)
+  }
+})
+
+it('ships only x86-64 executables in the extra bundle', () => {
+  const elf = machine => Buffer.concat([Buffer.from([0x7F, 0x45, 0x4C, 0x46]), Buffer.alloc(14), Buffer.from([machine, 0]), Buffer.alloc(44)])
+  expect(() => bundler.assertNativeExecutable('agy', elf(62))).not.toThrow()
+  expect(() => bundler.assertNativeExecutable('agy', elf(183))).toThrow('Not an x86-64 native executable: agy')
+  expect(() => bundler.assertNativeExecutable('agy', Buffer.from('#!/bin/sh\n'))).toThrow('Not an x86-64 native executable: agy')
 })
 
 it('refuses an archive containing stale files outside its manifest', async () => {

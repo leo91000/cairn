@@ -107,7 +107,9 @@ data class Chat(
     val wakeup: ChatWakeup? = null,
 ) {
     init {
-        accountRequired?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        accountRequired?.let {
+            require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(it))
+        }
         require(createdAt in 0L..9007199254740991L)
         environmentExpirationCause?.let {
             require(
@@ -122,7 +124,9 @@ data class Chat(
         require(Regex("^(active|trash|purging)\$").containsMatchIn(lifecycle))
         require(pendingQuestions >= 0L)
         require(pendingSideQuestions >= 0L)
-        provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        provider?.let {
+            require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(it))
+        }
         purgeAt?.let { require(it in 0L..9007199254740991L) }
         readAt?.let { require(it in 0L..9007199254740991L) }
         restoredAt?.let { require(it in 0L..9007199254740991L) }

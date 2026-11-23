@@ -59,7 +59,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
 
 /*
- * Coding-agent accounts: one list for Codex and Claude Code, a detail sheet per account and one
+ * Coding-agent accounts: one list per coding agent, a detail sheet per account and one
  * sign-in sheet for every coding agent. Selection rules and statuses come from the server.
  */
 
@@ -244,7 +244,7 @@ internal fun AccountRow(account: Account, open: () -> Unit) {
                         AccountBadge(account)
                     }
                     Text(
-                        account.modelProviderName ?: account.email ?: "Pas encore connecté",
+                        account.email ?: account.modelProviderName ?: "Pas encore connecté",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -576,6 +576,8 @@ internal fun AccountSheet(
                         account.state == "pending" ->
                             "Terminez la connexion pour voir l’usage de ce compte."
                         account.usage?.error != null -> account.usage.error
+                        account.provider == "antigravity" ->
+                            "Antigravity n’indique pas l’usage restant. Les exécutions peuvent utiliser ce compte."
                         account.status == "unavailable" ->
                             "L’usage apparaît après la première vérification, sous une minute."
                         else ->
@@ -703,7 +705,12 @@ internal fun AccountSheet(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 SignalButton(
-                    if (codingAgent(account.provider).apiKeys) "Remplacer la clé API"
+                    if (
+                        codingAgent(account.provider).accountSignIn &&
+                            account.modelProvider == GOOGLE_CLOUD
+                    )
+                        "Remplacer les identifiants"
+                    else if (replacesKey(account)) "Remplacer la clé API"
                     else if (account.state == "pending") "Se connecter" else "Reconnecter",
                     icon = CairnIcons.Retry,
                     container = MaterialTheme.colorScheme.surface,
@@ -816,13 +823,32 @@ internal fun AccountSignInSheet(
     var providerError by remember { mutableStateOf("") }
     var loadingProviders by remember { mutableStateOf(false) }
     var providerMenu by remember { mutableStateOf(false) }
-    val usesKey = codingAgent(provider).apiKeys
+    // Google Cloud credentials never enter saved instance state either.
+    var credentials by remember { mutableStateOf("") }
+    var project by remember { mutableStateOf("") }
+    var location by remember { mutableStateOf("") }
+    var googleWarning by remember { mutableStateOf(false) }
+    val agent = codingAgent(provider)
+    // Antigravity offers its connection kinds natively: a key, Google Cloud or a Google account.
+    val antigravity = agent.accountSignIn
+    val googleCloud = antigravity && modelProvider == GOOGLE_CLOUD
+    val usesKey = agent.apiKeys && !(antigravity && modelProvider == GOOGLE_ACCOUNT)
+    val keyReady =
+        when {
+            googleCloud ->
+                credentials.isNotBlank() && googleCloudCredentialsError(credentials) == null
+            antigravity -> apiKey.isNotBlank()
+            else -> !loadingProviders && keyProviders.isNotEmpty() && apiKey.isNotBlank()
+        }
     LaunchedEffect(provider) {
         apiKey = ""
+        credentials = ""
         providerError = ""
         keyProviders = emptyList()
-        loadingProviders = usesKey
-        if (usesKey) {
+        if (antigravity && antigravityConnections.none { it.first == modelProvider })
+            modelProvider = GEMINI_KEY
+        loadingProviders = agent.apiKeys && !antigravity
+        if (agent.apiKeys && !antigravity) {
             try {
                 keyProviders =
                     withContext(Dispatchers.IO) {
@@ -878,8 +904,11 @@ internal fun AccountSignInSheet(
                 Text(
                     when {
                         flow == null ->
-                            if (account != null) "Remplacer la clé API" else "Ajouter un compte"
+                            if (account == null) "Ajouter un compte"
+                            else if (googleCloud) "Remplacer les identifiants"
+                            else "Remplacer la clé API"
                         flow.state == "failed" -> "Nouvel essai nécessaire"
+                        codingAgent(flow.provider).accountSignIn -> "Connecter votre compte Google"
                         else ->
                             "Connecter votre ${codingAgent(flow.provider).subscription.replaceFirstChar { it.lowercase() }}"
                     },
@@ -887,8 +916,10 @@ internal fun AccountSignInSheet(
                 )
                 if (flow == null)
                     Text(
-                        if (usesKey) "Une clé API par fournisseur de modèles."
-                        else "Votre mot de passe reste chez ${codingAgent(provider).vendor}.",
+                        if (antigravity)
+                            "Une clé API Gemini, des identifiants Google Cloud ou un compte Google."
+                        else if (usesKey) "Une clé API par fournisseur de modèles."
+                        else "Votre mot de passe reste chez ${agent.vendor}.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -896,20 +927,18 @@ internal fun AccountSignInSheet(
             when {
                 flow == null -> {
                     if (account == null)
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.height(IntrinsicSize.Min),
-                        ) {
-                            codingAgents.forEach { agent ->
-                                ProviderTile(
-                                    agent.provider,
-                                    agent.subscription,
-                                    provider == agent.provider,
-                                    !state.busy,
-                                    Modifier.weight(1f).fillMaxHeight(),
-                                ) {
-                                    provider = agent.provider
-                                }
+                        ProviderTiles(codingAgents.map { it.provider to it.subscription }) {
+                            value,
+                            detail,
+                            modifier ->
+                            ProviderTile(
+                                value,
+                                detail,
+                                provider == value,
+                                !state.busy,
+                                modifier,
+                            ) {
+                                provider = value
                             }
                         }
                     OutlinedTextField(
@@ -921,7 +950,46 @@ internal fun AccountSignInSheet(
                         enabled = !state.busy && account == null,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    if (usesKey) {
+                    if (antigravity) {
+                        AntigravityConnectionChoice(
+                            modelProvider,
+                            enabled = !state.busy && account == null,
+                        ) {
+                            modelProvider = it
+                            apiKey = ""
+                            credentials = ""
+                        }
+                        when (modelProvider) {
+                            GOOGLE_ACCOUNT -> GoogleSignInWarningNotice()
+                            GOOGLE_CLOUD ->
+                                GoogleCloudFields(
+                                    credentials,
+                                    project,
+                                    location,
+                                    enabled = !state.busy,
+                                    changeCredentials = { credentials = it },
+                                    changeProject = { project = it },
+                                    changeLocation = { location = it },
+                                )
+                            else ->
+                                OutlinedTextField(
+                                    value = apiKey,
+                                    onValueChange = { apiKey = it.take(8192) },
+                                    label = { Text("Clé API Gemini") },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                                    enabled = !state.busy,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                        }
+                        if (usesKey)
+                            Text(
+                                "${if (googleCloud) "Les identifiants sont chiffrés" else "La clé est chiffrée"} sur votre installation. Antigravity n’indique pas l’usage restant.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                    } else if (usesKey) {
                         if (providerError.isNotBlank())
                             Text(providerError, color = MaterialTheme.colorScheme.error)
                         ExposedDropdownMenuBox(
@@ -988,8 +1056,45 @@ internal fun AccountSignInSheet(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    SignalButton(
+                    fun submit() = vm.perform {
+                        val accountName =
+                            name.trim().ifBlank { "Compte ${providerLabel(provider)}" }
+                        val key =
+                            if (googleCloud) googleCloudKey(credentials, project, location)
+                            else apiKey
+                        if (usesKey && account != null) {
+                            api.replaceCodingAgentAccountKey(
+                                    ReplaceAccountKeyInput(
+                                        accountId = account.id,
+                                        modelProvider = modelProvider,
+                                        apiKey = key,
+                                    )
+                                )
+                                .requireConnection()
+                        } else {
+                            api.connectCodingAgentAccount(
+                                    ConnectAccountInput(
+                                        provider = provider,
+                                        name = accountName,
+                                        modelProvider = if (usesKey) modelProvider else null,
+                                        apiKey = if (usesKey) key else null,
+                                    )
+                                )
+                                .requireConnection()
+                        }
+                        changed()
                         if (usesKey)
+                            withContext(Dispatchers.Main) {
+                                apiKey = ""
+                                credentials = ""
+                                close()
+                            }
+                    }
+                    SignalButton(
+                        if (googleCloud)
+                            if (account == null) "Enregistrer les identifiants"
+                            else "Remplacer les identifiants"
+                        else if (usesKey)
                             if (account == null) "Enregistrer la clé API"
                             else "Remplacer la clé API"
                         else "Continuer vers la connexion",
@@ -997,45 +1102,17 @@ internal fun AccountSignInSheet(
                         container = MaterialTheme.colorScheme.primary,
                         content = MaterialTheme.colorScheme.onPrimary,
                         expand = true,
-                        enabled =
-                            !state.busy &&
-                                (!usesKey ||
-                                    (!loadingProviders &&
-                                        keyProviders.isNotEmpty() &&
-                                        apiKey.isNotBlank())),
+                        enabled = !state.busy && (!usesKey || keyReady),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        vm.perform {
-                            val accountName =
-                                name.trim().ifBlank { "Compte ${providerLabel(provider)}" }
-                            if (usesKey && account != null) {
-                                api.replaceCodingAgentAccountKey(
-                                        ReplaceAccountKeyInput(
-                                            accountId = account.id,
-                                            modelProvider = modelProvider,
-                                            apiKey = apiKey,
-                                        )
-                                    )
-                                    .requireConnection()
-                            } else {
-                                api.connectCodingAgentAccount(
-                                        ConnectAccountInput(
-                                            provider = provider,
-                                            name = accountName,
-                                            modelProvider = if (usesKey) modelProvider else null,
-                                            apiKey = if (usesKey) apiKey else null,
-                                        )
-                                    )
-                                    .requireConnection()
-                            }
-                            changed()
-                            if (usesKey)
-                                withContext(Dispatchers.Main) {
-                                    apiKey = ""
-                                    close()
-                                }
-                        }
+                        // A Google account sign-in starts only once the owner accepts the risk.
+                        if (antigravity && !usesKey) googleWarning = true else submit()
                     }
+                    if (googleWarning)
+                        GoogleSignInWarningDialog(dismiss = { googleWarning = false }) {
+                            googleWarning = false
+                            submit()
+                        }
                 }
                 flow.state == "failed" -> {
                     Text(
@@ -1043,6 +1120,18 @@ internal fun AccountSignInSheet(
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     )
+                    var retryWarning by remember { mutableStateOf(false) }
+                    fun retry() = vm.perform {
+                        api.reconnectCodingAgentAccount(AccountInput(flow.accountId))
+                            .requireConnection()
+                        changed()
+                    }
+                    // Trying again starts another Google sign-in: the same warning applies.
+                    if (retryWarning)
+                        GoogleSignInWarningDialog(dismiss = { retryWarning = false }) {
+                            retryWarning = false
+                            retry()
+                        }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         SignalButton(
                             "Réessayer",
@@ -1050,11 +1139,7 @@ internal fun AccountSignInSheet(
                             content = MaterialTheme.colorScheme.onPrimary,
                             enabled = !state.busy,
                         ) {
-                            vm.perform {
-                                api.reconnectCodingAgentAccount(AccountInput(flow.accountId))
-                                    .requireConnection()
-                                changed()
-                            }
+                            if (flow.provider == "antigravity") retryWarning = true else retry()
                         }
                         TextButton(onClick = ::dismiss, enabled = !state.busy) { Text("Fermer") }
                     }
@@ -1108,26 +1193,31 @@ internal fun AccountSignInSheet(
                             }
                         }
                     } else {
+                        // Claude Code and Antigravity's Google account share the pasted-code steps.
+                        val google = codingAgent(flow.provider).accountSignIn
+                        val vendor = if (google) "Google" else "Anthropic"
+                        val brand = if (google) "Google" else "Claude"
                         Step(
                             if (flow.url != null) StepState.DONE else StepState.CURRENT,
                             "1",
-                            if (flow.url != null) "Connectez-vous sur la page d’Anthropic"
+                            if (flow.url != null)
+                                "Connectez-vous sur la page ${if (google) "de " else "d’"}$vendor"
                             else "Préparation du lien de connexion…",
                         ) {
                             if (flow.url != null && !verifying)
-                                ExternalButton("Ouvrir la connexion Claude", flow.url)
+                                ExternalButton("Ouvrir la connexion $brand", flow.url)
                         }
                         Step(
                             if (verifying) StepState.DONE
                             else if (flow.acceptsCode) StepState.CURRENT else StepState.LATER,
                             "2",
-                            "Collez le code affiché par Anthropic",
+                            "Collez le code affiché par $vendor",
                         ) {
                             if (flow.acceptsCode && !verifying) {
                                 OutlinedTextField(
                                     value = code,
                                     onValueChange = { code = it },
-                                    label = { Text("Code d’autorisation Claude") },
+                                    label = { Text("Code d’autorisation $brand") },
                                     singleLine = true,
                                     keyboardOptions = InputKeyboards.Password,
                                     visualTransformation = PasswordVisualTransformation(),

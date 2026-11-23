@@ -16,6 +16,12 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, Weak},
 };
 
+/// Coding agents whose runs receive credentials that change during the run: Codex
+/// rotates its tokens and Antigravity renews Google access tokens.
+fn observed(provider: Provider) -> bool {
+    matches!(provider, Provider::Codex | Provider::Antigravity)
+}
+
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // These locks contain only append/deduplicate bookkeeping, never callbacks
     // or I/O. A panic must not reset an already learned redaction history.
@@ -86,7 +92,7 @@ struct State {
 impl Scope {
     fn check(&self, state: &State, lease: &Lease) -> Result<()> {
         if !state.active
-            || lease.provider != Provider::Codex
+            || !observed(lease.provider)
             || lease.account_id != self.account
             || lease.run_id != self.run
             || lease.home != self.home
@@ -278,12 +284,12 @@ impl super::Accounts {
         attempt: &str,
         history: History,
     ) -> Result<Option<Observation>> {
-        if lease.provider != Provider::Codex {
+        if !observed(lease.provider) {
             return Ok(None);
         }
         let current = self.lease(s, &lease.run_id).await?;
         if current.is_none_or(|current| {
-            current.provider != Provider::Codex
+            !observed(current.provider)
                 || current.account_id != lease.account_id
                 || current.home != lease.home
         }) {

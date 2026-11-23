@@ -14,18 +14,25 @@ import { buildVersions, engines } from '../cli-updates.mjs'
 
 const claudeVersion = '2.1.311'
 const claudeRelease = `https://registry.npmjs.org/@anthropic-ai/claude-code/${claudeVersion}`
+const antigravityManifest = 'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json'
+const antigravityUrl = version => `https://storage.googleapis.com/antigravity-public/antigravity-cli/${version}-5302690847260672/linux-x64/cli_linux_x64.tar.gz`
+const antigravitySha512 = 'a'.repeat(128)
 const registry = {
   'https://registry.npmjs.org/@openai/codex/latest': { version: '0.159.0' },
   [claudeRelease]: { version: claudeVersion },
   'https://registry.npmjs.org/@anthropic-ai/claude-code/stable': { version: '2.1.323' },
   'https://registry.npmjs.org/opencode-ai/latest': { version: '1.19.4' },
   'https://api.github.com/repos/cli/cli/releases/latest': { tag_name: 'v2.101.0', draft: false, prerelease: false },
+  [antigravityManifest]: { version: '1.5.14', url: antigravityUrl('1.5.14'), sha512: antigravitySha512 },
 }
 const resolved = {
-  codex: '0.159.0',
-  gh: '2.101.0',
-  claude: claudeVersion,
-  opencode: '1.19.4',
+  'codex': '0.159.0',
+  'gh': '2.101.0',
+  'claude': claudeVersion,
+  'opencode': '1.19.4',
+  'antigravity': '1.5.14',
+  'antigravity-url': antigravityUrl('1.5.14'),
+  'antigravity-sha512': antigravitySha512,
 }
 
 function fixture(changes = {}) {
@@ -43,7 +50,7 @@ describe('application image tool versions', () => {
   it('resolves every agent tool without Dockerfile version defaults', async () => {
     expect(await buildVersions({ request: fixture() })).toEqual(resolved)
     const dockerfile = readFileSync(new URL('../../Dockerfile', import.meta.url), 'utf8')
-    for (const name of ['CODEX_VERSION', 'GH_VERSION', 'CLAUDE_VERSION', 'OPENCODE_VERSION']) {
+    for (const name of ['CODEX_VERSION', 'GH_VERSION', 'CLAUDE_VERSION', 'OPENCODE_VERSION', 'ANTIGRAVITY_VERSION']) {
       expect(dockerfile).toMatch(new RegExp(`^ARG ${name}$`, 'm'))
       expect(dockerfile).toContain(`APP_${name}=$${name}`)
     }
@@ -54,6 +61,17 @@ describe('application image tool versions', () => {
     // eslint-disable-next-line no-template-curly-in-string -- Docker expands these build arguments.
     expect(dockerfile).toContain('test "$(codex --version)" = "codex-cli ${CODEX_VERSION}"')
     expect(dockerfile).toContain('test "$(opencode --version)" = "$OPENCODE_VERSION"')
+    // Antigravity is the exact archive its manifest named, checked by digest, and never updates itself.
+    for (const name of ['ANTIGRAVITY_URL', 'ANTIGRAVITY_SHA512'])
+      expect(dockerfile).toMatch(new RegExp(`^ARG ${name}$`, 'm'))
+    expect(dockerfile).toContain('printf \'%s  /tmp/antigravity.tar.gz\\n\' "$ANTIGRAVITY_SHA512" | sha512sum --check -')
+    expect(dockerfile).toContain('test "$(HOME=/tmp/antigravity-home agy --version)" = "$ANTIGRAVITY_VERSION"')
+    expect(dockerfile).toMatch(/^ENV AGY_CLI_DISABLE_AUTO_UPDATE=true$/m)
+  })
+
+  it('shares the oldest Antigravity release its adapter supports', () => {
+    const adapter = readFileSync(new URL('../../crates/installation/src/antigravity/mod.rs', import.meta.url), 'utf8')
+    expect(adapter).toContain(`pub const MINIMUM: &str = "${engines.antigravity.minimum}";`)
   })
 
   it('pins the Claude Code release that fits in the native tool bundle', async () => {
@@ -79,6 +97,7 @@ describe('application image tool versions', () => {
       gh: 'GH_VERSION',
       claude: 'CLAUDE_VERSION',
       opencode: 'OPENCODE_VERSION',
+      antigravity: 'ANTIGRAVITY_VERSION',
     })) {
       const output = `\${{ needs.resolve.outputs.${tool} }}`
       expect(jobs.resolve.outputs[tool]).toBe(`\${{ steps.tools.outputs.${tool} }}`)
@@ -87,6 +106,13 @@ describe('application image tool versions', () => {
         expect(build.with['build-args']).toContain(`${name}=${output}\n`)
       expect(record.env[name]).toBe(output)
       expect(record.run).toContain(`${tool}: process.env.${name}`)
+    }
+
+    // The image downloads exactly the archive and digest the resolve job read.
+    for (const [output, name] of [['antigravity-url', 'ANTIGRAVITY_URL'], ['antigravity-sha512', 'ANTIGRAVITY_SHA512']]) {
+      expect(jobs.resolve.outputs[output]).toBe(`\${{ steps.tools.outputs.${output} }}`)
+      for (const build of builds)
+        expect(build.with['build-args']).toContain(`${name}=\${{ needs.resolve.outputs.${output} }}\n`)
     }
   })
 
@@ -136,6 +162,16 @@ describe('application image tool versions', () => {
       expect(claude.run).toContain(test)
     for (const test of ['native_cli_lists_providers_and_models', 'pinned_native_cli_executes_and_resumes_without_global_plugins'])
       expect(opencode.run).toContain(test)
+    // Only Antigravity's current release is downloadable, so it is the one qualified.
+    const antigravity = qualification.steps.find(step => step.name === 'Qualify the resolved Antigravity release against its native adapter')
+    expect(antigravity.env).toEqual({
+      ANTIGRAVITY_VERSION: expression('needs.resolve.outputs.antigravity'),
+      ANTIGRAVITY_URL: expression('needs.resolve.outputs.antigravity-url'),
+      ANTIGRAVITY_SHA512: expression('needs.resolve.outputs.antigravity-sha512'),
+    })
+    expect(antigravity.run).toContain('sha512sum --check -')
+    expect(antigravity.run).toContain('node scripts/test-backend.mjs -p cairn-installation --test antigravity -- --ignored')
+    expect(antigravity.run).toContain('ANTIGRAVITY_NATIVE_BIN="$directory/bin/agy"')
     // Images require both the backend workload and its separate CLI qualifications.
     for (const name of ['backend', 'cli-qualification']) {
       expect(jobs.publish.needs).toContain(name)
@@ -185,12 +221,13 @@ describe('application image tool versions', () => {
       { url: 'https://registry.npmjs.org/@openai/codex/latest', options: undefined },
       { url: claudeRelease, options: undefined },
       { url: 'https://registry.npmjs.org/opencode-ai/latest', options: undefined },
+      { url: antigravityManifest, options: undefined },
       {
         url: 'https://api.github.com/repos/cli/cli/releases/latest',
         options: { headers: { Accept: 'application/vnd.github+json', authorization: 'Bearer fixture-token' } },
       },
     ]))
-    expect(requests).toHaveLength(4)
+    expect(requests).toHaveLength(5)
   })
 
   it('rejects unstable releases and failed discovery before building', async () => {
@@ -226,6 +263,28 @@ describe('application image tool versions', () => {
     expect(versions).toMatchObject({ codex: '1.0.0', opencode: '1.20.0' })
   })
 
+  it.each([
+    ['older than the adapter supports', { version: '1.5.13', url: antigravityUrl('1.5.13') }, 'Antigravity 1.5.13 is older than 1.5.14, the oldest release its adapter supports.'],
+    ['a prerelease', { version: '1.6.0-rc.1' }, 'Antigravity manifest does not name a stable release.'],
+    ['malformed', { version: 1514 }, 'Antigravity manifest does not name a stable release.'],
+    ['missing', new Error(`Request to ${antigravityManifest} failed: HTTP 404`), 'failed: HTTP 404'],
+    ['for another release', { url: antigravityUrl('1.5.13') }, 'Antigravity 1.5.14 manifest does not name its official linux-x64 archive.'],
+    ['for another platform', { url: antigravityUrl('1.5.14').replace('linux-x64/cli_linux_x64', 'linux-arm/cli_linux_arm64') }, 'Antigravity 1.5.14 manifest does not name its official linux-x64 archive.'],
+    ['hosted elsewhere', { url: antigravityUrl('1.5.14').replace('storage.googleapis.com', 'storage.example.test') }, 'Antigravity 1.5.14 manifest does not name its official linux-x64 archive.'],
+    ['with an injected output', { url: `${antigravityUrl('1.5.14')}\nopencode=0.0.1` }, 'Antigravity 1.5.14 manifest does not name its official linux-x64 archive.'],
+    ['without a build id', { url: antigravityUrl('1.5.14').replace('-5302690847260672', '-') }, 'Antigravity 1.5.14 manifest does not name its official linux-x64 archive.'],
+    ['without a digest', { sha512: undefined }, 'Antigravity 1.5.14 manifest does not carry a SHA-512 digest.'],
+    ['with a SHA-256 digest', { sha512: 'b'.repeat(64) }, 'Antigravity 1.5.14 manifest does not carry a SHA-512 digest.'],
+  ])('fails when the Antigravity manifest is %s', async (_, change, message) => {
+    const response = change instanceof Error ? change : { ...registry[antigravityManifest], ...change }
+    await expect(buildVersions({ request: fixture({ [antigravityManifest]: response }) })).rejects.toThrow(message)
+  })
+
+  it('follows the Antigravity manifest into new releases', async () => {
+    const versions = await buildVersions({ request: fixture({ [antigravityManifest]: { version: '2.0.0', url: antigravityUrl('2.0.0'), sha512: 'c'.repeat(128) } }) })
+    expect(versions).toMatchObject({ 'antigravity': '2.0.0', 'antigravity-url': antigravityUrl('2.0.0'), 'antigravity-sha512': 'c'.repeat(128) })
+  })
+
   it('fails when OpenCode latest moves below the oldest release its adapter supports', async () => {
     await expect(buildVersions({ request: fixture({ 'https://registry.npmjs.org/opencode-ai/latest': { version: '1.18.35' } }) }))
       .rejects
@@ -251,7 +310,7 @@ describe('build-versions command', () => {
       expect(result.status).toBe(0)
       expect(result.stderr).toBe('')
       expect(JSON.parse(result.stdout)).toEqual(resolved)
-      expect(readFileSync(output, 'utf8')).toBe(`existing=value\ncodex=0.159.0\ngh=2.101.0\nclaude=${claudeVersion}\nopencode=1.19.4\n`)
+      expect(readFileSync(output, 'utf8')).toBe(`existing=value\ncodex=0.159.0\ngh=2.101.0\nclaude=${claudeVersion}\nopencode=1.19.4\nantigravity=1.5.14\nantigravity-url=${antigravityUrl('1.5.14')}\nantigravity-sha512=${antigravitySha512}\n`)
     }
     finally {
       rmSync(directory, { recursive: true, force: true })

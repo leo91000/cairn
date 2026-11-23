@@ -1,5 +1,6 @@
 //! Native execution differences between coding agents. Account selection, workspace
 //! ownership and execution lifecycle stay in their existing shared services.
+mod antigravity;
 mod claude;
 mod codex;
 pub mod mcp;
@@ -119,6 +120,7 @@ impl Provider {
             Self::Codex => &codex::Codex,
             Self::Claude => &claude::Claude,
             Self::Opencode => &opencode::Opencode,
+            Self::Antigravity => &antigravity::Antigravity,
         }
     }
 }

@@ -790,7 +790,7 @@ export function errorSection(message: string): SectionId | undefined {
     ['mcps', /mcp|tool/],
     ['skills', /skill/],
     ['projects', /project/],
-    ['model', /model|provider|reasoning|speed|codex|claude|opencode/],
+    ['model', /model|provider|reasoning|speed|codex|claude|opencode|antigravity/],
     ['advanced', /time limit|timeout/],
     ['identity', /name|description|instruction/],
   ]

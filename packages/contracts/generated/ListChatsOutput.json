@@ -177,7 +177,7 @@
         },
         "provider": {
           "default": "codex",
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "reasoning": {
@@ -268,7 +268,7 @@
       "properties": {
         "accountRequired": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -471,7 +471,7 @@
         },
         "provider": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -831,7 +831,7 @@
         },
         "provider": {
           "default": "",
-          "pattern": "^(|codex|claude|opencode)$",
+          "pattern": "^(|codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "questionId": {
@@ -969,7 +969,7 @@
         },
         "provider": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -1144,7 +1144,7 @@
           ]
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         }
       },
@@ -1381,7 +1381,7 @@
           "type": "string"
         },
         "provider": {
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": "string"
         },
         "revision": {
@@ -1671,7 +1671,7 @@
         },
         "accountRequired": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"
@@ -1866,7 +1866,7 @@
         },
         "provider": {
           "default": null,
-          "pattern": "^(codex|claude|opencode)$",
+          "pattern": "^(codex|claude|opencode|antigravity)$",
           "type": [
             "string",
             "null"

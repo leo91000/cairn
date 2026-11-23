@@ -137,7 +137,7 @@ export interface ActivityWait {
 const waitBoundaries = new Set(['turn.completed', 'turn.failed', 'chat.user', 'chat.sleep', 'chat.wait', 'chat.wait_ready', 'chat.wakeup', 'run.wait', 'run.wait_ready', 'run.wakeup'])
 const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'interrupted'])
 
-// Codex names the workspace server; Claude and OpenCode prefix the tool with it.
+// Codex and Antigravity name the workspace server; Claude and OpenCode prefix the tool with it.
 const workspaceWaitTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)(?:sleep|wait_for)$/
 
 const workspaceDelegateTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)delegate_task$/

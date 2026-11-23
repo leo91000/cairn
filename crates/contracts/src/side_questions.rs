@@ -50,7 +50,10 @@ pub struct ChatSideQuestion {
     pub reply_event_id: String,
     #[serde(default)]
     #[ts(optional = nullable)]
-    #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
+    #[schemars(
+        with = "Option<String>",
+        pattern("^(codex|claude|opencode|antigravity)$")
+    )]
     pub provider: Option<AgentProvider>,
     #[schemars(with = "String", pattern("^(pending|answered|failed|cancelled)$"))]
     pub status: SideQuestionStatus,

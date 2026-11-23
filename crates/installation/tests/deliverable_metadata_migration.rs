@@ -20,7 +20,14 @@ type Snapshot = BTreeMap<String, (String, Vec<Vec<SqlValue>>)>;
 fn schema(db: &Connection) -> BTreeMap<(String, String), String> {
     db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name")
         .unwrap()
-        .query_map([], |row| Ok(((row.get(0)?, row.get(1)?), row.get(2)?)))
+        // Version 37 only adds Antigravity to coding-agent constraints; earlier
+        // upgrades are compared without it.
+        .query_map([], |row| {
+            Ok((
+                (row.get(0)?, row.get(1)?),
+                row.get::<_, String>(2)?.replace(",'antigravity'", ""),
+            ))
+        })
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap()
@@ -31,7 +38,10 @@ fn snapshot(db: &Connection) -> Snapshot {
         .prepare("SELECT name,sql FROM sqlite_schema WHERE type='table' ORDER BY name")
         .unwrap()
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?.replace(",'antigravity'", ""),
+            ))
         })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -133,7 +143,7 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        36
+        37
     );
     let after = snapshot(&db);
     let after_schema = schema(&db);

@@ -29,7 +29,7 @@ CREATE TABLE conversation_engine_switches(
     request_id TEXT NOT NULL,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     turn_id TEXT NOT NULL CHECK(length(turn_id) BETWEEN 1 AND 200),
-    provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode')),
+    provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode','antigravity')),
     model TEXT NOT NULL,
     pending INTEGER NOT NULL CHECK(pending IN (0,1)),
     error TEXT,
@@ -74,7 +74,10 @@ impl Db<'_> {
         // Called in the conversation writer transaction. Retain earlier idempotency
         // receipts while making exactly one request current for this conversation.
         if value.provider.is_empty()
-            || !matches!(value.provider.as_str(), "codex" | "claude" | "opencode")
+            || !matches!(
+                value.provider.as_str(),
+                "codex" | "claude" | "opencode" | "antigravity"
+            )
             || value.turn_id.is_empty()
             || value.turn_id.chars().count() > 200
         {

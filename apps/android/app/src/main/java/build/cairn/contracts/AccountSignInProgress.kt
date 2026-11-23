@@ -13,7 +13,7 @@ data class AccountSignInProgress(
 ) {
     init {
         require(Regex("^(starting|authorizing|verifying)\$").containsMatchIn(phase))
-        require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
+        require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
         require(Regex("^(pending|complete|failed|cancelled)\$").containsMatchIn(state))
     }
 }
