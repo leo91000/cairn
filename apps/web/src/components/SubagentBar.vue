@@ -82,8 +82,14 @@ function holdPress(id: string, event: PointerEvent, inScrollingRow = false) {
   }
   // A mouse has no implicit capture: without it, the release and click of a moved button go
   // to whatever moved under the pointer. Touch and pen keep the browser's own targeting.
-  if (event.pointerType === 'mouse')
-    button.setPointerCapture(event.pointerId)
+  // A scripted pointer that the browser does not track cannot be captured.
+  if (event.pointerType === 'mouse') {
+    try {
+      button.setPointerCapture(event.pointerId)
+    }
+    catch {}
+  }
+
   // The release may reach what moved under the pointer, as WebKit does even for touch.
   window.addEventListener('pointerup', releasePress, true)
   // A later press means this one ended without a release this bar saw.

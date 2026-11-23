@@ -929,7 +929,14 @@ test('working subagents stay in sight beside the composer and open as a drawer o
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
     await panel.getByRole('button', { name: 'Close subagent activity' }).click()
     await expect(chip).toBeFocused()
+    // A click just inside a chip's left edge opens it: WebKit truncates the mouse coordinates of
+    // a chip that starts at a fractional position.
+    const second = bar.getByTestId('subagent-chip').filter({ hasText: 'Check the panel accessibility' })
+    const secondBounds = (await second.boundingBox())!
+    await page.mouse.click(secondBounds.x + 0.4, secondBounds.y + secondBounds.height / 2)
+    await expect(second).toHaveAttribute('aria-pressed', 'true')
     await chip.click()
+    await expect(chip).toHaveAttribute('aria-pressed', 'true')
     await page.screenshot({ path: test.info().outputPath('subagent-bar-1440.png'), animations: 'disabled' })
 
     await page.setViewportSize({ width: 390, height: 844 })
