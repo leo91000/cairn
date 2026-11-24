@@ -279,7 +279,7 @@ impl StagingReceipt {
 
     fn owns(&self, file: &std::fs::File) -> Result<bool> {
         Ok(file.metadata()?.ino() == self.inode
-            && crate::storage::policy::filesystem_id(file)? == self.filesystem)
+            && super::quota::pool_identity(file)? == self.filesystem)
     }
 
     fn validate_location(&self, parent: &Path) -> Result<()> {
@@ -394,7 +394,7 @@ impl Preparation {
             .open(staging)?;
         let receipt = StagingReceipt {
             path: staging.to_owned(),
-            filesystem: crate::storage::policy::filesystem_id(&file)?,
+            filesystem: super::quota::pool_identity(&file)?,
             inode: file.metadata()?.ino(),
         };
         receipt.validate_location(&data.join("runs"))?;
@@ -778,7 +778,7 @@ mod tests {
                 physical: None,
                 staging: Some(StagingReceipt {
                     path: temp.clone(),
-                    filesystem: crate::storage::policy::filesystem_id(
+                    filesystem: crate::native::quota::pool_identity(
                         &std::fs::File::open(&temp).unwrap(),
                     )
                     .unwrap(),

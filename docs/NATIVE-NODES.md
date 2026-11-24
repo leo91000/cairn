@@ -192,6 +192,21 @@ container stores are not converted or transferred.
 Revoke the node in Cairn first, then stop/disable `cairn-native-node.service` on its
 host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries and
 all retained local work; push commits and export files to keep before confirming revocation.
+After confirmed consumer shutdown, retire any persistent units installed by
+`migrate-pool` before running the Revoke command again. Use the migration
+receipt at `/var/lib/cairn-native/native-pool-migration/state.json` to identify the
+XFS UUID and, for image targets, the backing file. Inspect the pool unit with
+`systemctl cat "$(systemd-escape --path --suffix=mount /var/lib/cairn-native/state/native-data)"`
+and confirm that its `What=` references that UUID. For an image target, also
+inspect `systemctl cat cairn-native-data-loop.service` and confirm that it
+references the recorded image and UUID. Disable and stop the verified mount
+unit first, then disable and stop the verified loop service if present. Check
+with `findmnt` that the pool was unmounted and with `losetup --associated` and
+the recorded image path that no loop still holds it. Remove those verified
+unit files, then run `systemctl daemon-reload`. Keep any storage volume or
+backing file you need to retain outside the directories slated for removal.
+Operator-provisioned mount units are managed by the operator.
+
 After confirmed consumer shutdown, unmount the operator-provisioned native-data
 pool before removing its mountpoint. First confirm with `findmnt` that no other
 conversation disk is still mounted below

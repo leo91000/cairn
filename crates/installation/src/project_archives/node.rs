@@ -311,6 +311,9 @@ async fn prefetch_into(
     stop: CancellationToken,
 ) -> Result<()> {
     for descriptor in descriptors {
+        if stop.is_cancelled() {
+            return Ok(());
+        }
         // A best-effort warmer never queues behind active filesystem mutation.
         let state = crate::native::state_dir();
         let _disk = if crate::native::enabled() {
@@ -334,30 +337,44 @@ async fn prefetch_into(
                 continue;
             }
         }
+        let transfer = stop.child_token();
         let fetch = async {
-            let response = client
-                .post(
-                    master
-                        .join(&format!(
-                            "internal/node-workspace/cache/{}",
-                            descriptor.project_id
-                        ))
-                        .map_err(Error::internal)?,
-                )
-                .timeout(std::time::Duration::from_secs(300))
-                .bearer_auth(&token)
-                .json(&serde_json::json!({ "hash": descriptor.hash }))
-                .send()
-                .await
-                .map_err(|_| Error::unavailable("Project archive preload interrupted."))?;
-            download(&root, &descriptor, response, budget().await?, &stop).await?;
+            let response = await_preparation(&transfer, async {
+                client
+                    .post(
+                        master
+                            .join(&format!(
+                                "internal/node-workspace/cache/{}",
+                                descriptor.project_id
+                            ))
+                            .map_err(Error::internal)?,
+                    )
+                    .timeout(std::time::Duration::from_secs(300))
+                    .bearer_auth(&token)
+                    .json(&serde_json::json!({ "hash": descriptor.hash }))
+                    .send()
+                    .await
+                    .map_err(|_| Error::unavailable("Project archive preload interrupted."))
+            })
+            .await?;
+            download(&root, &descriptor, response, budget().await?, &transfer).await?;
             Ok::<_, Error>(())
         };
+        tokio::pin!(fetch);
         tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            () = foreground_waiter(&state), if crate::native::enabled() => return Ok(()),
-            result = fetch => if let Err(error) = result {
-                tracing::debug!(project_id = %descriptor.project_id, status = error.status, "Project archive preload deferred");
+            () = foreground_waiter(&state), if crate::native::enabled() => {
+                transfer.cancel();
+                // Keep both mutation guards until accepted writes and any
+                // publication already in flight have settled.
+                let _ = fetch.await;
+                return Ok(());
+            }
+            result = &mut fetch => {
+                if let Err(error) = result
+                    && !stop.is_cancelled()
+                {
+                    tracing::debug!(project_id = %descriptor.project_id, status = error.status, "Project archive preload deferred");
+                }
             },
         }
     }

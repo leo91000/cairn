@@ -5,6 +5,7 @@ The manager's HTTPS origin authenticates the release manifest. Exact binary and
 tool digests authenticate its payloads. Credentials never enter command arguments.
 """
 import ctypes
+import errno
 from contextlib import ExitStack
 import getpass
 import fcntl
@@ -863,6 +864,8 @@ OFFLINE_LOCK_FDS = ()
 CONTROLLER_RECEIPT_RESERVE = 64 * 1024 ** 2
 MOUNT_RESTRICTIONS = ('nosuid', 'nodev', 'noexec', 'nosymfollow')
 GET_INODE_FLAGS = 0x80086601  # FS_IOC_GETFLAGS on the supported Linux x86-64 host.
+XFS_GEOMETRY = 0x80705864  # XFS_IOC_FSGEOMETRY_V1
+XFS_GEOMETRY_V1 = struct.Struct('=64x16s32x')  # UUID after eight u32 and four u64 fields.
 GET_FILE_EXTENTS = 0xc020660b  # FS_IOC_FIEMAP
 EXTENT_HEADER = struct.Struct('=QQIIII')
 FILE_EXTENT = struct.Struct('=QQQQQIIII')
@@ -983,8 +986,8 @@ def mount_of(target):
     return found
 
 
-def filesystem_uuid(device):
-    return checked('blkid', '-p', '-s', 'UUID', '-o', 'value', str(device)).strip()
+def filesystem_uuid(device, descriptors=()):
+    return checked('blkid', '-p', '-s', 'UUID', '-o', 'value', str(device), descriptors=descriptors).strip()
 
 
 def mount_unit_name(path):
@@ -1190,9 +1193,9 @@ def has_partitions(sysfs):
     return sysfs.is_dir() and any((child / 'partition').is_file() for child in sysfs.iterdir())
 
 
-def check_device(device, force, uuid=None):
+def check_device(device, force, uuid=None, descriptor=None):
     try:
-        metadata = device.stat()
+        metadata = device.stat() if descriptor is None else os.fstat(descriptor)
     except OSError as error:
         raise MigrationError(f'{device} is not available.') from error
     if not stat.S_ISBLK(metadata.st_mode):
@@ -1209,7 +1212,9 @@ def check_device(device, force, uuid=None):
     if holders.is_dir() and any(holders.iterdir()):
         raise MigrationError(f'{device} is in use by another device (LVM, RAID or dm).')
     # blkid exits 2 when it finds no signature at all.
-    probe = subprocess.run(['blkid', '-p', '-o', 'export', str(device)], capture_output=True, text=True, timeout=30)
+    path = str(device) if descriptor is None else f'/proc/self/fd/{descriptor}'
+    descriptors = () if descriptor is None else (descriptor,)
+    probe = subprocess.run(['blkid', '-p', '-o', 'export', path], capture_output=True, text=True, timeout=30, pass_fds=descriptors)
     if probe.returncode not in (0, 2):
         raise MigrationError(f'blkid could not probe {device}.')
     fields = dict(line.split('=', 1) for line in probe.stdout.splitlines() if '=' in line)
@@ -1334,6 +1339,15 @@ def remount_old_pool(old, pool):
 def verify_old_pool(old, mounted):
     if not mounted or mounted.get('fstype') != 'ext4' or filesystem_uuid(mounted['source']) != old['uuid']:
         raise MigrationError('The mounted ext4 filesystem does not match the original pool.')
+
+
+def verify_restored_pool(old, mounted):
+    verify_old_pool(old, mounted)
+    options = set(mounted.get('options', '').split(','))
+    if 'rw' not in options or 'ro' in options or 'prjquota' not in options:
+        raise MigrationError('Restore the original pool writable with project quotas before completing rollback.')
+    if not set(old.get('restrictions', ())).issubset(options):
+        raise MigrationError('Restore the original pool mount restrictions before completing rollback.')
 
 
 def mount_new_pool(record, old, pool):
@@ -1475,7 +1489,21 @@ def image_identity(descriptor):
     metadata = os.fstat(descriptor)
     if not stat.S_ISREG(metadata.st_mode):
         raise MigrationError('A native pool backing file must be a regular file.')
-    return {'filesystem': os.fstatvfs(descriptor).f_fsid, 'inode': metadata.st_ino}
+    # XFS f_fsid encodes the current device number. The UUID remains
+    # stable when the backing filesystem is reattached after a reboot.
+    geometry = bytearray(XFS_GEOMETRY_V1.size)
+    try:
+        fcntl.ioctl(descriptor, XFS_GEOMETRY, geometry)
+    except OSError as error:
+        if error.errno not in (errno.ENOTTY, errno.EOPNOTSUPP):
+            raise
+        filesystem = os.fstatvfs(descriptor).f_fsid
+    else:
+        (identifier,) = XFS_GEOMETRY_V1.unpack(geometry)
+        if identifier == bytes(16):
+            raise MigrationError('The XFS image host has no stable filesystem UUID.')
+        filesystem = str(uuid.UUID(bytes=identifier))
+    return {'filesystem': filesystem, 'inode': metadata.st_ino}
 
 
 def check_image_inode(descriptor, receipt):
@@ -1694,7 +1722,13 @@ def prepare_loop(record, force, handles):
     if actual[2:] != ['1']:
         raise MigrationError(f'{device} does not support direct I/O for this image. Choose a partition, logical volume or another image filesystem.')
     disable_loop_discard(device)
-    return device
+    return device, device_fd
+
+
+def verify_target_device_path(device, device_id):
+    metadata = device.stat()
+    if not stat.S_ISBLK(metadata.st_mode) or metadata.st_rdev != device_id:
+        raise MigrationError(f'{device} no longer identifies the verified formatting target.')
 
 
 def prepare_target(record, force):
@@ -1706,36 +1740,44 @@ def prepare_target_with_handles(record, force, handles):
     target = record['target']
     work = migration_directory()
     if 'image' in target:
-        device = prepare_loop(record, force, handles)
+        device, descriptor = prepare_loop(record, force, handles)
     else:
         device = Path(target['device'])
+        descriptor = os.open(device, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+        handles.callback(os.close, descriptor)
+    device_id = os.fstat(descriptor).st_rdev
+    pinned = f'/proc/self/fd/{descriptor}'
+    inherited = (descriptor,)
     expected = record['uuid']
     if record['phase'] == 'planned':
-        ours = check_device(device, force or 'image' in target, uuid=expected)
+        ours = check_device(device, force or 'image' in target, uuid=expected, descriptor=descriptor)
         if 'device' in target:
-            device_id = device.stat().st_rdev
             if not ours and record.get('formatDevice', device_id) != device_id:
                 raise MigrationError(f'{device} no longer identifies the original formatting target.')
             if 'formatDevice' not in record:
                 record['formatDevice'] = device_id
                 save_migration(record)
+        verify_target_device_path(device, device_id)
         # A partial mkfs can already have written the recorded UUID. The
         # planned phase contains no copied environments and can format again.
         discard = ['-K'] if 'image' in target else []
-        checked('mkfs.xfs', '-f', '-q', *discard, '-L', 'cairn-native', '-m', f'crc=1,reflink=1,uuid={expected}', '-i', 'projid32bit=1', str(device), timeout=1800)
-        if filesystem_uuid(device) != expected:
+        checked('mkfs.xfs', '-f', '-q', *discard, '-L', 'cairn-native', '-m', f'crc=1,reflink=1,uuid={expected}', '-i', 'projid32bit=1',
+                pinned, timeout=1800, descriptors=inherited)
+        if filesystem_uuid(pinned, inherited) != expected:
             raise MigrationError(f'{device} did not retain the migration XFS UUID.')
         record['phase'] = 'formatted'
         save_migration(record)
-    elif filesystem_uuid(device) != expected:
+    elif filesystem_uuid(pinned, inherited) != expected:
         raise MigrationError(f'{device} no longer holds the XFS filesystem this migration formatted.')
     mountpoint = work / 'target'
     mountpoint.mkdir(mode=0o700, exist_ok=True)
     mounted = mount_of(mountpoint)
     if mounted is None:
+        verify_target_device_path(device, device_id)
         checked('mount', '-t', 'xfs', '-o', 'prjquota', str(device), str(mountpoint), timeout=300)
-    elif filesystem_uuid(mounted['source']) != record['uuid']:
-        raise MigrationError(f'{mountpoint} holds another filesystem; unmount it first.')
+        mounted = mount_of(mountpoint)
+    if not matches_new_pool(record, mounted):
+        raise MigrationError(f'{mountpoint} does not hold the migration filesystem.')
     # The new pool root becomes the pool path: root-owned, as the old one.
     os.chown(mountpoint, 0, 0)
     os.chmod(mountpoint, pool_path().stat().st_mode & 0o755)
@@ -1930,7 +1972,7 @@ def rollback_pool(arguments):
     if record['phase'] in ('planned', 'formatted'):
         # Switch never touched the original mount or its systemd files.
         remount_old_pool(old, pool)
-        verify_old_pool(old, mount_of(pool))
+        verify_restored_pool(old, mount_of(pool))
         if loop:
             checked('losetup', '--detach', str(loop))
         if image and record.get('createdImage'):
@@ -1991,7 +2033,7 @@ def rollback_pool(arguments):
         else:
             checked('mount', '-t', old['type'], '-o', old['options'], old['what'], str(pool), timeout=300)
     mounted = mount_of(pool)
-    verify_old_pool(old, mounted)
+    verify_restored_pool(old, mounted)
     pool_tool('rollback', state, migration_directory())
     pool_tool('check', state)
     finish_rollback(record)

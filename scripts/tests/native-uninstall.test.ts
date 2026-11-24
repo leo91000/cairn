@@ -24,12 +24,24 @@ function uninstall(scenario: string, policies: Record<string, string> = {}) {
   for (const [name, contents] of Object.entries(policies))
     writeFileSync(join(directory, name), contents)
   const nodeUnit = join(directory, 'firecracker-node-root')
+  const poolUnit = join(directory, 'native-data.mount')
+  const loopUnit = join(directory, 'cairn-native-data-loop.service')
+  if (scenario === 'migrated-device')
+    writeFileSync(poolUnit, 'Description=Cairn native data pool (XFS, reflink, project quotas)\n')
+  if (scenario === 'migrated-image')
+    writeFileSync(loopUnit, 'fixture')
+  if (scenario === 'manual-ext4')
+    writeFileSync(poolUnit, '[Mount]\nType=ext4\n')
   if (scenario === 'vm-installed')
     writeFileSync(nodeUnit, 'fixture')
   const isolatedScript = script.replaceAll('/etc/sudoers.d', '"$CAIRN_TEST_POLICY_DIR"')
+    .replace('/etc/systemd/system/$pool_unit', '$CAIRN_TEST_POOL_UNIT')
+    .replace('/etc/systemd/system/cairn-native-data-loop.service', '$CAIRN_TEST_LOOP_UNIT')
+    .replace('/etc/systemd/system/local-fs.target.wants/cairn-native-data-loop.service', '"$CAIRN_TEST_LOOP_UNIT.link"')
     .replaceAll('/var/lib/cairn-node', '"$CAIRN_TEST_NODE_UNIT"')
   try {
     return spawnSync('sh', ['-c', `
+systemd-escape() { echo native-data.mount; }
 systemctl() { echo "SYSTEMCTL $*"; [ "$scenario" != reload-failure ]; }
 findmnt() {
   case "$scenario" in
@@ -61,6 +73,8 @@ ${isolatedScript}
         PATH: '/usr/bin:/bin',
         scenario,
         CAIRN_TEST_POLICY_DIR: directory,
+        CAIRN_TEST_POOL_UNIT: poolUnit,
+        CAIRN_TEST_LOOP_UNIT: loopUnit,
         CAIRN_TEST_NODE_UNIT: nodeUnit,
       },
       encoding: 'utf8',
@@ -81,6 +95,20 @@ it.each(['findmnt-failure', 'findmnt-missing', 'grep-failure', 'mounted'])('keep
   expect(result.status).not.toBe(0)
   expect(result.stdout).not.toContain('REMOVE')
   expect(result.stdout).not.toContain('USERDEL')
+})
+
+it.each(['migrated-device', 'migrated-image'])('keeps native state until migrated pool units are retired: %s', (scenario) => {
+  const result = uninstall(scenario)
+  expect(result.status).not.toBe(0)
+  expect(result.stderr).toContain('Retire the migrated pool units')
+  expect(result.stdout).not.toContain('REMOVE')
+  expect(result.stdout).not.toContain('USERDEL')
+})
+
+it('preserves a manually managed ext4 unit on an unmounted uninstall', () => {
+  const result = uninstall('manual-ext4')
+  expect(result.status).toBe(0)
+  expect(result.stdout).not.toContain('native-data.mount')
 })
 
 it.each(['rm-failure', 'userdel-failure'])('keeps the unit when cleanup fails: %s', (scenario) => {
