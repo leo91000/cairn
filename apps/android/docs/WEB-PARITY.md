@@ -47,9 +47,12 @@ identifiers are kept. Agent/instance lists use the server filters, including rul
 that direct conversations bound by their creator’s keys. Confirmed state changes
 invalidate earlier polling responses on both apps.
 The installation validates drafts and reports
-errors at their step. Saving creates a version. A state-only revision change is
-refreshed while preserving the draft; a newer saved definition can be reviewed,
-adopted or explicitly replaced by the draft as the next version.
+errors at their step. On compact web screens the title has its own row, which
+keeps the header height stable when validation changes from Checking to Ready.
+Android already shows validation below the rule name. Saving creates a version.
+A state-only revision change is refreshed while preserving the draft. A newer
+saved definition can be reviewed, adopted or explicitly replaced by the draft
+as the next version.
 An uncertain creation keeps its original identity and submitted definition. Edits
 made afterwards remain in the editor and can be saved as the recovered rule's
 next version, including after native recreation. A replacement whose response

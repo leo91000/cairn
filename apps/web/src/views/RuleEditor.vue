@@ -371,27 +371,35 @@ onBeforeUnmount(() => {
 <template>
   <div class="rule-editor flex min-h-0 flex-1 flex-col">
     <header class="flex flex-wrap items-center gap-3 border-b border-line pb-4">
-      <RouterLink :to="rule ? { path: '/rules', query: { rule: rule.id } } : '/rules'" class="grid size-10 place-items-center rounded-full border border-line text-ink hover:bg-hover" aria-label="Back to the rules">
-        <Icon :name="ArrowLeft" :size="18" />
-      </RouterLink>
-      <div class="min-w-0 flex-1">
-        <p class="m-0! text-xs font-semibold tracking-wide text-muted uppercase">
-          {{ rule ? `Editing version ${rule.version}` : 'New rule' }}
-        </p>
-        <input
-          v-if="definition"
-          v-model="definition.name"
-          class="name-input w-full! border-0! bg-transparent! p-0! font-heading text-[26px] font-bold tracking-[-0.5px] shadow-none! outline-none"
-          maxlength="100"
-          placeholder="Name your rule"
-          aria-label="Rule name"
-        >
+      <!-- On narrow screens, validation must not change the title's wrapping mid-press. -->
+      <div class="flex min-w-0 flex-1 items-center gap-3 max-[480px]:basis-full">
+        <RouterLink :to="rule ? { path: '/rules', query: { rule: rule.id } } : '/rules'" class="grid size-10 shrink-0 place-items-center rounded-full border border-line text-ink hover:bg-hover" aria-label="Back to the rules">
+          <Icon :name="ArrowLeft" :size="18" />
+        </RouterLink>
+        <div class="min-w-0 flex-1">
+          <p class="m-0! text-xs font-semibold tracking-wide text-muted uppercase">
+            {{ rule ? `Editing version ${rule.version}` : 'New rule' }}
+          </p>
+          <input
+            v-if="definition"
+            v-model="definition.name"
+            class="name-input w-full! border-0! bg-transparent! p-0! font-heading text-[26px] font-bold tracking-[-0.5px] shadow-none! outline-none"
+            maxlength="100"
+            placeholder="Name your rule"
+            aria-label="Rule name"
+          >
+        </div>
       </div>
       <span class="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold" :class="checking || !validated && !validationError ? 'bg-hover text-muted' : validationError || problems.length ? 'bg-coral/12 text-coral' : 'bg-success/12 text-success'" role="status">
         <Icon :name="checking ? LoaderCircle : validationError || problems.length ? CircleAlert : CircleCheck" :size="14" :class="checking ? 'animate-spin' : ''" />
         {{ checking ? 'Checking…' : validationError ? 'Check failed' : !validated ? 'Waiting for check' : problems.length ? `${problems.length} to fix` : 'Ready' }}
       </span>
-      <UiButton variant="primary" :disabled="!ready || saving || !!conflict" @click="save">
+      <UiButton
+        class="max-[480px]:ml-auto"
+        variant="primary"
+        :disabled="!ready || saving || !!conflict"
+        @click="save"
+      >
         {{ saving ? 'Saving…' : rule ? 'Save version' : 'Create rule' }}
       </UiButton>
     </header>
