@@ -257,7 +257,7 @@ pub(crate) fn preparation_bytes(state: &Path) -> Result<u64> {
         }
         match std::fs::read_to_string(entry.path()) {
             Ok(amount) => {
-                bytes = bytes.saturating_add(amount.parse::<u64>().map_err(Error::internal)?)
+                bytes = bytes.saturating_add(amount.parse::<u64>().map_err(Error::internal)?);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -424,7 +424,7 @@ mod tests {
         let stale = crate::config::id();
         std::fs::write(state.path().join("native-preparations").join(&stale), b"10").unwrap();
 
-        recover_preparations(state.path(), &Default::default()).unwrap();
+        recover_preparations(state.path(), &std::collections::HashMap::new()).unwrap();
         assert_eq!(preparation_bytes(state.path()).unwrap(), 42);
         drop(protected);
         assert_eq!(preparation_bytes(state.path()).unwrap(), 0);

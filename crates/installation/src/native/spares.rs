@@ -118,14 +118,21 @@ async fn retire(state: &Path, spare: &Spare) -> Result<()> {
     let control = workspace::directory(state, &spare.run)?;
     if control.exists() {
         quota::retire(&control).await?;
+    } else if workspace::workload(state, &spare.run)?.try_exists()? {
+        return Err(Error::conflict(
+            "Native spare still holds a workload after its quota control record was lost.",
+        ));
     }
     forget(state, spare).await
 }
 
 /// Called only while no background builder can own the index.
-pub(super) async fn discard_unclaimed(state: &Path) -> Result<bool> {
+pub(super) async fn discard_unclaimed(state: &Path, keep: Option<&str>) -> Result<bool> {
     let mut removed = false;
     for spare in files(state)? {
+        if keep == Some(spare.key.as_str()) {
+            continue;
+        }
         let control = workspace::directory(state, &spare.run)?;
         if !control.join(ADOPTED_BY).exists() {
             retire(state, &spare).await?;
@@ -133,6 +140,16 @@ pub(super) async fn discard_unclaimed(state: &Path) -> Result<bool> {
         }
     }
     Ok(removed)
+}
+
+pub(super) async fn retire_for_base(state: &Path, key: &str) -> Result<()> {
+    for spare in files(state)?.into_iter().filter(|spare| spare.key == key) {
+        let control = workspace::directory(state, &spare.run)?;
+        if !control.join(ADOPTED_BY).exists() {
+            retire(state, &spare).await?;
+        }
+    }
+    Ok(())
 }
 
 fn ready(state: &Path, key: &str) -> Result<Option<Spare>> {
@@ -149,6 +166,16 @@ fn ready(state: &Path, key: &str) -> Result<Option<Spare>> {
 
 pub(super) fn has_ready(state: &Path, key: &str) -> Result<bool> {
     Ok(ready(state, key)?.is_some())
+}
+
+#[cfg(test)]
+pub(super) fn ready_inode(state: &Path, key: &str) -> Result<Option<u64>> {
+    ready(state, key)?
+        .map(|spare| {
+            let workload = workspace::workload(state, &spare.run)?;
+            Ok(std::fs::metadata(workload)?.ino())
+        })
+        .transpose()
 }
 
 pub(super) async fn warm(
@@ -193,6 +220,10 @@ pub(super) async fn warm(
     };
     let prepared = async {
         private_dir(&control).await?;
+        tokio::fs::File::open(control.parent().unwrap())
+            .await?
+            .sync_all()
+            .await?;
         private_dir(&workload).await?;
         quota::prepare(state, &workload, disk_mib * disk::MIB).await?;
         let data = workload.join("data");
@@ -232,6 +263,10 @@ pub(super) async fn claim(state: &Path, run: &str, key: &str) -> Result<bool> {
                 return Ok(false);
             };
             let claim = Claim::prepare(state, spare)?;
+            tokio::fs::File::open(control.parent().unwrap())
+                .await?
+                .sync_all()
+                .await?;
             atomic_write(&control.join(CLAIM), &serde_json::to_vec(&claim)?).await?;
             claim
         }
@@ -356,7 +391,7 @@ mod tests {
             .unwrap();
         std::fs::rename(&workload, &claimed).unwrap();
 
-        discard_unclaimed(&state).await.unwrap();
+        discard_unclaimed(&state, None).await.unwrap();
         assert!(!target.join("quota-owner.json").exists());
         assert!(super::claim(&state, &run, &ready.key).await.unwrap());
         assert!(super::claim(&state, &run, &ready.key).await.unwrap());

@@ -362,7 +362,11 @@ async fn active_background_build_releases_its_temporary_files_before_foreground_
 #[ignore = "requires the disposable project-quota pool; scripts/qualify-native-quota.mjs"]
 async fn measure_prepared_native_bases() {
     use rand::{RngCore, SeedableRng};
-    use std::{io::Read, os::fd::AsRawFd, time::Instant};
+    use std::{
+        io::Read,
+        os::{fd::AsRawFd, unix::fs::MetadataExt},
+        time::Instant,
+    };
 
     fn cpu_ms() -> f64 {
         let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
@@ -465,6 +469,27 @@ async fn measure_prepared_native_bases() {
     });
     let ready = bases.lookup(&archives, 256).await.unwrap().unwrap();
     let cache = bases.contents(&ready.key);
+    let accounting = [
+        (
+            state.join("native-accounting.json"),
+            json!({ "data": bases.data }),
+        ),
+        (
+            state.join(crate::microvm::budget::FILE),
+            json!({
+                "slots": 2,
+                "limits": { "cpu": 2, "memoryMiB": 1024, "diskMiB": 32768 },
+            }),
+        ),
+    ];
+    let previous_accounting = accounting
+        .each_ref()
+        .map(|(path, _)| std::fs::read(path).ok());
+    for (path, value) in &accounting {
+        super::atomic_write(path, &serde_json::to_vec(value).unwrap())
+            .await
+            .unwrap();
+    }
     let reflink =
         super::quota::reflink(&std::fs::File::open(super::workspace::data_root(&state)).unwrap())
             .unwrap();
@@ -502,7 +527,7 @@ async fn measure_prepared_native_bases() {
             "nativeProjectArchives": archives, "nativeProjectBase": ready.key,
             "storage": { "owner": run, "policy": policy }
         });
-        if spare {
+        let spare_inode = if spare {
             super::spares::warm(
                 &bases,
                 &ready.key,
@@ -514,7 +539,14 @@ async fn measure_prepared_native_bases() {
             )
             .await
             .unwrap();
-        }
+            Some(
+                super::spares::ready_inode(&state, &ready.key)
+                    .unwrap()
+                    .expect("benchmark spare publication"),
+            )
+        } else {
+            None
+        };
         let before = disk::usage_scans_of(&state);
         let begin = Instant::now();
         let cpu = cpu_ms();
@@ -528,13 +560,18 @@ async fn measure_prepared_native_bases() {
         let clone_sample =
             json!({ "wallMs": begin.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu });
         let usage_scans = disk::usage_scans_of(&state) - before;
-        if spare {
+        let workload = super::workspace::workload(&state, &run).unwrap();
+        if let Some(inode) = spare_inode {
+            assert_eq!(
+                std::fs::metadata(&workload).unwrap().ino(),
+                inode,
+                "benchmark must adopt the original quota-owned spare"
+            );
             assert_eq!(
                 usage_scans, 0,
                 "Claiming a prepared directory must not re-copy or scan the pool."
             );
         }
-        let workload = super::workspace::workload(&state, &run).unwrap();
         let private_bytes = super::quota::usage(&workload).unwrap();
         let prepared_io = file_io(
             &workload.join("data/workspaces").join(&archive.project_id),
@@ -572,6 +609,13 @@ async fn measure_prepared_native_bases() {
         })
     );
     bases.trim(0, u64::MAX, None).await.unwrap();
+    for ((path, _), previous) in accounting.into_iter().zip(previous_accounting) {
+        if let Some(bytes) = previous {
+            super::atomic_write(&path, &bytes).await.unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 }
 
 /// Uses the real quota pool supplied by the disposable qualification launcher.

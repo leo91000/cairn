@@ -746,7 +746,7 @@ class PoolMigrationTests(unittest.TestCase):
                 self.assertRaisesRegex(host.MigrationError, 'found differences'):
             host.copy_environment('run', Path('/old'), Path('/new'))
         copy, verify = (call.args for call in checked.call_args_list)
-        self.assertEqual(copy[:5], ('rsync', '-aHAX', '--numeric-ids', '--sparse', '--delete'))
+        self.assertEqual(copy[:5], ('rsync', '-aHAXc', '--numeric-ids', '--sparse', '--delete'))
         self.assertEqual(verify[:5], ('rsync', '-aHAXnc', '--numeric-ids', '--delete', '--itemize-changes'))
         for command in (copy, verify):
             self.assertIn('--filter=-x trusted.SGI_ACL_FILE', command)
@@ -859,6 +859,33 @@ class PoolMigrationTests(unittest.TestCase):
         (host.migration_directory() / 'units' / OLD['unit']).unlink()
         with self.assertRaisesRegex(host.MigrationError, 'changed'):
             host.back_up_unit(old)
+
+    def test_image_cannot_use_an_alias_of_the_pool_or_controller_state(self):
+        pool = host.pool_path()
+        state = self.root / 'state'
+        link = self.root / 'alias'
+        link.symlink_to(pool, target_is_directory=True)
+        with self.assertRaisesRegex(host.MigrationError, 'real directory'):
+            host.verify_image_location(link / 'new.xfs', state, pool)
+        link.unlink()
+        link.mkdir()
+        with patch.object(host, 'filesystem_path', side_effect=[Path('/origin/state/alias'), Path('/origin/state')]), \
+                self.assertRaisesRegex(host.MigrationError, 'aliases'):
+            host.verify_image_location(link / 'new.xfs', state, pool)
+
+    @unittest.skipUnless(host.shutil.which('rsync'), 'migration requires rsync')
+    def test_copy_repairs_bytes_with_the_same_size_and_mtime(self):
+        source, target = self.root / 'source', self.root / 'target'
+        for root in (source, target):
+            (root / 'run').mkdir(parents=True)
+        original = source / 'run/payload'
+        damaged = target / 'run/payload'
+        original.write_bytes(b'correct')
+        damaged.write_bytes(b'damaged')
+        metadata = original.stat()
+        os.utime(damaged, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        host.copy_environment('run', source, target)
+        self.assertEqual(damaged.read_bytes(), original.read_bytes())
 
     def test_migration_refusals_are_printed_for_the_operator(self):
         source = Path(SPEC.origin).read_text()

@@ -811,9 +811,12 @@ impl Controller {
         trace.phase(Phase::StorageAdmission);
         let disk = self.start_storage(id, &plan).await?;
         trace.phase(Phase::PoolAccounting);
-        let incoming = self.check_preparation_space(&plan).await?;
+        let (incoming, spare) = self.check_preparation_space(&plan).await?;
         let preparation = disk::Preparation::reserve(&self.state, id, incoming).await?;
-        drop(disk);
+        // Capacity admission credited an existing tree. Keep the same gate
+        // until its claim is recorded so another attempt cannot take it, and
+        // budget/pressure handling cannot retire it in between.
+        let spare_guard = spare.then_some(disk);
         trace.phase(Phase::WorkspaceOwnership);
         let owner =
             Arc::new(workspace::execution_ownership(&self.state, text(&plan, "runId")).await?);
@@ -867,6 +870,7 @@ impl Controller {
                         &execution_observation,
                         execution_workspace,
                         preparation,
+                        spare_guard,
                         execution_launch,
                     )
                     .await
@@ -1203,6 +1207,7 @@ impl Controller {
             &bootstrap::Trace::default(),
             None,
             0,
+            None,
         )
         .await
     }
@@ -1217,8 +1222,10 @@ impl Controller {
         trace: &bootstrap::Trace,
         workspace_owner: Option<Arc<crate::file_lock::Guard>>,
         reserved: u64,
+        mut spare_guard: Option<disk::StorageGuard>,
     ) -> Result<(bool, block::Mounted)> {
         let (deadline, time_limited) = disk_admission_deadline(plan, wait);
+        let require_spare = spare_guard.is_some();
         let mut reported = false;
         loop {
             if stop.is_cancelled() || !self.leased(id).await {
@@ -1232,15 +1239,19 @@ impl Controller {
             }
             // Cancel only lock acquisition, never an in-flight mount or clone.
             trace.phase(Phase::StorageAdmission);
-            let owner = tokio::select! {
-                biased;
-                () = stop.cancelled() => {
-                    return Err(self.preparation_stopped(id, plan).await);
-                }
-                result = tokio::time::timeout_at(deadline, disk::lock(&self.state)) => {
-                    match result {
-                        Ok(result) => result?,
-                        Err(_) => return Err(self.disk_admission_timeout(id, time_limited).await),
+            let owner = if let Some(owner) = spare_guard.take() {
+                owner
+            } else {
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => {
+                        return Err(self.preparation_stopped(id, plan).await);
+                    }
+                    result = tokio::time::timeout_at(deadline, disk::lock(&self.state)) => {
+                        match result {
+                            Ok(result) => result?,
+                            Err(_) => return Err(self.disk_admission_timeout(id, time_limited).await),
+                        }
                     }
                 }
             };
@@ -1264,7 +1275,7 @@ impl Controller {
                 trace.phase(Phase::FilesystemInitialize);
                 let from_base = self
                     .bases()
-                    .initialize_reserved(plan, stop, reserved, Some(owner))
+                    .initialize_reserved(plan, stop, reserved, Some(owner), require_spare)
                     .await?;
                 trace.phase(Phase::Mount);
                 let state = self.state.clone();
@@ -1509,6 +1520,7 @@ impl Controller {
         observation: &bootstrap::Scope,
         owner: Arc<crate::file_lock::Guard>,
         preparation: disk::Preparation,
+        spare_guard: Option<disk::StorageGuard>,
         launch_guard: Arc<Mutex<()>>,
     ) -> Result<i32> {
         let trace = observation.trace();
@@ -1541,6 +1553,7 @@ impl Controller {
                 &trace,
                 Some(owner),
                 preparation.bytes,
+                spare_guard,
             )
             .await?;
         let mounted = Arc::new(block::Handle::new(mounted));
@@ -2163,7 +2176,7 @@ impl Controller {
 
     /// Ceilings are not preallocated reservations. Charge actual retained
     /// payloads, then bound every additional copy by the remaining shared pool.
-    async fn check_preparation_space(&self, plan: &Value) -> Result<u64> {
+    async fn check_preparation_space(&self, plan: &Value) -> Result<(u64, bool)> {
         let run = text(plan, "runId");
         let root = workspace::directory(&self.state, run)?;
         let has_journal = block::exists(&self.state, run).await?;
@@ -2173,6 +2186,7 @@ impl Controller {
             disk::bytes_if_present(&root.join("data")).await?
         };
         let assigned_base = has_journal && root.join("file-owner.json").exists();
+        let mut spare_key = None;
         let seed = if assigned_base {
             0
         } else if !root.join("initialized").exists()
@@ -2193,7 +2207,13 @@ impl Controller {
                     .as_u64()
                     .ok_or_else(|| Error::bad("Missing native disk size."))?;
                 if let Some(base) = self.bases().lookup(&descriptors, size).await? {
-                    if super::spares::has_ready(&self.state, &base.key)? {
+                    let format = storage::environment::directory(&self.state, run)?;
+                    if !has_journal
+                        && !workspace::workload(&self.state, run)?.try_exists()?
+                        && !super::bases::has_initializing_base(&format)?
+                        && super::spares::has_ready(&self.state, &base.key)?
+                    {
+                        spare_key = Some(base.key);
                         0
                     } else {
                         base.metadata_bytes
@@ -2223,7 +2243,9 @@ impl Controller {
         let limit = self.disk_limit().await?;
         let mut used = disk::used(&self.data, &self.state).await?;
         let growth = disk::available(limit, used);
-        if incoming > growth && super::spares::discard_unclaimed(&self.state).await? {
+        if incoming > growth
+            && super::spares::discard_unclaimed(&self.state, spare_key.as_deref()).await?
+        {
             used = disk::used(&self.data, &self.state).await?;
         }
         let growth = disk::available(limit, used);
@@ -2243,7 +2265,7 @@ impl Controller {
                 "Retained native work leaves insufficient shared disk budget for this preparation.",
             ));
         }
-        Ok(incoming)
+        Ok((incoming, spare_key.is_some()))
     }
 
     /// Admission is global before it is attempt-scoped: a queued pool waiter
@@ -2815,7 +2837,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 // Do not hold the budget mutex while waiting for storage:
                 // foreground transfers query health with their disk lease held.
                 let _disk = disk::lock(&controller.state).await?;
-                super::spares::discard_unclaimed(&controller.state).await?;
+                super::spares::discard_unclaimed(&controller.state, None).await?;
                 let limit = budget.limits.disk_mi_b.saturating_mul(disk::MIB);
                 let used = disk::used(&controller.data, &controller.state).await?;
                 if let Err(error) = controller
@@ -3248,7 +3270,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         &serde_json::to_vec(&json!({ "data": data }))?,
     )
     .await?;
-    super::spares::discard_unclaimed(&state).await?;
+    super::spares::discard_unclaimed(&state, None).await?;
     let identity = Arc::new(systemd::identity().await?);
     private_dir(&state.join("roots")).await?;
     let mut interrupted = Vec::new();

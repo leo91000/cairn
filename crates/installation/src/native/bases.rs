@@ -362,6 +362,9 @@ impl Bases {
     /// Unpublish the control record first: a crash then leaves orphan pool
     /// contents for startup cleanup, never a record naming partial contents.
     async fn remove_entry(&self, name: &str) -> Result<()> {
+        if valid_key(name) {
+            super::spares::retire_for_base(&self.state, name).await?;
+        }
         forget_verified(name);
         match tokio::fs::remove_dir_all(self.root().join(name)).await {
             Ok(()) => {}
@@ -646,7 +649,7 @@ impl Bases {
 
     #[cfg(test)]
     pub async fn initialize(&self, plan: &Value, stop: &CancellationToken) -> Result<bool> {
-        self.initialize_reserved(plan, stop, 0, None).await
+        self.initialize_reserved(plan, stop, 0, None, false).await
     }
 
     pub async fn initialize_reserved(
@@ -655,6 +658,7 @@ impl Bases {
         stop: &CancellationToken,
         reserved: u64,
         pool_owner: Option<disk::StorageGuard>,
+        require_spare: bool,
     ) -> Result<bool> {
         let run = text(plan, "runId");
         let directory = environment::directory(&self.state, run)?;
@@ -800,6 +804,11 @@ impl Bases {
             }
         };
         let claimed = super::spares::claim(&self.state, run, &ready.key).await?;
+        if require_spare && !claimed {
+            return Err(Error::conflict(
+                "Reserved native spare is unavailable; retry admission.",
+            ));
+        }
         // Cache eviction is serialized with publishing the durable hard-link
         // pin. From here on, the pin keeps the source alive and the environment
         // lease and byte reservation cover the clone and its capacity checks.

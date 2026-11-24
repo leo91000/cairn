@@ -1097,7 +1097,7 @@ def plan_steps(record, old, plan, pool):
                      f'limit {environment["blockHardBytes"]} bytes / {environment["inodeHard"]} inodes')
         else:
             quota = 'no project quota assigned yet'
-        steps.append(f'Copy environment {environment["run"]} ({quota}) with rsync -aHAX --numeric-ids --sparse, verify it with a '
+        steps.append(f'Copy environment {environment["run"]} ({quota}) with rsync -aHAXc --numeric-ids --sparse, verify it with a '
                      'checksum pass, then apply the same project ID and limits and stage its rewritten ownership records.')
     if plan['skipped']:
         steps.append('Skip rebuildable or filesystem-owned entries: ' + ', '.join(plan['skipped']) + '.')
@@ -1180,11 +1180,35 @@ def unmount_old_pool(old, pool):
 
 def copy_environment(run, source, target):
     source_path, target_path = f'{source}/{run}/', f'{target}/{run}/'
-    checked('rsync', '-aHAX', '--numeric-ids', '--sparse', '--delete', *XFS_ACL_MIRRORS, '--', source_path, target_path, timeout=None)
+    # A resumed target can have the same size and timestamps as the original
+    # despite an interrupted write. Content checks make this retry converge.
+    checked('rsync', '-aHAXc', '--numeric-ids', '--sparse', '--delete', *XFS_ACL_MIRRORS, '--', source_path, target_path, timeout=None)
     differences = checked('rsync', '-aHAXnc', '--numeric-ids', '--delete', '--itemize-changes', *XFS_ACL_MIRRORS, '--',
                           source_path, target_path, timeout=None)
     if differences.strip():
         raise MigrationError(f'Verification of environment {run} found differences; rerun the migration:\n' + differences[:2000])
+
+
+def filesystem_path(path):
+    mounts = json.loads(checked('findmnt', '--json', '--target', str(path), '--output', 'TARGET,FSROOT'))['filesystems']
+    if len(mounts) != 1:
+        raise MigrationError(f'Cannot identify the underlying filesystem of {path}.')
+    mount = mounts[0]
+    return Path(mount['fsroot']) / path.relative_to(Path(mount['target']))
+
+
+def verify_image_location(image, state, pool):
+    parent = image.parent
+    if image.is_symlink() or (image.exists() and not image.is_file()) or parent.resolve(strict=True) != parent:
+        raise MigrationError('Choose a real directory and regular file for the new pool image.')
+    if image.is_relative_to(state) or image.is_relative_to(pool):
+        raise MigrationError('Keep the new pool image outside the data pool and controller state directories.')
+    target_device = parent.stat().st_dev
+    control_device = state.stat().st_dev
+    if (pool.exists() and target_device == pool.stat().st_dev != control_device) or (
+        target_device == control_device and filesystem_path(parent).is_relative_to(filesystem_path(state))
+    ):
+        raise MigrationError('Keep the new image outside aliases of the old pool or controller state.')
 
 
 def prepare_target(record, force):
@@ -1192,8 +1216,9 @@ def prepare_target(record, force):
     work = migration_directory()
     if 'image' in target:
         image = Path(target['image'])
+        verify_image_location(image, ROOT / 'state', pool_path())
         if record['phase'] == 'planned' and not image.exists():
-            descriptor = os.open(image, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+            descriptor = os.open(image, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
             try:
                 os.ftruncate(descriptor, target['size'])
                 os.fsync(descriptor)
@@ -1276,6 +1301,7 @@ def migrate_pool(arguments):
     if plan['blockers']:
         raise MigrationError('Resolve these before migrating:\n- ' + '\n- '.join(plan['blockers']))
     if 'image' in target:
+        verify_image_location(Path(target['image']), state, pool)
         free = os.statvfs(Path(target['image']).parent)
         needed = plan['usedBytes'] + plan['usedBytes'] // 10 + 1024 ** 3
         if target['size'] < needed or (free.f_bavail * free.f_frsize < needed and not Path(target['image']).exists()):
