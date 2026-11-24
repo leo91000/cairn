@@ -5,6 +5,7 @@ The manager's HTTPS origin authenticates the release manifest. Exact binary and
 tool digests authenticate its payloads. Credentials never enter command arguments.
 """
 import getpass
+import fcntl
 import grp
 import hashlib
 import http.client
@@ -906,7 +907,6 @@ def active_units():
 
 
 def controller_running():
-    import fcntl
     try:
         descriptor = os.open(ROOT / 'state/controller.lock', os.O_RDONLY | os.O_CLOEXEC)
     except FileNotFoundError:
@@ -933,6 +933,22 @@ def require_stopped(stop_services):
         raise MigrationError('Stop the native node first (or pass --stop); still active: ' + ', '.join(sorted(units)))
     if controller_running():
         raise MigrationError('A native controller still holds state/controller.lock; stop it before migrating.')
+
+
+def offline_pool_operation(operation, arguments):
+    if arguments.dry_run:
+        return operation(arguments)
+    require_stopped(arguments.stop)
+    lock = ROOT / 'state/controller.lock'
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise MigrationError('The native controller or another migration acquired state/controller.lock.') from None
+        return operation(arguments)
+    finally:
+        os.close(descriptor)
 
 
 def load_migration():
@@ -984,7 +1000,8 @@ def old_pool(pool):
     elif source.startswith('/dev/loop'):
         what, options = checked('losetup', '--noheadings', '--output', 'BACK-FILE', source).strip(), ['loop', 'prjquota']
     return {'unit': unit, 'fragment': fragment if fragment and Path(fragment).is_file() else None,
-            'what': what, 'type': 'ext4', 'options': ','.join(options)}
+            'what': what, 'type': 'ext4', 'options': ','.join(options),
+            'uuid': filesystem_uuid(source)}
 
 
 def check_device(device, force, uuid=None):
@@ -1095,6 +1112,11 @@ def remount_old_pool(old, pool):
         checked('systemctl', 'start', old['unit'], timeout=300)
     else:
         checked('mount', '-t', old['type'], '-o', old['options'], old['what'], str(pool), timeout=300)
+
+
+def verify_old_pool(old, mounted):
+    if not mounted or mounted.get('fstype') != 'ext4' or filesystem_uuid(mounted['source']) != old['uuid']:
+        raise MigrationError('The mounted ext4 filesystem does not match the original pool.')
 
 
 def mount_new_pool(record, old, pool):
@@ -1209,16 +1231,14 @@ def migrate_pool(arguments):
         raise MigrationError('Choose a target with --device <block device> or --image <path> --size <size>.')
     if record and record['target'] != target:
         raise MigrationError('Another pool migration is in progress (' + json.dumps(record['target']) + '); finish it or run rollback-pool.')
-    if record and (record['phase'] in ('switched', 'complete') or record['phase'] == 'copied' and new_pool_mounted(record, pool)):
+    if record and record['phase'] in ('copied', 'switched', 'complete'):
         return finish_migration(record, arguments, pool, state)
     safe_path(str(pool))
     if record and not arguments.dry_run:
-        # Resuming after a crash between unmounting the old pool and mounting
-        # the new one: the copy is verified again against the original.
-        require_stopped(arguments.stop)
+        # Before the copy has settled, reattach the original after a reboot.
         remount_old_pool(record['old'], pool)
     old = old_pool(pool)
-    if record and record['old']['unit'] != old['unit']:
+    if record and (record['old']['unit'], record['old']['uuid']) != (old['unit'], old['uuid']):
         raise MigrationError('The pool mount changed since the migration started; run rollback-pool.')
     old = record['old'] if record else old
     plan = pool_tool('plan', state)
@@ -1238,7 +1258,6 @@ def migrate_pool(arguments):
         if units:
             print('The node is running; stop it or pass --stop: ' + ', '.join(units))
         return
-    require_stopped(arguments.stop)
     migration_directory().mkdir(mode=0o700, exist_ok=True)
     save_migration(record)
     back_up_unit(old)
@@ -1257,10 +1276,6 @@ def migrate_pool(arguments):
     checked('umount', str(mountpoint), timeout=300)
     record['phase'] = 'copied'
     save_migration(record)
-    unmount_old_pool(old, pool)
-    mount_new_pool(record, old, pool)
-    record['phase'] = 'switched'
-    save_migration(record)
     finish_migration(record, arguments, pool, state)
 
 
@@ -1268,19 +1283,27 @@ def finish_migration(record, arguments, pool, state):
     if arguments.dry_run:
         print(f'The pool migration reached phase {record["phase"]}; a rerun only completes it.')
         return
-    require_stopped(arguments.stop)
     if not new_pool_mounted(record, pool):
-        if mount_of(pool) is not None:
-            raise MigrationError(f'{pool} holds another filesystem than the migrated pool; unmount it or run rollback-pool.')
+        mounted = mount_of(pool)
+        if mounted is not None:
+            if record['phase'] != 'copied':
+                raise MigrationError(f'{pool} holds another filesystem than the migrated pool.')
+            verify_old_pool(record['old'], mounted)
+            unmount_old_pool(record['old'], pool)
         mount_new_pool(record, record['old'], pool)
-    pool_tool('switch', state, migration_directory())
+    if record['phase'] == 'copied':
+        record['phase'] = 'switched'
+        save_migration(record)
+    if not record.get('activated'):
+        pool_tool('switch', state, migration_directory())
     result = pool_tool('check', state)
     record['phase'] = 'complete'
     save_migration(record)
     print(f'Native data pool migrated to XFS (reflink: {str(result["reflink"]).lower()}), {result["environments"]} environments checked.')
     print(f'Start the node with: systemctl start {SERVICE}')
-    print(f'The ext4 pool {record["old"]["what"]} was not modified. Until the node writes new work, roll back with '
-          f'"python3 {INSTALL}/host.py rollback-pool" while the node is stopped; delete the ext4 pool only once rollback is no longer needed.')
+    if not record.get('activated'):
+        print(f'The ext4 pool {record["old"]["what"]} was preserved. To roll back before starting the node, run '
+              f'"python3 {INSTALL}/host.py rollback-pool" while the node is stopped.')
 
 
 def rollback_pool(arguments):
@@ -1289,18 +1312,21 @@ def rollback_pool(arguments):
     record = load_migration()
     if record is None:
         raise MigrationError('No pool migration to roll back.')
+    if record.get('activated'):
+        raise MigrationError('The node has opened the XFS pool. Keep it mounted and restore from a verified backup if needed.')
     if arguments.dry_run:
         print(f'Rollback would unmount the XFS pool (phase {record["phase"]}), restore {record["old"]["unit"]} and the original ownership records.')
         return
-    require_stopped(arguments.stop)
     old = record['old']
     image = record['target'].get('image')
     mountpoint = migration_directory() / 'target'
     if mount_of(mountpoint):
         checked('umount', str(mountpoint), timeout=300)
     mounted = mount_of(pool)
-    if mounted and mounted.get('fstype') == 'xfs':
+    if mounted and new_pool_mounted(record, pool):
         checked('systemctl', 'stop', old['unit'], timeout=300)
+    elif mounted:
+        verify_old_pool(old, mounted)
     if image:
         if (UNIT_DIRECTORY / LOOP_SERVICE).exists():
             checked('systemctl', 'disable', '--now', LOOP_SERVICE, timeout=300)
@@ -1323,8 +1349,7 @@ def rollback_pool(arguments):
         else:
             checked('mount', '-t', old['type'], '-o', old['options'], old['what'], str(pool), timeout=300)
     mounted = mount_of(pool)
-    if not mounted or mounted.get('fstype') != 'ext4':
-        raise MigrationError(f'{pool} did not mount the original ext4 pool; the XFS copy was kept.')
+    verify_old_pool(old, mounted)
     pool_tool('rollback', state, migration_directory())
     pool_tool('check', state)
     migration_directory().rename(migration_directory().with_name(f'native-pool-migration.rolled-back-{int(time.time())}'))
@@ -1364,9 +1389,9 @@ if __name__ == '__main__':
         elif len(sys.argv) == 2 and sys.argv[1] == 'run':
             run()
         elif len(sys.argv) >= 2 and sys.argv[1] == 'migrate-pool':
-            migrate_pool(pool_arguments(sys.argv[1:]))
+            offline_pool_operation(migrate_pool, pool_arguments(sys.argv[1:]))
         elif len(sys.argv) >= 2 and sys.argv[1] == 'rollback-pool':
-            rollback_pool(pool_arguments(sys.argv[1:]))
+            offline_pool_operation(rollback_pool, pool_arguments(sys.argv[1:]))
         else:
             raise ValueError('Use install <manager HTTPS origin>, run, migrate-pool or rollback-pool.')
     except PrerequisiteError as error:

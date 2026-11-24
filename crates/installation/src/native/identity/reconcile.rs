@@ -20,6 +20,29 @@ const MARKER: &str = ".cairn-identity.json";
 const TRANSITION: &str = ".cairn-identity.transition.json";
 const PENDING: &str = ".cairn-identity.pending.json";
 
+pub(in crate::native) async fn stored_owner(data: &Path) -> Result<Option<Identity>> {
+    match tokio::fs::read(data.join(MARKER)).await {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A newly published base clone has only template content and all its files
+/// already belong to the supplied engine. Record that ownership before any
+/// workload or live filesystem operation can write to it.
+pub(in crate::native) async fn mark_base_owner(data: &Path, owner: &Identity) -> Result<()> {
+    if stored_owner(data).await?.is_some()
+        || data.join(TRANSITION).exists()
+        || data.join(PENDING).exists()
+    {
+        return Err(Error::conflict(
+            "New native base clone already has an ownership record.",
+        ));
+    }
+    atomic_write(&data.join(MARKER), &serde_json::to_vec(owner)?).await
+}
+
 const ATTRIBUTES: [&str; 3] = [
     "system.posix_acl_access",
     "system.posix_acl_default",
@@ -380,11 +403,7 @@ pub(in crate::native) async fn reconcile(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
     }
-    let previous = match tokio::fs::read(data.join(MARKER)).await {
-        Ok(bytes) => Some(serde_json::from_slice::<Identity>(&bytes)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
+    let previous = stored_owner(data).await?;
     if previous.as_ref() == Some(identity) {
         observation.add(Counter::MarkerMatch, 1);
         return Ok(());

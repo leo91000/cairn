@@ -6,14 +6,17 @@ use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+mod mounts;
 mod reconcile;
 
-pub(super) use reconcile::{rebind_pending, reconcile};
+pub(super) use mounts::Mapped;
+pub(super) use reconcile::{mark_base_owner, rebind_pending, reconcile, stored_owner};
 use tokio::process::Command;
 
 const COUNT: u32 = 65536;
 const ROOT_FIRST: u32 = 500_000_000;
 const ROOT_END: u32 = ROOT_FIRST + 1_048_576;
+const STORAGE_OWNER: &str = "namespace-storage-v1";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(super) struct Identity {
@@ -30,6 +33,32 @@ pub(super) struct Identity {
 }
 
 impl Identity {
+    /// Keep the template engine owner on disk, and set aside a disjoint range
+    /// for rootless Docker's other IDs. The retained marker records the actual
+    /// range, including when this environment travels to another node.
+    pub(super) fn storage(engine: (u32, u32)) -> Self {
+        let range = |id| {
+            if (1..=COUNT).contains(&id) {
+                COUNT + 1
+            } else {
+                1
+            }
+        };
+        Self {
+            user: STORAGE_OWNER.into(),
+            root_uid: 0,
+            root_gid: 0,
+            subuid: range(engine.0),
+            subgid: range(engine.1),
+            host_engine: Some(engine),
+        }
+    }
+
+    pub(super) fn is_storage(&self) -> bool {
+        self.host_engine
+            .is_some_and(|(uid, gid)| uid != 0 && gid != 0 && self == &Self::storage((uid, gid)))
+    }
+
     pub fn uid(&self) -> u32 {
         self.host_engine.map_or(self.subuid + 999, |ids| ids.0)
     }

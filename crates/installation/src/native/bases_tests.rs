@@ -465,8 +465,14 @@ async fn measure_prepared_native_bases() {
     });
     let ready = bases.lookup(&archives, 256).await.unwrap().unwrap();
     let cache = bases.contents(&ready.key);
+    let reflink =
+        super::quota::reflink(&std::fs::File::open(super::workspace::data_root(&state)).unwrap())
+            .unwrap();
     let mut samples = Vec::new();
-    for _ in 0..3 {
+    for spare in [false, true, false, true, false, true] {
+        if spare && !reflink {
+            continue;
+        }
         let baseline_run = crate::config::id();
         let baseline_control = super::workspace::directory(&state, &baseline_run).unwrap();
         let baseline_workload = super::workspace::workload(&state, &baseline_run).unwrap();
@@ -496,6 +502,20 @@ async fn measure_prepared_native_bases() {
             "nativeProjectArchives": archives, "nativeProjectBase": ready.key,
             "storage": { "owner": run, "policy": policy }
         });
+        if spare {
+            super::spares::warm(
+                &bases,
+                &ready.key,
+                256,
+                ready.metadata_bytes,
+                32 * 1024 * 1024 * 1024,
+                &policy,
+                &stop,
+            )
+            .await
+            .unwrap();
+        }
+        let before = disk::usage_scans_of(&state);
         let begin = Instant::now();
         let cpu = cpu_ms();
         assert!(bases.initialize(&plan, &stop).await.unwrap());
@@ -507,14 +527,28 @@ async fn measure_prepared_native_bases() {
             .unwrap();
         let clone_sample =
             json!({ "wallMs": begin.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu });
+        let usage_scans = disk::usage_scans_of(&state) - before;
+        if spare {
+            assert_eq!(
+                usage_scans, 0,
+                "Claiming a prepared directory must not re-copy or scan the pool."
+            );
+        }
         let workload = super::workspace::workload(&state, &run).unwrap();
         let private_bytes = super::quota::usage(&workload).unwrap();
         let prepared_io = file_io(
             &workload.join("data/workspaces").join(&archive.project_id),
             &random,
         );
-        samples.push(json!({ "cachedZipExtraction": zip_sample, "preparedDirectoryAdmission": clone_sample,
-            "privateAllocatedBytesBeforeDelta": private_bytes, "baselineIo": baseline_io, "preparedIo": prepared_io }));
+        samples.push(json!({
+            "cachedZipExtraction": zip_sample,
+            "preparedDirectoryAdmission": clone_sample,
+            "claimedSpare": spare,
+            "usageScans": usage_scans,
+            "privateAllocatedBytesBeforeDelta": private_bytes,
+            "baselineIo": baseline_io,
+            "preparedIo": prepared_io,
+        }));
         let control = super::workspace::directory(&state, &run).unwrap();
         tokio::fs::write(control.join("attempt"), attempt.as_bytes())
             .await

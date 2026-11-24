@@ -15,6 +15,35 @@ use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncWriteExt};
 
 const CHUNK: usize = 65536;
 const MAX_ENTRIES: u64 = 1_000_000;
+pub(super) const ENTRY_ALLOCATION: u64 = 5120;
+
+/// An upper bound on the logical bytes and entry creation debits for a seed.
+/// A mutable source can grow afterwards, so the receiver enforces its own cap.
+pub(super) fn staging_size(root: &Path, include: impl Fn(&Path) -> bool) -> Result<u64> {
+    let mut pending = vec![root.to_owned()];
+    let mut bytes = 0u64;
+    let mut entries = 0u64;
+    while let Some(path) = pending.pop() {
+        let relative = path.strip_prefix(root).map_err(Error::internal)?;
+        if !relative.as_os_str().is_empty() && !include(relative) {
+            continue;
+        }
+        entries += 1;
+        if entries > MAX_ENTRIES {
+            return Err(Error::bad("Too many workspace entries."));
+        }
+        let metadata = std::fs::symlink_metadata(&path)?;
+        bytes = bytes.saturating_add(ENTRY_ALLOCATION);
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                pending.push(entry?.path());
+            }
+        } else if metadata.is_file() {
+            bytes = bytes.saturating_add(metadata.len());
+        }
+    }
+    Ok(bytes)
+}
 
 /// The frame announcing one workspace entry. File contents follow as `data` frames.
 #[derive(Serialize)]
@@ -160,7 +189,23 @@ where
     F: FnMut(u64) -> Fut + Send,
     Fut: std::future::Future<Output = Result<u64>> + Send,
 {
-    receive_admitted(reader, root, budget, maximum, reclaim, &mut |_| Ok(())).await
+    receive_admitted(
+        reader,
+        root,
+        budget,
+        maximum,
+        reclaim,
+        Durability::PerFile,
+        &mut |_| Ok(()),
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Durability {
+    PerFile,
+    /// The caller holds a filesystem barrier opened before receiving the tree.
+    StagedTree,
 }
 
 pub(crate) async fn receive_admitted<F, Fut>(
@@ -169,13 +214,14 @@ pub(crate) async fn receive_admitted<F, Fut>(
     mut budget: u64,
     maximum: u64,
     mut reclaim: F,
+    durability: Durability,
     admit: &mut (impl FnMut(u64) -> Result<()> + Send),
 ) -> Result<()>
 where
     F: FnMut(u64) -> Fut + Send,
     Fut: std::future::Future<Output = Result<u64>> + Send,
 {
-    admit(5120)?;
+    admit(ENTRY_ALLOCATION)?;
     crate::skills::private_dir(root).await?;
     let mut used = 0u64;
     let mut entries = 0u64;
@@ -196,7 +242,7 @@ where
         check_parents(root, relative).await?;
         let target = root.join(relative);
         let mode = entry["mode"].as_u64().unwrap_or(0o600) as u32 & 0o777;
-        admit(5120)?;
+        admit(ENTRY_ALLOCATION)?;
         match text(&entry, "kind") {
             "directory" => {
                 tokio::fs::create_dir(&target).await?;
@@ -224,7 +270,7 @@ where
                         return Err(Error::bad("Workspace exceeds node disk budget."));
                     }
                 }
-                receive_file(reader, &target, size, mode, admit).await?;
+                receive_file(reader, &target, size, mode, durability, admit).await?;
             }
             _ => return Err(Error::bad("Invalid workspace entry.")),
         }
@@ -237,6 +283,7 @@ async fn receive_file(
     target: &Path,
     size: u64,
     mode: u32,
+    durability: Durability,
     admit: &mut (impl FnMut(u64) -> Result<()> + Send),
 ) -> Result<()> {
     let mut file = tokio::fs::OpenOptions::new()
@@ -251,7 +298,9 @@ async fn receive_file(
     // Creation applies the node's umask; restore the transmitted mode on the open file.
     file.set_permissions(std::fs::Permissions::from_mode(mode))
         .await?;
-    file.sync_all().await?;
+    if matches!(durability, Durability::PerFile) {
+        file.sync_all().await?;
+    }
     Ok(())
 }
 
@@ -384,6 +433,7 @@ mod tests {
             8,
             8,
             |_| std::future::ready(Ok(0)),
+            Durability::PerFile,
             &mut |bytes| {
                 if bytes == 4 {
                     payloads += 1;

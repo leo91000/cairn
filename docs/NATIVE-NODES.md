@@ -229,11 +229,11 @@ live memory reclamation preserve the running VMM; memory snapshots and the paire
 filesystem layout are no longer supported.
 
 
-## Pool de répertoires locaux (ADR-0088)
+## Pool de répertoires locaux
 
 Les nouveaux environnements utilisent des répertoires ordinaires dans
 `/var/lib/cairn-native/state/native-data/<conversation UUID>/`. Ce pool doit être
-un système de fichiers ext4 dédié, monté avec `prjquota`, appartenant à root sans
+un système de fichiers XFS ou ext4 dédié, monté avec `prjquota`, appartenant à root sans
 écriture pour les autres comptes. Son périphérique doit différer de celui du
 répertoire `state` : les quotas de données ne réservent pas les inodes du système
 de fichiers, et un pool plein doit encore pouvoir écrire ses reçus de nettoyage.
@@ -241,14 +241,48 @@ Les historiques et artefacts conservés par le manager ne sont pas déplacés da
 ce pool. Les cgroups bornent CPU/RAM/processus et les débits IO, pas les octets
 occupés. Le contrôleur vérifie aussi que les quotas sont effectivement actifs.
 
-Le propriétaire prépare et monte ce volume avant l’enrôlement ou la mise à jour
-du superviseur. Cairn ne reformate, ne repartitionne et ne remonte pas un système
-de fichiers de production. Pour un volume **vide et jetable**, la qualification
-utilise `mkfs.ext4 -O project,quota -E quotatype=prjquota`, puis un montage avec
-`-o prjquota`. Ces commandes détruisent le contenu de leur cible ; elles ne sont
-pas une procédure de conversion d’un disque existant. L’exploitant choisit la
-capacité et la persistance du montage. Les fichiers locaux retenus et leurs
-métadonnées restent à leur emplacement jusqu’à leur conversion vérifiée.
+Pour une nouvelle installation, préparez un volume XFS dédié avec
+`mkfs.xfs -m crc=1,reflink=1 -i projid32bit=1` sur une cible vide, puis montez-le
+de façon persistante avec `prjquota` avant l’enrôlement. Un pool ext4 existant
+reste utilisable avec une copie des bases projet. XFS avec reflink partage les
+blocs de chaque base entre les environnements privés.
+
+### Migrer un nœud ext4 vers XFS hors ligne
+
+Mettez à jour le nœud vers une version comprenant la commande
+`cairn native-pool-migrate`. Utilisez le `deploy/nodes/native-host.py` de cette
+même version. Il accompagne le superviseur dans `/opt/cairn-native/host.py`
+quand le superviseur a été rafraîchi. Installez `xfsprogs` et `rsync` sur le
+nœud, et vérifiez votre sauvegarde des données du pool et du répertoire
+`/var/lib/cairn-native/state`.
+
+Choisissez une partition ou un volume logique inutilisé sur le nœud. Remplacez
+`/dev/mapper/cairn-native-xfs` dans l’exemple par cette cible. Le premier appel
+affiche le plan. Le second formate la cible, arrête le service s’il tourne, copie
+et vérifie les environnements, puis configure le montage de façon persistante.
+Exécutez-le depuis une session d’administration qui survit à l’arrêt du nœud.
+
+```sh
+sudo python3 /opt/cairn-native/host.py migrate-pool --device /dev/mapper/cairn-native-xfs --dry-run
+sudo python3 /opt/cairn-native/host.py migrate-pool --device /dev/mapper/cairn-native-xfs --stop
+```
+
+Si vous utilisez un fichier image, remplacez `--device …` par
+`--image /var/lib/cairn-native/native-data.xfs --size 200G`, avec une capacité
+adaptée aux données et à l’espace physique libre. L’outil configure alors un
+loop avec direct I/O. Pour un pool source déclaré dans `/etc/fstab`, installez
+d’abord une unité `.mount` persistante équivalente et vérifiez le montage ext4.
+
+Après interruption, relancez `migrate-pool` avec la même cible pour reprendre.
+Le nœud reste arrêté à la fin. À ce stade, `rollback-pool` restaure l’ancien
+montage et ses reçus. Le démarrage suivant ferme cette possibilité pour
+préserver les nouvelles écritures sur XFS. Conservez le pool ext4 et la
+sauvegarde pendant la vérification.
+
+```sh
+sudo systemctl start cairn-native-node.service
+findmnt --mountpoint /var/lib/cairn-native/state/native-data
+```
 
 Le protocole de distribution `nativeHostProtocol: 2` exige un rafraîchissement
 explicite du superviseur après préparation du pool. Un ancien superviseur refuse

@@ -1,5 +1,7 @@
 //! Master-owned run scope for remote seed files, inboxes, results, access-token
 //! relay and run-scoped MCP.
+mod skill_cache;
+
 use crate::{
     error::{Error, Result},
     http::{App, Input},
@@ -24,6 +26,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 const MAX_RESULT_BYTES: usize = 1_000_000;
 const MAX_AUTH_REQUEST_BYTES: usize = 32768;
 const SEED_BUDGET_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const SEED_ALLOCATION: &str = "x-cairn-seed-allocation";
+const SEED_OUTGREW_RESERVATION: &str = "Native seed outgrew its staging reservation.";
 
 /// The provider's configuration directory inside the conversation home, where its
 /// credential broker listens. Each coding agent's adapter names it, as for microVMs.
@@ -236,10 +240,47 @@ async fn seed_source(
     let attempt = text(plan, "id").to_owned();
     let initial = text(selection, "kind") == "initial";
     let runtime = text(selection, "kind") == "runtime";
+    let (skill_key, allocation) =
+        if initial && plan["backend"] == "native" && selection[skill_cache::NEGOTIATE].is_array() {
+            let root = source.clone();
+            let skipped = project_root.clone();
+            tokio::task::spawn_blocking(move || {
+                let key = skill_cache::key(&root.join("home"));
+                let allocation = super::files::staging_size(&root, |path| {
+                    skipped.as_deref() != Some(path)
+                        && path
+                            != Path::new(crate::conversation_deletion::retired::MANAGER_NAMESPACE)
+                })
+                .ok()
+                .map(|bytes| {
+                    let margin = if key.is_some() {
+                        skill_cache::CACHE_WRITE_MARGIN
+                    } else {
+                        0
+                    };
+                    bytes
+                        .saturating_add(margin)
+                        .saturating_add(crate::native::disk::MIB)
+                });
+                (key, allocation)
+            })
+            .await
+            .map_err(Error::internal)?
+        } else {
+            (None, None)
+        };
+    let skill_hit = skill_key.as_ref().is_some_and(|key| {
+        selection[skill_cache::NEGOTIATE]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|offered| offered.as_str() == Some(key))
+    });
     tokio::spawn(async move {
         // A failed transfer ends the stream early, which the receiver rejects.
         if let Err(error) = super::files::send_filtered(&source, &mut writer, |path| {
             (!runtime || path != Path::new(".agents/skills"))
+                && (!skill_hit || path != Path::new("home/.agents/skills"))
                 && project_root.as_deref() != Some(path)
                 && (!initial
                     || path != Path::new(crate::conversation_deletion::retired::MANAGER_NAMESPACE))
@@ -253,9 +294,24 @@ async fn seed_source(
             );
         }
     });
-    Ok(Response::new(Body::from_stream(
-        tokio_util::io::ReaderStream::new(reader),
-    )))
+    let mut response = Response::new(Body::from_stream(tokio_util::io::ReaderStream::new(reader)));
+    if let Some(key) = skill_key {
+        response
+            .headers_mut()
+            .insert(skill_cache::KEY, key.parse().map_err(Error::internal)?);
+        if skill_hit {
+            response
+                .headers_mut()
+                .insert(skill_cache::HIT, axum::http::HeaderValue::from_static("1"));
+        }
+    }
+    if let Some(bytes) = allocation {
+        response.headers_mut().insert(
+            SEED_ALLOCATION,
+            bytes.to_string().parse().map_err(Error::internal)?,
+        );
+    }
+    Ok(response)
 }
 
 async fn relay_auth(path: &Path, value: &Value) -> Result<Value> {
@@ -307,15 +363,61 @@ pub async fn seed(
     master: &url::Url,
     token: &str,
     attempt: &str,
-    selection: Value,
+    mut selection: Value,
     target: &Path,
 ) -> Result<()> {
     use futures_util::StreamExt;
-    let _disk = if crate::native::enabled() {
+    // The manager can authorize and open the source while unrelated local
+    // storage operations run. No bytes enter staging before disk admission.
+    let native_initial = crate::native::enabled() && selection["kind"] == "initial";
+    let cache = skill_cache::directory();
+    if native_initial && selection.get(skill_cache::NEGOTIATE).is_none() {
+        selection[skill_cache::NEGOTIATE] = json!(skill_cache::offered(&cache));
+    }
+    let mut response = fetch(client, master, token, attempt, "seed", &selection).await?;
+    let mut storage_guard = if crate::native::enabled() {
         Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
     } else {
         None
     };
+    let mut skill_hit = native_initial
+        && response
+            .headers()
+            .get(skill_cache::HIT)
+            .is_some_and(|v| v == "1");
+    let mut skill_key = response
+        .headers()
+        .get(skill_cache::KEY)
+        .and_then(|value| value.to_str().ok())
+        .filter(|key| skill_cache::valid(key))
+        .map(str::to_owned);
+    if skill_hit
+        && !skill_key.as_ref().is_some_and(|key| {
+            selection[skill_cache::NEGOTIATE]
+                .as_array()
+                .is_some_and(|offered| offered.iter().any(|value| value == key))
+        })
+    {
+        return Err(Error::bad(
+            "Manager omitted native skills without a matching cache offer.",
+        ));
+    }
+    if skill_hit
+        && skill_key
+            .as_ref()
+            .is_none_or(|key| !cache.join(key).is_file())
+    {
+        // An offered entry can be evicted while the manager prepares the reply.
+        selection[skill_cache::NEGOTIATE] = Value::Null;
+        response = fetch(client, master, token, attempt, "seed", &selection).await?;
+        if response.headers().contains_key(skill_cache::HIT) {
+            return Err(Error::bad(
+                "Manager omitted native skills after a cache miss.",
+            ));
+        }
+        skill_hit = false;
+        skill_key = None;
+    }
     let budget = if crate::native::enabled() {
         let available = crate::native::disk::staging_budget().await?;
         // Inbox refresh copies into an inode already mounted by the workload;
@@ -329,23 +431,68 @@ pub async fn seed(
     } else {
         SEED_BUDGET_BYTES
     };
-    let response = fetch(client, master, token, attempt, "seed", &selection).await?;
+    let allocation = response
+        .headers()
+        .get(SEED_ALLOCATION)
+        .and_then(|value| value.to_str().ok()?.parse::<u64>().ok())
+        .filter(|bytes| native_initial && *bytes > 0 && *bytes <= budget);
     let parent = target
         .parent()
         .ok_or_else(|| Error::bad("Invalid seed directory."))?;
-    let mut admission = if crate::native::enabled() {
-        let mut admission = crate::native::ingress::Admission::staging(
-            &super::node_data_dir(),
-            &crate::native::state_dir(),
-            parent,
-        )?;
-        admission.admit(2 * 5120)?;
-        Some(admission)
+    let (mut admission, reservation) = if crate::native::enabled() {
+        let state = crate::native::state_dir();
+        let admission =
+            crate::native::ingress::Admission::staging(&super::node_data_dir(), &state, parent)?;
+        if let Some(bytes) = allocation
+            && admission.reserve_staging(bytes)?
+        {
+            let reservation =
+                crate::native::disk::Preparation::reserve(&state, &crate::config::id(), bytes)
+                    .await?;
+            (
+                Some(admission.with_new_reservation(bytes)),
+                Some(reservation),
+            )
+        } else {
+            (Some(admission), None)
+        }
+    } else {
+        (None, None)
+    };
+    let entry_overhead = 2 * super::files::ENTRY_ALLOCATION;
+    if let Some(admission) = &mut admission {
+        admission.admit(entry_overhead)?;
+    }
+    crate::skills::private_dir(parent).await?;
+    let temp = tempfile::TempDir::new_in(parent)?;
+    if let Some(admission) = &mut admission {
+        admission.retarget_staging(temp.path())?;
+    }
+    let mut remaining = reservation
+        .as_ref()
+        .map(|reserved| reserved.bytes.saturating_sub(entry_overhead));
+    let reserved = remaining.is_some();
+    if reserved {
+        drop(storage_guard.take());
+    }
+    let mut admit = |bytes| {
+        if let Some(remaining) = &mut remaining {
+            *remaining = remaining
+                .checked_sub(bytes)
+                .ok_or_else(|| Error::new(507, SEED_OUTGREW_RESERVATION))?;
+        }
+        admission
+            .as_mut()
+            .expect("native staging admission")
+            .admit(bytes)
+    };
+    // Initial native seeds are private until the complete HTTP body has arrived
+    // and the destination filesystem has accepted one writeback barrier.
+    let barrier = if native_initial {
+        Some(tokio::fs::File::open(temp.path()).await?.into_std().await)
     } else {
         None
     };
-    crate::skills::private_dir(parent).await?;
-    let temp = tempfile::TempDir::new_in(parent)?;
     let mut transport_interrupted = false;
     let mut received_bytes = 0u64;
     let stream = response.bytes_stream().map(|result| match result {
@@ -385,10 +532,13 @@ pub async fn seed(
                 &mut reader,
                 temp.path(),
                 budget,
-                SEED_BUDGET_BYTES,
+                if reserved { budget } else { SEED_BUDGET_BYTES },
                 |needed| {
                     let (data, keep) = (data.clone(), keep.clone());
                     async move {
+                        if reserved {
+                            return Ok(0);
+                        }
                         Ok(crate::project_archives::reclaim_for_foreground(
                             &data,
                             needed.saturating_mul(multiplier),
@@ -398,12 +548,12 @@ pub async fn seed(
                             / multiplier)
                     }
                 },
-                &mut |bytes| {
-                    admission
-                        .as_mut()
-                        .expect("native staging admission")
-                        .admit(bytes)
+                if barrier.is_some() {
+                    super::files::Durability::StagedTree
+                } else {
+                    super::files::Durability::PerFile
                 },
+                &mut admit,
             )
             .await?;
         } else {
@@ -424,9 +574,51 @@ pub async fn seed(
             "Workspace transfer was interrupted; source files are preserved.",
         ));
     }
-    received?;
-    if crate::native::enabled() && selection["kind"] == "initial" {
+    if let Err(error) = received {
+        if error.message == SEED_OUTGREW_RESERVATION && reserved {
+            drop(temp);
+            drop(reservation);
+            selection[skill_cache::NEGOTIATE] = Value::Null;
+            return Box::pin(seed(client, master, token, attempt, selection, target)).await;
+        }
+        return Err(error);
+    }
+    let staged = barrier.is_some();
+    if let Some(barrier) = barrier {
+        if let Some(key) = skill_key {
+            let home = temp.path().join("home");
+            if skill_hit {
+                if let Err(error) = skill_cache::install(&cache, &key, &home, &mut admit).await {
+                    if error.status == 507 {
+                        return Err(error);
+                    }
+                    tracing::debug!(
+                        status = error.status,
+                        "Native skill cache entry could not be reused"
+                    );
+                    let _ = tokio::fs::remove_file(cache.join(&key)).await;
+                    drop(temp);
+                    drop(reservation);
+                    drop(storage_guard);
+                    selection[skill_cache::NEGOTIATE] = Value::Null;
+                    return Box::pin(seed(client, master, token, attempt, selection, target)).await;
+                }
+            } else {
+                let _cache_write = if storage_guard.is_none() {
+                    Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
+                } else {
+                    None
+                };
+                if let Err(error) = skill_cache::remember(&cache, &key, &home, &mut admit).await {
+                    tracing::debug!(
+                        status = error.status,
+                        "Native skill cache population deferred"
+                    );
+                }
+            }
+        }
         prepare_native_inbox(&temp.path().join("chat-input")).await?;
+        crate::native::block::sync_opened(barrier).await?;
     }
     // Preserve the directory inode mounted into a native workload. Replacing a
     // bind-mounted directory would leave it reading the previous inbox forever.
@@ -441,6 +633,9 @@ pub async fn seed(
         tokio::fs::remove_dir_all(target).await?;
     }
     tokio::fs::rename(temp.path(), target).await?;
+    if staged {
+        tokio::fs::File::open(parent).await?.sync_all().await?;
+    }
     Ok(())
 }
 

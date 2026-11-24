@@ -1,4 +1,27 @@
 use super::*;
+
+#[tokio::test]
+async fn controller_refuses_incomplete_migrations_and_records_activation_before_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let migration = root.path().join("native-pool-migration");
+    std::fs::create_dir(&state).unwrap();
+    require_settled(&state).await.unwrap();
+    std::fs::create_dir(&migration).unwrap();
+    let record = migration.join("state.json");
+    std::fs::write(&record, br#"{"phase":"switched"}"#).unwrap();
+    assert!(require_settled(&state).await.unwrap_err().is_conflict());
+
+    std::fs::write(&record, br#"{"phase":"complete","uuid":"new-pool"}"#).unwrap();
+    require_settled(&state).await.unwrap();
+    require_settled(&state).await.unwrap();
+    let receipt: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+    assert_eq!(
+        receipt,
+        json!({"phase": "complete", "uuid": "new-pool", "activated": true})
+    );
+}
+
 use std::{collections::BTreeMap, io::Write};
 
 fn ownership(control: &Path, workload: &Path, project: u32) -> Ownership {

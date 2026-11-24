@@ -809,10 +809,11 @@ impl Controller {
             ));
         }
         trace.phase(Phase::StorageAdmission);
-        let _disk = self.start_storage(id, &plan).await?;
+        let disk = self.start_storage(id, &plan).await?;
         trace.phase(Phase::PoolAccounting);
         let incoming = self.check_preparation_space(&plan).await?;
         let preparation = disk::Preparation::reserve(&self.state, id, incoming).await?;
+        drop(disk);
         trace.phase(Phase::WorkspaceOwnership);
         let owner =
             Arc::new(workspace::execution_ownership(&self.state, text(&plan, "runId")).await?);
@@ -1263,10 +1264,9 @@ impl Controller {
                 trace.phase(Phase::FilesystemInitialize);
                 let from_base = self
                     .bases()
-                    .initialize_reserved(plan, stop, reserved)
+                    .initialize_reserved(plan, stop, reserved, Some(owner))
                     .await?;
                 trace.phase(Phase::Mount);
-                drop(owner);
                 let state = self.state.clone();
                 let owned_plan = plan.clone();
                 let owned_stop = stop.clone();
@@ -1402,6 +1402,8 @@ impl Controller {
         &self,
         plan: Value,
         identity: super::identity::Identity,
+        storage_identity: super::identity::Identity,
+        from_base: bool,
         data: PathBuf,
         mounted: Arc<block::Handle>,
         trace: bootstrap::Trace,
@@ -1454,10 +1456,17 @@ impl Controller {
             private_dir(&temporary).await?;
             workspace::own_tree(&temporary, identity.uid(), identity.gid()).await?;
             let stage = controller.data.join("runs").join(text(&plan, "runId"));
+            if from_base
+                && (storage_identity.uid(), storage_identity.gid())
+                    == (controller.identity.uid, controller.identity.gid)
+            {
+                super::identity::mark_base_owner(&data, &storage_identity).await?;
+            }
             let bindings = super::home::prepare_for_identity_admitted(
                 &stage.join("home"),
                 &data,
                 &identity,
+                &storage_identity,
                 &trace,
                 &mut |bytes| check.lock().map_err(Error::internal)?.admit(bytes),
             )
@@ -1473,8 +1482,16 @@ impl Controller {
             tokio::fs::create_dir_all(&docker_data).await?;
             std::os::unix::fs::lchown(
                 &docker_data,
-                Some(if administrator { 0 } else { identity.root_uid }),
-                Some(if administrator { 0 } else { identity.root_gid }),
+                Some(if administrator {
+                    0
+                } else {
+                    storage_identity.root_uid
+                }),
+                Some(if administrator {
+                    0
+                } else {
+                    storage_identity.root_gid
+                }),
             )?;
             tokio::fs::set_permissions(&docker_data, std::fs::Permissions::from_mode(0o700))
                 .await?;
@@ -1542,10 +1559,24 @@ impl Controller {
         }
         let view = block::view(&self.state, text(plan, "runId")).await?;
         let data = view.filesystems[0].clone();
+        let idmapped = !administrator
+            && super::quota::reflink(&std::fs::File::open(workspace::data_root(&self.state))?)?;
+        let storage_identity = if idmapped {
+            super::identity::stored_owner(&data)
+                .await?
+                .filter(super::identity::Identity::is_storage)
+                .unwrap_or_else(|| {
+                    super::identity::Identity::storage((self.identity.uid, self.identity.gid))
+                })
+        } else {
+            identity.clone()
+        };
         let bindings = self
             .prepare_files(
                 plan.clone(),
                 identity.clone(),
+                storage_identity.clone(),
+                from_base,
                 data.clone(),
                 mounted,
                 trace.clone(),
@@ -1746,14 +1777,37 @@ impl Controller {
         // The staging inbox is readonly in the workload's mount namespace.
         private_dir(&stage.join("chat-input")).await?;
         crate::nodes::workspace::prepare_native_inbox(&stage.join("chat-input")).await?;
+        let mapped = if idmapped {
+            Some(
+                super::identity::Mapped::attach(
+                    &self.state,
+                    id,
+                    &data,
+                    &storage_identity,
+                    &identity,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let mapped_view = mapped
+            .as_ref()
+            .map(|mounted| super::block::View::at(mounted.path()));
+        let launch_view = mapped_view.as_ref().unwrap_or(&view);
+        let docker_data = if idmapped {
+            launch_view.docker_data()?
+        } else {
+            docker_data
+        };
         let launch = systemd::Launch {
             id,
             plan: &plan,
             data: &self.data,
             root: &container,
-            home: &view.home,
-            workspace: &view.workspace,
-            output: &view.output,
+            home: &launch_view.home,
+            workspace: &launch_view.workspace,
+            output: &launch_view.output,
             identity: &self.identity,
             conversation: (!administrator).then_some(&identity),
             docker_data: Some(docker_data.as_path()),
@@ -1819,6 +1873,9 @@ impl Controller {
             drop(launch_fence);
             return Err(error);
         }
+        if let Some(mapped) = mapped {
+            mapped.close()?;
+        }
         drop(launch_fence);
         let environment_task = if let Some((listener, control, uid)) = environment {
             let controller = self.clone();
@@ -1840,6 +1897,20 @@ impl Controller {
         // The submission has settled; coding-engine readiness and first
         // output retain their separate protocol observations.
         observation.submitted();
+        if from_base && plan["nativeProjectArchives"].is_array() {
+            let _ = self
+                .base_warmer
+                .enqueue(
+                    self.bases(),
+                    json!({
+                        "archives": plan["nativeProjectArchives"],
+                        "diskMiB": plan["resources"]["diskMiB"],
+                    }),
+                    self.budget.clone(),
+                    self.stop.clone(),
+                )
+                .await;
+        }
         let storage_stop = stop.child_token();
         let _storage_guard = storage_stop.clone().drop_guard();
         let mounted = self
@@ -2138,6 +2209,11 @@ impl Controller {
         let mut used = disk::used(&self.data, &self.state).await?;
         let growth = disk::available(limit, used);
         if incoming > growth {
+            super::spares::discard_unclaimed(&self.state).await?;
+            used = disk::used(&self.data, &self.state).await?;
+        }
+        let growth = disk::available(limit, used);
+        if incoming > growth {
             crate::project_archives::reclaim_for_foreground(&self.data, incoming - growth, &[])
                 .await?;
             used = disk::used(&self.data, &self.state).await?;
@@ -2175,6 +2251,11 @@ impl Controller {
             let attempt = active
                 .get(id)
                 .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
+            if !attempt.started {
+                return Err(Error::conflict(
+                    "Native attempt is still preparing its filesystem.",
+                ));
+            }
             if requested_run != attempt.run {
                 return Err(Error::forbidden(forbidden));
             }
@@ -2329,7 +2410,10 @@ impl Controller {
                             identity.host_engine =
                                 Some((controller.identity.uid, controller.identity.gid));
                         }
-                        workspace::own_tree(&received, identity.uid(), identity.gid()).await?;
+                        let stored = super::identity::stored_owner(data)
+                            .await?
+                            .unwrap_or(identity);
+                        workspace::own_tree(&received, stored.uid(), stored.gid()).await?;
                         if stop.is_cancelled() {
                             return Err(Error::conflict("Native project import stopped."));
                         }
@@ -2714,6 +2798,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 // Do not hold the budget mutex while waiting for storage:
                 // foreground transfers query health with their disk lease held.
                 let _disk = disk::lock(&controller.state).await?;
+                super::spares::discard_unclaimed(&controller.state).await?;
                 let limit = budget.limits.disk_mi_b.saturating_mul(disk::MIB);
                 let used = disk::used(&controller.data, &controller.state).await?;
                 if let Err(error) = controller
@@ -3138,6 +3223,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         &state.join("controller.lock"),
         "Another native controller owns this storage.",
     )?;
+    super::quota::migration::require_settled(&state).await?;
     disk::recover_exports(&state).await?;
     atomic_write(
         &state.join("native-accounting.json"),
@@ -3145,6 +3231,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     )
     .await?;
     super::quota::require(&state)?;
+    super::spares::discard_unclaimed(&state).await?;
     let identity = Arc::new(systemd::identity().await?);
     private_dir(&state.join("roots")).await?;
     let mut interrupted = Vec::new();

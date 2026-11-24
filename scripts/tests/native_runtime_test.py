@@ -113,19 +113,22 @@ def completed_local_disk(api, manager, run):
 
 
 @contextmanager
-def native_fixture():
+def native_fixture(filesystem='ext4'):
     # A single quota filesystem for ordinary environment directories. Control
     # receipts live on the host filesystem and remain writable at inode ENOSPC.
     root = Path(tempfile.mkdtemp(prefix='cairn-native-smoke-', dir='/var/tmp'))
     root.chmod(0o700)
     pool = root / 'state/native-data'
     pool.mkdir(parents=True, mode=0o700)
-    image = root / 'native-data.ext4'
+    image = root / f'native-data.{filesystem}'
     mounted = False
     try:
         with image.open('wb') as stream:
             stream.truncate(12 * 1024**3)
-        command('mkfs.ext4', '-q', '-F', '-O', 'project,quota', '-E', 'quotatype=prjquota', str(image))
+        if filesystem == 'xfs':
+            command('mkfs.xfs', '-q', '-f', '-m', 'crc=1,reflink=1', '-i', 'projid32bit=1', str(image))
+        else:
+            command('mkfs.ext4', '-q', '-F', '-O', 'project,quota', '-E', 'quotatype=prjquota', str(image))
         command('mount', '-o', 'loop,prjquota', str(image), str(pool))
         mounted = True
         yield root
@@ -259,6 +262,7 @@ def main():
     binary = Path(sys.argv[1]).resolve(strict=True)
     qualifier = Path(sys.argv[2]).resolve(strict=True)
     legacy_binary = Path(sys.argv[3]).resolve(strict=True)
+    xfs_smoke = os.environ.get('CAIRN_NATIVE_XFS_SMOKE') == '1'
     active_binary = legacy_binary
     legacy_phase = True
     identifier = str(uuid.uuid4())
@@ -299,7 +303,7 @@ def main():
 
     progress('start')
     host.require_docker_host()
-    with native_fixture() as root:
+    with native_fixture('xfs' if xfs_smoke else 'ext4') as root:
         root.chmod(0o700)
         previous_install = host.INSTALL
         host.INSTALL = root / 'managed-tools'
@@ -876,6 +880,31 @@ def main():
         command('useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user)
         try:
             run = create()
+            if xfs_smoke:
+                active_binary = binary
+                legacy_phase = False
+                start_controller()
+                observed = api('/health', method='GET')
+                assert observed['backend'] == 'native'
+                attempt = start(run, lease=300000, docker_script='docker version >/tmp/docker-version\n')
+                disk = state / 'native-data' / run / 'data'
+                storage_owner = json.loads((disk / '.cairn-identity.json').read_text())
+                assert storage_owner['user'] == 'namespace-storage-v1'
+                assert (disk / 'workspaces/persisted').stat().st_uid == storage_owner['host_engine'][0]
+                assert (disk / 'docker').stat().st_uid == storage_owner['root_uid'] == 0
+                assert not (state / 'roots' / (attempt + '.idmap')).exists(), 'Launch left its temporary mapped source attached.'
+                api('/runs/' + attempt, method='DELETE')
+                fenced(run, attempt)
+
+                resumed = start(run, lease=300000, docker_script='docker version >/tmp/docker-version\n')
+                assert json.loads((disk / '.cairn-identity.json').read_text()) == storage_owner
+                api('/runs/' + resumed, method='DELETE')
+                fenced(run, resumed)
+                manager('purge', run=run)
+                api('/disks/' + run + '/delete', {'permanentlyDeleted': True})
+                assert not disk.exists()
+                print('PASS: real protected XFS launch, rootless Docker, retained owners, resume and quota retirement.')
+                return
             other = create()
             start_controller()
             progress('legacy-controller-ready')

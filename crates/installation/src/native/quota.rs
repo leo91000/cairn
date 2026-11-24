@@ -492,18 +492,7 @@ pub(super) async fn prepare(state: &Path, root: &Path, bytes: u64) -> Result<()>
                 .ok_or_else(|| Error::unavailable("Native project quota IDs exhausted."))?;
             crate::skills::atomic_write(&counter, next.to_string().as_bytes()).await?;
             tokio::fs::File::open(state).await?.sync_all().await?;
-            let control_file = open(&parent)?;
-            let control = control_file.metadata()?;
-            let workload = file.metadata()?;
-            let owner = Ownership {
-                project,
-                filesystem: pool_identity(&file)?,
-                control_device: control.dev(),
-                control_inode: control.ino(),
-                control_filesystem: filesystem_identity(&control_file)?,
-                workload_device: workload.dev(),
-                workload_inode: workload.ino(),
-            };
+            let owner = Ownership::bind(&parent, &file, project)?;
             super::atomic_write(&marker, &serde_json::to_vec(&owner)?).await?;
             owner
         }
@@ -536,6 +525,21 @@ struct Ownership {
 }
 
 impl Ownership {
+    fn bind(parent: &Path, workload: &File, project: u32) -> Result<Self> {
+        let control_file = open(parent)?;
+        let control = control_file.metadata()?;
+        let data = workload.metadata()?;
+        Ok(Self {
+            project,
+            filesystem: pool_identity(workload)?,
+            control_device: control.dev(),
+            control_inode: control.ino(),
+            control_filesystem: filesystem_identity(&control_file)?,
+            workload_device: data.dev(),
+            workload_inode: data.ino(),
+        })
+    }
+
     fn validate(&self, parent: &Path, workload: &File) -> Result<()> {
         let control_file = open(parent)?;
         let control = control_file.metadata()?;
@@ -554,6 +558,30 @@ impl Ownership {
         }
         Ok(())
     }
+}
+
+/// Transfer the record after an anonymous workload root is renamed. The
+/// directory, project and limits stay attached to the original inode.
+pub(super) async fn adopt_prepared(source: &Path, target: &Path, workload: &Path) -> Result<()> {
+    let file = open(workload)?;
+    let marker = target.join("quota-owner.json");
+    let project = project_io(&file)?;
+    if let Ok(bytes) = tokio::fs::read(&marker).await {
+        let owner: Ownership = serde_json::from_slice(&bytes)?;
+        owner.validate(target, &file)?;
+        if owner.project == project {
+            return Ok(());
+        }
+        return Err(Error::conflict("Claimed native quota project changed."));
+    }
+    let original: Ownership =
+        serde_json::from_slice(&tokio::fs::read(source.join("quota-owner.json")).await?)?;
+    original.validate(source, &file)?;
+    if original.project != project {
+        return Err(Error::conflict("Prepared native quota project changed."));
+    }
+    let owner = Ownership::bind(target, &file, project)?;
+    super::atomic_write(&marker, &serde_json::to_vec(&owner)?).await
 }
 
 /// Caller owns the conversation and environment locks and has fenced all

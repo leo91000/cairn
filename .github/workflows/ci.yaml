@@ -655,7 +655,7 @@ jobs:
       - name: Prepare disposable host block storage
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends e2fsprogs rsync python3-venv sudo uidmap iproute2 iptables libcap2-bin
+          sudo apt-get install -y --no-install-recommends e2fsprogs xfsprogs rsync python3-venv sudo uidmap iproute2 iptables libcap2-bin
           sudo modprobe tun
           sudo modprobe ip_tables
           sudo modprobe iptable_nat
@@ -817,6 +817,7 @@ jobs:
             sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/candidate" 90 -- node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
           else
             sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_XFS_SMOKE=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/xfs" node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
           fi
       - uses: actions/upload-artifact@v7.0.1
         if: always()

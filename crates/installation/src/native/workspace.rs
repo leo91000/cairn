@@ -165,6 +165,7 @@ pub(super) async fn copy_admitted(
         budget,
         budget,
         |_| std::future::ready(Ok(0)),
+        files::Durability::PerFile,
         admit,
     )
     .await;

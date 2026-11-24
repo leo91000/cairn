@@ -24,6 +24,34 @@ const RECORDS: [&str; 2] = [OWNER, RETIREMENT];
 
 const USAGE: &str = "Use native-pool-migrate plan|prepare|commit|switch|rollback|check <state> [<work> [<target> <run>]].";
 
+/// The offline tool holds the controller flock while operating. Its durable
+/// record also prevents automatic restarts between interrupted migration steps.
+pub(in crate::native) async fn require_settled(state: &Path) -> Result<()> {
+    let Some(root) = state.parent() else {
+        return Ok(());
+    };
+    let record = root.join("native-pool-migration/state.json");
+    match tokio::fs::read(&record).await {
+        Ok(bytes) => {
+            let mut value: Value = serde_json::from_slice(&bytes)?;
+            if value["phase"] != "complete" {
+                return Err(Error::conflict(
+                    "Native data pool migration is incomplete. Resume it or roll it back before starting the node.",
+                ));
+            }
+            if value["activated"] != true {
+                // The old pool is a pre-migration snapshot. Prohibit rollback
+                // before this controller can change ownership or start writers.
+                value["activated"] = true.into();
+                atomic_write(&record, &serde_json::to_vec(&value)?).await?;
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 struct Environment {
     run: String,
     control: PathBuf,
@@ -76,6 +104,13 @@ fn classify(state: &Path, pool: &std::fs::File, run: &str) -> Result<Environment
     if control.join("directory-conversion-verified").exists() {
         return Err(Error::conflict(
             "has an unfinished legacy journal conversion; start the node and let it finish first",
+        ));
+    }
+    if control.join(crate::native::spares::CLAIM).exists()
+        || control.join(crate::native::spares::ADOPTED_BY).exists()
+    {
+        return Err(Error::conflict(
+            "has an unfinished prepared environment claim; resume it or retire it before migration",
         ));
     }
     let project = super::attributes(&file)?.project;

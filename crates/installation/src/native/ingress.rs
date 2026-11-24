@@ -149,10 +149,32 @@ impl Admission {
         self.sampled
     }
 
+    pub(crate) fn reserve_staging(&self, bytes: u64) -> Result<bool> {
+        let (total, free) = storage::policy::physical_space(&self.filesystem)?;
+        let available = free
+            .saturating_sub(self.policy.reserve(total))
+            .saturating_sub(storage::cache::pending_write_bytes())
+            .saturating_sub(disk::preparation_bytes(&self.state)?);
+        Ok(bytes.saturating_add(disk::MIB) <= available)
+    }
+
     pub fn with_reservation(mut self, bytes: u64) -> Self {
         self.reservation = bytes;
         self.observation.used = self.observation.used.saturating_sub(bytes);
         self
+    }
+
+    pub(crate) fn with_new_reservation(mut self, bytes: u64) -> Self {
+        // This sample was taken under the storage lock before publication.
+        // Later samples include the reservation and subtract it in admit.
+        self.reservation = bytes;
+        self
+    }
+
+    pub(crate) fn retarget_staging(&mut self, target: &Path) -> Result<()> {
+        self.initial_target = allocated(target)?;
+        self.target = target.to_owned();
+        Ok(())
     }
 
     pub fn admit(&mut self, allocation: u64) -> Result<()> {

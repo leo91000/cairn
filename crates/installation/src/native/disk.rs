@@ -195,8 +195,10 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
 }
 
 /// Incoming bytes remain charged while the copy's physical worker is alive.
-pub(super) struct Preparation {
+pub(crate) struct Preparation {
     path: std::path::PathBuf,
+    lease: std::path::PathBuf,
+    _owner: crate::file_lock::Guard,
     pub bytes: u64,
 }
 
@@ -207,11 +209,18 @@ impl Preparation {
         let root = state.join("native-preparations");
         crate::skills::private_dir(&root).await?;
         let path = root.join(attempt);
+        let lease = root.join(format!("{attempt}.lease"));
+        let owner = crate::file_lock::exclusive(&lease, "Native preparation is already reserved.")?;
         if path.try_exists()? {
             return Err(Error::conflict("Native preparation is already reserved."));
         }
         super::atomic_write(&path, bytes.to_string().as_bytes()).await?;
-        Ok(Self { path, bytes })
+        Ok(Self {
+            path,
+            lease,
+            _owner: owner,
+            bytes,
+        })
     }
 }
 
@@ -222,7 +231,39 @@ impl Drop for Preparation {
         {
             tracing::error!(%error, "Native preparation reservation remains retained");
         }
+        if let Err(error) = std::fs::remove_file(&self.lease)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::error!(%error, "Native preparation reservation lease remains retained");
+        }
     }
+}
+
+pub(crate) fn preparation_bytes(state: &Path) -> Result<u64> {
+    let entries = match std::fs::read_dir(state.join("native-preparations")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    let mut bytes = 0u64;
+    for entry in entries {
+        let entry = entry?;
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| crate::validation::uuid(name).is_ok())
+        {
+            continue;
+        }
+        match std::fs::read_to_string(entry.path()) {
+            Ok(amount) => {
+                bytes = bytes.saturating_add(amount.parse::<u64>().map_err(Error::internal)?)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(bytes)
 }
 
 pub(super) fn recover_preparations(
@@ -230,7 +271,7 @@ pub(super) fn recover_preparations(
     pending: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
     let root = state.join("native-preparations");
-    let entries = match std::fs::read_dir(root) {
+    let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
@@ -241,13 +282,26 @@ pub(super) fn recover_preparations(
         let Some(attempt) = name.to_str() else {
             continue;
         };
+        let attempt = attempt.strip_suffix(".lease").unwrap_or(attempt);
         if crate::validation::uuid(attempt).is_err() {
             continue;
         }
         if pending.values().any(|id| id == attempt) {
             continue;
         }
-        std::fs::remove_file(entry.path())?;
+        let lease = root.join(format!("{attempt}.lease"));
+        let _owner = match crate::file_lock::exclusive(&lease, "Native preparation is active.") {
+            Ok(owner) => owner,
+            Err(error) if error.is_conflict() => continue,
+            Err(error) => return Err(error),
+        };
+        for path in [root.join(attempt), lease] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
     Ok(())
 }
@@ -359,6 +413,22 @@ pub(super) async fn staging_budget_from(client: &reqwest::Client, origin: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn recovery_keeps_another_process_staging_reservation_until_its_lease_settles() {
+        let state = tempfile::tempdir().unwrap();
+        let attempt = crate::config::id();
+        let protected = Preparation::reserve(state.path(), &attempt, 42)
+            .await
+            .unwrap();
+        let stale = crate::config::id();
+        std::fs::write(state.path().join("native-preparations").join(&stale), b"10").unwrap();
+
+        recover_preparations(state.path(), &Default::default()).unwrap();
+        assert_eq!(preparation_bytes(state.path()).unwrap(), 42);
+        drop(protected);
+        assert_eq!(preparation_bytes(state.path()).unwrap(), 0);
+    }
 
     #[test]
     fn sparse_temporary_holes_never_reduce_future_host_space_promises() {

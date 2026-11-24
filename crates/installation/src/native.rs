@@ -20,6 +20,7 @@ mod protection;
 mod quota;
 pub mod releases;
 mod service;
+mod spares;
 mod suspension;
 mod systemd;
 mod watchdog;

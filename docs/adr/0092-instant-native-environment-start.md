@@ -26,8 +26,9 @@ one or two seconds.
 
 ## Decision
 
-Starting a native environment costs a claim, a mount and a process launch. Work
-proportional to the project size happens once per base, off the start path.
+A ready native environment starts with a claim, a mount and a process launch.
+An unprepared environment clones its base on demand. Reflink avoids duplicating
+the data blocks, with metadata work proportional to the number of files.
 
 ### Storage substrate
 
@@ -50,55 +51,71 @@ recorded at publication, so cache trimming and usage accounting never walk it.
 
 ### Ownership through idmapped mounts
 
-Files are stored with namespace IDs (namespace root 0, engine 1000, volume users
-in the subordinate range), never with host IDs. The controller creates a detached
-idmapped mount of the environment's data with the conversation's user-namespace
-mapping and binds it into the workload. A fresh clone therefore needs no `chown`,
-and moving an environment to another identity or node changes only the mapping.
-Existing environments are converted once from host IDs to namespace IDs with the
-journaled translation, which remains the recovery path for interrupted
-conversions. Administrator Docker data keeps host ownership and is bound
-separately, without an idmap.
+On a reflink-capable XFS pool, protected environments store a root ID, a
+template engine ID and a subordinate range in their retained ownership marker.
+An idmapped source presents those three roles as the conversation's current
+host IDs. systemd takes private binds from that source and the controller
+detaches the temporary alias after launch admission. Fresh base clones already
+carry the backing engine owner. Protected moves keep the stored mapping even
+when the new node allocates different host IDs.
+
+The journaled translation converts existing protected environments and handles
+changes between protected and administrator ownership. Administrator execution
+keeps host ownership, including a separate Docker store. ext4 uses the existing
+host-owner path.
 
 ### Accounting
 
-Pool usage comes from `statvfs` and project quota counters, not from walking
-trees. A bootstrap performs at most one full inventory of the remaining
-controller-side state. A bootstrap counter records every usage scan so tests and
-production observations can detect regressions.
+The dedicated pool's allocated bytes come from `statvfs`. Conversation usage
+comes from project quota counters. Controller-side files still need inventory,
+and one admission decision reuses its sample until reclamation changes usage.
+A bootstrap counter records process-wide usage scans, including concurrent
+activity, so tests and production observations can detect regressions.
 
 ### Durability where it buys something
 
-Nothing created during preparation is unique until the workload writes: an
-interrupted preparation is redone. Staging receives and identity work use a single
-barrier before publication instead of per-file or per-batch flushes. The clone is
-published after one barrier, as before.
+The initial native seed is received in a temporary directory and has a single
+writeback barrier before publication. A prepared tree is published after its
+verified clone is durable. Identity mapping of an already prepared base updates
+only the ownership marker. Retained ownership conversions keep their replay
+journal and batch barriers because their contents can include unique work.
 
 ### Locking
 
-The node-wide storage lock becomes three short critical sections that are never
-held across copies, transfers, `syncfs` or calls to the other process: capacity
-reservation, base-cache pin and eviction, and project-archive cache mutation.
-Long work runs under a per-environment preparation lock. Every writer that
-allocates pool or staging space, including connector staging, archive downloads
-and base builds, holds a durable reservation; reservations of dead owners are
-reaped.
+The connector reserves the initial seed's bounded allocation before releasing
+the common storage lock and receiving the body. Older peers that omit the bound
+use serialized admission. The controller publishes the base pin before
+releasing the storage lock for an on-demand clone. A per-environment owner
+fences its preparation and launch. The remaining shared locks cover capacity,
+cache mutation and the cold project-archive path. The background warmer
+continues to yield to foreground waiters.
+
+### Seed cache
+
+The manager authorizes each request against its attempt. Native nodes can offer
+hashes of up to eight previously verified skill bundles. The manager omits the
+skill tree only after hashing the authorized source, and the node verifies the
+recreated tree before staging it. Configuration, the inbox and credentials
+continue to use attempt-scoped transfers.
 
 ### Prepared environments
 
 Like the Firecracker ready pool of [ADR-0019](0019-booted-vms-with-ready-codex.md),
-the controller keeps a small bounded set of anonymous environments per popular
-base: cloned, quota-limited and idmap-ready, with no account, credentials or
-conversation data. The first attempt of a conversation claims one by renaming it
-into its run and writing its owner record; an unclaimed one is retired under
-pressure, on budget changes or at restart. Live work always preempts preparation.
-The manager and the clients are unchanged.
+the controller keeps up to two anonymous XFS environments, at most one per
+recently warmed base. They are cloned, verified and quota-limited. They contain
+no account, credentials or conversation data. The first attempt claims an
+environment by renaming its quota-owned root and transferring the ownership
+record. The intent and the original project/inode identity allow replay after
+interruption. Unclaimed environments are retired under pressure, on budget
+changes or at restart.
 
 ## Consequences
 
-- A fresh conversation's environment is ready in well under a second when a
-  prepared environment exists, and in about a second otherwise; the remaining
-  start latency is the coding agent itself.
+- The target is under 2 seconds at the median and under 5 seconds at the
+  95th percentile from sending a message to agent launch. The native storage
+  qualification measures clone and claim costs and checks that the claim has no
+  full usage scan. Production observations include transport, provisioning and
+  coding-engine startup.
 - The data pool must be migrated once, with the node stopped.
 - Reflink clones charge their logical size to the environment quota while sharing
   physical blocks; physical reserve checks use the pool's real free space.

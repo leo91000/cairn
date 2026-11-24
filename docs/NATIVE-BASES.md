@@ -93,9 +93,9 @@ lookups; reflink clones still charge this logical size to the environment quota.
 
 ## Reproducible measurements
 
-Use a disposable Linux host with root, ext4 project quotas and the pinned native
-build dependencies. The isolated launcher creates one private loop filesystem,
-executes the actual quota/base admission/recovery cases, then the measurement:
+Use a disposable Linux host with root, XFS and ext4 project quotas, and the
+pinned native build dependencies. The launcher creates private ext4 and XFS
+filesystems for the actual quota, base and identity admission cases:
 
 ```sh
 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -112,9 +112,11 @@ random bytes (StdRng seed 42), 24 MiB total. Three alternating samples compare
 cached ZIP extraction/ownership/final synchronization with verified private
 prepared-directory admission, including format publication and initialization.
 Both destinations use the same data filesystem and 256 MiB project quotas. Base
-construction is measured separately. Output includes encoded ZIP bytes, allocated
-base/private bytes, wall time and process plus reaped-child CPU (including rsync),
-identical advisory cold/warm 4 MiB file reads and a synchronized new 4 KiB file.
+construction is measured separately. The XFS run also samples quota-owned
+prepared claims, with a regression check that a claim performs zero full usage
+scans. Output includes encoded ZIP bytes, allocated base/private bytes, wall
+time and process plus reaped-child CPU (including rsync), identical advisory
+cold/warm 4 MiB file reads and a synchronized new 4 KiB file.
 
 This is local filesystem preparation and IO, not production network latency.
 Pool-wide `syncfs` can include other writeback; the cases run serially on their

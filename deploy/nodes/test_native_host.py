@@ -584,7 +584,7 @@ PLAN = dict(filesystem='ext4', reflink=False, usedBytes=10 * 1024 ** 2, skipped=
                           dict(run='22222222-2222-4222-8222-222222222222', project=0, usedBytes=0, inodes=0,
                                blockHardBytes=0, inodeHard=0)])
 OLD = dict(unit='var-lib-cairn\\x2dnative-state-native\\x2ddata.mount', fragment='/etc/systemd/system/var-lib-cairn\\x2dnative-state-native\\x2ddata.mount',
-           what='/var/lib/cairn-native/native-data.ext4', type='ext4', options='loop,prjquota,nodiscard')
+           what='/var/lib/cairn-native/native-data.ext4', type='ext4', options='loop,prjquota,nodiscard', uuid='original')
 
 
 def pool_arguments(**changes):
@@ -707,6 +707,7 @@ class PoolMigrationTests(unittest.TestCase):
         fragment.write_text('[Mount]\nWhat=/var/lib/cairn-native/native-data.ext4\nWhere=/x\nType=ext4\nOptions=loop,prjquota,nodiscard\n')
         responses = {'systemd-escape': OLD['unit'] + '\n', 'systemctl': f'FragmentPath={fragment}\nSourcePath=\n'}
         with patch.object(host, 'mount_of', return_value=dict(source='/dev/loop0', fstype='ext4', options='rw,relatime,prjquota')), \
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), \
                 patch.object(host, 'checked', side_effect=lambda *args, **_: responses[args[0]]):
             old = host.old_pool(host.pool_path())
         self.assertEqual(dict(OLD, fragment=str(fragment)), old)
@@ -769,7 +770,8 @@ class PoolMigrationTests(unittest.TestCase):
                 patch.object(host, 'unmount_old_pool', side_effect=lambda *_: events.append(('unmount-old',))),
                 patch.object(host, 'mount_new_pool', side_effect=new_pool),
                 patch.object(host, 'new_pool_mounted', side_effect=lambda *_: any(event[0] == 'mount-new' for event in events)),
-                patch.object(host, 'mount_of', return_value=None)]
+                patch.object(host, 'mount_of', return_value=dict(source='/dev/loop0', fstype='ext4')),
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid'])]
 
     def test_migration_copies_every_environment_before_switching_records(self):
         mountpoint = self.root / 'target'
@@ -803,7 +805,7 @@ class PoolMigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(host.MigrationError, 'in progress'):
             host.migrate_pool(pool_arguments(device='/dev/another'))
 
-    def test_resume_after_a_crash_between_mounts_remounts_the_original_first(self):
+    def test_resume_after_a_crash_between_mounts_uses_the_verified_copy(self):
         host.migration_directory().mkdir()
         (self.root / 'target').mkdir()
         host.save_migration(dict(version=1, target=dict(device='/dev/synthetic'), phase='copied', old=OLD, uuid='f00d'))
@@ -811,10 +813,9 @@ class PoolMigrationTests(unittest.TestCase):
         with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
             for patcher in self.fake_migration(self.root / 'target', events):
                 stack.enter_context(patcher)
-            stack.enter_context(patch.object(host, 'remount_old_pool', side_effect=lambda *_: events.append(('remount-old',))))
+            stack.enter_context(patch.object(host, 'mount_of', return_value=None))
             host.migrate_pool(pool_arguments())
-        self.assertEqual(events[:2], [('remount-old',), ('plan', str(self.root / 'state'))])
-        self.assertIn(('copy', PLAN['environments'][0]['run']), events)
+        self.assertEqual([event[0] for event in events], ['mount-new', 'switch', 'check'])
 
     def test_rollback_restores_the_original_unit_and_records(self):
         host.migration_directory().mkdir()
@@ -828,6 +829,8 @@ class PoolMigrationTests(unittest.TestCase):
         mounts = iter([None, dict(fstype='xfs', source='/dev/loop1'), None, dict(fstype='ext4', source='/dev/loop0')])
         commands = []
         with patch.object(host, 'require_stopped'), patch.object(host, 'mount_of', side_effect=lambda *_: next(mounts)), \
+                patch.object(host, 'new_pool_mounted', return_value=True), \
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), \
                 patch.object(host, 'checked', side_effect=lambda *args, **_: commands.append(args) or ''), \
                 patch.object(host, 'attached_loop', return_value=Path('/dev/loop1')), \
                 patch.object(host, 'pool_tool', side_effect=lambda action, *_: commands.append(('pool', action)) or {}), \
@@ -848,10 +851,22 @@ class PoolMigrationTests(unittest.TestCase):
         scope = dict(vars(host), __name__='__main__', migrate_pool=Mock(side_effect=host.MigrationError('Stop the native node first')))
         output = io.StringIO()
         with patch.object(host.os, 'geteuid', return_value=0), patch.object(host.signal, 'signal'), \
+                patch.object(host, 'require_stopped'), \
                 patch.object(host.sys, 'argv', ['native-host.py', 'migrate-pool', '--device', '/dev/x']), \
                 contextlib.redirect_stderr(output), self.assertRaises(SystemExit):
             exec(code, scope)
         self.assertIn('Native pool migration stopped: Stop the native node first', output.getvalue())
+
+    def test_offline_operation_fences_controller_starts_during_mutations(self):
+        with patch.object(host, 'require_stopped'):
+            host.offline_pool_operation(lambda _: self.assertTrue(host.controller_running()), pool_arguments())
+        self.assertFalse(host.controller_running())
+
+    def test_rollback_refuses_to_reopen_the_old_pool_after_activation(self):
+        host.migration_directory().mkdir()
+        host.save_migration(dict(phase='complete', activated=True))
+        with self.assertRaisesRegex(host.MigrationError, 'opened the XFS pool'):
+            host.rollback_pool(pool_arguments())
 
 
 if __name__ == '__main__':

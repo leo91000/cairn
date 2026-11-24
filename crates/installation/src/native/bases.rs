@@ -603,7 +603,7 @@ impl Bases {
 
     #[cfg(test)]
     pub async fn initialize(&self, plan: &Value, stop: &CancellationToken) -> Result<bool> {
-        self.initialize_reserved(plan, stop, 0).await
+        self.initialize_reserved(plan, stop, 0, None).await
     }
 
     pub async fn initialize_reserved(
@@ -611,6 +611,7 @@ impl Bases {
         plan: &Value,
         stop: &CancellationToken,
         reserved: u64,
+        pool_owner: Option<disk::StorageGuard>,
     ) -> Result<bool> {
         let run = text(plan, "runId");
         let directory = environment::directory(&self.state, run)?;
@@ -632,6 +633,7 @@ impl Bases {
                     ));
                 }
                 super::directory::require_retained_tree(&workspace::workload(&self.state, run)?)?;
+                super::spares::finish(&root).await?;
                 finish_initializing_base(
                     &lease.directory,
                     &self.data.join("runs").join(run),
@@ -742,6 +744,11 @@ impl Bases {
                 attempt: attempt.into(),
             }
         };
+        let claimed = super::spares::claim(&self.state, run, &ready.key).await?;
+        // Cache eviction is serialized with publishing the durable hard-link
+        // pin. From here on, the pin keeps the source alive and the environment
+        // lease and byte reservation cover the clone and its capacity checks.
+        drop(pool_owner);
         private_dir(&workload).await?;
         workspace::require_no_mounts(&workload)?;
         super::quota::prepare(&self.state, &workload, size * disk::MIB).await?;
@@ -766,7 +773,13 @@ impl Bases {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(error.into()),
         };
-        if existing_data && std::fs::read_dir(&data)?.next().is_some() {
+        if claimed {
+            if !existing_data || !data.join(".cairn-seed-complete").is_file() {
+                return Err(Error::conflict(
+                    "Claimed native spare is missing its verified seed.",
+                ));
+            }
+        } else if existing_data && std::fs::read_dir(&data)?.next().is_some() {
             // Rename may have completed before the format marker. Verify only;
             // never overwrite retained files while replaying initialization.
             super::directory::verify_copy(&source, &data, stop, &capacity).await?;
@@ -800,6 +813,7 @@ impl Bases {
         )
         .await?;
         super::directory::publish_format(&lease.directory, &root, plan, size * disk::MIB).await?;
+        super::spares::finish(&root).await?;
         finish_initializing_base(
             &lease.directory,
             &self.data.join("runs").join(run),

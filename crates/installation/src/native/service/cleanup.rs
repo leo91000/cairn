@@ -41,6 +41,7 @@ impl super::super::cleanup::Work for CloseWork {
             self.mounted = self.mounts.lock().await.get(&self.run).cloned();
         }
         self.storage_close.drain().await?;
+        super::super::identity::Mapped::recover(&self.state, &self.attempt, &self.run)?;
         if !self.exported {
             let root = workspace::directory(&self.state, &self.run)?;
             let output = block::view(&self.state, &self.run)
@@ -340,6 +341,10 @@ impl super::super::cleanup::Work for RecoveryWork {
                 for (attempt, _) in &attempts {
                     systemd::stop(attempt).await?;
                 }
+            }
+            super::super::identity::Mapped::recover(&self.state, &self.attempt, &self.run)?;
+            for (attempt, _) in &attempts {
+                super::super::identity::Mapped::recover(&self.state, attempt, &self.run)?;
             }
             self.fenced = Some(attempts);
         }

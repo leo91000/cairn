@@ -1069,6 +1069,7 @@ pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>
         {
             super::systemd::directory_consumers::stop(&workload).await?;
         }
+        super::spares::settle_for_retirement(state, run).await?;
         quota::retire(&root).await?;
     }
     let grants = block::action_locked(&lease.directory, delete).await?;

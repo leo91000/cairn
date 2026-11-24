@@ -40,6 +40,8 @@ const target = path.resolve('target')
 mkdirSync(target, { recursive: true })
 const tests = ['native::quota::tests::kernel_quota_lifecycle_qualification', 'native::bases_tests::kernel_prepared_base_admission_and_recovery', 'native::bases_tests::measure_prepared_native_bases', 'native::directory::tests::kernel_missing_conversion_replacement_preserves_original_journal', 'native::directory::tests::kernel_migration_copy_headroom']
 const privilegedWriterTest = 'native::ingress::tests::kernel_privileged_parent_cannot_bypass_writer_quotas'
+const idmappedViewTest = 'native::identity::mounts::tests::kernel_mapped_view_keeps_disk_owners_and_uses_conversation_ids'
+const spareClaimTest = 'native::spares::tests::kernel_spare_claim_recovers_after_rename_before_quota_adoption'
 // Every quota case runs on both supported pool filesystems: ext4, and XFS
 // with reflink as recommended for new nodes.
 const script = `
@@ -86,7 +88,7 @@ done
 `
 for (const filesystem of ['ext4', 'xfs']) {
   const fixture = mkdtempSync(path.join(target, `quota-qualification-${filesystem}-`))
-  const result = spawnSync('sudo', ['-n', 'unshare', '--mount', '--propagation', 'private', 'bash', '-c', script, 'cairn-quota-qualification', binary, fixture, filesystem, ...tests, privilegedWriterTest], {
+  const result = spawnSync('sudo', ['-n', 'unshare', '--mount', '--propagation', 'private', 'bash', '-c', script, 'cairn-quota-qualification', binary, fixture, filesystem, ...tests, privilegedWriterTest, idmappedViewTest, spareClaimTest], {
     stdio: 'inherit',
   })
   if (result.error)
