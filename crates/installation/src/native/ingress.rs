@@ -340,9 +340,14 @@ impl Admission {
             .saturating_sub(self.observation.peer_reservations)
             .saturating_sub(self.observation.outstanding)
             .saturating_sub(since);
-        if allocation.saturating_add(disk::MIB) > physical
-            || projected.saturating_add(pending) > limit.saturating_sub(disk::MIB)
-        {
+        let required = allocation.saturating_add(disk::MIB);
+        let enough_physical = required <= physical
+            || self
+                .reconciled_headroom(&policy, || {
+                    storage::policy::physical_space(&self.filesystem).map_err(Error::from)
+                })?
+                .is_some_and(|headroom| required <= headroom);
+        if !enough_physical || projected.saturating_add(pending) > limit.saturating_sub(disk::MIB) {
             return Err(Error::new(
                 507,
                 "Native ingress exceeds the current physical reserve or shared allocated budget.",
@@ -350,6 +355,33 @@ impl Admission {
         }
         self.submitted = self.submitted.saturating_add(allocation);
         Ok(())
+    }
+
+    fn reconciled_headroom(
+        &self,
+        policy: &storage::policy::Policy,
+        mut sample: impl FnMut() -> Result<(u64, u64)>,
+    ) -> Result<Option<u64>> {
+        let own = self
+            .progress
+            .as_ref()
+            .map(|progress| progress.path.as_path());
+        for _ in 0..3 {
+            let before = sample()?;
+            let peers = disk::reconciled_physical_preparations(&self.state, &self.filesystem, own)?;
+            let growth = self.target.allocated()?.saturating_sub(self.initial_target);
+            let after = sample()?;
+            if before == after {
+                let (total, free) = after;
+                return Ok(Some(
+                    free.saturating_sub(policy.reserve(total))
+                        .saturating_sub(storage::cache::pending_write_bytes())
+                        .saturating_sub(peers)
+                        .saturating_sub(self.submitted.saturating_sub(growth)),
+                ));
+            }
+        }
+        Ok(None)
     }
 
     fn peer_reservations(&self) -> Result<u64> {
@@ -399,6 +431,62 @@ mod tests {
         drop(peer);
         let mut available = Admission::new(&data, &state, &data, &data, u64::MAX, &policy).unwrap();
         available.admit(4096).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "executed by its isolated parent"]
+    async fn paused_peer_allocation_reconciles_physical_headroom_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let data = temp.path().join("data");
+        let first = data.join("runs/.cairn-seed-first");
+        let second = data.join("runs/.cairn-seed-second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        let policy = storage::policy::Policy::default();
+        let reserve = 12 * disk::MIB;
+        let _first_reservation = disk::Preparation::reserve_staging(
+            &state,
+            &crate::config::id(),
+            reserve,
+            &data,
+            &first,
+        )
+        .await
+        .unwrap();
+        let admission = Admission::new(&data, &state, &second, &data, u64::MAX, &policy).unwrap();
+        let second_reservation = disk::Preparation::reserve_staging(
+            &state,
+            &crate::config::id(),
+            reserve,
+            &data,
+            &second,
+        )
+        .await
+        .unwrap();
+        let admission = admission.with_new_reservation(&second_reservation).unwrap();
+
+        // The first writer is paused after its data write and before crediting
+        // the receipt. There is still room for both full 12 MiB commitments.
+        std::fs::write(first.join("payload"), vec![7; (10 * disk::MIB) as usize]).unwrap();
+        let total = 1024 * disk::MIB;
+        let free = policy.reserve(total) + 16 * disk::MIB;
+        assert_eq!(admission.observation.peer_reservations, reserve);
+        assert!(free - policy.reserve(total) - reserve < reserve + disk::MIB);
+        assert_eq!(
+            admission
+                .reconciled_headroom(&policy, || Ok((total, free)))
+                .unwrap(),
+            Some(14 * disk::MIB)
+        );
+    }
+
+    #[test]
+    fn paused_peer_allocation_reconciles_physical_headroom() {
+        crate::test_process::run_ignored(
+            "native::ingress::tests::paused_peer_allocation_reconciles_physical_headroom_child",
+        );
     }
 
     #[tokio::test]

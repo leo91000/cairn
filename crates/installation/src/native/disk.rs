@@ -480,6 +480,45 @@ pub(super) fn physical_preparations(
     })
 }
 
+/// A bounded seed may have materialized data since its last receipt update.
+/// Use only exclusive, already allocated bytes from the recorded inode.
+pub(super) fn reconciled_physical_preparations(
+    state: &Path,
+    filesystem: &Path,
+    except: Option<&Path>,
+) -> Result<u64> {
+    let device = std::fs::metadata(filesystem)?.dev();
+    let mut bytes = 0_u64;
+    for (path, record) in preparations(state)? {
+        if except == Some(path.as_path()) {
+            continue;
+        }
+        let Some(claim) = record.physical.filter(|claim| claim.device == device) else {
+            continue;
+        };
+        let remaining = if let Some(staged) = record.staging {
+            let owned = std::fs::symlink_metadata(&staged.path).is_ok_and(|metadata| {
+                metadata.is_dir()
+                    && metadata.dev() == staged.device
+                    && metadata.ino() == staged.inode
+            });
+            if owned {
+                claim.remaining.min(
+                    record
+                        .bytes
+                        .saturating_sub(super::workspace::credit_bytes(&staged.path)?),
+                )
+            } else {
+                claim.remaining
+            }
+        } else {
+            claim.remaining
+        };
+        bytes = bytes.saturating_add(remaining);
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 fn preparation_bytes(state: &Path) -> Result<u64> {
     sum_preparations(state, None, |record| record.bytes)

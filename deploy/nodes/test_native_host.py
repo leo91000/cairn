@@ -755,6 +755,34 @@ class PoolMigrationTests(unittest.TestCase):
             host.offline_pool_operation(host.migrate_pool, pool_arguments(stop=True))
         stop.assert_not_called()
 
+    def test_bad_block_target_is_rejected_before_stopping_or_publishing_state(self):
+        with patch.object(host, 'pool_unit_properties'), patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
+                patch.object(host, 'check_device', side_effect=host.MigrationError('target is mounted')) as probe, \
+                patch.object(host, 'require_stopped') as stop:
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run), self.assertRaisesRegex(host.MigrationError, 'target is mounted'):
+                    host.offline_pool_operation(host.migrate_pool, pool_arguments(device='/dev/synthetic', dry_run=dry_run, stop=True))
+        self.assertEqual(probe.call_count, 2)
+        stop.assert_not_called()
+        self.assertIsNone(host.load_migration())
+
+    def test_copy_refuses_inode_flags_that_rsync_cannot_preserve(self):
+        source = self.root / 'source'
+        run = source / 'sample'
+        run.mkdir(parents=True)
+        (run / 'keep').write_bytes(b'payload')
+
+        def inode_flags(descriptor, request, buffer):
+            self.assertEqual(request, host.GET_INODE_FLAGS)
+            metadata = os.fstat(descriptor)
+            flags = 0x00080000 if host.stat.S_ISDIR(metadata.st_mode) else 0x00080040
+            host.struct.pack_into('=I', buffer, 0, flags)
+
+        with patch.object(host.fcntl, 'ioctl', side_effect=inode_flags), patch.object(host, 'checked') as rsync, \
+                self.assertRaisesRegex(host.MigrationError, 'keep has inode flags 0x40'):
+            host.copy_environment('sample', source, self.root / 'target')
+        rsync.assert_not_called()
+
     def test_cutover_preserves_an_existing_mount_dependency(self):
         unit = self.units / OLD['unit']
         link = host.pool_boot_link(OLD['unit'])
@@ -802,7 +830,8 @@ class PoolMigrationTests(unittest.TestCase):
 
     def test_copy_verification_must_report_no_difference(self):
         outputs = iter(['', '>f.st...... data/home/file\n'])
-        with patch.object(host, 'checked', side_effect=lambda *args, **_: next(outputs)) as checked, \
+        with patch.object(host, 'verify_portable_inode_flags'), \
+                patch.object(host, 'checked', side_effect=lambda *args, **_: next(outputs)) as checked, \
                 self.assertRaisesRegex(host.MigrationError, 'found differences'):
             host.copy_environment('run', Path('/old'), Path('/new'))
         copy, verify = (call.args for call in checked.call_args_list)
@@ -824,6 +853,7 @@ class PoolMigrationTests(unittest.TestCase):
         def new_pool(record, old, pool):
             events.append(('mount-new', record['phase']))
         return [patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', side_effect=tool),
+                patch.object(host, 'check_device'),
                 patch.object(host, 'pool_unit_properties'),
                 patch.object(host, 'back_up_unit'),
                 patch.object(host, 'require_stopped'), patch.object(host, 'prepare_target', return_value=mountpoint),

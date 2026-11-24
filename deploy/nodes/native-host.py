@@ -19,6 +19,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -854,6 +855,9 @@ PHASES = ('planned', 'formatted', 'copied', 'switched', 'complete')
 OFFLINE_LOCK_FDS = ()
 CONTROLLER_RECEIPT_RESERVE = 64 * 1024 ** 2
 MOUNT_RESTRICTIONS = ('nosuid', 'nodev', 'noexec', 'nosymfollow')
+GET_INODE_FLAGS = 0x80086601  # FS_IOC_GETFLAGS on the supported Linux x86-64 host.
+EXT4_LAYOUT_FLAGS = 0x00001000 | 0x00040000 | 0x00080000 | 0x00200000 | 0x00400000 | 0x10000000
+PROJECT_INHERIT_FLAG = 0x20000000
 
 
 class MigrationError(ValueError):
@@ -1043,6 +1047,10 @@ def offline_pool_operation(operation, arguments):
     global OFFLINE_LOCK_FDS
     if operation is migrate_pool:
         pool_unit_properties(mount_unit_name(pool_path()))
+        if not arguments.dry_run:
+            record = load_migration()
+            target = migration_target(arguments, record)
+            probe_migration_device(target, arguments.force, record)
     if arguments.dry_run:
         return operation(arguments)
     require_stopped(arguments.stop)
@@ -1351,7 +1359,36 @@ def unmount_old_pool(old, pool):
         raise MigrationError(f'{pool} is still mounted; nothing was switched.')
 
 
-def copy_environment(run, source, target):
+def verify_portable_inode_flags(source, project):
+    # rsync's archive/xattr flags cannot attest chattr semantics. Ext4's
+    # internal layout can change, and XFS recreates quota inheritance.
+    allowed = EXT4_LAYOUT_FLAGS | (PROJECT_INHERIT_FLAG if project else 0)
+
+    def check(descriptor, path):
+        flags = bytearray(8)
+        fcntl.ioctl(descriptor, GET_INODE_FLAGS, flags)
+        unsupported = struct.unpack_from('=I', flags)[0] & ~allowed
+        if unsupported:
+            raise MigrationError(f'{path} has inode flags 0x{unsupported:x} that this migration cannot preserve. The ext4 source was retained.')
+
+    def unreadable(error):
+        raise MigrationError(f'Cannot complete inode flag inspection for {source}.') from error
+
+    for directory, _, files, descriptor in os.fwalk(source, onerror=unreadable, follow_symlinks=False):
+        check(descriptor, directory)
+        for name in files:
+            metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            file = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=descriptor)
+            try:
+                check(file, Path(directory) / name)
+            finally:
+                os.close(file)
+
+
+def copy_environment(run, source, target, project=0):
+    verify_portable_inode_flags(source / run, project)
     source_path, target_path = f'{source}/{run}/', f'{target}/{run}/'
     # A resumed target can have the same size and timestamps as the original
     # despite an interrupted write. Content checks make this retry converge.
@@ -1587,15 +1624,12 @@ def new_pool_mounted(record, pool):
                 and filesystem_uuid(mounted['source']) == record['uuid'])
 
 
-def migrate_pool(arguments):
-    pool = pool_path()
-    state = ROOT / 'state'
-    record = load_migration()
+def migration_target(arguments, record):
     if arguments.device:
         target = {'device': str(device_path(arguments.device))}
     elif arguments.image:
         image = safe_path(arguments.image)
-        if image.is_relative_to(pool) or image.is_relative_to(state):
+        if image.is_relative_to(ROOT / 'state'):
             raise MigrationError('Keep the new pool image outside the data pool and controller state directories.')
         target = {'image': str(image), 'size': parse_size(arguments.size or '')}
     elif record:
@@ -1604,6 +1638,21 @@ def migrate_pool(arguments):
         raise MigrationError('Choose a target with --device <block device> or --image <path> --size <size>.')
     if record and record['target'] != target:
         raise MigrationError('Another pool migration is in progress (' + json.dumps(record['target']) + '); finish it or run rollback-pool.')
+    return target
+
+
+def probe_migration_device(target, force, record):
+    if 'device' in target and (not record or record['phase'] == 'planned'):
+        check_device(Path(target['device']), force, uuid=record['uuid'] if record else None)
+
+
+def migrate_pool(arguments):
+    pool = pool_path()
+    state = ROOT / 'state'
+    record = load_migration()
+    target = migration_target(arguments, record)
+    if arguments.dry_run:
+        probe_migration_device(target, arguments.force, record)
     if record and record['phase'] in ('copied', 'switched', 'complete'):
         return finish_migration(record, arguments, pool, state)
     safe_path(str(pool))
@@ -1644,6 +1693,7 @@ def migrate_pool(arguments):
         if units:
             print('The node is running; stop it or pass --stop: ' + ', '.join(units))
         return
+    probe_migration_device(target, arguments.force, record)
     migration_directory().mkdir(mode=0o700, exist_ok=True)
     save_migration(record)
     back_up_unit(old)
@@ -1659,9 +1709,10 @@ def migrate_pool(arguments):
                 # A failed writeback can leave bytes visible in page cache.
                 # Recreate the interrupted copy before trusting checksums.
                 shutil.rmtree(entry)
-        for run in runs:
+        for environment in plan['environments']:
+            run = environment['run']
             pool_tool('prepare', state, migration_directory(), mountpoint, run)
-            copy_environment(run, pool, mountpoint)
+            copy_environment(run, pool, mountpoint, environment['project'])
             pool_tool('commit', state, migration_directory(), mountpoint, run)
             print(f'Copied and verified environment {run}.')
         flush_migration_copy(descriptor)

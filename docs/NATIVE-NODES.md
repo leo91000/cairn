@@ -283,6 +283,8 @@ Le fichier image doit laisser au moins 64 Mio, plus 64 Kio par environnement,
 disponibles pour les reçus de récupération sur les systèmes de fichiers du
 contrôleur. L’outil conserve les restrictions de montage `nosuid`, `nodev`,
 `noexec` et `nosymfollow` du pool ext4.
+Il refuse les attributs inode qu’il ne sait pas préserver, par exemple
+`nodump`, et indique le fichier concerné avant la bascule.
 
 Après interruption, relancez `migrate-pool` avec la même cible pour reprendre.
 Une copie interrompue est recréée sur la cible avant la vérification. Le
