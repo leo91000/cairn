@@ -733,8 +733,16 @@ def main():
             if api('/health', method='GET').get('environmentProtocol') != 1:
                 return
             run = create()
+            administrator_workload = """
+if test -e administrator-first-turn; then
+    test "$(docker inspect --format '{{.State.Running}}' cairn-background)" = true
+else
+    test ! -e /run/cairn-docker/network.ready
+    touch administrator-first-turn
+fi
+"""
             attempt = start(run, long=False, lease=300000, environment=True,
-                docker_script='test ! -e /run/cairn-docker/network.ready\n' if administrator else '')
+                docker_script=administrator_workload if administrator else '')
             plan = json.loads((data / 'runner-plans' / (attempt + '.json')).read_text())
             def receipt(turn):
                 value = api('/runs/' + attempt + '/turn/' + turn, method='GET', timeout=25)
@@ -769,7 +777,8 @@ def main():
             accepted = api(control, dict(operation='resume_turn', requestId='second', turnId=plan['turnId'], plan=plan))
             assert accepted['event'] == 'accepted'
             second = eventually(lambda: receipt(plan['turnId']))
-            assert second['code'] == 0 and second['generation'] == first['generation']
+            assert second['code'] == 0, f"Second provider turn exited with {second['code']}."
+            assert second['generation'] == first['generation'], 'Provider turn changed the environment generation.'
             assert owned_namespace_pid(group, namespace_pid) == pid, 'Background job changed between provider turns.'
             if docker_job:
                 assert api(control, dict(operation='activity', requestId=str(uuid.uuid4())))['containers'] is True
