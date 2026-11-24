@@ -39,6 +39,7 @@ import build.cairn.contracts.ReplaceAgentInput
 import build.cairn.contracts.ReplaceAgentPluginGrantsInput
 import build.cairn.contracts.createAgent
 import build.cairn.contracts.deleteAgent
+import build.cairn.contracts.getAgent
 import build.cairn.contracts.getAgentPluginGrants
 import build.cairn.contracts.listAgents
 import build.cairn.contracts.previewAgent
@@ -272,10 +273,34 @@ private fun AgentPage(
     BackHandler(enabled = !saving) { leave() }
 
     suspend fun requireCodingAgentConnection(provider: String) {
-        val catalog = vm.refreshModels(provider) ?: vm.state.value.modelCatalog(provider)
+        val catalog =
+            checkNotNull(vm.refreshModels(provider)) {
+                "Impossible de vérifier la connexion de cet assistant de code. Réessayez."
+            }
         check(catalog.connected != false) {
             "Connectez ${providerLabel(provider)} ou choisissez un autre assistant de code."
         }
+    }
+
+    suspend fun retryAgentCreation(input: CreateAgentInput, latest: () -> CreateAgentInput): Agent {
+        val agentId = input.creationId ?: return vm.api.createAgent(input)
+        try {
+            requireCodingAgentConnection(input.settings.provider)
+        } catch (connectionError: IllegalStateException) {
+            if (connectionError is CancellationException) throw connectionError
+            // Recover an existing agent without writing the original disconnected provider.
+            try {
+                return vm.api.getAgent(AgentInput(agentId))
+            } catch (readError: ApiException) {
+                if (readError.status != 404) throw readError
+            }
+
+            val current = latest().copy(creationId = agentId)
+            if (current.settings.provider == input.settings.provider) throw connectionError
+            requireCodingAgentConnection(current.settings.provider)
+            return vm.api.createAgent(current)
+        }
+        return vm.api.createAgent(input)
     }
 
     suspend fun commit(
@@ -299,6 +324,16 @@ private fun AgentPage(
                 creating -> {
                     // Once created, the agent's revision guards the recovery update, so a change
                     // made elsewhere meanwhile is reported as a conflict instead of overwritten.
+                    val replaying = creation.pendingCreation
+                    val createBody = {
+                        agentSaveBody(
+                                edited.copy(revision = ""),
+                                approved,
+                                mcpIds,
+                                nativeNodeReviews = nativeNodes,
+                            )
+                            .let { JsonObject(it - "agentId" - "revision") }
+                    }
                     val response =
                         try {
                             creation.save(
@@ -312,27 +347,27 @@ private fun AgentPage(
                                         nativeNodeReviews = nativeNodes,
                                     )
                                 },
-                                createValue = {
-                                    agentSaveBody(
-                                            edited.copy(revision = ""),
-                                            approved,
-                                            mcpIds,
-                                            nativeNodeReviews = nativeNodes,
-                                        )
-                                        .let { JsonObject(it - "agentId" - "revision") }
-                                },
+                                createValue = createBody,
                                 onCreated = {
                                     baseline = wireJson.decodeFromJsonElement<Agent>(it)
                                 },
                                 request = { method, _, payload ->
                                     val saved =
-                                        if (method == "POST")
-                                            vm.api.createAgent(
+                                        if (method == "POST") {
+                                            val input =
                                                 wireJson.decodeFromJsonElement<CreateAgentInput>(
                                                     payload
                                                 )
-                                            )
-                                        else {
+                                            if (replaying)
+                                                retryAgentCreation(input) {
+                                                    wireJson.decodeFromJsonElement<
+                                                        CreateAgentInput
+                                                    >(
+                                                        createBody()
+                                                    )
+                                                }
+                                            else vm.api.createAgent(input)
+                                        } else {
                                             if (edited.provider != baseline.provider)
                                                 requireCodingAgentConnection(edited.provider)
                                             vm.api.replaceAgent(

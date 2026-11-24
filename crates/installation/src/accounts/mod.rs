@@ -785,6 +785,14 @@ impl Accounts {
         let provider = account.provider;
         let driver = provider.driver();
         if let Err(error) = driver.refresh(s, id, &models).await {
+            if provider == Provider::Antigravity && matches!(error.status, 502..=504) {
+                tracing::warn!(
+                    account_id = %id,
+                    status = error.status,
+                    "Antigravity account refresh temporarily unavailable"
+                );
+                return Ok(());
+            }
             let mut account = self.account(s, id).await?;
             account.state = AccountState::Error;
             account.error = if error.status < 500 {

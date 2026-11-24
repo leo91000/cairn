@@ -124,7 +124,7 @@ abstract class ModelPickerCases {
         compose.onNodeWithText("Modèle masqué").assertDoesNotExist()
         compose.onNodeWithText("Rechercher un modèle").performTextInput("rapide")
         compose.onNodeWithText("Modèle annexe 1").assertDoesNotExist()
-        compose.onNodeWithText("Modèle rapide").performClick()
+        compose.onNodeWithText("Modèle rapide").performScrollTo().assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals("fast" to "", result) }
         // The effort control follows the chosen model inside the same sheet.
         compose

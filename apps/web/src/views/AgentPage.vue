@@ -29,6 +29,7 @@ import { providers as codingAgents } from '../../../../packages/contracts/accoun
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { createAgent } from '../../../../packages/contracts/generated/createAgent'
 import { deleteAgent } from '../../../../packages/contracts/generated/deleteAgent'
+import { getAgent } from '../../../../packages/contracts/generated/getAgent'
 import { getAgentPluginGrants } from '../../../../packages/contracts/generated/getAgentPluginGrants'
 import { listAgents } from '../../../../packages/contracts/generated/listAgents'
 import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
@@ -807,14 +808,45 @@ function failed(e: unknown) {
 async function requireCodingAgentConnection(value: AgentDraft['provider']) {
   const models = modelCatalogs[value]
   await models.load()
+  if (!models.catalog.loaded || models.catalog.requestFailed)
+    throw new Error(`Couldn’t check the ${codingAgents[value].label} connection. Try saving again.`)
   if (models.catalog.connected === false)
     throw new Error(`Connect ${codingAgents[value].label} in Connections or choose another coding agent.`)
 }
 
-async function agentRequest<T>(_path: string, options: RequestInit): Promise<T> {
+async function retryAgentCreation(input: CreateAgentInput, latest: (id: string) => CreateAgentInput): Promise<Agent> {
+  const agentId = input.creationId
+  if (agentId) {
+    try {
+      await requireCodingAgentConnection(input.settings.provider)
+    }
+    catch (connectionError) {
+      // Recover a committed identity without asking an unavailable engine to create it again.
+      try {
+        return await getAgent(api, { agentId })
+      }
+      catch (readError) {
+        if (!(readError instanceof ApiError && readError.status === 404))
+          throw readError
+      }
+
+      const current = latest(agentId)
+      if (current.settings.provider === input.settings.provider)
+        throw connectionError
+      await requireCodingAgentConnection(current.settings.provider)
+      return createAgent(api, current)
+    }
+  }
+
+  return createAgent(api, input)
+}
+
+async function agentRequest<T>(options: RequestInit, replaying: boolean, createBody: (id: string) => CreateAgentInput): Promise<T> {
   const payload = JSON.parse(options.body as string)
-  if (options.method === 'POST')
-    return await createAgent(api, payload as CreateAgentInput) as T
+  if (options.method === 'POST') {
+    const creation = payload as CreateAgentInput
+    return (replaying ? await retryAgentCreation(creation, createBody) : await createAgent(api, creation)) as T
+  }
 
   const update = payload as ReplaceAgentInput
   if (update.settings.provider !== agent.value?.provider)
@@ -832,12 +864,18 @@ async function commit(reapprove: string[]) {
   let result: Agent
   try {
     if (isNew.value) {
-      if (!agent.value && !creation.pendingCreation.value)
+      const replaying = creation.pendingCreation.value
+      if (!agent.value && !replaying)
         await requireCodingAgentConnection(draft.value.provider)
+      const createBody = (creationId: string) => {
+        const profile = body(reapprove, nativeNodes)
+        return { creationId, settings: profile.settings, review: profile.review }
+      }
+
       result = await creation.save<Agent>('/agents', {
         body: () => body(reapprove, nativeNodes),
-        request: agentRequest,
-        createBody: creationId => ({ creationId, settings: body(reapprove, nativeNodes).settings, review: body(reapprove, nativeNodes).review }),
+        request: (_path, options) => agentRequest(options, replaying, createBody),
+        createBody,
         // A replayed creation updates the agent it created, at that agent's revision.
         onCreated: (created) => {
           agent.value = created

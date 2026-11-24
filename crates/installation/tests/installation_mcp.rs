@@ -6480,6 +6480,17 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     assert_eq!(status, StatusCode::OK, "{failed_renewal}");
     assert_eq!(failed_renewal["connected"], true, "{failed_renewal}");
     assert_eq!(failed_renewal["stale"], true, "{failed_renewal}");
+    s.accounts.refresh(&s, &google.id).await.unwrap();
+    assert!(
+        s.accounts
+            .account(&s, &google.id)
+            .await
+            .unwrap()
+            .is_active()
+    );
+    let (_, after_poll) =
+        account_http(&app, &member, "GET", "/api/antigravity/models", Value::Null).await;
+    assert_eq!(after_poll, failed_renewal);
 }
 
 #[tokio::test]
