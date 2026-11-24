@@ -214,9 +214,15 @@ internal fun ModelPicker(
     change: (String, String) -> Unit,
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
-    val discovered = remember(open) { mutableStateMapOf<String, ModelCatalog?>() }
-    val shownCatalog =
-        discovered[provider]?.let { catalog.copy(connected = it.connected) } ?: catalog
+    val lastConnection = remember { mutableStateMapOf<String, Boolean?>() }
+    val verified = remember(open) { mutableStateMapOf<String, Boolean>() }
+    fun connectionFor(value: String): Boolean? =
+        when {
+            value in lastConnection -> lastConnection[value]
+            value == provider -> catalog.connected
+            else -> catalogs?.get(value)?.connected
+        }
+    val shownCatalog = catalog.copy(connected = connectionFor(provider))
     val inheritedModel =
         if (inherit) defaultModel else shownCatalog.nativeDefaults?.model ?: defaultModel
     val inheritedReasoning =
@@ -320,20 +326,24 @@ internal fun ModelPicker(
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
             var discoveryAttempt by remember { mutableIntStateOf(0) }
-            val checkingConnections = refreshCatalog != null && discovered.size < codingAgents.size
+            val checkingConnections = refreshCatalog != null && verified.size < codingAgents.size
             suspend fun refreshInventory() {
                 val fresh = reload() ?: return
                 // Inventory can verify a rejected credential during the provider call.
-                if (refreshCatalog != null && fresh.connected != discovered[provider]?.connected)
+                if (refreshCatalog != null && fresh.connected != lastConnection[provider])
                     discoveryAttempt++
             }
             if (refresh != null) Poll(provider, 300_000) { refreshInventory() }
             if (refreshCatalog != null) {
                 Poll(discoveryAttempt, 300_000) {
-                    discovered.clear()
+                    verified.clear()
                     coroutineScope {
                         codingAgents.forEach { agent ->
-                            launch { discovered[agent.provider] = refreshCatalog(agent.provider) }
+                            launch {
+                                val fresh = refreshCatalog(agent.provider)
+                                if (fresh != null) lastConnection[agent.provider] = fresh.connected
+                                verified[agent.provider] = fresh != null
+                            }
                         }
                     }
                 }
@@ -441,12 +451,9 @@ internal fun ModelPicker(
                     // A chat can return to its saved agent even if its account went away.
                     fun retained(value: String) =
                         value == savedProvider || (!requireConnection && value == provider)
-                    fun catalogFor(value: String) =
-                        if (value == provider) shownCatalog
-                        else discovered[value] ?: catalogs?.get(value)
                     val (offered, unconnected) =
                         codingAgents.partition {
-                            retained(it.provider) || catalogFor(it.provider)?.connected != false
+                            retained(it.provider) || connectionFor(it.provider) != false
                         }
                     SectionLabel("Assistant de code")
                     ProviderTiles(offered.map { it.provider to it.vendor }) {
@@ -460,9 +467,9 @@ internal fun ModelPicker(
                             enabled &&
                                 (retained(value) ||
                                     refreshCatalog == null ||
-                                    discovered[value] != null),
+                                    verified[value] == true),
                             tileModifier,
-                            connectionRequired = catalogFor(value)?.connected == false,
+                            connectionRequired = connectionFor(value) == false,
                         ) {
                             if (provider != value) {
                                 query = ""
@@ -473,17 +480,13 @@ internal fun ModelPicker(
                     if (unconnected.isNotEmpty())
                         UnconnectedAgents(unconnected.map { it.provider }, connect)
                     val alternateAgents = codingAgents.filterNot { retained(it.provider) }
-                    if (checkingConnections && alternateAgents.any { it.provider !in discovered })
+                    if (checkingConnections && alternateAgents.any { it.provider !in verified })
                         Text(
                             "Vérification des connexions…",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                    else if (
-                        alternateAgents.any {
-                            discovered.containsKey(it.provider) && discovered[it.provider] == null
-                        }
-                    )
+                    else if (alternateAgents.any { verified[it.provider] == false })
                         Text(
                             "Certaines connexions n’ont pas pu être vérifiées.",
                             style = MaterialTheme.typography.bodySmall,

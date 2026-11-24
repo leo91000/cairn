@@ -479,6 +479,50 @@ abstract class ModelPickerCases {
     }
 
     @Test
+    fun aFailedConnectionCheckKeepsTheConfirmedDisconnectionAcrossReopening() {
+        var checks by mutableIntStateOf(0)
+        compose.setContent {
+            CairnTheme {
+                SurfaceForTest {
+                    ModelPicker(
+                        ModelCatalog(connected = true),
+                        "saved-model",
+                        "",
+                        provider = "opencode",
+                        savedProvider = "opencode",
+                        changeProvider = {},
+                        refreshCatalog = { provider ->
+                            if (provider == "opencode") {
+                                checks++
+                                if (checks == 1) ModelCatalog(connected = false) else null
+                            } else ModelCatalog(connected = true)
+                        },
+                    ) { _, _ ->
+                    }
+                }
+            }
+        }
+
+        val picker = compose.onNodeWithTag("model-picker")
+        val cue = compose.onNodeWithText("OpenCode a besoin d’une connexion")
+        picker.performClick()
+        compose.waitUntil(10000) { checks >= 1 }
+        cue.assertExists()
+
+        val refresh = hasTestTag("refresh-models") and isEnabled()
+        compose.waitUntil(10000) { compose.onAllNodes(refresh).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNode(refresh).performClick()
+        compose.waitUntil(10000) { checks >= 2 }
+        cue.assertExists()
+
+        compose.onNodeWithText("Terminé").performClick()
+        picker.performClick()
+        compose.waitUntil(10000) { checks >= 3 }
+        cue.assertExists()
+        compose.onNodeWithText("Nom du modèle").assertDoesNotExist()
+    }
+
+    @Test
     fun switchingProvidersLoadsModelsWhileThePreviousRefreshWaits() {
         var provider by mutableStateOf("codex")
         var inventories by mutableStateOf(mapOf("codex" to catalog.copy(connected = true)))
