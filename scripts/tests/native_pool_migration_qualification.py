@@ -56,6 +56,10 @@ def mounted(path):
 def direct_io(image):
     devices = command('losetup', '--noheadings', '--output', 'NAME', '--associated', image).stdout.split()
     assert len(devices) == 1, f'{image} is attached {len(devices)} times.'
+    queue = Path('/sys/class/block') / Path(devices[0]).name / 'queue/discard_max_bytes'
+    assert queue.read_text().strip() == '0', 'Loop discard can punch a hole in the backing file.'
+    backing = image.stat()
+    assert backing.st_blocks * 512 >= backing.st_size, 'The backing image is no longer fully allocated.'
     return command('losetup', '--noheadings', '--output', 'DIO', devices[0]).stdout.strip() == '1'
 
 
@@ -105,6 +109,8 @@ def main(binary, cairn, fixture):
         assert 'nothing changed' in plan and not image.exists(), 'Dry run changed the host.'
         host(root, cairn, 'migrate-pool', '--image', image, '--size', '2G')
         assert mounted(pool) == 'xfs' and direct_io(image), 'Migration did not mount the direct-I/O XFS pool.'
+        command('fstrim', pool, check=False)
+        assert direct_io(image), 'Trimming the pool changed its backing allocation.'
         assert (UNITS / unit).exists() and (UNITS / LOOP_SERVICE).exists(), 'Persistent pool units are missing.'
 
         # A reboot detaches the loop device; the units must restore both.

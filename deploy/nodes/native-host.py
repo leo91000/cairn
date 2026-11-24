@@ -1100,6 +1100,20 @@ def attached_loop(image):
 
 def loop_unit(image, mount_unit, filesystem):
     image_text = str(image)
+    attached = f'set -- $$(losetup --noheadings --output NAME --associated {image_text}); test "$$#" -le 1; '
+    same_filesystem = f'test "$$(blkid -p -s UUID -o value "$$1")" = {filesystem}'
+    ready = (
+        'ready() { '
+        f'{same_filesystem} && '
+        'test "$$(losetup --noheadings --output DIO "$$1" | tr -d " ")" = 1 && '
+        'printf "0\\n" >/sys/class/block/$${1##*/}/queue/discard_max_bytes; }; '
+    )
+    start = (
+        ready + attached +
+        f'if test "$$#" = 0; then device=$$(losetup --direct-io=on --find --show {image_text}); '
+        'if ready "$$device"; then exit 0; fi; losetup --detach "$$device"; exit 1; fi; ready "$$1"'
+    )
+    stop = attached + 'if test "$$#" = 0; then exit 0; fi; ' + same_filesystem + '; losetup --detach "$$1"'
     return f'''[Unit]
 Description=Cairn native data pool loop device (direct I/O)
 DefaultDependencies=no
@@ -1109,8 +1123,8 @@ Conflicts=umount.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -ec 'set -- $$(losetup --noheadings --output NAME --associated {image_text}); test "$$#" -le 1; if test "$$#" = 0; then device=$$(losetup --direct-io=on --find --show {image_text}); if test "$$(blkid -p -s UUID -o value "$$device")" = {filesystem} && test "$$(losetup --noheadings --output DIO "$$device" | tr -d " ")" = 1; then exit 0; fi; losetup --detach "$$device"; exit 1; fi; test "$$(blkid -p -s UUID -o value "$$1")" = {filesystem}; test "$$(losetup --noheadings --output DIO "$$1" | tr -d " ")" = 1'
-ExecStop=/bin/sh -ec 'set -- $$(losetup --noheadings --output NAME --associated {image_text}); if test "$$#" = 0; then exit 0; fi; test "$$#" = 1; test "$$(blkid -p -s UUID -o value "$$1")" = {filesystem}; losetup --detach "$$1"'
+ExecStart=/bin/sh -ec '{start}'
+ExecStop=/bin/sh -ec '{stop}'
 [Install]
 WantedBy=local-fs.target
 '''
@@ -1352,6 +1366,18 @@ def owned_loop(record, image):
     return device
 
 
+def disable_loop_discard(device):
+    if not re.fullmatch(r'/dev/loop[0-9]+', str(device)):
+        raise MigrationError(f'Cannot identify the queue of the migration loop device {device}.')
+    queue = Path('/sys/class/block') / device.name / 'queue/discard_max_bytes'
+    # Discard punches holes in a loop backing file, including discards
+    # initiated by the host's periodic fstrim service.
+    if queue.read_text().strip() != '0':
+        queue.write_text('0\n')
+    if queue.read_text().strip() != '0':
+        raise MigrationError(f'Cannot preserve the allocated backing space of {device}.')
+
+
 def prepare_target(record, force):
     target = record['target']
     work = migration_directory()
@@ -1369,6 +1395,7 @@ def prepare_target(record, force):
             checked('losetup', '--direct-io=on', str(device), str(image))
         if checked('losetup', '--noheadings', '--output', 'DIO', str(device)).strip() != '1':
             raise MigrationError(f'{device} does not support direct I/O for this image. Choose a partition, logical volume or another image filesystem.')
+        disable_loop_discard(device)
     else:
         device = Path(target['device'])
     expected = record['uuid']
@@ -1383,7 +1410,8 @@ def prepare_target(record, force):
                 save_migration(record)
         # A partial mkfs can already have written the recorded UUID. The
         # planned phase contains no copied environments and can format again.
-        checked('mkfs.xfs', '-f', '-q', '-L', 'cairn-native', '-m', f'crc=1,reflink=1,uuid={expected}', '-i', 'projid32bit=1', str(device), timeout=1800)
+        discard = ['-K'] if 'image' in target else []
+        checked('mkfs.xfs', '-f', '-q', *discard, '-L', 'cairn-native', '-m', f'crc=1,reflink=1,uuid={expected}', '-i', 'projid32bit=1', str(device), timeout=1800)
         if filesystem_uuid(device) != expected:
             raise MigrationError(f'{device} did not retain the migration XFS UUID.')
         record['phase'] = 'formatted'
