@@ -524,34 +524,32 @@ impl Catalog {
                 continue;
             }
             // A revoked Google sign-in must not hide the models of healthy accounts.
-            let credentials = match crate::accounts::antigravity::credentials(s, &account.id).await
-            {
-                Ok(credentials) => credentials,
-                Err(error)
-                    if error.code.as_deref()
-                        == Some(crate::accounts::antigravity::RECONNECT_REQUIRED) =>
-                {
-                    reconnect = Some(error);
-                    continue;
-                }
-                Err(error) => {
-                    failure = Some(error);
-                    continue;
-                }
-            };
+            let credentials =
+                match crate::accounts::antigravity::catalog_credentials(s, &account.id).await {
+                    Ok(Some(credentials)) => credentials,
+                    Ok(None) => continue,
+                    Err(error)
+                        if error.code.as_deref()
+                            == Some(crate::accounts::antigravity::RECONNECT_REQUIRED) =>
+                    {
+                        reconnect = Some(error);
+                        continue;
+                    }
+                    Err(error) => {
+                        failure = Some(error);
+                        continue;
+                    }
+                };
             match Self::list(s, &credentials).await {
                 Ok(models) => kinds.push((kind, models)),
                 Err(error) => failure = Some(error),
             }
         }
         if kinds.is_empty() {
-            if let Some(error) = failure {
-                return Err(error);
-            }
-            if reconnect.is_some() {
-                return Ok(disconnected_catalog());
-            }
-            return Err(Error::bad_gateway("Antigravity could not list models."));
+            return match failure {
+                Some(error) => Err(error),
+                None => Ok(disconnected_catalog()),
+            };
         }
         let mut entries = Vec::<Value>::new();
         for (kind, models) in &kinds {
