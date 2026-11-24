@@ -436,6 +436,7 @@ fn can_recover_controller(
         && !saved.provider_failed()
         && may_retry
         && (mode_change || run.state.session_id.is_some())
+        && !(run.state.session_id.is_none() && saved.antigravity_start_unconfirmed())
         && !stopped
 }
 

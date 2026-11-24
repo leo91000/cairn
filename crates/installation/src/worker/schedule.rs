@@ -3290,6 +3290,7 @@ mod tests {
                     super::super::checkpoint::EventChanges {
                         run: None,
                         failure: Some(("Provider busy".into(), Some(cause), true)),
+                        antigravity_probe_failed: false,
                         completed: false,
                         progress_complete: true,
                         last_message: None,

@@ -33,7 +33,7 @@ struct Controller {
 
 /// Current controllers report occupied native slots as plain 503 errors.
 /// Normalize known capacity refusals into the manager's wait contract.
-fn startup_rejection(status: StatusCode, reason: Option<&str>) -> String {
+fn startup_rejection(status: StatusCode, reason: Option<&str>) -> (String, bool) {
     let mut message = format!("Execution controller rejected startup (HTTP {status}).");
     if let Some(reason) = reason {
         message.push(' ');
@@ -49,12 +49,15 @@ fn startup_rejection(status: StatusCode, reason: Option<&str>) -> String {
             )
         );
     if capacity {
-        return format!(
-            "{} can accept this execution right now. {message}",
-            crate::nodes::placement::NO_CAPACITY,
+        return (
+            format!(
+                "{} can accept this execution right now. {message}",
+                crate::nodes::placement::NO_CAPACITY,
+            ),
+            true,
         );
     }
-    message
+    (message, false)
 }
 
 impl Controller {
@@ -79,7 +82,7 @@ impl Controller {
             }
 
             let error = serde_json::from_slice::<Value>(&body).unwrap_or_default();
-            let message = startup_rejection(status, error["error"].as_str());
+            let (message, capacity_rejection) = startup_rejection(status, error["error"].as_str());
             let message = run_output::redact(&message, std::slice::from_ref(&self.token));
 
             // Only an explicit rejection proves that the native agent never started.
@@ -87,6 +90,7 @@ impl Controller {
             let event = json!({
                 "type": "runner.start_rejected",
                 "message": message,
+                "capacityRejection": capacity_rejection,
             });
 
             let mut stdout = tokio::io::stdout();
@@ -875,19 +879,27 @@ mod tests {
 
     #[test]
     fn startup_rejections_are_backend_neutral_and_preserve_capacity_detection() {
-        let message = startup_rejection(
+        let (message, capacity) = startup_rejection(
             StatusCode::CONFLICT,
             Some("Native workspace is still active."),
         );
         assert!(message.starts_with("Execution controller rejected startup"));
         assert!(message.ends_with("Native workspace is still active."));
+        assert!(!capacity);
         for reason in [
             "All VM slots are occupied.",
             "The native execution slot is occupied.",
         ] {
-            let message = startup_rejection(StatusCode::SERVICE_UNAVAILABLE, Some(reason));
+            let (message, capacity) =
+                startup_rejection(StatusCode::SERVICE_UNAVAILABLE, Some(reason));
             assert!(message.starts_with(crate::nodes::placement::NO_CAPACITY));
+            assert!(capacity);
         }
+        let (_, capacity) = startup_rejection(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("VM controller unavailable"),
+        );
+        assert!(!capacity);
     }
 }
 

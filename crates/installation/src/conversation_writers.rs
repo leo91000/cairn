@@ -179,7 +179,7 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 /// What a person wrote in a message. Delivery state changes it never.
-fn entry_digest(message: &Message) -> Result<String> {
+pub(crate) fn entry_digest(message: &Message) -> Result<String> {
     let attachments: Vec<_> = message
         .attachments
         .iter()
@@ -358,6 +358,16 @@ pub(crate) fn record_message_before_change(db: &Db<'_>, message: &Message) -> Re
         record_entry(db, &message.chat_id, &EntryWriter::Unknown)?;
     }
     Ok(())
+}
+
+/// Delivery state changes do not update the time of the last content entry.
+pub(crate) fn message_written_after(db: &Db<'_>, message: &Message, at: i64) -> Result<bool> {
+    Ok(db
+        .0
+        .prepare_cached(
+            "SELECT 1 FROM conversation_entry_writers WHERE chat_id=? AND message_id=? AND written_at>?",
+        )?
+        .exists(params![message.chat_id, message.id, at])?)
 }
 
 /// Attests who wrote a message as it is now stored: sent, edited or answered.

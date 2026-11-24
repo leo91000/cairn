@@ -1171,6 +1171,7 @@ mod tests {
                     }),
                     completed: false,
                     failure: None,
+                    antigravity_probe_failed: false,
                     progress_complete: true,
                     last_message: None,
                 },
