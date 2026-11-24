@@ -23,12 +23,24 @@ const durable = fileURLToPath(new URL('../ci-backend-durable.mjs', import.meta.u
 const foreground = fileURLToPath(new URL('../ci-backend-trace.mjs', import.meta.url))
 const admission = fileURLToPath(new URL('./fixtures/admitted-uploader.mjs', import.meta.url))
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
-const fixtureSetupMs = 6500
-// The local guard, trace and publisher retain their shorter per-operation
-// deadlines. Allow headroom for their combined scheduling and process exits.
-const autonomousExitMs = 4000
-const numericControlMs = 4500
+const fixtureSetupMs = 5000
+const autonomousExitMs = 2500
+const numericControlMs = 3500
 const uploaderAdmissionMs = 2500
+
+function actionScratch() {
+  const prefix = 'cairn-action-exit-'
+  try {
+    // Keep the fixture's own files out of unrelated disk writeback. FIFOs,
+    // file-size limits and the blocked-worker case still use real filesystem I/O.
+    return mkdtempSync(path.join('/dev/shm', prefix))
+  }
+  catch (error) {
+    if (!['ENOENT', 'EACCES', 'EPERM', 'EROFS', 'ENOSPC'].includes(error.code))
+      throw error
+    return mkdtempSync(path.join(os.tmpdir(), prefix))
+  }
+}
 
 function identity(pid) {
   try {
@@ -98,7 +110,7 @@ async function action(t, {
   fixtureStartupDelayMs = 0,
   cancel,
 } = {}) {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-action-exit-'))
+  const root = actionScratch()
   onTestFinished(() => rmSync(root, { recursive: true, force: true }))
   for (const name of ['proof', 'publication', 'remote', 'staging'])
     mkdirSync(path.join(root, name))
