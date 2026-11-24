@@ -155,4 +155,34 @@ describe('coding-agent model catalogs', () => {
     expect(modelCatalogs.claude.catalog.models[0].model).toBe('new-claude')
     expect(modelCatalogs.claude.catalog.error).toBe('')
   })
+
+  it('keeps and persists inventory when a connection is confirmed but model discovery is stale', async () => {
+    const saved = [{ model: 'opencode/saved-model' }]
+    localStorage.setItem('fixture-installation:cairn-models:opencode', JSON.stringify({ models: saved }))
+    const { modelCatalogs } = await import('../src/models')
+    const catalog = modelCatalogs.opencode.catalog
+    request.mockResolvedValueOnce({
+      connected: true,
+      models: [],
+      stale: true,
+      error: 'Inventory unavailable',
+    })
+    await modelCatalogs.opencode.load()
+    expect(catalog).toMatchObject({
+      connected: true,
+      models: saved,
+      stale: true,
+      error: 'Inventory unavailable',
+    })
+    expect(localStorage.getItem('fixture-installation:cairn-models:opencode')).toContain('opencode/saved-model')
+
+    request.mockResolvedValueOnce({
+      connected: true,
+      models: [],
+      stale: false,
+      error: '',
+    })
+    await modelCatalogs.opencode.load()
+    expect(catalog.models).toEqual([])
+  })
 })

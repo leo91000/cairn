@@ -53,9 +53,11 @@ function createCatalog(provider: Provider) {
       .then((value) => {
         if (requestRevision !== revision)
           return
-        Object.assign(catalog, value, { nativeDefaults: value.nativeDefaults, connected: value.connected })
+        // A stale, empty inventory can still confirm the account pool.
+        const models = value.connected === true && value.stale && !value.models.length ? catalog.models : value.models
+        Object.assign(catalog, value, { models, nativeDefaults: value.nativeDefaults, connected: value.connected })
         catalog.requestFailed = false
-        store(key, value)
+        store(key, { ...value, models })
       })
       .catch((error: Error) => {
         if (requestRevision === revision) {

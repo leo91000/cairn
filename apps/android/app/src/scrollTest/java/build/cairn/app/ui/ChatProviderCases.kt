@@ -330,7 +330,11 @@ abstract class ChatProviderCases {
             // Agent, model and effort share a single menu.
             compose.onNodeWithTag("model-picker").performClick()
             compose.onNodeWithText("Codex").assertIsSelected()
-            compose.onNodeWithText("Claude Code").performClick()
+            val enabledClaude = hasText("Claude Code") and isEnabled()
+            compose.waitUntil(10000) {
+                compose.onAllNodes(enabledClaude).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNode(enabledClaude).performClick()
             compose.onNodeWithText("Claude Code").assertIsSelected()
             compose.onNodeWithText("Deep thinker", substring = true).assertDoesNotExist()
             compose.waitUntil(10000) {

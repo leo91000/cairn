@@ -8,6 +8,7 @@ import {
   isolatedWorkspaceTest,
   openAgentSection,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -181,6 +182,7 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
 // A fresh installation, so accounts other journeys of this worker connected cannot offer agents.
 isolatedWorkspaceTest('points coding agents without an account to Connections instead of offering them', async ({ page, workspace }) => {
   isolatedWorkspaceTest.setTimeout(90000)
+  await useRelayForHttpMocks(page)
   const labels = {
     codex: 'Codex',
     claude: 'Claude Code',
@@ -247,21 +249,30 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   await expect(menu.getByText(hidden.filter(label => label !== 'Antigravity').join(', '), { exact: true })).toBeVisible()
   await page.keyboard.press('Escape')
 
+  const codexModels = '**/api/codex/models'
+  await page.route(codexModels, route => route.fulfill({ json: { connected: false, models: [] } }))
   await page.goto(workspacePath('/agents'))
   await page.getByRole('link', { name: 'New agent', exact: true }).click()
   await page.getByLabel('Name', { exact: true }).fill('Picker Antigravity helper')
+  await page.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Connect Codex in Connections or choose another coding agent.' })).toBeVisible()
+  await expect(page).toHaveURL(/\/agents\/new$/)
   await openAgentSection(page, 'Coding agent & model')
   await picker.click()
+  await expect(menu.getByText('Codex needs a connection')).toBeVisible()
+  await expect(menu.getByRole('radio', { name: 'Codex', exact: true })).toHaveCount(0)
   const antigravity = menu.getByRole('radio', { name: 'Antigravity', exact: true })
   await antigravity.click()
   await menu.getByRole('radio', { name: 'Gemini 4 Neon', exact: true }).click()
   await menu.getByRole('radiogroup', { name: 'Reasoning' }).getByRole('radio', { name: 'High', exact: true }).click()
   await page.keyboard.press('Escape')
   const agentId = await createAgent(page)
+  await page.unroute(codexModels)
   const held = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${held.id}/pause`, 'POST', { paused: true })
+  const messageId = crypto.randomUUID()
   await workspace.api(`/api/chats/${held.id}/messages`, 'POST', {
-    id: crypto.randomUUID(),
+    id: messageId,
     provider: 'antigravity',
     model: 'gemini-4-neon',
     reasoning: 'high',
@@ -287,10 +298,15 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()
   await picker.click()
   await menu.getByRole('radio', { name: 'Codex', exact: true }).click()
+  await menu.getByRole('radiogroup', { name: 'Reasoning' }).getByRole('radio', { name: 'High', exact: true }).click()
   await antigravity.click()
   await expect(menu.getByText('gemini-4-neon', { exact: true })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(picker).toHaveAccessibleName(/Antigravity · gemini-4-neon · High reasoning$/)
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(composer).toHaveValue('')
+  const queued = (await workspace.api(`/api/chats/${held.id}`)).messages.find((message: { id: string }) => message.id === messageId)
+  expect(queued).toMatchObject({ provider: 'antigravity', model: 'gemini-4-neon', reasoning: 'high' })
 
   // In agent settings, returning to the disconnected engine restores its explicit model and effort.
   await page.goto(workspacePath(`/agents/${agentId}`))

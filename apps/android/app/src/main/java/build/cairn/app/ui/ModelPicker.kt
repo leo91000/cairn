@@ -208,6 +208,7 @@ internal fun ModelPicker(
     onReasoningIntent: (ResumeReasoningIntent) -> Unit = {},
     catalogs: Map<String, ModelCatalog>? = null,
     savedProvider: String? = null,
+    requireConnection: Boolean = false,
     refreshCatalog: (suspend (String) -> ModelCatalog?)? = null,
     openConnections: (() -> Unit)? = null,
     change: (String, String) -> Unit,
@@ -426,7 +427,8 @@ internal fun ModelPicker(
                 }
                 if (changeProvider != null) {
                     // A chat can return to its saved agent even if its account went away.
-                    fun retained(value: String) = value == provider || value == savedProvider
+                    fun retained(value: String) =
+                        value == savedProvider || (!requireConnection && value == provider)
                     fun catalogFor(value: String) =
                         if (value == provider) shownCatalog
                         else discovered[value] ?: catalogs?.get(value)
@@ -517,8 +519,12 @@ internal fun ModelPicker(
                                 color = MaterialTheme.colorScheme.error,
                             )
                             Text(
-                                if (field) "Les exécutions attendront une connexion."
-                                else "Le prochain tour attendra une connexion.",
+                                when {
+                                    requireConnection ->
+                                        "Connectez cet assistant ou choisissez-en un autre."
+                                    field -> "Les exécutions attendront une connexion."
+                                    else -> "Le prochain tour attendra une connexion."
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                             )
                             if (connect != null)

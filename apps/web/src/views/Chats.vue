@@ -647,14 +647,17 @@ const savedAssistant = computed(() => {
 })
 const chosenProvider = computed({
   get: () => provider.value || currentProvider.value,
-  set: (value: Provider) => {
-    resumeReasoningIntent.value = { kind: 'untouched' }
-    provider.value = value
-    model.value = ''
-    reasoning.value = ''
-    speed.value = ''
-  },
+  set: (value: Provider) => { provider.value = value },
 })
+
+function switchedCodingAgent(value: Provider) {
+  resumeReasoningIntent.value = { kind: 'untouched' }
+  provider.value = value
+  model.value = ''
+  reasoning.value = ''
+  speed.value = ''
+}
+
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
 const planEnabled = chatPlanEnabled
 // An accepted queued Plan request can still be edited without dropping its boundary.
@@ -1953,7 +1956,7 @@ function key(event: KeyboardEvent) {
             @ask="sideQuestions?.ask($event)"
             @side-questions="sideQuestions?.show($event)"
             @resume-quota="resumeQuota"
-            @coding-agent-switched="chosenProvider = $event"
+            @coding-agent-switched="switchedCodingAgent"
             @load="live.loadOlder"
             @position="live.savePosition"
             @implement="implementPlan"

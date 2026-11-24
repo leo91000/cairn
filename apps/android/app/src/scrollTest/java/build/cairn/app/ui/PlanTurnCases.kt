@@ -409,8 +409,16 @@ abstract class PlanTurnCases {
                 compose.onNodeWithContentDescription("Envoyer").assertIsNotEnabled()
                 assertTrue(calls.isEmpty())
 
+                fun chooseCodingAgent(name: String) {
+                    val enabledTile = hasText(name) and isSelectable() and isEnabled()
+                    compose.waitUntil(20_000) {
+                        compose.onAllNodes(enabledTile).fetchSemanticsNodes().isNotEmpty()
+                    }
+                    compose.onNode(enabledTile).performClick()
+                }
+
                 compose.onNodeWithTag("model-picker").performClick()
-                compose.onNode(hasText("Codex") and isSelectable()).performClick()
+                chooseCodingAgent("Codex")
                 compose.onNodeWithText("Terminé").performClick()
                 compose.waitUntil(20_000) {
                     compose
@@ -446,7 +454,7 @@ abstract class PlanTurnCases {
 
                 compose.onNode(hasSetTextAction()).performTextInput("Demande ordinaire explicite")
                 compose.onNodeWithTag("model-picker").performClick()
-                compose.onNode(hasText("OpenCode") and isSelectable()).performClick()
+                chooseCodingAgent("OpenCode")
                 compose.onNodeWithText("Terminé").performClick()
                 compose.waitUntil(20_000) {
                     compose
@@ -851,7 +859,7 @@ abstract class PlanTurnCases {
                             "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                             "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                             "/api/installations/fixture/api/overview" -> "{}"
-                            else -> "[]"
+                            else -> if (path.endsWith("/models")) """{"models":[]}""" else "[]"
                         }
                     return MockResponse()
                         .setHeader("Content-Type", "application/json")

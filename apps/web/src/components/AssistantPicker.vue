@@ -58,6 +58,7 @@ const props = withDefaults(defineProps<{
     reasoning?: string
     speed?: string
   }
+  requireConnection?: boolean
   disabled?: boolean
   switching?: boolean
   variant?: 'pill' | 'field'
@@ -89,7 +90,7 @@ const disconnected = computed(() => catalog.value.connected === false)
 const reload = () => modelCatalogs[provider.value].load()
 const current = computed(() => providers.find(item => item.value === provider.value) ?? providers[0])
 // A chat can return to its saved agent even if that agent's account went away.
-const retainedProvider = (value: Provider) => value === provider.value || value === props.savedAssistant?.provider
+const retainedProvider = (value: Provider) => value === props.savedAssistant?.provider || (!props.requireConnection && value === provider.value)
 const offered = computed(() => providers.filter(item => retainedProvider(item.value) || modelCatalogs[item.value].catalog.connected !== false))
 const unconnected = computed(() => providers.filter(item => !offered.value.includes(item)))
 const checkingConnections = computed(() => providers.some(item => !retainedProvider(item.value) && modelCatalogs[item.value].catalog.loading))
@@ -450,7 +451,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
               {{ current.label }} needs a connection
             </p>
             <p class="text-muted">
-              {{ variant === 'pill' ? 'The next turn will wait for a connection.' : 'Runs will wait for a connection.' }}
+              {{ requireConnection ? 'Connect this coding agent or choose another one.' : variant === 'pill' ? 'The next turn will wait for a connection.' : 'Runs will wait for a connection.' }}
             </p>
             <RouterLink
               v-if="state.installationRole === 'owner'"

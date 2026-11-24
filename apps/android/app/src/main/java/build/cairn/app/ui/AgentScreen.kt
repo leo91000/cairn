@@ -285,6 +285,18 @@ private fun AgentPage(
             when {
                 !profilePending -> baseline
                 creating -> {
+                    if (creation.id.isBlank() && !creation.pendingCreation) {
+                        val catalog =
+                            vm.refreshModels(edited.provider)
+                                ?: vm.state.value.modelCatalog(edited.provider)
+                        if (catalog.connected == false) {
+                            saveError =
+                                "Connectez ${providerLabel(edited.provider)} ou choisissez un autre assistant de code."
+                            errorSection = AgentSection.Engine
+                            return
+                        }
+                    }
+
                     // Once created, the agent's revision guards the recovery update, so a change
                     // made elsewhere meanwhile is reported as a conflict instead of overwritten.
                     val response =
@@ -2268,6 +2280,7 @@ private fun EngineSection(
         changeSpeed = { speed -> update { it.copy(speed = speed) } },
         catalogs = state.modelCatalogs,
         savedProvider = saved?.provider,
+        requireConnection = saved == null,
         refreshCatalog = { vm.refreshModels(it) },
         // Connections is pushed on the navigation stack, so Back restores the saved draft.
         openConnections = openConnections,

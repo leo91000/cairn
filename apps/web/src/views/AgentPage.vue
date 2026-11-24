@@ -95,6 +95,7 @@ import {
   Trash2,
   TriangleAlert,
 } from '../icons'
+import { modelCatalogs } from '../models'
 import {
   grantDescription,
   grantDetails,
@@ -820,6 +821,13 @@ async function commit(reapprove: string[]) {
   let result: Agent
   try {
     if (isNew.value) {
+      if (!agent.value && !creation.pendingCreation.value) {
+        const models = modelCatalogs[draft.value.provider]
+        await models.load()
+        if (models.catalog.connected === false)
+          throw new Error(`Connect ${provider.value.label} in Connections or choose another coding agent.`)
+      }
+
       result = await creation.save<Agent>('/agents', {
         body: () => body(reapprove, nativeNodes),
         request: agentRequest,
@@ -1224,6 +1232,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               variant="field"
               :disabled="busy"
               :saved-assistant="agent ? saved : undefined"
+              :require-connection="!agent"
               :inherit="!!agent"
               :default-model="agent?.codingAgentDefaults?.[draft.provider]?.model || ''"
               :default-reasoning="agent?.codingAgentDefaults?.[draft.provider]?.reasoning || ''"

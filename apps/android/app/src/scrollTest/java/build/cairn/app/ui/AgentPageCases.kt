@@ -326,6 +326,7 @@ abstract class AgentPageCases {
         val grantReadBarrier: AtomicReference<GrantReadBarrier?> = AtomicReference(null),
         val refreshWorkspace: AtomicReference<(() -> Unit)?> = AtomicReference(null),
         val failGrantWrites: AtomicBoolean = AtomicBoolean(false),
+        val modelConnections: ConcurrentHashMap<String, Boolean>,
     )
 
     private class GrantReadBarrier {
@@ -348,6 +349,7 @@ abstract class AgentPageCases {
         val failPlugins = AtomicBoolean(false)
         val failGrantReads = AtomicBoolean(false)
         val failGrantWrites = AtomicBoolean(false)
+        val modelConnections = ConcurrentHashMap(mapOf("antigravity" to false))
         val grantReadBarrier = AtomicReference<GrantReadBarrier?>(null)
         val mcps = AtomicReference("[]")
         val allowed = AtomicReference<List<String>>(emptyList())
@@ -701,8 +703,12 @@ abstract class AgentPageCases {
                             path == "/plugins" -> wireJson.encodeToString(pluginCatalog.get())
                             path == "/api/installations" -> beaconInstallationsFixture()
                             path == "/api/account/session" -> beaconAccountFixture("fixture")
-                            path == "/antigravity/models" -> """{"models":[],"connected":false}"""
-                            path.endsWith("/models") -> """{"models":[]}"""
+                            path.endsWith("/models") -> {
+                                val provider = path.substringBeforeLast('/').substringAfterLast('/')
+                                val connected = modelConnections[provider]
+                                if (connected == null) """{"models":[]}"""
+                                else """{"models":[],"connected":$connected}"""
+                            }
                             path.endsWith("/overview") -> installationOverviewFixture()
                             else ->
                                 if (
@@ -752,6 +758,7 @@ abstract class AgentPageCases {
             grantReadBarrier,
             AtomicReference(null),
             failGrantWrites,
+            modelConnections,
         )
     }
 
@@ -847,6 +854,26 @@ abstract class AgentPageCases {
                 .assertExists()
             compose.onNodeWithText("Ouvrir les connexions").performScrollTo().performClick()
             assertEquals("connections", route.get())
+        }
+    }
+
+    @Test
+    fun aNewAgentCannotKeepAnUnavailableCodingAgent() {
+        journey("", prepare = { it.modelConnections["codex"] = false }) { fixture ->
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Nouvel agent")
+            back()
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText("Connectez Codex ou choisissez un autre assistant de code.")
+            assertTrue(fixture.saved.isEmpty())
+
+            open(AgentSection.Engine)
+            compose.onNodeWithTag("model-picker").performScrollTo().performClick()
+            val sheet = hasAnyAncestor(hasTestTag("model-settings-sheet"))
+            compose.onNode(sheet and hasText("Codex") and hasClickAction()).assertDoesNotExist()
+            compose
+                .onNodeWithTag("unconnected-agents")
+                .assertTextContains("Codex", substring = true)
         }
     }
 

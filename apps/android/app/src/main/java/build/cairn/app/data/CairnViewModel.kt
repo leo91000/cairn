@@ -48,6 +48,9 @@ fun body(vararg pairs: Pair<String, String>) = buildJsonObject {
 
 fun segment(value: String): String = java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 
+private fun ModelCatalog.withCachedInventory(cached: ModelCatalog): ModelCatalog =
+    if (connected == true && stale && models.isEmpty()) copy(models = cached.models) else this
+
 data class Workspace(
     val ready: Boolean = false,
     val origin: String = "",
@@ -808,7 +811,9 @@ constructor(
             agent.provider to
                 async {
                     try {
-                        target.listModels(ListModelsInput(agent.provider))
+                        target
+                            .listModels(ListModelsInput(agent.provider))
+                            .withCachedInventory(state.value.modelCatalog(agent.provider))
                     } catch (e: Exception) {
                         if (e is CancellationException || (e is ApiException && e.status == 401))
                             throw e
@@ -896,9 +901,10 @@ constructor(
         codingAgent(provider)
         val target = api
         return try {
-            val catalog = target.listModels(ListModelsInput(provider))
+            val fresh = target.listModels(ListModelsInput(provider))
             // A request started before sign-out or a server change must not restore old data.
             if (connection !== target || !state.value.session.authenticated) return null
+            val catalog = fresh.withCachedInventory(state.value.modelCatalog(provider))
             mutable.update { it.copy(modelCatalogs = it.modelCatalogs + (provider to catalog)) }
             catalog
         } catch (e: Exception) {
