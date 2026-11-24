@@ -21,6 +21,15 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(super) struct Antigravity;
+pub(crate) const RECONNECT_REQUIRED: &str = "antigravity_google_reconnect_required";
+
+fn reconnect_required() -> Error {
+    Error::coded(
+        409,
+        RECONNECT_REQUIRED,
+        "Reconnect this Antigravity Google account in Connections.",
+    )
+}
 
 fn secret_id(id: &str) -> String {
     format!("antigravity-account:{id}")
@@ -88,13 +97,9 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
     }
     .await;
     let _ = crate::accounts::remove_directory(&home).await;
-    let renewed = renewed.map_err(|_| {
-        Error::conflict("Reconnect this Antigravity Google account in Connections.")
-    })?;
+    let renewed = renewed.map_err(|_| reconnect_required())?;
     if text(&renewed["token"], "access_token").is_empty() || expiry(&renewed["token"]) <= now() {
-        return Err(Error::conflict(
-            "Reconnect this Antigravity Google account in Connections.",
-        ));
+        return Err(reconnect_required());
     }
     let mut credential = saved.clone();
     let mut token = renewed;

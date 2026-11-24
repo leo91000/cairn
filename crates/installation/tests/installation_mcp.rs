@@ -6155,6 +6155,7 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
         codex_bin: common::fixture("codex.mjs"),
         claude_bin: common::fixture("claude.mjs"),
         opencode_bin: opencode.to_string_lossy().into_owned(),
+        antigravity_bin: common::fixture("antigravity.mjs"),
         ..common::config(root.path())
     })
     .await
@@ -6191,12 +6192,26 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
                 let _: cairn_contracts::ModelCatalog =
                     serde_json::from_value(expected.clone()).unwrap();
                 assert!(expected.get("source").is_none());
+                if provider == "codex" {
+                    assert_eq!(expected["connected"], false, "{expected}");
+                }
             } else if provider != "opencode" {
                 assert_eq!(expected["kind"], "unsupported");
                 assert_eq!(expected["capability"], "apiKey");
             }
         }
     }
+    let codex_home = s.config.home.join(".codex");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let host_auth = codex_home.join("auth.json");
+    std::fs::write(&host_auth, br#"{"tokens":{"access_token":"synthetic-host-login"}}"#).unwrap();
+    let (status, codex) =
+        account_http(&app, &member, "GET", "/api/codex/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{codex}");
+    assert_eq!(codex["connected"], true, "{codex}");
+    assert!(!codex.to_string().contains("synthetic-host-login"));
+    std::fs::remove_file(host_auth).unwrap();
+
     let (status, _) = account_http(&app, &member, "GET", "/api/accounts", Value::Null).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (_, unsupported) = account_http(
@@ -6323,6 +6338,35 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     assert_eq!(stale["stale"], true, "{stale}");
     assert!(!text(&stale, "error").is_empty(), "{stale}");
 
+    let mut google = cairn_installation::accounts::Account::new(
+        cairn_installation::provider::Provider::Antigravity,
+        "Expired fixture login",
+        cairn_installation::accounts::AccountState::Ready,
+    );
+    google.model_provider = Some("google".into());
+    s.store.save_coding_account(&google).await.unwrap();
+    s.vault
+        .set(
+            &format!("antigravity-account:{}", google.id),
+            &json!({
+                "kind": "google",
+                "token": {
+                    "token": {
+                        "access_token": "synthetic-expired-google-token",
+                        "expiry": "2000-01-01T00:00:00Z",
+                    },
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let (status, reconnect) =
+        account_http(&app, &member, "GET", "/api/antigravity/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{reconnect}");
+    assert_eq!(reconnect["connected"], false, "{reconnect}");
+    assert!(text(&reconnect, "error").contains("Reconnect this Antigravity Google account"));
+    assert!(!reconnect.to_string().contains("synthetic-expired-google-token"));
+
     for (endpoint, token) in [
         ("/mcp", public.as_str()),
         ("/mcp-installation", agent_token),
@@ -6336,6 +6380,15 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
         )
         .await;
         assert_eq!(result(&response), &stale);
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_models",
+            json!({"provider":"antigravity"}),
+        )
+        .await;
+        assert_eq!(result(&response), &reconnect);
         let (_, invalid) = node_management_call(
             &app,
             endpoint,

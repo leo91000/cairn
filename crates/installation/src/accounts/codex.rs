@@ -750,19 +750,23 @@ async fn recover_sessions(s: &Service) -> Result<()> {
     Ok(())
 }
 
-/// Adopts an existing ChatGPT login of the host once. The CLI's own file stays untouched.
-async fn import_host_login(s: &Service) -> Result<()> {
+pub(crate) async fn host_login_present(s: &Service) -> bool {
     let home = s.config.home.join(".codex");
     let Ok(bytes) = tokio::fs::read(home.join("auth.json")).await else {
-        return Ok(());
+        return false;
     };
-    let signed_in = serde_json::from_slice::<Value>(&bytes)
+    serde_json::from_slice::<Value>(&bytes)
         .ok()
         .and_then(|v| auth_input(v).ok())
-        .is_some();
-    if !signed_in {
+        .is_some()
+}
+
+/// Adopts an existing ChatGPT login of the host once. The CLI's own file stays untouched.
+async fn import_host_login(s: &Service) -> Result<()> {
+    if !host_login_present(s).await {
         return Ok(());
     }
+    let home = s.config.home.join(".codex");
     let account = Account::new(Provider::Codex, "Primary account", AccountState::Ready);
     let imported = account.clone();
     s.store

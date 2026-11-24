@@ -276,6 +276,20 @@ private fun AgentPage(
         approved: List<String>,
         nativeNodes: List<String> = emptyList(),
     ) {
+        val needsConnection =
+            if (creating && creation.id.isBlank()) !creation.pendingCreation
+            else edited.provider != baseline.provider
+        if (needsConnection) {
+            val catalog =
+                vm.refreshModels(edited.provider) ?: vm.state.value.modelCatalog(edited.provider)
+            if (catalog.connected == false) {
+                saveError =
+                    "Connectez ${providerLabel(edited.provider)} ou choisissez un autre assistant de code."
+                errorSection = AgentSection.Engine
+                return
+            }
+        }
+
         // Explicit reapproval uses the revision-checked profile API, including grant-only edits.
         val profilePending =
             (creating && creation.id.isBlank()) ||
@@ -285,18 +299,6 @@ private fun AgentPage(
             when {
                 !profilePending -> baseline
                 creating -> {
-                    if (creation.id.isBlank() && !creation.pendingCreation) {
-                        val catalog =
-                            vm.refreshModels(edited.provider)
-                                ?: vm.state.value.modelCatalog(edited.provider)
-                        if (catalog.connected == false) {
-                            saveError =
-                                "Connectez ${providerLabel(edited.provider)} ou choisissez un autre assistant de code."
-                            errorSection = AgentSection.Engine
-                            return
-                        }
-                    }
-
                     // Once created, the agent's revision guards the recovery update, so a change
                     // made elsewhere meanwhile is reported as a conflict instead of overwritten.
                     val response =
@@ -701,7 +703,7 @@ private fun AgentPage(
                             draft.agent,
                             ::update,
                             !creating && !dirty,
-                            saved = baseline.takeUnless { creating },
+                            saved = baseline.takeUnless { creating && creation.id.isBlank() },
                             openConnections = { navigate("connections") },
                         ) {
                             navigate(
@@ -2280,7 +2282,7 @@ private fun EngineSection(
         changeSpeed = { speed -> update { it.copy(speed = speed) } },
         catalogs = state.modelCatalogs,
         savedProvider = saved?.provider,
-        requireConnection = saved == null,
+        requireConnection = agent.provider != saved?.provider,
         refreshCatalog = { vm.refreshModels(it) },
         // Connections is pushed on the navigation stack, so Back restores the saved draft.
         openConnections = openConnections,

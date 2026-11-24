@@ -522,8 +522,8 @@ internal fun ModelPicker(
                                 when {
                                     requireConnection ->
                                         "Connectez cet assistant ou choisissez-en un autre."
-                                    field -> "Les exécutions attendront une connexion."
-                                    else -> "Le prochain tour attendra une connexion."
+                                    field -> "Les exécutions ont besoin d’une connexion."
+                                    else -> "Le prochain tour a besoin d’une connexion."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                             )

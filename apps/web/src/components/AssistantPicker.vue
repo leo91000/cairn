@@ -451,7 +451,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
               {{ current.label }} needs a connection
             </p>
             <p class="text-muted">
-              {{ requireConnection ? 'Connect this coding agent or choose another one.' : variant === 'pill' ? 'The next turn will wait for a connection.' : 'Runs will wait for a connection.' }}
+              {{ requireConnection ? 'Connect this coding agent or choose another one.' : variant === 'pill' ? 'The next turn needs a connection.' : 'Runs need a connection.' }}
             </p>
             <RouterLink
               v-if="state.installationRole === 'owner'"

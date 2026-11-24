@@ -842,16 +842,17 @@ abstract class AgentPageCases {
         ) {
             open(AgentSection.Engine)
             compose.onNodeWithTag("model-picker").performScrollTo().performClick()
-            compose.onNode(hasText("Codex") and hasClickAction()).performScrollTo().performClick()
-            compose
-                .onNode(hasText("Antigravity") and hasClickAction())
-                .performScrollTo()
-                .performClick()
-            compose
-                .onNode(
-                    hasText("gemini-saved") and hasAnyAncestor(hasTestTag("model-settings-sheet"))
-                )
-                .assertExists()
+            val sheet = hasAnyAncestor(hasTestTag("model-settings-sheet"))
+            fun choose(name: String) {
+                val tile = sheet and hasText(name) and hasClickAction() and isEnabled()
+                compose.waitUntil(10000) {
+                    compose.onAllNodes(tile).fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNode(tile).performScrollTo().performClick().assertIsSelected()
+            }
+            choose("Codex")
+            choose("Antigravity")
+            compose.onNode(sheet and hasText("gemini-saved")).assertExists()
             compose.onNodeWithText("Ouvrir les connexions").performScrollTo().performClick()
             assertEquals("connections", route.get())
         }

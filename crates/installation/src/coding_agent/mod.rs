@@ -20,20 +20,35 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn read_model_catalog(s: &Service, provider: Provider) -> Result<Value> {
-    let mut catalog = match provider.adapter().model_catalog(s).await {
-        Ok(catalog) => catalog,
-        Err(error) if matches!(error.status, 502..=504) => json!({
+    let (mut catalog, needs_reconnect) = match provider.adapter().model_catalog(s).await {
+        Ok(catalog) => (catalog, false),
+        Err(error)
+            if error.code.as_deref() == Some(crate::accounts::antigravity::RECONNECT_REQUIRED) =>
+        {
+            (json!({
+                "models": [],
+                "checkedAt": null,
+                "stale": false,
+                "error": error.message,
+            }), true)
+        }
+        Err(error) if matches!(error.status, 502..=504) => (json!({
             "models": [],
             "checkedAt": null,
             "stale": true,
             "error": "The model catalog is temporarily unavailable. Retry to refresh models.",
-        }),
+        }), false),
         Err(error) => return Err(error),
     };
 
     // Provider inventory can fail independently of the account pool.
-    // Unmanaged Codex runs on the host login, without an account.
-    let connected = !s.accounts.needs_attention(s, provider).await?;
+    let connected = if needs_reconnect {
+        false
+    } else if provider == Provider::Codex && !provider.driver().managed(s).await? {
+        crate::accounts::codex::host_login_present(s).await
+    } else {
+        !s.accounts.needs_attention(s, provider).await?
+    };
     let fields = catalog
         .as_object_mut()
         .ok_or_else(|| Error::bad_gateway("The coding agent returned an invalid model catalog."))?;

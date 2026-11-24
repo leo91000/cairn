@@ -820,14 +820,15 @@ async function commit(reapprove: string[]) {
   const profileChanged = isNew.value || changes(saved.value, draft.value).length > 0 || reapprove.length > 0
   let result: Agent
   try {
-    if (isNew.value) {
-      if (!agent.value && !creation.pendingCreation.value) {
-        const models = modelCatalogs[draft.value.provider]
-        await models.load()
-        if (models.catalog.connected === false)
-          throw new Error(`Connect ${provider.value.label} in Connections or choose another coding agent.`)
-      }
+    const needsConnection = agent.value ? draft.value.provider !== saved.value.provider : !creation.pendingCreation.value
+    if (needsConnection) {
+      const models = modelCatalogs[draft.value.provider]
+      await models.load()
+      if (models.catalog.connected === false)
+        throw new Error(`Connect ${provider.value.label} in Connections or choose another coding agent.`)
+    }
 
+    if (isNew.value) {
       result = await creation.save<Agent>('/agents', {
         body: () => body(reapprove, nativeNodes),
         request: agentRequest,
@@ -1232,7 +1233,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               variant="field"
               :disabled="busy"
               :saved-assistant="agent ? saved : undefined"
-              :require-connection="!agent"
+              :require-connection="!agent || draft.provider !== saved.provider"
               :inherit="!!agent"
               :default-model="agent?.codingAgentDefaults?.[draft.provider]?.model || ''"
               :default-reasoning="agent?.codingAgentDefaults?.[draft.provider]?.reasoning || ''"
