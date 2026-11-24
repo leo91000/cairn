@@ -47,8 +47,8 @@ identifiers are kept. Agent/instance lists use the server filters, including rul
 that direct conversations bound by their creator’s keys. Confirmed state changes
 invalidate earlier polling responses on both apps.
 The installation validates drafts and reports
-errors at their step. On compact web screens the title has its own row so a
-validation status update leaves insertion buttons in place during a press.
+errors at their step. On compact web screens the title has its own row, which
+keeps the header height stable when validation changes from Checking to Ready.
 Android already shows validation below the rule name. Saving creates a version.
 A state-only revision change is refreshed while preserving the draft. A newer
 saved definition can be reviewed, adopted or explicitly replaced by the draft

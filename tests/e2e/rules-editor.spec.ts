@@ -511,8 +511,8 @@ test('loop insertion does not offer an unsupported wait', async ({ page, workspa
   await expect(page.getByRole('menuitem', { name: /Remember a value/ })).toBeVisible()
 })
 
-test('loop insertion stays reachable when validation finishes during a press', async ({ page, workspace }, testInfo) => {
-  test.skip(!testInfo.project.use.isMobile, 'The compact editor header is exercised on mobile')
+test('loop insertion stays reachable when validation finishes during a press', async ({ page, workspace }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
 
   const rule = await emptyLoopRule(workspace)
   const validation = Promise.withResolvers<void>()
