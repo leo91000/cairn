@@ -41,7 +41,7 @@ def phase(binary, root, name):
 
 def host(root, cairn, *args):
     environment = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'CAIRN_NATIVE_DISPOSABLE_HOST': '1',
-                   'CAIRN_NATIVE_ROOT': str(root), 'CAIRN_NATIVE_BINARY': str(cairn)}
+                   'CAIRN_NATIVE_ROOT': str(root), 'CAIRN_NATIVE_INSTALL': str(root), 'CAIRN_NATIVE_BINARY': str(cairn)}
     result = command(sys.executable, '-B', HOST, *args, env=environment, check=False, timeout=1800)
     print(result.stdout, result.stderr, sep='\n')
     assert result.returncode == 0, f'native-host.py {args[0]} failed.'
@@ -96,6 +96,7 @@ def main(binary, cairn, fixture):
     pool.mkdir(parents=True)
     state.chmod(0o700)
     (root / 'home').mkdir()
+    (root / 'host.py').write_bytes(HOST.read_bytes())
     unit = command('systemd-escape', '--path', '--suffix=mount', pool).stdout.strip()
     try:
         original = root / 'native-data.ext4'

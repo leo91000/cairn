@@ -125,3 +125,14 @@ owned filesystem. `POSIX_FADV_DONTNEED` is advisory, not proof of cold hardware.
 Actual execution, Docker, controller crash recovery and expiration are separately
 qualified by the full disposable native-runtime fixture. The local legacy-journal
 versus direct-file block comparison is documented in [journal qualification](JOURNAL-RECOVERY.md#qualification).
+
+The same native-runtime workflow drives the production connector and controller
+from a loopback fixture manager on both candidate XFS and the pinned ext4
+reference. It runs three cold and warm skill bundles per runtime. Each row in
+`connector-startup.json` reports the encoded seed bytes, cache negotiation,
+connector completion and the workload readiness marker. Its scan count is
+process-wide inside the controller's admission-to-submission interval. It excludes
+the connector's own scans. The fixture holds the seed payload fixed and creates
+fresh conversations. The loopback timings exclude the production manager's
+authorization and network costs, so production observations still determine
+the message-to-launch target.

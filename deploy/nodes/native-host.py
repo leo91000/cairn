@@ -984,6 +984,32 @@ def require_stopped(stop_services):
         raise MigrationError('A native controller still holds state/controller.lock; stop it before migrating.')
 
 
+def settle_pool_jobs():
+    # PID 1 owns jobs once a systemctl request has been accepted. Reaping the
+    # client after cancellation does not guarantee a stable mount observation.
+    units = (mount_unit_name(pool_path()), LOOP_SERVICE)
+    deadline = time.monotonic() + 300
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MigrationError('The pool still has pending systemd jobs. Wait for them before retrying.')
+        output = checked('systemctl', 'list-jobs', '--no-legend', '--no-pager', '--plain', '--full', *units,
+                         timeout=min(10, remaining))
+        if not any(fields and fields[0].isdigit() for fields in map(str.split, output.splitlines())):
+            return
+        time.sleep(min(0.2, remaining))
+
+
+def require_installed_supervisor():
+    installed = INSTALL / 'host.py'
+    try:
+        matches = installed.read_bytes() == Path(__file__).read_bytes()
+    except FileNotFoundError:
+        matches = False
+    if not matches:
+        raise MigrationError(f'Refresh the native supervisor from the same release before migrating. Verify {installed}.')
+
+
 def offline_pool_operation(operation, arguments):
     global OFFLINE_LOCK_FDS
     if arguments.dry_run:
@@ -998,6 +1024,7 @@ def offline_pool_operation(operation, arguments):
             raise MigrationError('The native controller or another migration acquired state/controller.lock.') from None
         OFFLINE_LOCK_FDS = (descriptor,)
         try:
+            settle_pool_jobs()
             return operation(arguments)
         finally:
             OFFLINE_LOCK_FDS = ()
@@ -1516,6 +1543,7 @@ def migrate_pool(arguments):
         copy_environment(run, pool, mountpoint)
         pool_tool('commit', state, migration_directory(), mountpoint, run)
         print(f'Copied and verified environment {run}.')
+    pool_tool('seal', state, migration_directory(), mountpoint)
     checked('umount', str(mountpoint), timeout=300)
     record['phase'] = 'copied'
     save_migration(record)
@@ -1679,8 +1707,10 @@ if __name__ == '__main__':
         elif len(sys.argv) == 2 and sys.argv[1] == 'run':
             run()
         elif len(sys.argv) >= 2 and sys.argv[1] == 'migrate-pool':
+            require_installed_supervisor()
             offline_pool_operation(migrate_pool, pool_arguments(sys.argv[1:]))
         elif len(sys.argv) >= 2 and sys.argv[1] == 'activate-pool':
+            require_installed_supervisor()
             offline_pool_operation(activate_pool, pool_arguments(sys.argv[1:]))
         elif len(sys.argv) >= 2 and sys.argv[1] == 'rollback-pool':
             offline_pool_operation(rollback_pool, pool_arguments(sys.argv[1:]))

@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import queue
 import random
 import resource
 import select
@@ -242,18 +243,62 @@ print(json.dumps({'write':write,'readColdHint':reads[0],'readWarm':reads[1]}))
 
 
 class OfflineFixtureMaster(http.server.BaseHTTPRequestHandler):
-    """Exercise the installed node connector without issuing manager commands."""
+    """Offer synthetic, scoped commands over the installed node's real relay."""
     def log_message(self, *_):
         pass
 
+    def respond(self, status, body=b'', headers=None):
+        self.send_response(status)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def json_response(self, payload):
+        self.respond(200, json.dumps(payload).encode(), {'Content-Type': 'application/json'})
+
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
-        self.rfile.read(length)
+        body = self.rfile.read(length)
         if self.path == '/internal/nodes/heartbeat':
             self.server.heartbeat_seen.set()
-        self.send_response(503)
-        self.send_header('Content-Length', '0')
-        self.end_headers()
+        elif self.path == '/internal/nodes/poll':
+            try:
+                return self.json_response(self.server.commands.get(timeout=0.5))
+            except queue.Empty:
+                return self.json_response(None)
+        elif self.path == '/internal/nodes/reply':
+            frame = json.loads(body)
+            reply = self.server.replies[frame['id']]
+            if 'status' in frame:
+                reply['status'] = frame['status']
+            if frame.get('done'):
+                reply['done'].set()
+            return self.json_response({})
+        elif self.path.startswith('/internal/node-workspace/'):
+            from native_connector_benchmark import SKILL_HIT, SKILL_KEY
+
+            attempt, operation = self.path.removeprefix('/internal/node-workspace/').split('/')
+            fixture = self.server.preparations.get(attempt)
+            if fixture and operation == 'plan':
+                return self.json_response(fixture['descriptor'])
+            if fixture and operation == 'lease':
+                return self.json_response({'remainingMs': fixture['lease']})
+            if fixture and operation == 'seed' and json.loads(body).get('kind') == 'initial':
+                offered = json.loads(body).get('nativeSkillCache')
+                hit = isinstance(offered, list) and fixture['key'] in offered
+                payload = fixture['hit' if hit else 'miss']
+                headers = {}
+                if isinstance(offered, list):
+                    headers[SKILL_KEY] = fixture['key']
+                    headers['x-cairn-seed-allocation'] = str(len(fixture['miss']) + 16 * 1024 * 1024)
+                    if hit:
+                        headers[SKILL_HIT] = '1'
+                fixture['observed'] = dict(cacheSupported=isinstance(offered, list), cacheHit=hit, encodedBytes=len(payload))
+                return self.respond(200, payload, headers)
+        self.respond(503)
 
 
 def main():
@@ -263,6 +308,7 @@ def main():
     qualifier = Path(sys.argv[2]).resolve(strict=True)
     legacy_binary = Path(sys.argv[3]).resolve(strict=True)
     xfs_smoke = os.environ.get('CAIRN_NATIVE_XFS_SMOKE') == '1'
+    connector_reference = os.environ.get('CAIRN_NATIVE_CONNECTOR_REFERENCE') == '1'
     active_binary = legacy_binary
     legacy_phase = True
     identifier = str(uuid.uuid4())
@@ -367,6 +413,9 @@ def main():
         fixture_master = http.server.ThreadingHTTPServer(('127.0.0.1', 0), OfflineFixtureMaster)
         fixture_master.daemon_threads = True
         fixture_master.heartbeat_seen = threading.Event()
+        fixture_master.commands = queue.Queue()
+        fixture_master.replies = {}
+        fixture_master.preparations = {}
         threading.Thread(target=fixture_master.serve_forever, daemon=True).start()
         node_identity = root / 'node-identity'
         node_identity.mkdir(mode=0o700)
@@ -471,6 +520,8 @@ def main():
                 CAIRN_NATIVE_TOOLS=str(tools), CAIRN_NATIVE_USER=user, CAIRN_NODE_BACKEND='native',
                 CAIRN_NATIVE_DOCKER_TOOLS=str(docker_tools),
                 APP_RUNTIME_ID='synthetic', CAIRN_NATIVE_SUPERVISOR_UNIT=supervisor)
+            if xfs_smoke or connector_reference:
+                environment['RUNNER_URL'] = 'http://localhost/'
             # Keep the immutable reference fixture unchanged. The candidate uses
             # the real installed entry point, including its pre-Tokio IO setup.
             candidate = active_binary == binary
@@ -574,19 +625,29 @@ def main():
                 self.end_headers()
                 self.wfile.write(response)
 
-        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write', idle=False, environment=False):
+        def relay(path, method='POST'):
+            identifier = str(uuid.uuid4())
+            reply = dict(done=threading.Event())
+            fixture_master.replies[identifier] = reply
+            fixture_master.commands.put(dict(id=identifier, method=method, path=path, body='e30='))
+            assert reply['done'].wait(120), 'Node relay did not complete ' + path
+            del fixture_master.replies[identifier]
+            assert 200 <= reply['status'] < 300, f'Node relay rejected {path}: {reply["status"]}'
+
+        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write', idle=False, environment=False, connector_sample=None):
             seed(run)
             channel = data / 'runs' / run / 'home/cairn-mcp.sock'
-            if run in mcp_servers:
-                mcp_servers[run].shutdown()
-                mcp_servers[run].server_close()
-            channel.unlink(missing_ok=True)
-            server = socketserver.ThreadingUnixStreamServer(str(channel), PluginChannel)
-            server.daemon_threads = True
-            server.run_id = run
-            channel.chmod(0o600)
-            threading.Thread(target=server.serve_forever, daemon=True).start()
-            mcp_servers[run] = server
+            if connector_sample is None:
+                if run in mcp_servers:
+                    mcp_servers[run].shutdown()
+                    mcp_servers[run].server_close()
+                channel.unlink(missing_ok=True)
+                server = socketserver.ThreadingUnixStreamServer(str(channel), PluginChannel)
+                server.daemon_threads = True
+                server.run_id = run
+                channel.chmod(0o600)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                mcp_servers[run] = server
             attempt = str(uuid.uuid4())
             attempts.append(attempt)
             workspace = data / 'runs' / run / 'workspace'
@@ -606,10 +667,11 @@ def main():
                 script += 'test ! -e ' + str(private) + '\n'
                 script += 'if sudo -n true 2>/dev/null; then exit 80; fi\n'
                 script += 'test ! -e /run/docker.sock\nif touch /usr/cairn-should-be-readonly 2>/dev/null; then exit 81; fi\n'
-            if not administrator:
+            if not administrator and connector_sample is None:
                 script += 'test "$(CAIRN_MCP_RUN_TOKEN=fixture-plugin-' + run + ' cairn plugin fixture identity)" = "' + run + '"\n'
-            script += "test \"$(cat /home/node/.codex/auth.json)\" = '" + SECRET + "'\n"
-            script += 'if echo bad > /home/node/.codex/auth.json 2>/dev/null; then exit 82; fi\n'
+            if connector_sample is None:
+                script += "test \"$(cat /home/node/.codex/auth.json)\" = '" + SECRET + "'\n"
+                script += 'if echo bad > /home/node/.codex/auth.json 2>/dev/null; then exit 82; fi\n'
             # Exercise the same atomic credential replacement as the real Claude
             # broker client (unit coverage invokes that Client directly).
             script += "/usr/bin/python3 - <<'CLAUDE'\nimport os,tempfile\nfrom pathlib import Path\np=Path('/home/node/.claude'); auth=Path('/run/cairn-claude-auth')\nfor i in range(2):\n    with tempfile.NamedTemporaryFile(dir=auth,delete=False) as f:\n        f.write(b'" + SECRET + "'); f.flush(); os.fsync(f.fileno())\n    os.replace(f.name,auth/'.credentials.json')\nassert not (p/'.credentials.json').exists()\n(p/'projects').mkdir(exist_ok=True)\ns=p/'projects/session'\nif s.exists(): assert s.read_text()=='durable Claude session'\ns.write_text('durable Claude session')\nCLAUDE\n"
@@ -664,13 +726,32 @@ def main():
             image.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             image.write_text('synthetic image bytes')
             image.chmod(0o600)
-            (data / 'runner-plans' / (attempt + '.json')).write_text(json.dumps(plan))
-            manager('checkpoint', run=run, attempt=attempt, vm=run in vm_runs)
-            api('/runs/' + attempt + '/lease', {'remainingMs': lease})
-            progress('attempt-checkpointed')
+            if connector_sample is None:
+                (data / 'runner-plans' / (attempt + '.json')).write_text(json.dumps(plan))
+                manager('checkpoint', run=run, attempt=attempt, vm=run in vm_runs)
+                api('/runs/' + attempt + '/lease', {'remainingMs': lease})
+                progress('attempt-checkpointed')
+            else:
+                from native_connector_benchmark import seed_frames, skill_bundle
+
+                manager('checkpoint', run=run, attempt=attempt, vm=run in vm_runs)
+                source = root / ('connector-seed-' + attempt)
+                (data / 'runs' / run).rename(source)
+                key = skill_bundle(source, connector_sample, lambda path: manager('archive-hash', path=str(path))['hash'],
+                                   root / 'connector-fingerprint')
+                fixture_master.preparations[attempt] = dict(
+                    descriptor=dict(dataRoot=str(data), plan=plan), lease=lease, key=key,
+                    miss=seed_frames(source), hit=seed_frames(source, omit_skills=True),
+                )
+                shutil.rmtree(source)
             startup = time.perf_counter()
             progress('run-admission-before')
-            api('/runs/' + attempt)
+            if connector_sample is None:
+                api('/runs/' + attempt)
+            else:
+                relay('/prepare/' + attempt)
+                prepared_at = time.perf_counter()
+                relay('/runs/' + attempt)
             progress('run-admission-returned')
             def execution_ready():
                 if (state / (attempt + '.exit')).exists():
@@ -680,6 +761,12 @@ def main():
 
             eventually(execution_ready, timeout=600 if docker_script else 60)
             startup_ms = (time.perf_counter() - startup) * 1000
+            if connector_sample is not None:
+                sample = fixture_master.preparations.pop(attempt)['observed']
+                report = api('/runs/' + attempt + '/bootstrap', method='GET')['bootstrap']
+                sample.update(connectorMs=(prepared_at - startup) * 1000, readinessMs=startup_ms,
+                              controllerUsageScans=report.get('usageScans'))
+                metrics.setdefault('connectorStartup', []).append(sample)
             progress('attempt-ready')
             if (state / (attempt + '.exit')).exists() and read_controller_result(state / (attempt + '.exit'))['StatusCode'] != 0:
                 for record in (state / (attempt + '.log')).read_text().splitlines():
@@ -880,14 +967,39 @@ def main():
         command('useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user)
         try:
             run = create()
-            if xfs_smoke:
-                from native_docker_workload import ALPINE
-
+            if xfs_smoke or connector_reference:
                 active_binary = binary
                 legacy_phase = False
                 start_controller()
                 observed = api('/health', method='GET')
                 assert observed['backend'] == 'native'
+
+                for index in range(3):
+                    for warm in (False, True):
+                        measured = create()
+                        attempt = start(measured, connector_sample=index)
+                        sample = metrics['connectorStartup'][-1]
+                        assert sample['cacheSupported'] or not xfs_smoke, 'Candidate connector did not propose skill caching.'
+                        assert sample['cacheHit'] == (warm and sample['cacheSupported']), 'Connector chose an unexpected seed variant.'
+                        sample['warmRequest'] = warm
+                        relay('/runs/' + attempt, method='DELETE')
+                        fenced(measured, attempt)
+                        manager('purge', run=measured)
+                        api('/disks/' + measured + '/delete', {'permanentlyDeleted': True})
+
+                with binary.open('rb') as source:
+                    binary_sha = hashlib.file_digest(source, 'sha256').hexdigest()
+                report = dict(filesystem='xfs' if xfs_smoke else 'ext4', runtimeSha256=binary_sha,
+                              scans='Controller process-wide scans from admission to submission. Connector scans excluded.',
+                              samples=metrics['connectorStartup'])
+                evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
+                evidence.mkdir(parents=True, exist_ok=True)
+                (evidence / 'connector-startup.json').write_text(json.dumps(report, indent=2) + '\n')
+                print(json.dumps(dict(connectorStartup=report)))
+                if connector_reference:
+                    return
+
+                from native_docker_workload import ALPINE
 
                 prepared_run = create()
                 prepare_base(prepared_run)

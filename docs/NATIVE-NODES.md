@@ -251,12 +251,13 @@ blocs de chaque base entre les environnements privés.
 
 ### Migrer un nœud ext4 vers XFS hors ligne
 
-Mettez à jour le nœud vers une version comprenant la commande
-`cairn native-pool-migrate`. Utilisez le `deploy/nodes/native-host.py` de cette
-même version. Il accompagne le superviseur dans `/opt/cairn-native/host.py`
-quand le superviseur a été rafraîchi. Installez `xfsprogs` et `rsync` sur le
-nœud, et vérifiez votre sauvegarde des données du pool et du répertoire
-`/var/lib/cairn-native/state`.
+Sur le pool ext4, mettez à jour le nœud vers une version comprenant la commande
+`cairn native-pool-migrate`. Relancez la commande d’installation native fournie
+par le manager de cette release pour rafraîchir `/opt/cairn-native/host.py` sans
+réenrôler le nœud. Redémarrez le superviseur lorsque le nœud est inactif et
+vérifiez qu’il est opérationnel sur ext4 avant de préparer la migration.
+Installez `xfsprogs` et `rsync` sur le nœud, et vérifiez votre sauvegarde des
+données du pool et du répertoire `/var/lib/cairn-native/state`.
 
 Choisissez une partition ou un volume logique inutilisé sur le nœud. Remplacez
 `/dev/mapper/cairn-native-xfs` dans l’exemple par cette cible. Le premier appel
@@ -291,10 +292,10 @@ sudo systemctl start cairn-native-node.service
 findmnt --mountpoint /var/lib/cairn-native/state/native-data
 ```
 
-Le protocole de distribution `nativeHostProtocol: 2` exige un rafraîchissement
-explicite du superviseur après préparation du pool. Un ancien superviseur refuse
-la distribution avant de sélectionner le candidat ; le protocole d’exécution
-reste 2. Aucun déploiement de cette migration n’est réalisé par la PR.
+Le runtime peut être distribué sur ext4 par un superviseur utilisant le
+protocole de distribution 2. Avant le formatage et avant l’autorisation
+d’activation, l’outil vérifie que `/opt/cairn-native/host.py` correspond à la
+version de l’outil exécuté.
 
 Une reprise rouvre l’arbre existant. Une source manquante ou inconnue est refusée,
 sans recréation silencieuse. La compatibilité ublk n’est chargée que pour des

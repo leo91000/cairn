@@ -16,6 +16,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
 };
@@ -23,8 +24,9 @@ use std::{
 const OWNER: &str = "quota-owner.json";
 const RETIREMENT: &str = "quota-retirement.json";
 const RECORDS: [&str; 2] = [OWNER, RETIREMENT];
+const SEALED: &str = "sealed-records.json";
 
-const USAGE: &str = "Use native-pool-migrate plan|prepare|commit|switch|rollback|check <state> [<work> [<target> <run>]].";
+const USAGE: &str = "Use native-pool-migrate plan|prepare|commit|seal|switch|rollback|check <state> [<work> [<target> <run>]].";
 
 /// The offline tool holds the controller flock while operating. Its durable
 /// record also prevents automatic restarts between interrupted migration steps.
@@ -516,6 +518,90 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
+type ExpectedRecords = BTreeMap<String, Vec<String>>;
+
+struct StagedRecord {
+    live: PathBuf,
+    original: Vec<u8>,
+    migrated: Vec<u8>,
+}
+
+fn read_staged(work: &Path, run: &str, name: &str, control: &Path) -> Result<StagedRecord> {
+    if !RECORDS.contains(&name) {
+        return Err(Error::conflict("Invalid sealed migration receipt name."));
+    }
+    let read = |kind| {
+        read_optional(&record_directory(work, run, kind).join(name))?.ok_or_else(|| {
+            Error::conflict(format!(
+                "Missing {kind} migration receipt {name} for {run}."
+            ))
+        })
+    };
+    Ok(StagedRecord {
+        live: control.join(name),
+        original: read("original")?,
+        migrated: read("migrated")?,
+    })
+}
+
+async fn seal_records(work: &Path, expected: &ExpectedRecords) -> Result<()> {
+    // A receipt's file and its immediate parent are already synced. Make
+    // each ancestor durable before publishing the inventory of receipts.
+    for run in expected.keys() {
+        for kind in ["original", "migrated"] {
+            std::fs::File::open(record_directory(work, run, kind))?.sync_all()?;
+        }
+        std::fs::File::open(work.join("records").join(run))?.sync_all()?;
+    }
+    if !expected.is_empty() {
+        std::fs::File::open(work.join("records"))?.sync_all()?;
+    }
+    atomic_write(&work.join(SEALED), &serde_json::to_vec(expected)?).await
+}
+
+/// Seal the entire set while the original pool can still verify the list and
+/// a retry can still regenerate any missing captured receipt.
+async fn seal(state: &Path, work: &Path, target: &Path) -> Result<Value> {
+    target_pool(state, target)?;
+    let inventory = inventory(state)?;
+    if let Some(blocker) = inventory.blockers.first() {
+        return Err(Error::conflict(blocker.clone()));
+    }
+    let mut expected = ExpectedRecords::new();
+    for environment in inventory.environments {
+        let mut names = Vec::new();
+        for (name, present) in [
+            (OWNER, environment.owner.is_some()),
+            (RETIREMENT, environment.retirement.is_some()),
+        ] {
+            if !present {
+                continue;
+            }
+            let record = read_staged(work, &environment.run, name, &environment.control)?;
+            if read_optional(&record.live)?.as_deref() != Some(record.original.as_slice()) {
+                return Err(Error::conflict(
+                    "Original quota receipt changed before migration cutover.",
+                ));
+            }
+            serde_json::from_slice::<Ownership>(&record.migrated)?.validate(
+                &environment.control,
+                &open(&copy_path(target, &environment.run)?)?,
+            )?;
+            names.push(name.to_owned());
+        }
+        if !names.is_empty() {
+            expected.insert(environment.run, names);
+        }
+    }
+    if staged_runs(work)?.iter().ne(expected.keys()) {
+        return Err(Error::conflict(
+            "Staged quota receipts do not match the source inventory.",
+        ));
+    }
+    seal_records(work, &expected).await?;
+    Ok(json!({ "sealedEnvironments": expected.len() }))
+}
+
 /// Replace one live record, but only from the expected previous version, so
 /// a record the controller changed after the copy is never overwritten.
 async fn replace(live: &Path, expected: &[u8], replacement: &[u8], run: &str) -> Result<bool> {
@@ -534,28 +620,36 @@ async fn replace(live: &Path, expected: &[u8], replacement: &[u8], run: &str) ->
 /// The new pool is mounted at the pool path. Each staged record must already
 /// describe it before it replaces the original.
 async fn switch(state: &Path, work: &Path) -> Result<Value> {
-    let mut switched = 0;
-    for run in staged_runs(work)? {
+    let manifest = read_optional(&work.join(SEALED))?
+        .ok_or_else(|| Error::conflict("Migration receipt inventory is missing."))?;
+    let expected: ExpectedRecords = serde_json::from_slice(&manifest)?;
+    let mut verified = Vec::new();
+    for (run, names) in expected {
         let control = workspace::directory(state, &run)?;
         let workload = open(&workspace::workload(state, &run)?)?;
-        for name in RECORDS {
-            let Some(migrated) =
-                read_optional(&record_directory(work, &run, "migrated").join(name))?
-            else {
-                continue;
-            };
-            let original = read_optional(&record_directory(work, &run, "original").join(name))?
-                .ok_or_else(|| Error::conflict("Missing original migration record."))?;
-            serde_json::from_slice::<Ownership>(&migrated)?
+        for name in names {
+            let record = read_staged(work, &run, &name, &control)?;
+            serde_json::from_slice::<Ownership>(&record.migrated)?
                 .validate(&control, &workload)
                 .map_err(|_| {
                     Error::conflict(format!(
                         "Environment {run} on the mounted pool is not the verified copy."
                     ))
                 })?;
-            if replace(&control.join(name), &original, &migrated, &run).await? {
-                switched += 1;
+            if !read_optional(&record.live)?
+                .is_some_and(|current| current == record.original || current == record.migrated)
+            {
+                return Err(Error::conflict(format!(
+                    "Environment {run} changed its quota receipts before cutover."
+                )));
             }
+            verified.push((run.clone(), record));
+        }
+    }
+    let mut switched = 0;
+    for (run, record) in verified {
+        if replace(&record.live, &record.original, &record.migrated, &run).await? {
+            switched += 1;
         }
     }
     Ok(json!({ "switchedRecords": switched }))
@@ -643,6 +737,7 @@ pub async fn command(args: &[String]) -> Result<()> {
     let value = match action {
         "plan" if args.len() == 2 => plan(state)?,
         "check" if args.len() == 2 => check(state)?,
+        "seal" if args.len() == 4 => seal(state, argument(args, 2)?, argument(args, 3)?).await?,
         "switch" if args.len() == 3 => switch(state, argument(args, 2)?).await?,
         "rollback" if args.len() == 3 => rollback(state, argument(args, 2)?).await?,
         "prepare" if args.len() == 5 => prepare(state, argument(args, 3)?, &args[4]).await?,

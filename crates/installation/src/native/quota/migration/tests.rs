@@ -113,6 +113,16 @@ async fn records_switch_only_onto_the_verified_copy_and_roll_back() {
     let original_pool = root.path().join("original");
     std::fs::rename(&pool, &original_pool).unwrap();
     std::fs::rename(&copy_pool, &pool).unwrap();
+    let expected =
+        ExpectedRecords::from([(run.clone(), vec![OWNER.to_owned(), RETIREMENT.to_owned()])]);
+    seal_records(&work, &expected).await.unwrap();
+    assert!(
+        switch(&state, &work).await.is_err(),
+        "missing sealed receipts must refuse cutover"
+    );
+    assert_eq!(std::fs::read(control.join(OWNER)).unwrap(), original);
+    let expected = ExpectedRecords::from([(run.clone(), vec![OWNER.to_owned()])]);
+    seal_records(&work, &expected).await.unwrap();
     assert_eq!(switch(&state, &work).await.unwrap()["switchedRecords"], 1);
     assert_eq!(switch(&state, &work).await.unwrap()["switchedRecords"], 0);
     assert_eq!(std::fs::read(control.join(OWNER)).unwrap(), migrated);

@@ -802,6 +802,7 @@ class PoolMigrationTests(unittest.TestCase):
         self.assertEqual(events, [('plan', str(self.root / 'state')),
                                   ('prepare', first), ('copy', first), ('commit', first),
                                   ('prepare', second), ('copy', second), ('commit', second),
+                                  ('seal', str(mountpoint)),
                                   ('umount',), ('unmount-old',), ('mount-new', 'copied'),
                                   ('switch', str(host.migration_directory())), ('check', str(self.root / 'state'))])
         self.assertFalse((mountpoint / 'stale-attempt').exists())
@@ -1030,7 +1031,8 @@ class PoolMigrationTests(unittest.TestCase):
         source = Path(SPEC.origin).read_text()
         entrypoint = ast.parse(source).body[-1]
         code = compile(ast.Module(body=[entrypoint], type_ignores=[]), SPEC.origin, 'exec')
-        scope = dict(vars(host), __name__='__main__', migrate_pool=Mock(side_effect=host.MigrationError('Stop the native node first')))
+        scope = dict(vars(host), __name__='__main__', require_installed_supervisor=Mock(),
+                     settle_pool_jobs=Mock(), migrate_pool=Mock(side_effect=host.MigrationError('Stop the native node first')))
         output = io.StringIO()
         with patch.object(host.os, 'geteuid', return_value=0), patch.object(host.signal, 'signal'), \
                 patch.object(host, 'require_stopped'), \
@@ -1040,7 +1042,7 @@ class PoolMigrationTests(unittest.TestCase):
         self.assertIn('Native pool migration stopped: Stop the native node first', output.getvalue())
 
     def test_offline_operation_fences_controller_starts_during_mutations(self):
-        with patch.object(host, 'require_stopped'):
+        with patch.object(host, 'require_stopped'), patch.object(host, 'settle_pool_jobs'):
             host.offline_pool_operation(lambda _: self.assertTrue(host.controller_running()), pool_arguments())
         self.assertFalse(host.controller_running())
 
@@ -1064,6 +1066,7 @@ host = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(host)
 host.ROOT = Path(sys.argv[2])
 host.require_stopped = lambda _: None
+host.settle_pool_jobs = lambda: None
 host.offline_pool_operation(lambda _: host.checked(sys.executable, '-c', *sys.argv[3:], timeout=15),
                             SimpleNamespace(stop=False, dry_run=False))
 '''
@@ -1102,6 +1105,30 @@ host.offline_pool_operation(lambda _: host.checked(sys.executable, '-c', *sys.ar
         check.assert_called_once_with('check', self.root / 'state')
         self.assertTrue(host.load_migration()['activationRequested'])
         self.assertNotIn('activated', host.load_migration())
+
+    def test_offline_recovery_waits_for_a_manager_owned_pool_job(self):
+        calls = []
+        mount = 'fixture.mount'
+        def list_jobs(*arguments, **_):
+            self.assertTrue(host.controller_running(), 'pool observations need the recovery fence')
+            self.assertEqual(arguments[-2:], (mount, host.LOOP_SERVICE))
+            calls.append('inspect')
+            return f'19 {mount} stop running\n' if len(calls) == 1 else ''
+        with patch.object(host, 'require_stopped'), patch.object(host, 'mount_unit_name', return_value=mount), \
+                patch.object(host, 'checked', side_effect=list_jobs), patch.object(host.time, 'sleep'):
+            host.offline_pool_operation(lambda _: calls.append('recover'), pool_arguments())
+        self.assertEqual(calls, ['inspect', 'inspect', 'recover'])
+
+    def test_offline_migration_requires_the_matching_installed_supervisor(self):
+        installed = self.root / 'host.py'
+        with patch.object(host, 'INSTALL', self.root):
+            for content in (None, b'old supervisor'):
+                if content is not None:
+                    installed.write_bytes(content)
+                with self.assertRaisesRegex(host.MigrationError, 'Refresh the native supervisor'):
+                    host.require_installed_supervisor()
+            installed.write_bytes(Path(SPEC.origin).read_bytes())
+            host.require_installed_supervisor()
 
     def test_rollback_refuses_to_reopen_the_old_pool_after_activation(self):
         host.migration_directory().mkdir()
