@@ -93,6 +93,7 @@ const current = computed(() => providers.find(item => item.value === provider.va
 const retainedProvider = (value: Provider) => value === props.savedAssistant?.provider || (!props.requireConnection && value === provider.value)
 const offered = computed(() => providers.filter(item => retainedProvider(item.value) || modelCatalogs[item.value].catalog.connected !== false))
 const unconnected = computed(() => providers.filter(item => !offered.value.includes(item)))
+const refreshing = computed(() => providers.some(item => modelCatalogs[item.value].catalog.loading))
 const checkingConnections = computed(() => providers.some(item => !retainedProvider(item.value) && modelCatalogs[item.value].catalog.loading))
 const connectionsCheckFailed = computed(() => providers.some(({ value }) => {
   const catalog = modelCatalogs[value].catalog
@@ -364,10 +365,10 @@ onBeforeUnmount(() => removeEventListener('resize', place))
             :class="iconButton"
             aria-label="Refresh models"
             title="Refresh models"
-            :disabled="catalog.loading"
-            @click="reload"
+            :disabled="refreshing"
+            @click="refreshConnections"
           >
-            <Icon :name="catalog.loading ? LoaderCircle : RefreshCw" :size="15" :class="{ 'animate-spin': catalog.loading }" />
+            <Icon :name="refreshing ? LoaderCircle : RefreshCw" :size="15" :class="{ 'animate-spin': refreshing }" />
           </button>
           <button
             type="button"

@@ -235,15 +235,16 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   await openConnections('Connect more →')
   await expect(page).toHaveURL(workspacePath('/chats'))
 
-  // An account connected meanwhile is offered when the picker opens again.
+  // The refresh control also discovers an account connected while the picker stays open.
+  await picker.click()
+  await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveCount(0)
   const { account } = await workspace.api('/api/accounts', 'POST', {
     provider: 'antigravity',
     name: 'Picker Gemini key',
     modelProvider: 'gemini',
     apiKey: 'synthetic-picker-gemini-key',
   })
-  await page.goto(workspacePath('/chats'))
-  await picker.click()
+  await menu.getByRole('button', { name: 'Refresh models', exact: true }).click()
   await menu.getByRole('radio', { name: 'Antigravity', exact: true }).click()
   await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
   await expect(menu.getByText(hidden.filter(label => label !== 'Antigravity').join(', '), { exact: true })).toBeVisible()
