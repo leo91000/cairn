@@ -1153,10 +1153,17 @@ async fn reconnecting_google_refreshes_a_partial_catalog_immediately() {
     expired["token"]["token"]["refresh_token"] = "".into();
     s.vault.set(&secret, &expired).await.unwrap();
 
+    let lists_google = |catalog: &Value| {
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| text(model, "description").contains("Google account"))
+    };
     let partial = s.antigravity.models(&s).await.unwrap();
     assert!(text(&partial, "error").contains("Reconnect this Antigravity Google account"));
     assert!(!s.accounts.account(&s, &id).await.unwrap().is_active());
-    assert!(!partial.to_string().contains("Gemini 3.5 Flash"));
+    assert!(!lists_google(&partial), "{partial}");
 
     s.accounts.reconnect(&s, &id).await.unwrap();
     sign_in_until(&s, |view| view["acceptsCode"] == true).await;
@@ -1169,10 +1176,7 @@ async fn reconnecting_google_refreshes_a_partial_catalog_immediately() {
 
     let catalog = s.antigravity.models(&s).await.unwrap();
     assert_eq!(catalog["error"], "", "{catalog}");
-    assert!(
-        catalog.to_string().contains("Gemini 3.5 Flash"),
-        "{catalog}"
-    );
+    assert!(lists_google(&catalog), "{catalog}");
 }
 
 #[tokio::test]
