@@ -326,6 +326,7 @@ abstract class AgentPageCases {
         val grantReadBarrier: AtomicReference<GrantReadBarrier?> = AtomicReference(null),
         val refreshWorkspace: AtomicReference<(() -> Unit)?> = AtomicReference(null),
         val failGrantWrites: AtomicBoolean = AtomicBoolean(false),
+        val modelConnections: ConcurrentHashMap<String, Boolean>,
     )
 
     private class GrantReadBarrier {
@@ -348,6 +349,7 @@ abstract class AgentPageCases {
         val failPlugins = AtomicBoolean(false)
         val failGrantReads = AtomicBoolean(false)
         val failGrantWrites = AtomicBoolean(false)
+        val modelConnections = ConcurrentHashMap(mapOf("antigravity" to false))
         val grantReadBarrier = AtomicReference<GrantReadBarrier?>(null)
         val mcps = AtomicReference("[]")
         val allowed = AtomicReference<List<String>>(emptyList())
@@ -701,7 +703,12 @@ abstract class AgentPageCases {
                             path == "/plugins" -> wireJson.encodeToString(pluginCatalog.get())
                             path == "/api/installations" -> beaconInstallationsFixture()
                             path == "/api/account/session" -> beaconAccountFixture("fixture")
-                            path.endsWith("/models") -> """{"models":[]}"""
+                            path.endsWith("/models") || path.endsWith("/model-availability") -> {
+                                val provider = path.substringBeforeLast('/').substringAfterLast('/')
+                                val connected = modelConnections[provider]
+                                if (connected == null) """{"models":[]}"""
+                                else """{"models":[],"connected":$connected}"""
+                            }
                             path.endsWith("/overview") -> installationOverviewFixture()
                             else ->
                                 if (
@@ -751,6 +758,7 @@ abstract class AgentPageCases {
             grantReadBarrier,
             AtomicReference(null),
             failGrantWrites,
+            modelConnections,
         )
     }
 
@@ -764,6 +772,7 @@ abstract class AgentPageCases {
     private fun journey(
         agentId: String,
         prepare: (Fixture) -> Unit = {},
+        navigate: (String) -> Unit = {},
         body: (Fixture) -> Unit,
     ) {
         val fixture = fixture().also(prepare)
@@ -800,7 +809,7 @@ abstract class AgentPageCases {
                                         agentId,
                                         back = { left.set(true) },
                                         chat = {},
-                                        navigate = {},
+                                        navigate = navigate,
                                     )
                             }
                         }
@@ -820,6 +829,90 @@ abstract class AgentPageCases {
     private fun open(section: AgentSection) {
         compose.onNodeWithTag("agent-section-${section.name}").performScrollTo().performClick()
         compose.waitForIdle()
+    }
+
+    @Test
+    fun returningToADisconnectedEngineRestoresItsSavedModel() {
+        val disconnected = release.copy(provider = "antigravity", model = "gemini-saved")
+        val route = AtomicReference<String>()
+        journey(
+            release.id,
+            prepare = { it.agents.set(listOf(main, disconnected)) },
+            navigate = route::set,
+        ) {
+            open(AgentSection.Engine)
+            compose.onNodeWithTag("model-picker").performScrollTo().performClick()
+            val sheet = hasAnyAncestor(hasTestTag("model-settings-sheet"))
+            fun choose(name: String) {
+                val tile = sheet and hasText(name) and hasClickAction() and isEnabled()
+                compose.waitUntil(10000) {
+                    compose.onAllNodes(tile).fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNode(tile).performScrollTo().performClick().assertIsSelected()
+            }
+            choose("Codex")
+            choose("Antigravity")
+            compose.onNode(sheet and hasText("gemini-saved")).assertExists()
+            compose.onNodeWithText("Ouvrir les connexions").performScrollTo().performClick()
+            assertEquals("connections", route.get())
+        }
+    }
+
+    @Test
+    fun aNewAgentCannotKeepAnUnavailableCodingAgent() {
+        journey("", prepare = { it.modelConnections["codex"] = false }) { fixture ->
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Nouvel agent")
+            back()
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText("Connectez Codex ou choisissez un autre assistant de code.")
+            assertTrue(fixture.saved.isEmpty())
+
+            open(AgentSection.Engine)
+            compose.onNodeWithTag("model-picker").performScrollTo().performClick()
+            val sheet = hasAnyAncestor(hasTestTag("model-settings-sheet"))
+            compose.onNode(sheet and hasText("Codex") and hasClickAction()).assertDoesNotExist()
+            compose
+                .onNodeWithTag("unconnected-agents")
+                .assertTextContains("Codex", substring = true)
+        }
+    }
+
+    @Test
+    fun creationReplayRecoversTheAgentBeforeCheckingADifferentCodingAgent() {
+        journey(
+            "",
+            prepare = {
+                it.loseCreation.set(true)
+                it.modelConnections["antigravity"] = true
+            },
+        ) { fixture ->
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Nouvel agent")
+            back()
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText("Sauvegarde de l’agent non confirmée", substring = true)
+
+            open(AgentSection.Engine)
+            compose.onNodeWithTag("model-picker").performScrollTo().performClick()
+            val tile =
+                hasAnyAncestor(hasTestTag("model-settings-sheet")) and
+                    hasText("Antigravity") and
+                    hasClickAction() and
+                    isEnabled()
+            compose.waitUntil(10000) { compose.onAllNodes(tile).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNode(tile).performScrollTo().performClick().assertIsSelected()
+            compose.onNodeWithText("Terminé").performClick()
+            back()
+
+            fixture.modelConnections["antigravity"] = false
+            waitForEnabled("Créer l’agent")
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText("Connectez Antigravity", substring = true)
+            assertEquals(listOf("/agents", "/agents"), fixture.saved.map { it.first })
+            val recovered = fixture.agents.get().single { it.name == "Nouvel agent" }
+            assertEquals("codex", recovered.provider)
+        }
     }
 
     private fun back() {

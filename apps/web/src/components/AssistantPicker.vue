@@ -11,6 +11,7 @@ import {
   useId,
   watch,
 } from 'vue'
+import { RouterLink } from 'vue-router'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import {
   billingLabels,
@@ -20,6 +21,7 @@ import {
   STANDARD_SPEED,
 } from '../../../../packages/contracts/models'
 import { brands } from '../accounts'
+import { state } from '../api'
 import {
   Check,
   ChevronDown,
@@ -49,6 +51,14 @@ const props = withDefaults(defineProps<{
   defaultReasoning?: string
   defaultSpeed?: string
   defaultSource?: 'agent' | 'conversation'
+  /** Retain the saved coding agent, and restore explicit settings when supplied by the editor. */
+  savedAssistant?: {
+    provider: Provider
+    model?: string
+    reasoning?: string
+    speed?: string
+  }
+  requireConnection?: boolean
   disabled?: boolean
   switching?: boolean
   variant?: 'pill' | 'field'
@@ -76,8 +86,31 @@ const open = ref(false)
 const query = ref('')
 const position = ref<CSSProperties>({})
 const catalog = computed(() => modelCatalogs[provider.value].catalog)
+const disconnected = computed(() => catalog.value.connected === false)
 const reload = () => modelCatalogs[provider.value].load()
 const current = computed(() => providers.find(item => item.value === provider.value) ?? providers[0])
+// A chat can return to its saved agent even if that agent's account went away.
+const retainedProvider = (value: Provider) => value === props.savedAssistant?.provider || (!props.requireConnection && value === provider.value)
+const offered = computed(() => providers.filter(item => retainedProvider(item.value) || modelCatalogs[item.value].catalog.connected !== false))
+const unconnected = computed(() => providers.filter(item => !offered.value.includes(item)))
+const refreshing = computed(() => providers.some(item => modelCatalogs[item.value].connection.loading))
+const checkingConnections = computed(() => providers.some(item => !retainedProvider(item.value) && modelCatalogs[item.value].connection.loading))
+const connectionsCheckFailed = computed(() => providers.some(({ value }) => {
+  const { connection } = modelCatalogs[value]
+  return !retainedProvider(value) && !connection.loading && connection.failed
+}))
+
+function canChooseProvider(value: Provider) {
+  const { catalog, connection } = modelCatalogs[value]
+  return retainedProvider(value) || (connection.loaded && !connection.loading && !connection.failed && catalog.connected !== false)
+}
+
+function refreshConnections() {
+  for (const item of providers)
+    void modelCatalogs[item.value].checkConnection()
+  void reload()
+}
+
 const inheritedModel = computed(() => props.inherit ? props.defaultModel : catalog.value.nativeDefaults?.model || props.defaultModel)
 const inheritedReasoning = computed(() => props.inherit ? props.defaultReasoning : catalog.value.nativeDefaults?.reasoning || props.defaultReasoning)
 const inheritedSpeedValue = computed(() => props.inherit ? props.defaultSpeed : catalog.value.nativeDefaults?.speed || props.defaultSpeed)
@@ -164,8 +197,8 @@ const choices = computed(() => [
     : []),
 ])
 
-watch([provider, () => catalog.value.models, () => inheritedModel.value, () => catalog.value.loaded], () => {
-  if (catalog.value.loaded && current.value.requiresModel && !model.value && !inheriting.value) {
+watch([provider, () => catalog.value.models, () => inheritedModel.value, () => catalog.value.loaded, disconnected], () => {
+  if (!disconnected.value && catalog.value.loaded && current.value.requiresModel && !model.value && !inheriting.value) {
     model.value = catalog.value.models.find(item => item.isDefault && !item.hidden)?.model
       || catalog.value.models.find(item => !item.hidden)?.model || ''
   }
@@ -176,13 +209,14 @@ const effortDescription = computed(() => efforts.value.find(effort => effort.rea
 const unsupported = computed(() => !!reasoning.value && !!selected.value && !efforts.value.some(effort => effort.reasoningEffort === reasoning.value))
 
 function chooseProvider(value: Provider) {
-  if (value === provider.value)
+  if (value === provider.value || !canChooseProvider(value))
     return
+  const saved = value === props.savedAssistant?.provider ? props.savedAssistant : undefined
   emit('reasoningChoice', { kind: 'untouched' })
   provider.value = value
-  model.value = ''
-  reasoning.value = ''
-  speed.value = ''
+  model.value = saved?.model ?? ''
+  reasoning.value = saved?.reasoning ?? ''
+  speed.value = saved?.speed ?? ''
   query.value = ''
 }
 
@@ -239,8 +273,8 @@ function place() {
 async function show() {
   if (props.disabled || open.value)
     return
+  refreshConnections()
   open.value = true
-  void reload()
   place()
   await nextTick()
   dialog.value?.showModal()
@@ -332,10 +366,10 @@ onBeforeUnmount(() => removeEventListener('resize', place))
             :class="iconButton"
             aria-label="Refresh models"
             title="Refresh models"
-            :disabled="catalog.loading"
-            @click="reload"
+            :disabled="refreshing"
+            @click="refreshConnections"
           >
-            <Icon :name="catalog.loading ? LoaderCircle : RefreshCw" :size="15" :class="{ 'animate-spin': catalog.loading }" />
+            <Icon :name="refreshing || catalog.loading ? LoaderCircle : RefreshCw" :size="15" :class="{ 'animate-spin': refreshing || catalog.loading }" />
           </button>
           <button
             type="button"
@@ -353,7 +387,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
           </h3>
           <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Coding agent">
             <button
-              v-for="item in providers"
+              v-for="item in offered"
               :key="item.value"
               type="button"
               role="radio"
@@ -361,22 +395,83 @@ onBeforeUnmount(() => removeEventListener('resize', place))
               :aria-label="item.label"
               class="provider-tile flex flex-col items-center gap-2 rounded-xl border px-2 py-2.5 text-center transition-[border-color,background,box-shadow] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               :class="provider === item.value ? item.chosen : 'border-line hover:border-control hover:bg-hover/40'"
-              :disabled="disabled"
+              :disabled="disabled || !canChooseProvider(item.value)"
               @click="chooseProvider(item.value)"
             >
               <Icon :name="item.icon" :size="22" :class="item.text" />
               <span class="flex min-w-0 flex-col">
                 <span class="text-sm leading-tight font-semibold">{{ item.label }}</span>
                 <span class="text-3xs text-muted">{{ item.vendor }}</span>
+                <span v-if="modelCatalogs[item.value].catalog.connected === false" class="mt-1 text-3xs font-medium text-warning">Connection required</span>
               </span>
             </button>
           </div>
-          <p v-if="switching" class="flex items-start gap-2 rounded-lg bg-soft px-3 py-2 text-2xs text-ink" role="status">
+          <div v-if="unconnected.length" class="flex items-center justify-between gap-3 rounded-xl border border-dashed border-control px-3 py-2.5 text-2xs">
+            <span class="flex min-w-0 items-center gap-2 text-muted">
+              <Icon
+                v-for="item in unconnected"
+                :key="item.value"
+                :name="item.icon"
+                :size="16"
+                class="shrink-0 opacity-60"
+              />
+              <span class="wrap-anywhere">{{ unconnected.map(item => item.label).join(', ') }}</span>
+            </span>
+            <RouterLink
+              v-if="state.installationRole === 'owner'"
+              to="/connections"
+              target="_blank"
+              rel="noopener"
+              aria-description="Opens in a new tab"
+              class="shrink-0 font-semibold text-accent"
+              @click="close"
+            >
+              Connect more →
+            </RouterLink>
+            <span v-else class="shrink-0 text-muted">Not connected</span>
+          </div>
+          <p v-if="checkingConnections" class="text-2xs text-muted" role="status">
+            Checking connections…
+          </p>
+          <p v-else-if="connectionsCheckFailed" class="flex items-center justify-between gap-3 text-2xs text-muted" role="status">
+            Some connections couldn’t be checked.
+            <button type="button" class="shrink-0 text-accent underline" @click="refreshConnections">
+              Retry
+            </button>
+          </p>
+          <p v-if="switching && !disconnected" class="flex items-start gap-2 rounded-lg bg-soft px-3 py-2 text-2xs text-ink" role="status">
             <Icon :name="Info" :size="14" class="mt-px text-accent" />The next message starts a new {{ current.label }} session with this chat’s context and existing files.
           </p>
         </section>
 
-        <section class="flex flex-col gap-2" :aria-labelledby="`${id}-model`">
+        <section v-if="disconnected" class="flex flex-col gap-2" :aria-labelledby="`${id}-model`">
+          <h3 :id="`${id}-model`" class="section-label">
+            Model
+          </h3>
+          <div class="flex flex-col gap-1 rounded-xl border border-line bg-surface px-3.5 py-3 text-2xs" role="status">
+            <p class="font-semibold text-warning">
+              {{ current.label }} needs a connection
+            </p>
+            <p class="text-muted">
+              {{ requireConnection ? 'Connect this coding agent or choose another one.' : variant === 'pill' ? 'The next turn needs a connection.' : 'Runs need a connection.' }}
+            </p>
+            <RouterLink
+              v-if="state.installationRole === 'owner'"
+              to="/connections"
+              target="_blank"
+              rel="noopener"
+              aria-description="Opens in a new tab"
+              class="self-start font-semibold text-accent"
+              @click="close"
+            >
+              Open Connections →
+            </RouterLink>
+          </div>
+          <div class="rounded-xl bg-hover/35 px-3.5 py-3 text-sm font-semibold text-muted" aria-disabled="true">
+            {{ modelLabel }}
+          </div>
+        </section>
+        <section v-else class="flex flex-col gap-2" :aria-labelledby="`${id}-model`">
           <h3 :id="`${id}-model`" class="section-label">
             Model
           </h3>
@@ -620,12 +715,12 @@ onBeforeUnmount(() => removeEventListener('resize', place))
           <p v-else-if="query && !models.length" class="py-3 text-center text-xs text-muted">
             No models match “{{ query }}”.
           </p>
-          <label v-if="!catalog.loading && !catalog.models.length" class="text-2xs text-muted">Model name<input
+          <label v-if="!catalog.models.length" class="text-2xs text-muted">Model name<input
             :value="model"
             maxlength="100"
             placeholder="Use the provider default"
             class="mt-1"
-            @change="(event) => { const value = (event.target as HTMLInputElement).value.trim(); chooseModel({ value, chosen: value === model }) }"
+            @input="(event) => { const value = (event.target as HTMLInputElement).value.trim(); chooseModel({ value, chosen: value === model }) }"
           ></label>
         </section>
       </div>

@@ -634,16 +634,30 @@ watch(() => state.usableAgents, (usable) => {
     agentId.value = defaultAgent(usable, state.agents)
 })
 const currentProvider = computed(() => detail.value?.run?.snapshot.agent.provider || selectedAgent.value?.provider || 'codex')
+const savedAssistant = computed(() => {
+  const message = editing.value && detail.value?.messages.find(message => message.id === editing.value)
+  return message
+    ? {
+        provider: message.provider || currentProvider.value,
+        model: message.model,
+        reasoning: message.reasoning,
+        speed: message.speed,
+      }
+    : { provider: currentProvider.value }
+})
 const chosenProvider = computed({
   get: () => provider.value || currentProvider.value,
-  set: (value: Provider) => {
-    resumeReasoningIntent.value = { kind: 'untouched' }
-    provider.value = value
-    model.value = ''
-    reasoning.value = ''
-    speed.value = ''
-  },
+  set: (value: Provider) => { provider.value = value },
 })
+
+function switchedCodingAgent(value: Provider) {
+  resumeReasoningIntent.value = { kind: 'untouched' }
+  provider.value = value
+  model.value = ''
+  reasoning.value = ''
+  speed.value = ''
+}
+
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
 const planEnabled = chatPlanEnabled
 // An accepted queued Plan request can still be edited without dropping its boundary.
@@ -1942,7 +1956,7 @@ function key(event: KeyboardEvent) {
             @ask="sideQuestions?.ask($event)"
             @side-questions="sideQuestions?.show($event)"
             @resume-quota="resumeQuota"
-            @coding-agent-switched="chosenProvider = $event"
+            @coding-agent-switched="switchedCodingAgent"
             @load="live.loadOlder"
             @position="live.savePosition"
             @implement="implementPlan"
@@ -2214,6 +2228,7 @@ function key(event: KeyboardEvent) {
                       :default-speed="inheritedAssistant?.speed || ''"
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
+                      :saved-assistant="savedAssistant"
                       :disabled="busy || readOnly || noAgent"
                       @reasoning-choice="setResumeReasoningIntent"
                     />

@@ -5,8 +5,10 @@ import {
   expectSingleScroll,
   grantFullAccess,
   initializeRepository,
+  isolatedWorkspaceTest,
   openAgentSection,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -175,4 +177,185 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
   await expect(page.getByText('This turn runs at Standard speed')).toBeVisible({ timeout: 30000 })
   await expect(page.getByText('Codex doesn’t list the selected speed for this model here, so Cairn asks for Standard')).toBeVisible()
   expect(workspace.service.chats.detail(chatId).run?.snapshot.agent).toMatchObject({ model: 'fixture-deep', speed: 'priority' })
+})
+
+// A fresh installation, so accounts other journeys of this worker connected cannot offer agents.
+isolatedWorkspaceTest('points coding agents without an account to Connections instead of offering them', async ({ page, workspace }) => {
+  isolatedWorkspaceTest.setTimeout(90000)
+  await useRelayForHttpMocks(page)
+  const labels = {
+    codex: 'Codex',
+    claude: 'Claude Code',
+    opencode: 'OpenCode',
+    antigravity: 'Antigravity',
+  }
+  const unconnected = async () => {
+    const providers = Object.keys(labels) as (keyof typeof labels)[]
+    const catalogs = await Promise.all(providers.map(provider => workspace.api(`/api/${provider}/models`)))
+    return providers.filter((provider, index) => provider !== 'codex' && catalogs[index].connected === false).map(provider => labels[provider])
+  }
+
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  const menu = page.getByRole('dialog', { name: 'Agent & model' })
+
+  async function openConnections(name: string) {
+    const [tab] = await Promise.all([
+      page.context().waitForEvent('page'),
+      menu.getByRole('link', { name, exact: true }).click(),
+    ])
+    await expect(tab).toHaveURL(/\/connections$/)
+    await tab.close()
+    await expect(menu).toHaveCount(0)
+  }
+
+  const hidden = await unconnected()
+  expect(hidden).toEqual(expect.arrayContaining(['OpenCode', 'Antigravity']))
+  const releaseDiscovery = Promise.withResolvers<void>()
+  await page.route(/\/api\/antigravity\/model-availability$/, async (route) => {
+    await releaseDiscovery.promise
+    await route.continue()
+  }, { times: 1 })
+  await page.setViewportSize({ width: 360, height: 740 })
+  try {
+    await picker.click()
+    await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toBeDisabled()
+  }
+  finally {
+    releaseDiscovery.resolve()
+  }
+
+  await expect(menu.getByRole('radio', { name: 'Codex', exact: true })).toHaveAttribute('aria-checked', 'true')
+  for (const label of Object.values(labels).filter(label => label !== 'Codex'))
+    await expect(menu.getByRole('radio', { name: label, exact: true })).toHaveCount(hidden.includes(label) ? 0 : 1)
+  const hiddenNames = menu.getByText(hidden.join(', '), { exact: true })
+  await expect(hiddenNames).toBeVisible()
+  expect(await hiddenNames.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await openConnections('Connect more →')
+  await expect(page).toHaveURL(workspacePath('/chats'))
+
+  // The refresh control also discovers an account connected while the picker stays open.
+  await picker.click()
+  await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveCount(0)
+  const { account } = await workspace.api('/api/accounts', 'POST', {
+    provider: 'antigravity',
+    name: 'Picker Gemini key',
+    modelProvider: 'gemini',
+    apiKey: 'synthetic-picker-gemini-key',
+  })
+  await menu.getByRole('button', { name: 'Refresh models', exact: true }).click()
+  const antigravityInventory = /\/api\/antigravity\/models$/
+  const releaseInventory = Promise.withResolvers<void>()
+  await page.route(antigravityInventory, async (route) => {
+    await releaseInventory.promise
+    await route.continue()
+  }, { times: 1 })
+  try {
+    const inventoryStarted = page.waitForRequest(antigravityInventory)
+    await menu.getByRole('radio', { name: 'Antigravity', exact: true }).click()
+    await inventoryStarted
+    await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
+    await menu.getByLabel('Model name', { exact: true }).fill('gemini-custom-model')
+  }
+  finally {
+    releaseInventory.resolve()
+  }
+
+  await expect(menu.getByRole('radio', { name: 'Gemini 4 Neon', exact: true })).toBeVisible()
+  await expect(menu.getByRole('radio', { name: 'gemini-custom-model', exact: true })).toHaveAttribute('aria-checked', 'true')
+
+  await expect(menu.getByText(hidden.filter(label => label !== 'Antigravity').join(', '), { exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  expect((await workspace.api('/api/codex/models')).connected).toBe(true)
+  await page.goto(workspacePath('/agents'))
+  await page.getByRole('link', { name: 'New agent', exact: true }).click()
+  await page.getByLabel('Name', { exact: true }).fill('Picker Antigravity helper')
+  const create = page.getByRole('button', { name: 'Create agent', exact: true })
+  const createAttempts: { id: string, provider: string }[] = []
+  await page.route('**/api/agents', async (route) => {
+    if (route.request().method() !== 'POST')
+      return route.continue()
+    const input = route.request().postDataJSON()
+    createAttempts.push({ id: input.creationId, provider: input.settings.provider })
+    if (createAttempts.length === 1)
+      return route.fulfill({ status: 503, json: { error: 'Creation response lost before the write' } })
+    await route.continue()
+  })
+  await page.route(/\/api\/codex\/model-availability$/, route => route.fulfill({ status: 503, json: { error: 'Discovery unavailable' } }), { times: 1 })
+  await create.click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Couldn’t check the Codex connection.' })).toBeVisible()
+  expect(createAttempts).toHaveLength(0)
+  await create.click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Could not confirm whether the agent was saved.' })).toBeVisible()
+  expect(createAttempts).toHaveLength(1)
+
+  await workspace.setLegacyCodexLogin(false)
+  expect((await workspace.api('/api/codex/models')).connected).toBe(false)
+  await create.click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Connect Codex in Connections or choose another coding agent.' })).toBeVisible()
+  await expect(page).toHaveURL(/\/agents\/new(?:\?|$)/)
+  expect(createAttempts).toHaveLength(1)
+  await openAgentSection(page, 'Coding agent & model')
+  await picker.click()
+  await expect(menu.getByText('Codex needs a connection')).toBeVisible()
+  await expect(menu.getByRole('radio', { name: 'Codex', exact: true })).toHaveCount(0)
+  const antigravity = menu.getByRole('radio', { name: 'Antigravity', exact: true })
+  await antigravity.click()
+  await menu.getByRole('radio', { name: 'Gemini 4 Neon', exact: true }).click()
+  await menu.getByRole('radiogroup', { name: 'Reasoning' }).getByRole('radio', { name: 'High', exact: true }).click()
+  await page.keyboard.press('Escape')
+  const agentId = await createAgent(page)
+  expect(createAttempts).toEqual([{ id: agentId, provider: 'codex' }, { id: agentId, provider: 'antigravity' }])
+  await workspace.setLegacyCodexLogin(true)
+  const held = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${held.id}/pause`, 'POST', { paused: true })
+  const messageId = crypto.randomUUID()
+  await workspace.api(`/api/chats/${held.id}/messages`, 'POST', {
+    id: messageId,
+    provider: 'antigravity',
+    model: 'gemini-4-neon',
+    reasoning: 'high',
+    text: 'Keep this queued message.',
+    mode: 'queue',
+  })
+  await page.getByRole('link', { name: 'Chat with this agent' }).click()
+
+  // A disconnected saved choice keeps its selection and shows the reconnection action.
+  await workspace.api(`/api/accounts/${account.id}`, 'DELETE')
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+  await composer.fill('Keep this draft.')
+  await picker.click()
+  await expect(antigravity).toHaveAttribute('aria-checked', 'true')
+  await expect(menu.getByText('The next turn needs a connection.')).toBeVisible()
+  await expect(menu.getByRole('radiogroup', { name: 'Model', exact: true })).toHaveCount(0)
+  await openConnections('Open Connections →')
+  await expect(composer).toHaveValue('Keep this draft.')
+
+  // A queued message can name a different agent from the conversation's default.
+  await page.goto(workspacePath(`/chats/${held.id}`))
+  await page.getByRole('button', { name: /^Queued message options/ }).click()
+  await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()
+  await picker.click()
+  await menu.getByRole('radio', { name: 'Codex', exact: true }).click()
+  await menu.getByRole('radiogroup', { name: 'Reasoning' }).getByRole('radio', { name: 'High', exact: true }).click()
+  await antigravity.click()
+  await expect(menu.getByText('gemini-4-neon', { exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(picker).toHaveAccessibleName(/Antigravity · gemini-4-neon · High reasoning$/)
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(composer).toHaveValue('')
+  const queued = (await workspace.api(`/api/chats/${held.id}`)).messages.find((message: { id: string }) => message.id === messageId)
+  expect(queued).toMatchObject({ provider: 'antigravity', model: 'gemini-4-neon', reasoning: 'high' })
+
+  // In agent settings, returning to the disconnected engine restores its explicit model and effort.
+  await page.goto(workspacePath(`/agents/${agentId}`))
+  await openAgentSection(page, 'Coding agent & model')
+  await picker.click()
+  await menu.getByRole('radio', { name: 'Codex', exact: true }).click()
+  await antigravity.click()
+  await expect(menu.getByText('gemini-4-neon', { exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(picker).toHaveAccessibleName(/Antigravity · gemini-4-neon · High reasoning$/)
 })

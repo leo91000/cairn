@@ -553,6 +553,7 @@ pub async fn model_catalog(s: &Service) -> Result<Value> {
         checked_at: catalog.checked_at,
         stale: catalog.stale,
         error: catalog.error,
+        connected: None,
     };
     Ok(serde_json::to_value(view)?)
 }

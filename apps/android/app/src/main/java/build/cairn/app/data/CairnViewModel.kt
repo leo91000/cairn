@@ -20,6 +20,7 @@ import build.cairn.contracts.listAccountMethods
 import build.cairn.contracts.listAgents
 import build.cairn.contracts.listMcps
 import build.cairn.contracts.listMissions
+import build.cairn.contracts.listModelAvailability
 import build.cairn.contracts.listModels
 import build.cairn.contracts.listProjects
 import build.cairn.contracts.listSkills
@@ -47,6 +48,9 @@ fun body(vararg pairs: Pair<String, String>) = buildJsonObject {
 }
 
 fun segment(value: String): String = java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+
+private fun ModelCatalog.withCachedInventory(cached: ModelCatalog): ModelCatalog =
+    if (connected == true && stale && models.isEmpty()) copy(models = cached.models) else this
 
 data class Workspace(
     val ready: Boolean = false,
@@ -808,7 +812,9 @@ constructor(
             agent.provider to
                 async {
                     try {
-                        target.listModels(ListModelsInput(agent.provider))
+                        target
+                            .listModels(ListModelsInput(provider = agent.provider))
+                            .withCachedInventory(state.value.modelCatalog(agent.provider))
                     } catch (e: Exception) {
                         if (e is CancellationException || (e is ApiException && e.status == 401))
                             throw e
@@ -892,23 +898,31 @@ constructor(
             }
     }
 
-    suspend fun refreshModels(provider: String) {
+    suspend fun refreshModels(provider: String, availabilityOnly: Boolean = false): ModelCatalog? {
         codingAgent(provider)
         val target = api
-        try {
-            val catalog = target.listModels(ListModelsInput(provider))
+        return try {
+            val input = ListModelsInput(provider = provider)
+            val fresh =
+                if (availabilityOnly) target.listModelAvailability(input)
+                else target.listModels(input)
             // A request started before sign-out or a server change must not restore old data.
-            if (connection === target && state.value.session.authenticated)
-                mutable.update {
-                    it.copy(modelCatalogs = it.modelCatalogs + (provider to catalog))
-                }
+            if (connection !== target || !state.value.session.authenticated) return null
+            if (availabilityOnly) return fresh
+            val catalog = fresh.withCachedInventory(state.value.modelCatalog(provider))
+            mutable.update { it.copy(modelCatalogs = it.modelCatalogs + (provider to catalog)) }
+            catalog
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            if (connection !== target || !state.value.session.authenticated) return
+            if (connection !== target || !state.value.session.authenticated) return null
             if (e is ApiException && e.status == 401) {
                 report(e)
-                return
+                return null
             }
+            if (availabilityOnly)
+                return if (e is ApiException && e.status == 404 && e.message == "Not found")
+                    ModelCatalog()
+                else null
             mutable.update {
                 val cached = it.modelCatalog(provider)
                 val unavailable =
@@ -918,6 +932,7 @@ constructor(
                     )
                 it.copy(modelCatalogs = it.modelCatalogs + (provider to unavailable))
             }
+            null
         }
     }
 

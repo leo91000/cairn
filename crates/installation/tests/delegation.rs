@@ -299,6 +299,24 @@ async fn opencode_delegation_discovers_automatic_models_and_rejects_unconnected_
     assert_eq!(catalog["models"][0]["model"], "auto/ling-3-1-flash-free");
     assert!(!catalog.to_string().contains("synthetic-delegation-go-key"));
 
+    let response = project_workspaces::rpc(
+        &f.s,
+        &turn.token,
+        "tools/call",
+        &json!({
+            "name": "task_models",
+            "arguments": {
+                "provider": "opencode",
+                "availabilityOnly": true,
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    assert_ne!(response["isError"], true, "{response}");
+    assert_eq!(response["structuredContent"]["connected"], true);
+    assert_eq!(response["structuredContent"]["models"], json!([]));
+
     // An explicitly requested connection remains supported when it is connected.
     let pinned = f
         .delegate(

@@ -12,6 +12,7 @@ import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.Density
 import build.cairn.app.data.*
+import kotlinx.coroutines.CompletableDeferred
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -123,7 +124,7 @@ abstract class ModelPickerCases {
         compose.onNodeWithText("Modèle masqué").assertDoesNotExist()
         compose.onNodeWithText("Rechercher un modèle").performTextInput("rapide")
         compose.onNodeWithText("Modèle annexe 1").assertDoesNotExist()
-        compose.onNodeWithText("Modèle rapide").performClick()
+        compose.onNodeWithText("Modèle rapide").performScrollTo().assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals("fast" to "", result) }
         // The effort control follows the chosen model inside the same sheet.
         compose
@@ -475,5 +476,230 @@ abstract class ModelPickerCases {
         compose.onNodeWithTag("model-picker").performClick()
         compose.onNodeWithText("Auto", substring = false).performScrollTo().performClick()
         compose.runOnIdle { assertEquals("auto/sonnet" to "", chosen) }
+    }
+
+    @Test
+    fun inventoryCanConfirmDisconnectionAfterAnAvailabilityFailure() {
+        val inventory = CompletableDeferred<ModelCatalog>()
+        compose.setContent {
+            CairnTheme {
+                SurfaceForTest {
+                    ModelPicker(
+                        ModelCatalog(connected = true),
+                        "saved-model",
+                        "",
+                        provider = "opencode",
+                        savedProvider = "opencode",
+                        changeProvider = {},
+                        refresh = { inventory.await() },
+                        refreshCatalog = { provider ->
+                            if (provider == "opencode") null else ModelCatalog(connected = true)
+                        },
+                    ) { _, _ ->
+                    }
+                }
+            }
+        }
+
+        compose.onNodeWithTag("model-picker").performClick()
+        val refresh = hasTestTag("refresh-models") and isEnabled()
+        compose.waitUntil(10000) { compose.onAllNodes(refresh).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Nom du modèle").assertExists()
+        inventory.complete(ModelCatalog(connected = false))
+
+        val cue = hasText("OpenCode a besoin d’une connexion")
+        compose.waitUntil(10000) { compose.onAllNodes(cue).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Nom du modèle").assertDoesNotExist()
+    }
+
+    @Test
+    fun aFailedConnectionCheckKeepsTheConfirmedDisconnectionAcrossReopening() {
+        var checks by mutableIntStateOf(0)
+        compose.setContent {
+            CairnTheme {
+                SurfaceForTest {
+                    ModelPicker(
+                        ModelCatalog(connected = true),
+                        "saved-model",
+                        "",
+                        provider = "opencode",
+                        savedProvider = "opencode",
+                        changeProvider = {},
+                        refreshCatalog = { provider ->
+                            if (provider == "opencode") {
+                                checks++
+                                if (checks == 1) ModelCatalog(connected = false) else null
+                            } else ModelCatalog(connected = true)
+                        },
+                    ) { _, _ ->
+                    }
+                }
+            }
+        }
+
+        val picker = compose.onNodeWithTag("model-picker")
+        val cue = compose.onNodeWithText("OpenCode a besoin d’une connexion")
+        val refresh = hasTestTag("refresh-models") and isEnabled()
+        fun awaitCheck(count: Int) {
+            compose.waitUntil(10000) {
+                val ready = compose.onAllNodes(refresh).fetchSemanticsNodes().isNotEmpty()
+                ready && checks >= count
+            }
+            cue.assertExists()
+        }
+        picker.performClick()
+        awaitCheck(1)
+
+        compose.onNode(refresh).performClick()
+        awaitCheck(2)
+
+        compose.onNodeWithText("Terminé").performClick()
+        picker.performClick()
+        awaitCheck(3)
+        compose.onNodeWithText("Nom du modèle").assertDoesNotExist()
+    }
+
+    @Test
+    fun switchingProvidersLoadsModelsWhileThePreviousRefreshWaits() {
+        var provider by mutableStateOf("codex")
+        var inventories by mutableStateOf(mapOf("codex" to catalog.copy(connected = true)))
+        var holdCodex by mutableStateOf(false)
+        val codexWaiting = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        compose.setContent {
+            CairnTheme {
+                SurfaceForTest {
+                    ModelPicker(
+                        inventories[provider] ?: ModelCatalog(),
+                        "",
+                        "",
+                        provider = provider,
+                        changeProvider = { provider = it },
+                        refreshCatalog = { ModelCatalog(connected = true) },
+                        refresh = {
+                            val requested = provider
+                            if (requested == "codex" && holdCodex) {
+                                codexWaiting.complete(Unit)
+                                release.await()
+                            }
+                            val found =
+                                if (requested == "antigravity")
+                                    ModelCatalog(
+                                        connected = true,
+                                        models =
+                                            listOf(
+                                                CodingAgentModel(
+                                                    model = "fixture-neon",
+                                                    displayName = "Fixture Neon",
+                                                )
+                                            ),
+                                    )
+                                else inventories[requested] ?: ModelCatalog(connected = true)
+                            inventories = inventories + (requested to found)
+                            found
+                        },
+                    ) { _, _ ->
+                    }
+                }
+            }
+        }
+        try {
+            compose.onNodeWithTag("model-picker").performClick()
+            val button = hasTestTag("refresh-models") and isEnabled()
+            compose.waitUntil(10000) {
+                compose.onAllNodes(button).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.runOnIdle { holdCodex = true }
+            compose.onNode(button).performClick()
+            compose.waitUntil(10000) { codexWaiting.isCompleted }
+
+            val tile = hasText("Antigravity") and hasClickAction() and isEnabled()
+            compose.waitUntil(10000) { compose.onAllNodes(tile).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNode(tile).performScrollTo().performClick()
+            val model =
+                hasText("Fixture Neon") and hasAnyAncestor(hasTestTag("model-settings-sheet"))
+            compose.waitUntil(10000) {
+                compose.onAllNodes(model).fetchSemanticsNodes().isNotEmpty()
+            }
+        } finally {
+            release.complete(Unit)
+        }
+    }
+
+    @Test
+    fun agentsWithoutAnAccountPointToConnectionsInsteadOfBeingOffered() {
+        val catalogs =
+            mapOf(
+                "codex" to catalog.copy(connected = true),
+                "claude" to catalog.copy(connected = true),
+                "opencode" to ModelCatalog(connected = false),
+                // An installation that predates the field still offers the agent.
+                "antigravity" to ModelCatalog(),
+            )
+        var provider by mutableStateOf("codex")
+        var saved by mutableStateOf("codex")
+        var owner by mutableStateOf(true)
+        var stored by mutableStateOf(catalogs + ("opencode" to ModelCatalog(connected = true)))
+        val openCodeRefresh = CompletableDeferred<Unit>()
+        var connections = 0
+        val refreshed = mutableListOf<String>()
+        val tile = { name: String -> hasText(name) and hasClickAction() }
+        compose.setContent {
+            CairnTheme {
+                SurfaceForTest {
+                    ModelPicker(
+                        stored.getValue(provider),
+                        if (provider == "opencode") "saved-model" else "",
+                        "",
+                        provider = provider,
+                        changeProvider = { provider = it },
+                        catalogs = stored,
+                        savedProvider = saved,
+                        refreshCatalog = { name ->
+                            if (name == "opencode") openCodeRefresh.await()
+                            refreshed += name
+                            catalogs.getValue(name).also { stored = stored + (name to it) }
+                        },
+                        openConnections = if (owner) ({ connections++ }) else null,
+                    ) { _, _ ->
+                    }
+                }
+            }
+        }
+        compose.onNodeWithTag("model-picker").performClick()
+        // A previously connected agent cannot be chosen before its refresh confirms it.
+        compose.onNodeWithText("OpenCode").assertIsNotEnabled()
+        compose.runOnIdle { openCodeRefresh.complete(Unit) }
+        compose.runOnIdle {
+            assertEquals(setOf("codex", "claude", "opencode", "antigravity"), refreshed.toSet())
+        }
+        compose.onNode(tile("Antigravity")).assertExists()
+        compose.onNode(tile("OpenCode")).assertDoesNotExist()
+        compose.onNodeWithTag("unconnected-agents").assertTextContains("OpenCode")
+        compose.onNodeWithText("Connecter").performClick()
+        compose.runOnIdle { assertEquals(1, connections) }
+        compose.onNodeWithTag("model-settings-sheet").assertDoesNotExist()
+
+        // A member cannot open Connections; a chat already on the agent keeps offering it, also
+        // after looking at another agent.
+        owner = false
+        provider = "opencode"
+        saved = "opencode"
+        compose.onNodeWithTag("model-picker").performClick()
+        compose.onNode(tile("OpenCode")).assertExists()
+        compose.onNodeWithText("Connexion requise").assertExists()
+        compose.onNodeWithText("Le prochain tour a besoin d’une connexion.").assertExists()
+        compose
+            .onNode(hasText("saved-model") and hasAnyAncestor(hasTestTag("model-settings-sheet")))
+            .assertHasNoClickAction()
+        compose.onNodeWithTag("unconnected-agents").assertDoesNotExist()
+        compose.onNodeWithText("Connecter").assertDoesNotExist()
+        compose.onNodeWithText("Ouvrir les connexions").assertDoesNotExist()
+        compose.onNode(tile("Codex")).performClick()
+        compose.runOnIdle { assertEquals("codex", provider) }
+        compose.onNode(tile("OpenCode")).assertExists()
+        saved = "codex"
+        compose.onNode(tile("OpenCode")).assertDoesNotExist()
+        compose.onNodeWithText("Non connecté").assertExists()
     }
 }

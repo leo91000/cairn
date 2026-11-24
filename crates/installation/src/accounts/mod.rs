@@ -693,6 +693,13 @@ impl Accounts {
 
     /// Answers a run's broker request.
     pub async fn access(&self, s: &Service, lease: &Lease, request: &Value) -> Result<Value> {
+        // Antigravity can update account status when Google rejects the refresh grant.
+        // Check the lease and record that result under the normal account lock.
+        let _guard = if lease.provider == Provider::Antigravity {
+            Some(self.lock(&lease.account_id).await)
+        } else {
+            None
+        };
         let request = broker::Request::deserialize(request).unwrap_or_default();
         let ended = self
             .lease(s, &lease.run_id)
@@ -785,6 +792,14 @@ impl Accounts {
         let provider = account.provider;
         let driver = provider.driver();
         if let Err(error) = driver.refresh(s, id, &models).await {
+            if provider == Provider::Antigravity && matches!(error.status, 502..=504) {
+                tracing::warn!(
+                    account_id = %id,
+                    status = error.status,
+                    "Antigravity account refresh temporarily unavailable"
+                );
+                return Ok(());
+            }
             let mut account = self.account(s, id).await?;
             account.state = AccountState::Error;
             account.error = if error.status < 500 {

@@ -193,8 +193,11 @@ fun sectionOfError(message: String): AgentSection? {
         "project" in text -> AgentSection.Projects
         "sandbox" in text -> AgentSection.Sandbox
         "installation" in text -> AgentSection.Powers
-        "model" in text || "reasoning" in text || "provider" in text || "speed" in text ->
-            AgentSection.Engine
+        "model" in text ||
+            "reasoning" in text ||
+            "provider" in text ||
+            "speed" in text ||
+            "assistant de code" in text -> AgentSection.Engine
         "timeout" in text -> AgentSection.Advanced
         "name" in text || "instructions" in text || "description" in text -> AgentSection.Identity
         else -> null
