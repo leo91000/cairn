@@ -212,15 +212,18 @@ internal fun ModelPicker(
     openConnections: (() -> Unit)? = null,
     change: (String, String) -> Unit,
 ) {
-    val inheritedModel =
-        if (inherit) defaultModel else catalog.nativeDefaults?.model ?: defaultModel
-    val inheritedReasoning =
-        if (inherit) defaultReasoning else catalog.nativeDefaults?.reasoning ?: defaultReasoning
-    val inheritedSpeedValue =
-        if (inherit) defaultSpeed else catalog.nativeDefaults?.speed ?: defaultSpeed
-    val inheriting = inherit || catalog.nativeDefaults != null
-    val disconnected = catalog.connected == false
     var open by rememberSaveable { mutableStateOf(false) }
+    val discovered = remember(open) { mutableStateMapOf<String, ModelCatalog?>() }
+    val shownCatalog = discovered[provider] ?: catalog
+    val inheritedModel =
+        if (inherit) defaultModel else shownCatalog.nativeDefaults?.model ?: defaultModel
+    val inheritedReasoning =
+        if (inherit) defaultReasoning
+        else shownCatalog.nativeDefaults?.reasoning ?: defaultReasoning
+    val inheritedSpeedValue =
+        if (inherit) defaultSpeed else shownCatalog.nativeDefaults?.speed ?: defaultSpeed
+    val inheriting = inherit || shownCatalog.nativeDefaults != null
+    val disconnected = shownCatalog.connected == false
     var refreshing by remember { mutableStateOf(false) }
     var refreshError by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
@@ -237,20 +240,20 @@ internal fun ModelPicker(
             refreshing = false
         }
     }
-    val chosen = selectedModel(catalog, model, inheritedModel)
+    val chosen = selectedModel(shownCatalog, model, inheritedModel)
     // A pinned route offers its own reasoning levels; Auto offers those all routes share.
     val route = chosen?.route(model.ifBlank { inheritedModel })
     val selected =
         route?.let { chosen.copy(supportedReasoningEfforts = it.supportedReasoningEfforts) }
             ?: chosen
-    LaunchedEffect(provider, catalog.models, model, inheritedModel, inheriting, disconnected) {
+    LaunchedEffect(provider, shownCatalog.models, model, inheritedModel, inheriting, disconnected) {
         if (
             !disconnected && codingAgent(provider).requiresModel && model.isBlank() && !inheriting
         ) {
             onReasoningIntent(ResumeReasoningIntent.Untouched)
             val next =
-                catalog.models.find { it.isDefault && !it.hidden }
-                    ?: catalog.models.find { !it.hidden }
+                shownCatalog.models.find { it.isDefault && !it.hidden }
+                    ?: shownCatalog.models.find { !it.hidden }
             if (next != null) change(next.model, "")
         }
     }
@@ -263,7 +266,7 @@ internal fun ModelPicker(
         else selected?.defaultReasoningEffort.orEmpty()
     val effectiveEffort = pickerAppliedReasoning(selected, reasoning, inheritedEffort)
     // Speeds Codex names in this catalog, to label a saved speed the selected model lacks.
-    val knownTiers = catalog.models.flatMap { it.serviceTiers.orEmpty() }
+    val knownTiers = shownCatalog.models.flatMap { it.serviceTiers.orEmpty() }
     val inheritedSpeed = if (inheriting) inheritedSpeedValue else ""
     val currentSpeed = effectiveSpeed(speed, inheritedSpeed)
     val speedShown =
@@ -311,7 +314,6 @@ internal fun ModelPicker(
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
-            val discovered = remember { mutableStateMapOf<String, ModelCatalog?>() }
             var discoveryAttempt by remember { mutableIntStateOf(0) }
             val checkingConnections = refreshCatalog != null && discovered.size < codingAgents.size
             if (refreshCatalog != null) {
@@ -334,7 +336,7 @@ internal fun ModelPicker(
             // Claude lists its own "default" alias. When the default row already resolves to it,
             // show one row instead of two equivalent choices.
             val alias =
-                catalog.models
+                shownCatalog.models
                     .find { it.model == "default" }
                     ?.takeIf { !inheriting || inheritedModel.isBlank() }
             val defaultName =
@@ -342,7 +344,7 @@ internal fun ModelPicker(
                     provider == "claude" && it.isNotBlank() && !it.startsWith("Default")
                 }
             val visible =
-                catalog.models.filter {
+                shownCatalog.models.filter {
                     (!it.hidden || it.matches(model)) && (it != alias || model == it.model)
                 }
             val models = visible.filter {
@@ -425,7 +427,9 @@ internal fun ModelPicker(
                 if (changeProvider != null) {
                     // A chat can return to its saved agent even if its account went away.
                     fun retained(value: String) = value == provider || value == savedProvider
-                    fun catalogFor(value: String) = discovered[value] ?: catalogs?.get(value)
+                    fun catalogFor(value: String) =
+                        if (value == provider) shownCatalog
+                        else discovered[value] ?: catalogs?.get(value)
                     val (offered, unconnected) =
                         codingAgents.partition {
                             retained(it.provider) || catalogFor(it.provider)?.connected != false
@@ -566,7 +570,7 @@ internal fun ModelPicker(
                     )
                 if (visible.size > 6) SearchField("Rechercher un modèle", query) { query = it }
                 val fallback =
-                    selectedModel(catalog, "", inheritedModel)?.let {
+                    selectedModel(shownCatalog, "", inheritedModel)?.let {
                         it.displayName.ifBlank { it.model }
                     } ?: inheritedModel
                 if (
@@ -575,7 +579,7 @@ internal fun ModelPicker(
                 )
                     ModelCard(
                         if (inheriting) {
-                            if (!inherit && catalog.nativeDefaults != null)
+                            if (!inherit && shownCatalog.nativeDefaults != null)
                                 "Modèle de l’installation"
                             else if (conversationDefault) "Modèle de la conversation"
                             else "Modèle de l’agent"
@@ -664,7 +668,7 @@ internal fun ModelPicker(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                if (model.isNotBlank() && catalog.models.none { it.matches(model) })
+                if (model.isNotBlank() && shownCatalog.models.none { it.matches(model) })
                     ModelCard(
                         model,
                         "Modèle enregistré · absent du catalogue",
@@ -672,7 +676,7 @@ internal fun ModelPicker(
                         enabled,
                         reasoning = reasoningFor,
                     ) {}
-                if (catalog.models.isEmpty())
+                if (shownCatalog.models.isEmpty())
                     Field(
                         "Nom du modèle",
                         model,
@@ -682,9 +686,9 @@ internal fun ModelPicker(
                         },
                         keyboardOptions = InputKeyboards.Literal,
                     )
-                if (catalog.stale || catalog.error.isNotBlank())
+                if (shownCatalog.stale || shownCatalog.error.isNotBlank())
                     Text(
-                        catalog.error.ifBlank {
+                        shownCatalog.error.ifBlank {
                             "Catalogue enregistré ; actualisation en attente."
                         },
                         style = MaterialTheme.typography.bodySmall,

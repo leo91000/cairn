@@ -7,13 +7,39 @@ pub mod mcp;
 mod opencode;
 
 use crate::{
-    accounts::Lease, config::Config, error::Result, process::Environment, provider::Provider,
+    accounts::Lease,
+    config::Config,
+    error::{Error, Result},
+    process::Environment,
+    provider::Provider,
     service::Service,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+pub(crate) async fn read_model_catalog(s: &Service, provider: Provider) -> Result<Value> {
+    let mut catalog = match provider.adapter().model_catalog(s).await {
+        Ok(catalog) => catalog,
+        Err(error) if matches!(error.status, 502..=504) => json!({
+            "models": [],
+            "checkedAt": null,
+            "stale": true,
+            "error": "The model catalog is temporarily unavailable. Retry to refresh models.",
+        }),
+        Err(error) => return Err(error),
+    };
+
+    // Provider inventory can fail independently of the account pool.
+    // Unmanaged Codex runs on the host login, without an account.
+    let connected = !s.accounts.needs_attention(s, provider).await?;
+    let fields = catalog
+        .as_object_mut()
+        .ok_or_else(|| Error::bad_gateway("The coding agent returned an invalid model catalog."))?;
+    fields.insert("connected".into(), json!(connected));
+    Ok(catalog)
+}
 
 /// The native CLI configuration and session protocol for one coding agent.
 /// Credentials and usage remain the responsibility of `accounts::Driver`.

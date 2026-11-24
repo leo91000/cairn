@@ -6149,10 +6149,12 @@ async fn account_http(
 async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_transports() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
+    let opencode = root.path().join("opencode-fixture");
+    std::os::unix::fs::symlink(common::fixture_path("opencode.mjs"), &opencode).unwrap();
     let s = Service::new(cairn_installation::config::Config {
         codex_bin: common::fixture("codex.mjs"),
         claude_bin: common::fixture("claude.mjs"),
-        opencode_bin: common::fixture("opencode.mjs"),
+        opencode_bin: opencode.to_string_lossy().into_owned(),
         ..common::config(root.path())
     })
     .await
@@ -6307,10 +6309,33 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
         .await;
         assert_eq!(result(&response), &unconnected);
     }
+
+    // A changed pool invalidates cached inventory. Failure to launch discovery does not erase
+    // the other enabled account, and callers can still select a pinned model.
+    let mut paused = s.accounts.account(&s, &ids[0]).await.unwrap();
+    paused.enabled = false;
+    s.store.save_coding_account(&paused).await.unwrap();
+    std::fs::remove_file(opencode).unwrap();
+    let (status, stale) =
+        account_http(&app, &member, "GET", "/api/opencode/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{stale}");
+    assert_eq!(stale["connected"], true, "{stale}");
+    assert_eq!(stale["stale"], true, "{stale}");
+    assert!(!text(&stale, "error").is_empty(), "{stale}");
+
     for (endpoint, token) in [
         ("/mcp", public.as_str()),
         ("/mcp-installation", agent_token),
     ] {
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_models",
+            json!({"provider":"opencode"}),
+        )
+        .await;
+        assert_eq!(result(&response), &stale);
         let (_, invalid) = node_management_call(
             &app,
             endpoint,

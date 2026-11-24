@@ -197,6 +197,17 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   await authenticateWorkspace(page)
   const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
+
+  async function openConnections(name: string) {
+    const [tab] = await Promise.all([
+      page.context().waitForEvent('page'),
+      menu.getByRole('link', { name, exact: true }).click(),
+    ])
+    await expect(tab).toHaveURL(/\/connections$/)
+    await tab.close()
+    await expect(menu).toHaveCount(0)
+  }
+
   const hidden = await unconnected()
   expect(hidden).toEqual(expect.arrayContaining(['OpenCode', 'Antigravity']))
   const releaseDiscovery = Promise.withResolvers<void>()
@@ -219,9 +230,8 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   const hiddenNames = menu.getByText(hidden.join(', '), { exact: true })
   await expect(hiddenNames).toBeVisible()
   expect(await hiddenNames.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
-  await menu.getByRole('link', { name: 'Connect more →', exact: true }).click()
-  await expect(page).toHaveURL(/\/connections$/)
-  await expect(menu).toHaveCount(0)
+  await openConnections('Connect more →')
+  await expect(page).toHaveURL(workspacePath('/chats'))
 
   // An account connected meanwhile is offered when the picker opens again.
   const { account } = await workspace.api('/api/accounts', 'POST', {
@@ -248,16 +258,39 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   await menu.getByRole('radiogroup', { name: 'Reasoning' }).getByRole('radio', { name: 'High', exact: true }).click()
   await page.keyboard.press('Escape')
   const agentId = await createAgent(page)
+  const held = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${held.id}/pause`, 'POST', { paused: true })
+  await workspace.api(`/api/chats/${held.id}/messages`, 'POST', {
+    id: crypto.randomUUID(),
+    provider: 'antigravity',
+    model: 'gemini-4-neon',
+    reasoning: 'high',
+    text: 'Keep this queued message.',
+    mode: 'queue',
+  })
   await page.getByRole('link', { name: 'Chat with this agent' }).click()
 
   // A disconnected saved choice keeps its selection and shows the reconnection action.
   await workspace.api(`/api/accounts/${account.id}`, 'DELETE')
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+  await composer.fill('Keep this draft.')
   await picker.click()
   await expect(antigravity).toHaveAttribute('aria-checked', 'true')
   await expect(menu.getByText('The next turn will wait for a connection.')).toBeVisible()
   await expect(menu.getByRole('radiogroup', { name: 'Model', exact: true })).toHaveCount(0)
-  await menu.getByRole('link', { name: 'Open Connections →' }).click()
-  await expect(page).toHaveURL(/\/connections$/)
+  await openConnections('Open Connections →')
+  await expect(composer).toHaveValue('Keep this draft.')
+
+  // A queued message can name a different agent from the conversation's default.
+  await page.goto(workspacePath(`/chats/${held.id}`))
+  await page.getByRole('button', { name: /^Queued message options/ }).click()
+  await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()
+  await picker.click()
+  await menu.getByRole('radio', { name: 'Codex', exact: true }).click()
+  await antigravity.click()
+  await expect(menu.getByText('gemini-4-neon', { exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(picker).toHaveAccessibleName(/Antigravity · gemini-4-neon · High reasoning$/)
 
   // In agent settings, returning to the disconnected engine restores its explicit model and effort.
   await page.goto(workspacePath(`/agents/${agentId}`))

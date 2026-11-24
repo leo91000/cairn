@@ -417,6 +417,9 @@ onBeforeUnmount(() => removeEventListener('resize', place))
             <RouterLink
               v-if="state.installationRole === 'owner'"
               to="/connections"
+              target="_blank"
+              rel="noopener"
+              aria-description="Opens in a new tab"
               class="shrink-0 font-semibold text-accent"
               @click="close"
             >
@@ -452,6 +455,9 @@ onBeforeUnmount(() => removeEventListener('resize', place))
             <RouterLink
               v-if="state.installationRole === 'owner'"
               to="/connections"
+              target="_blank"
+              rel="noopener"
+              aria-description="Opens in a new tab"
               class="self-start font-semibold text-accent"
               @click="close"
             >

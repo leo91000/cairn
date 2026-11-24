@@ -204,7 +204,7 @@ impl AccountOperation {
                 let input: ListModelsInput = decode(input)?;
                 let provider: crate::provider::Provider = input.provider.into();
                 let mut catalog: ModelCatalog = serde_json::from_value(
-                    provider.adapter().model_catalog(s).await?,
+                    crate::coding_agent::read_model_catalog(s, provider).await?,
                 )
                 .map_err(|_| {
                     Error::bad_gateway("The coding agent returned an invalid model catalog.")
@@ -221,8 +221,6 @@ impl AccountOperation {
                 catalog.native_defaults = catalog.native_defaults.filter(|defaults| {
                     *defaults != cairn_contracts::CodingAgentPreferences::default()
                 });
-                // Unmanaged Codex runs on the host login, without an account.
-                catalog.connected = Some(!s.accounts.needs_attention(s, provider).await?);
                 serde_json::to_value(catalog)?
             }
             "get_coding_agent_account_sign_in" => {

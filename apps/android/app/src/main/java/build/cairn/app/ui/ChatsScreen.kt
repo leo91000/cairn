@@ -675,6 +675,8 @@ internal fun ChatPage(
         remember(error, chat?.id, chat?.run?.id, chat?.run?.finishedAt) { mutableStateOf(false) }
     val selectedAgent = state.agents.find { it.id == (chat?.agentId ?: agent) }
     val currentProvider = chat?.run?.snapshot?.agent?.provider ?: selectedAgent?.provider ?: "codex"
+    val editedMessage = chat?.messages?.firstOrNull { it.id == editing }
+    val editedProvider = editedMessage?.provider?.ifBlank { currentProvider }
     val chosenProvider = provider.ifBlank { currentProvider }
     val switchingProvider = chat?.run != null && chosenProvider != currentProvider
     val conversationAssistant = chat?.run?.snapshot?.agent
@@ -697,11 +699,12 @@ internal fun ChatPage(
     val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
     val defaultSpeed = inheritedAssistant?.speed.orEmpty()
     fun chooseProvider(value: String) {
+        val saved = editedMessage?.takeIf { editedProvider == value }
         setResumeReasoningIntent(ResumeReasoningIntent.Untouched)
         provider = value
-        model = ""
-        reasoning = ""
-        speed = ""
+        model = saved?.model.orEmpty()
+        reasoning = saved?.reasoning.orEmpty()
+        speed = saved?.speed.orEmpty()
     }
     val planEnabled = live.state?.planTurnsEnabled == true
     // Editing an accepted queued Plan request preserves its existing boundary.
@@ -2268,7 +2271,7 @@ internal fun ChatPage(
                                                 changeSpeed = { speed = it },
                                                 onReasoningIntent = ::setResumeReasoningIntent,
                                                 catalogs = state.modelCatalogs,
-                                                savedProvider = currentProvider,
+                                                savedProvider = editedProvider ?: currentProvider,
                                                 refreshCatalog = { vm.refreshModels(it) },
                                                 openConnections =
                                                     openConnections.takeIf { state.isOwner },

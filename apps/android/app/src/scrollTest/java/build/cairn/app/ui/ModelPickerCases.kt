@@ -541,7 +541,9 @@ abstract class ModelPickerCases {
         compose.onNode(tile("OpenCode")).assertExists()
         compose.onNodeWithText("Connexion requise").assertExists()
         compose.onNodeWithText("Le prochain tour attendra une connexion.").assertExists()
-        compose.onNodeWithText("saved-model").assertHasNoClickAction()
+        compose
+            .onNode(hasText("saved-model") and hasAnyAncestor(hasTestTag("model-settings-sheet")))
+            .assertHasNoClickAction()
         compose.onNodeWithTag("unconnected-agents").assertDoesNotExist()
         compose.onNodeWithText("Connecter").assertDoesNotExist()
         compose.onNodeWithText("Ouvrir les connexions").assertDoesNotExist()

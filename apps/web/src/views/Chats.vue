@@ -634,6 +634,17 @@ watch(() => state.usableAgents, (usable) => {
     agentId.value = defaultAgent(usable, state.agents)
 })
 const currentProvider = computed(() => detail.value?.run?.snapshot.agent.provider || selectedAgent.value?.provider || 'codex')
+const savedAssistant = computed(() => {
+  const message = editing.value && detail.value?.messages.find(message => message.id === editing.value)
+  return message
+    ? {
+        provider: message.provider || currentProvider.value,
+        model: message.model,
+        reasoning: message.reasoning,
+        speed: message.speed,
+      }
+    : { provider: currentProvider.value }
+})
 const chosenProvider = computed({
   get: () => provider.value || currentProvider.value,
   set: (value: Provider) => {
@@ -2214,7 +2225,7 @@ function key(event: KeyboardEvent) {
                       :default-speed="inheritedAssistant?.speed || ''"
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
-                      :saved-assistant="{ provider: currentProvider }"
+                      :saved-assistant="savedAssistant"
                       :disabled="busy || readOnly || noAgent"
                       @reasoning-choice="setResumeReasoningIntent"
                     />
