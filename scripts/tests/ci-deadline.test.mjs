@@ -2,8 +2,6 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  accessSync,
-  constants,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -27,20 +25,31 @@ function temporary(t, parent = os.tmpdir()) {
 }
 
 function deadlineFixture(t) {
-  // The evidence rename is synchronous. Use the standard Linux tmpfs mount
-  // when writable so shared disk writeback cannot hold the timed fixture.
-  let parent = '/dev/shm'
-  try {
-    accessSync(parent, constants.W_OK | constants.X_OK)
-  }
-  catch {
-    parent = os.tmpdir()
+  function allocate(parent) {
+    // The observer also looks for a backend log beside the evidence directory.
+    const root = temporary(t, parent)
+    const output = path.join(root, 'evidence')
+    try {
+      mkdirSync(output)
+    }
+    catch (error) {
+      rmSync(root, { force: true, recursive: true })
+      throw error
+    }
+
+    return output
   }
 
-  // The observer also looks for a backend log beside the evidence directory.
-  const output = path.join(temporary(t, parent), 'evidence')
-  mkdirSync(output)
-  return output
+  // The evidence rename is synchronous. Prefer the standard shared-memory
+  // mount so disk writeback cannot hold the timed fixture.
+  try {
+    return allocate('/dev/shm')
+  }
+  catch (error) {
+    if (!['EACCES', 'EDQUOT', 'ENOENT', 'ENOSPC', 'ENOTDIR', 'EPERM', 'EROFS'].includes(error.code))
+      throw error
+    return allocate(os.tmpdir())
+  }
 }
 
 function live(pid) {
