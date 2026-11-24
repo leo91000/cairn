@@ -85,11 +85,12 @@ private partial tree. Renamed data is verified without overwriting it. A committ
 format wins over a leftover pin, preserving later user changes. Environment
 deletion releases unfinished pins and private data; cache reclamation follows
 its existing limits. Existing conversations retain their own files.
-The historical `metadataBytes` response now estimates the complete private
-copy, including per-entry/logical allocation and reserve, rather than only journal
-metadata or compressed cache allocation. Large templates use the bounded cache
-payload limit. It is measured once at publication and returned unchanged by
-lookups; reflink clones still charge this logical size to the environment quota.
+The historical `metadataBytes` response estimates the complete private copy,
+including per-entry logical allocation and reserve. For reflink, the base also
+records a separate physical estimate based on directory entries and data extent
+counts. Both estimates are measured at publication. XFS accounts the shared
+blocks against the conversation's project quota, while node-wide reservations
+use the physical clone estimate.
 
 ## Reproducible measurements
 

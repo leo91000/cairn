@@ -673,9 +673,22 @@ class PoolMigrationTests(unittest.TestCase):
                 self.assertFalse(host.check_device(device, True))
             with patch.object(host.subprocess, 'run', side_effect=system(signature='TYPE=xfs\nUUID=ours\n')):
                 self.assertTrue(host.check_device(device, False, uuid='ours'))
+            with patch.object(host, 'has_partitions', return_value=True), \
+                    self.assertRaisesRegex(host.MigrationError, 'contains partitions'):
+                host.check_device(device, True)
         with patch.object(host.Path, 'stat', return_value=SimpleNamespace(st_mode=host.stat.S_IFREG | 0o600, st_rdev=0)), \
                 self.assertRaisesRegex(host.MigrationError, 'not a block device'):
             host.check_device(device, True)
+
+    def test_block_topology_identifies_a_parent_with_partitions(self):
+        sysfs = self.root / 'synthetic-sys-device'
+        sysfs.mkdir()
+        (sysfs / 'holders').mkdir()
+        self.assertFalse(host.has_partitions(sysfs))
+        partition = sysfs / 'disk1'
+        partition.mkdir()
+        (partition / 'partition').write_text('1\n')
+        self.assertTrue(host.has_partitions(sysfs))
 
     def test_units_attach_the_image_with_direct_io_and_mount_by_uuid(self):
         pool = Path('/var/lib/cairn-native/state/native-data')
@@ -886,6 +899,31 @@ class PoolMigrationTests(unittest.TestCase):
         os.utime(damaged, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
         host.copy_environment('run', source, target)
         self.assertEqual(damaged.read_bytes(), original.read_bytes())
+
+    def test_terminating_offline_copy_reaps_its_process_before_migration_can_continue(self):
+        import threading
+        pid_file = self.root / 'copy-process'
+        script = 'import os,sys,time; open(sys.argv[1], "w").write(str(os.getpid())); time.sleep(30)'
+        def cancel():
+            deadline = host.time.monotonic() + 5
+            while host.time.monotonic() < deadline:
+                if pid_file.is_file() and pid_file.read_text():
+                    break
+                host.time.sleep(0.01)
+            host.stop(host.signal.SIGTERM, None)
+        with patch.object(host, 'STOP', False):
+            cancelling = threading.Thread(target=cancel)
+            cancelling.start()
+            try:
+                with self.assertRaisesRegex(host.MigrationError, 'interrupted'):
+                    host.checked(host.sys.executable, '-c', script, str(pid_file), timeout=10)
+            finally:
+                cancelling.join()
+            pid = int(pid_file.read_text())
+            self.assertFalse((Path('/proc') / str(pid)).exists())
+            with self.assertRaisesRegex(host.MigrationError, 'interrupted'):
+                host.save_migration({'phase': 'copied'})
+            self.assertFalse(host.migration_directory().exists())
 
     def test_migration_refusals_are_printed_for_the_operator(self):
         source = Path(SPEC.origin).read_text()

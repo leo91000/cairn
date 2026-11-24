@@ -183,7 +183,7 @@ impl Warmer {
                             &worker,
                             &ready.key,
                             work.disk_mib,
-                            ready.metadata_bytes,
+                            ready.allocated_for_clone(true),
                             limit,
                             &policy,
                             &worker_stop,

@@ -477,6 +477,7 @@ async fn measure_prepared_native_bases() {
         (
             state.join(crate::microvm::budget::FILE),
             json!({
+                "nativeModeProtocol": 1,
                 "slots": 2,
                 "limits": { "cpu": 2, "memoryMiB": 1024, "diskMiB": 32768 },
             }),
@@ -532,7 +533,7 @@ async fn measure_prepared_native_bases() {
                 &bases,
                 &ready.key,
                 256,
-                ready.metadata_bytes,
+                ready.allocated_for_clone(true),
                 32 * 1024 * 1024 * 1024,
                 &policy,
                 &stop,

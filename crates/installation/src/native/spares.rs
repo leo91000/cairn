@@ -192,11 +192,20 @@ pub(super) async fn warm(
     let prepared = files(state)?;
     if stop.is_cancelled()
         || !quota::reflink(&std::fs::File::open(&pool)?)?
-        || prepared.len() >= MAX_SPARES
-        || prepared.iter().any(|spare| spare.key == key)
         || required > disk::available(limit, disk::used(&bases.data, state).await?)
     {
         return Ok(());
+    }
+    if let Some(existing) = prepared.iter().find(|spare| spare.key == key) {
+        let record = std::fs::File::open(index(state).join(&existing.run))?;
+        record.set_modified(std::time::SystemTime::now())?;
+        return Ok(());
+    }
+    if prepared.len() >= MAX_SPARES {
+        let Some(oldest) = oldest_unclaimed(state, &prepared)? else {
+            return Ok(());
+        };
+        retire(state, oldest).await?;
     }
     let spare = Spare {
         run: crate::config::id(),
@@ -229,7 +238,8 @@ pub(super) async fn warm(
         let data = workload.join("data");
         private_dir(&data).await?;
         let capacity = directory::CopyCapacity::new(state, &workload, required, policy.clone())
-            .with_reservation(reservation.bytes);
+            .with_reservation(reservation.bytes)
+            .with_shared_blocks(true);
         directory::copy_verified(&bases.contents(key), &data, stop, &capacity, true).await?;
         atomic_write(&control.join("spare-ready"), key.as_bytes()).await?;
         Ok(())
@@ -239,6 +249,23 @@ pub(super) async fn warm(
         retire(state, &spare).await?;
     }
     prepared
+}
+
+fn oldest_unclaimed<'a>(state: &Path, prepared: &'a [Spare]) -> Result<Option<&'a Spare>> {
+    let mut oldest = None;
+    for spare in prepared {
+        if workspace::directory(state, &spare.run)?
+            .join(ADOPTED_BY)
+            .exists()
+        {
+            continue;
+        }
+        let modified = std::fs::metadata(index(state).join(&spare.run))?.modified()?;
+        if oldest.is_none_or(|(timestamp, _)| modified < timestamp) {
+            oldest = Some((modified, spare));
+        }
+    }
+    Ok(oldest.map(|(_, spare)| spare))
 }
 
 fn read_claim(control: &Path) -> Result<Option<Claim>> {
@@ -350,6 +377,35 @@ pub(super) async fn settle_for_retirement(state: &Path, run: &str) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_new_base_replaces_the_least_recent_unclaimed_spare() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path();
+        private_dir(&index(state)).await.unwrap();
+        let entries = [("a", 1), ("b", 3), ("c", 2)].map(|(key, modified)| {
+            let spare = Spare {
+                run: crate::config::id(),
+                key: key.repeat(64),
+            };
+            let file = std::fs::File::create(index(state).join(&spare.run)).unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(modified))
+                .unwrap();
+            spare
+        });
+        assert_eq!(
+            oldest_unclaimed(state, &entries).unwrap().unwrap().key,
+            "a".repeat(64)
+        );
+        let control = workspace::directory(state, &entries[0].run).unwrap();
+        private_dir(&control).await.unwrap();
+        std::fs::write(control.join(ADOPTED_BY), b"claimed").unwrap();
+        assert_eq!(
+            oldest_unclaimed(state, &entries).unwrap().unwrap().key,
+            "c".repeat(64)
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires an explicitly disposable host and the native quota fixture"]

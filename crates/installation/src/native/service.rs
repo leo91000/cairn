@@ -2187,6 +2187,7 @@ impl Controller {
         };
         let assigned_base = has_journal && root.join("file-owner.json").exists();
         let mut spare_key = None;
+        let mut project_bytes = None;
         let seed = if assigned_base {
             0
         } else if !root.join("initialized").exists()
@@ -2216,7 +2217,8 @@ impl Controller {
                         spare_key = Some(base.key);
                         0
                     } else {
-                        base.metadata_bytes
+                        project_bytes = Some(base.metadata_bytes);
+                        base.allocated_for_clone(self.bases().reflink_enabled().await?)
                     }
                 } else {
                     archives.iter().try_fold(0u64, |bytes, archive| {
@@ -2257,7 +2259,10 @@ impl Controller {
                 used = disk::used(&self.data, &self.state).await?;
             }
         }
-        if current.saturating_add(incoming) > self.disk_budget(plan)
+        let private_bytes = current
+            .saturating_add(project_bytes.unwrap_or(seed))
+            .saturating_add(home);
+        if private_bytes > self.disk_budget(plan)
             || incoming > disk::available(limit, used)
             || used > limit
         {

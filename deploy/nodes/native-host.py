@@ -863,9 +863,42 @@ def pool_path():
     return ROOT / 'state/native-data'
 
 
+def require_migration_running():
+    if STOP:
+        raise MigrationError('Pool migration interrupted. Rerun the command to resume the current phase.')
+
+
+def offline_command(args, timeout, env=None):
+    require_migration_running()
+    deadline = None if timeout is None else time.monotonic() + timeout
+    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, env=env) as child:
+        try:
+            while True:
+                require_migration_running()
+                remaining = 0.2 if deadline is None else deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                try:
+                    stdout, stderr = child.communicate(timeout=min(0.2, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+                require_migration_running()
+                return subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
+        except BaseException:
+            if child.returncode is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait()
+            raise
+
+
 def checked(*args, timeout=120):
     try:
-        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout).stdout
+        result = offline_command(args, timeout)
+        result.check_returncode()
+        return result.stdout
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or error.stdout or '').strip().splitlines()
         raise MigrationError(f'{args[0]} failed: ' + (detail[-1][:300] if detail else f'exit status {error.returncode}')) from None
@@ -968,6 +1001,7 @@ def load_migration():
 
 
 def save_migration(record):
+    require_migration_running()
     atomic_json(migration_directory() / 'state.json', record)
     sync_directory(migration_directory().parent)
 
@@ -979,8 +1013,8 @@ def cairn_binary():
 
 def pool_tool(*args):
     """Project IDs, limits and ownership records use the controller's own code."""
-    result = subprocess.run([str(cairn_binary()), 'native-pool-migrate', *[str(arg) for arg in args]], capture_output=True, text=True,
-                            env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'RUNNER_STATE_DIR': str(ROOT / 'state')})
+    result = offline_command([str(cairn_binary()), 'native-pool-migrate', *[str(arg) for arg in args]], None,
+                             env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'RUNNER_STATE_DIR': str(ROOT / 'state')})
     if result.returncode != 0:
         detail = (result.stderr.strip().splitlines() or ['no diagnostic'])[-1]
         if 'cairn --help' in result.stderr:
@@ -1017,6 +1051,10 @@ def old_pool(pool):
             'uuid': filesystem_uuid(source)}
 
 
+def has_partitions(sysfs):
+    return sysfs.is_dir() and any((child / 'partition').is_file() for child in sysfs.iterdir())
+
+
 def check_device(device, force, uuid=None):
     try:
         metadata = device.stat()
@@ -1024,9 +1062,15 @@ def check_device(device, force, uuid=None):
         raise MigrationError(f'{device} is not available.') from error
     if not stat.S_ISBLK(metadata.st_mode):
         raise MigrationError(f'{device} is not a block device.')
-    if subprocess.run(['findmnt', '--source', str(device)], capture_output=True, timeout=10).returncode == 0:
+    device_id = f'{os.major(metadata.st_rdev)}:{os.minor(metadata.st_rdev)}'
+    sysfs = Path('/sys/dev/block') / device_id
+    if has_partitions(sysfs):
+        raise MigrationError(f'{device} contains partitions; select the unused partition or logical volume itself.')
+    mounts = Path('/proc/self/mountinfo').read_text().splitlines()
+    mounted = any(line.split()[2] == device_id for line in mounts)
+    if mounted or subprocess.run(['findmnt', '--source', str(device)], capture_output=True, timeout=10).returncode == 0:
         raise MigrationError(f'{device} is mounted; choose an unused partition or logical volume.')
-    holders = Path('/sys/dev/block') / f'{os.major(metadata.st_rdev)}:{os.minor(metadata.st_rdev)}' / 'holders'
+    holders = sysfs / 'holders'
     if holders.is_dir() and any(holders.iterdir()):
         raise MigrationError(f'{device} is in use by another device (LVM, RAID or dm).')
     # blkid exits 2 when it finds no signature at all.

@@ -93,6 +93,9 @@ impl Inputs {
 pub(crate) struct Ready {
     pub key: String,
     pub metadata_bytes: u64,
+    /// Physical space for a same-pool clone, excluding shared data extents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reflink_bytes: Option<u64>,
     /// Physical allocation of the contents, measured once at publication.
     /// Cache budgets and trimming use it instead of walking the tree.
     #[serde(default)]
@@ -101,6 +104,16 @@ pub(crate) struct Ready {
     #[serde(default)]
     contents_inode: u64,
     inputs: Inputs,
+}
+
+impl Ready {
+    pub(super) fn allocated_for_clone(&self, reflink: bool) -> u64 {
+        if reflink {
+            self.reflink_bytes.unwrap_or(self.metadata_bytes)
+        } else {
+            self.metadata_bytes
+        }
+    }
 }
 
 fn valid_key(name: &str) -> bool {
@@ -209,6 +222,13 @@ impl Bases {
         self.pool().join(key)
     }
 
+    pub(super) async fn reflink_enabled(&self) -> Result<bool> {
+        let pool = self.pool();
+        tokio::task::spawn_blocking(move || reflink_supported(&pool))
+            .await
+            .map_err(Error::internal)
+    }
+
     async fn stored(
         &self,
         archives: &[Archive],
@@ -240,6 +260,9 @@ impl Bases {
             || ready.inputs != inputs
             || ready.metadata_bytes < CLONE_RESERVE
             || ready.metadata_bytes > MAX_BASE_BYTES
+            || ready
+                .reflink_bytes
+                .is_some_and(|bytes| !(CLONE_RESERVE..=MAX_BASE_BYTES).contains(&bytes))
             || ready.contents_inode != contents.ino()
             || !root.join("pin").is_file()
             || !root.join("contents.digest").is_file()
@@ -523,14 +546,23 @@ impl Bases {
                 return Ok(None);
             }
             let measured = contents.clone();
-            let (allocated_bytes, footprint) = tokio::task::spawn_blocking(move || {
-                Ok::<_, Error>((
-                    workspace::measure(&measured, true)?,
-                    clone_footprint(&measured)?,
-                ))
-            })
-            .await
-            .map_err(Error::internal)??;
+            let reflink = self.reflink_enabled().await?;
+            let (allocated_bytes, footprint, reflink_bytes) =
+                tokio::task::spawn_blocking(move || {
+                    Ok::<_, Error>((
+                        workspace::measure(&measured, true)?,
+                        clone_footprint(&measured)?,
+                        if reflink {
+                            reflink_footprint(&measured)
+                                .ok()
+                                .filter(|bytes| *bytes <= MAX_BASE_BYTES)
+                        } else {
+                            None
+                        },
+                    ))
+                })
+                .await
+                .map_err(Error::internal)??;
             let metadata_bytes = footprint.saturating_add(CLONE_RESERVE);
             if self.cached_bytes()?.saturating_add(allocated_bytes) > budget
                 || disk::used(&self.data, &self.state).await? > limit
@@ -541,6 +573,7 @@ impl Bases {
             Ok(Some(Ready {
                 key: key.clone(),
                 metadata_bytes,
+                reflink_bytes,
                 allocated_bytes,
                 contents_inode: tokio::fs::symlink_metadata(&contents).await?.ino(),
                 inputs,
@@ -602,6 +635,7 @@ impl Bases {
             return Err(Error::unavailable("Native base preparation stopped."));
         }
         let pool = workspace::data_root(&self.state);
+        let writeback = tokio::fs::File::open(contents).await?.into_std().await;
         let filesystem = workspace::filesystem(&pool)?;
         let unit = filesystem.f_frsize.max(filesystem.f_bsize).max(4096);
         let admission = std::sync::Arc::new(std::sync::Mutex::new(super::ingress::Admission::new(
@@ -642,7 +676,7 @@ impl Bases {
         atomic_write(&contents.join(".cairn-seed-complete"), b"native-base-v1").await?;
         workspace::own_tree_with_stop(contents, inputs.uid, inputs.gid, stop).await?;
         admission.lock().map_err(Error::internal)?.admit(0)?;
-        super::block::sync(contents).await?;
+        super::block::sync_opened(writeback).await?;
 
         Ok(())
     }
@@ -824,10 +858,11 @@ impl Bases {
             self.contents(&ready.key)
         };
         // Both monitored copy and verification check capacity before starting.
+        let reflink = !is_inline && self.reflink_enabled().await?;
         let capacity = super::directory::CopyCapacity::new(
             &self.state,
             &workload,
-            ready.metadata_bytes,
+            ready.allocated_for_clone(reflink),
             crate::storage::policy::for_node(&plan["storage"]["policy"])?,
         );
         let capacity = capacity.with_reservation(reserved);
@@ -856,11 +891,7 @@ impl Bases {
                 tokio::fs::remove_dir_all(&staging).await?;
             }
             private_dir(&staging).await?;
-            let pool = self.pool();
-            let reflink = !is_inline
-                && tokio::task::spawn_blocking(move || reflink_supported(&pool))
-                    .await
-                    .map_err(Error::internal)?;
+            let capacity = capacity.with_shared_blocks(reflink);
             if let Err(error) =
                 super::directory::copy_verified(&source, &staging, stop, &capacity, reflink).await
             {
@@ -892,6 +923,55 @@ impl Bases {
         release_pin(&self.data.join("runs").join(run), text(plan, "id")).await?;
         Ok(true)
     }
+}
+
+fn reflink_footprint(root: &Path) -> std::io::Result<u64> {
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+
+    // Asking FIEMAP for zero records returns the extent count without reading
+    // file data. Files are already synced and the template is unpublished.
+    #[repr(C)]
+    struct Fiemap {
+        start: u64,
+        length: u64,
+        flags: u32,
+        mapped: u32,
+        count: u32,
+        reserved: u32,
+    }
+
+    let mut pending = vec![root.to_owned()];
+    let mut estimate = CLONE_RESERVE;
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        // Inode, directory entry and project allocation metadata. Account
+        // separately for refcount and extent-btree work in regular files.
+        estimate = estimate.saturating_add(4096);
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                pending.push(entry?.path());
+            }
+        } else if metadata.is_file() && metadata.len() > 0 {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)?;
+            let mut map = Fiemap {
+                start: 0,
+                length: u64::MAX,
+                flags: 0,
+                mapped: 0,
+                count: 0,
+                reserved: 0,
+            };
+            const FS_IOC_FIEMAP: libc::c_ulong = 0xc020_660b;
+            if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP, &mut map) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            estimate = estimate.saturating_add(u64::from(map.mapped).saturating_mul(4096));
+        }
+    }
+    Ok(estimate)
 }
 
 const INITIALIZING_BASE: &str = "native-base-initializing-v1.";
@@ -1260,6 +1340,70 @@ mod payload_size_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires an explicitly disposable XFS project-quota pool"]
+    async fn kernel_reflink_admission_excludes_shared_extents_from_physical_reserve() {
+        use std::io::Write;
+
+        assert_eq!(
+            std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),
+            Ok("1")
+        );
+        let state = PathBuf::from(std::env::var("CAIRN_NATIVE_QUOTA_TEST_STATE").unwrap());
+        let pool = workspace::data_root(&state);
+        assert!(super::super::quota::reflink(&std::fs::File::open(&pool).unwrap()).unwrap());
+        let source = tempfile::tempdir_in(&pool).unwrap();
+        let mut asset = std::fs::File::create(source.path().join("asset")).unwrap();
+        let bytes = vec![0x5a; disk::MIB as usize];
+        for _ in 0..64 {
+            asset.write_all(&bytes).unwrap();
+        }
+        asset.sync_all().unwrap();
+        drop(asset);
+
+        let run = crate::config::id();
+        let control = workspace::directory(&state, &run).unwrap();
+        let workload = workspace::workload(&state, &run).unwrap();
+        private_dir(&control).await.unwrap();
+        private_dir(&workload).await.unwrap();
+        super::super::quota::prepare(&state, &workload, 128 * disk::MIB)
+            .await
+            .unwrap();
+        let target = workload.join("data");
+        private_dir(&target).await.unwrap();
+        let (_, free) = storage::policy::physical_space(&pool).unwrap();
+        let policy = storage::policy::Policy {
+            reserve_mi_b: free.saturating_sub(36 * disk::MIB) / disk::MIB,
+            ..Default::default()
+        };
+        let copied = clone_footprint(source.path())
+            .unwrap()
+            .saturating_add(CLONE_RESERVE);
+        let reflinked = reflink_footprint(source.path()).unwrap();
+        assert!(reflinked < 36 * disk::MIB && copied > 36 * disk::MIB);
+        let copy =
+            super::super::directory::CopyCapacity::new(&state, &workload, copied, policy.clone());
+        assert_eq!(copy.check().await.unwrap_err().status, 507);
+        let clone =
+            super::super::directory::CopyCapacity::new(&state, &workload, reflinked, policy)
+                .with_shared_blocks(true);
+        super::super::directory::copy_verified(
+            source.path(),
+            &target,
+            &CancellationToken::new(),
+            &clone,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(target.join("asset")).unwrap().len(),
+            64 * disk::MIB
+        );
+        assert!(super::super::quota::usage(&workload).unwrap() >= 64 * disk::MIB);
+        super::super::quota::retire(&control).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn durable_format_two_intent_opens_its_inline_base_after_upgrade() {
         let fixture = tempfile::tempdir().unwrap();
         let bases = Bases {
@@ -1348,6 +1492,7 @@ mod payload_size_tests {
         let ready = Ready {
             key: inputs.key().unwrap(),
             metadata_bytes: CLONE_RESERVE + 16384,
+            reflink_bytes: None,
             allocated_bytes: 16384,
             contents_inode: std::fs::metadata(&contents).unwrap().ino(),
             inputs,
@@ -1461,6 +1606,7 @@ mod payload_size_tests {
         let ready = Ready {
             key: key.clone(),
             metadata_bytes,
+            reflink_bytes: None,
             allocated_bytes: workspace::measure(&contents, true).unwrap(),
             contents_inode: std::fs::metadata(&contents).unwrap().ino(),
             inputs,

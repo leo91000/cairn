@@ -636,6 +636,7 @@ pub(super) struct CopyCapacity {
     required: u64,
     fallback: storage::policy::Policy,
     reserved: u64,
+    shared_blocks: bool,
 }
 
 impl CopyCapacity {
@@ -651,6 +652,7 @@ impl CopyCapacity {
             required,
             fallback,
             reserved: 0,
+            shared_blocks: false,
         }
     }
 
@@ -659,18 +661,24 @@ impl CopyCapacity {
         self
     }
 
+    pub(super) fn with_shared_blocks(mut self, shared_blocks: bool) -> Self {
+        self.shared_blocks = shared_blocks;
+        self
+    }
+
     pub(super) async fn check(&self) -> Result<()> {
         let workload = self.workload.clone();
         let allocated = tokio::task::spawn_blocking(move || quota::usage(&workload))
             .await
             .map_err(Error::internal)??;
-        check_copy_headroom(
-            &self.state,
-            self.required.saturating_sub(allocated),
-            &self.fallback,
-            self.reserved,
-        )
-        .await
+        let remaining = if self.shared_blocks {
+            // XFS charges shared data to the project, so a gain in that
+            // counter does not prove this copy used its physical reservation.
+            self.required
+        } else {
+            self.required.saturating_sub(allocated)
+        };
+        check_copy_headroom(&self.state, remaining, &self.fallback, self.reserved).await
     }
 }
 
