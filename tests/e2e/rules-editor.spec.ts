@@ -1,3 +1,4 @@
+import type { Workspace } from './fixtures'
 import {
   expect,
   signIn,
@@ -484,9 +485,9 @@ test('a catalog load failure explains disabled creation and can be retried', asy
   await expect(page.getByRole('alert').filter({ hasText: 'The rule catalog could not be loaded' })).toHaveCount(0)
 })
 
-test('loop insertion does not offer an unsupported wait', async ({ page, workspace }) => {
+async function emptyLoopRule(workspace: Workspace) {
   const fixture = await rulesFixture(workspace)
-  const rule = await workspace.api('/api/hook-rules', 'POST', {
+  return workspace.api('/api/hook-rules', 'POST', {
     definition: {
       ...fixture.definition,
       steps: [{
@@ -499,11 +500,49 @@ test('loop insertion does not offer an unsupported wait', async ({ page, workspa
     },
     enabled: false,
   })
+}
+
+test('loop insertion does not offer an unsupported wait', async ({ page, workspace }) => {
+  const rule = await emptyLoopRule(workspace)
   await page.goto(workspacePath(`/rules/${rule.id}/edit`))
   await signIn(page)
   await page.getByRole('region', { name: 'For each entry', exact: true }).getByRole('button', { name: 'Add the first step', exact: true }).click()
   await expect(page.getByRole('menuitem', { name: /^Wait/ })).toHaveCount(0)
   await expect(page.getByRole('menuitem', { name: /Remember a value/ })).toBeVisible()
+})
+
+test('loop insertion stays reachable when validation finishes during a press', async ({ page, workspace }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+
+  const rule = await emptyLoopRule(workspace)
+  const validation = Promise.withResolvers<void>()
+  await useRelayForHttpMocks(page)
+  await page.route('**/api/hook-rules/validate', async (route) => {
+    await validation.promise
+    await route.continue()
+  })
+
+  try {
+    await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+    await signIn(page)
+    const status = page.getByRole('status').filter({ hasText: /Checking|Ready/ })
+    const insert = page.getByRole('region', { name: 'For each entry', exact: true })
+      .getByRole('button', { name: 'Add the first step', exact: true })
+    await expect(status).toHaveText('Checking…')
+    await insert.scrollIntoViewIfNeeded()
+    const position = await insert.boundingBox()
+    expect(position).not.toBeNull()
+    await page.mouse.move(position!.x + position!.width / 2, position!.y + position!.height / 2)
+    await page.mouse.down()
+    validation.resolve()
+    await expect(status).toHaveText('Ready')
+    await page.mouse.up()
+    await expect(page.getByRole('menuitem', { name: /Remember a value/ })).toBeVisible()
+    await expect(page.getByRole('menuitem', { name: /^Wait/ })).toHaveCount(0)
+  }
+  finally {
+    validation.resolve()
+  }
 })
 
 test('a committed creation with an unavailable response keeps later edits for a new version', async ({ page, workspace }) => {
