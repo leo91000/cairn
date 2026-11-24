@@ -1,3 +1,4 @@
+import type { CodingAgentAccounts } from '../../packages/contracts/generated/typescript/CodingAgentAccounts'
 import {
   createAgent,
   expect,
@@ -20,16 +21,21 @@ test.beforeEach(async ({ workspace }) => {
 
 // Each journey connects its own accounts; later journeys in this worker start without them.
 test.afterEach(async ({ workspace }) => {
+  let removableAccountIds: string[] = []
   await expect.poll(async () => {
-    const { accounts } = await workspace.api('/api/accounts')
-    return accounts.filter((account: { id: string }) => !existingAccountIds.has(account.id))
-      .flatMap((account: { activeRunIds: string[] }) => account.activeRunIds)
-  }, { timeout: 15000 }).toEqual([])
-  const { accounts } = await workspace.api('/api/accounts')
-  for (const account of accounts) {
-    if (!existingAccountIds.has(account.id))
-      await workspace.api(`/api/accounts/${account.id}`, 'DELETE')
-  }
+    const { accounts, signIn }: CodingAgentAccounts = await workspace.api('/api/accounts')
+    const createdAccounts = accounts.filter(account => !existingAccountIds.has(account.id))
+    removableAccountIds = createdAccounts.map(account => account.id)
+
+    // Credentials can be ready while sign-in still owns the account for cleanup.
+    return {
+      activeRunIds: createdAccounts.flatMap(account => account.activeRunIds),
+      signingIn: signIn?.state === 'pending' && removableAccountIds.includes(signIn.accountId),
+    }
+  }, { timeout: 15000 }).toEqual({ activeRunIds: [], signingIn: false })
+
+  for (const id of removableAccountIds)
+    await workspace.api(`/api/accounts/${id}`, 'DELETE')
 })
 
 test('Antigravity connects a Gemini API key, selects a model and runs a conversation', async ({ page, workspace }, testInfo) => {
