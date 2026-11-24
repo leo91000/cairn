@@ -928,6 +928,8 @@ impl Bases {
 fn reflink_footprint(root: &Path) -> std::io::Result<u64> {
     use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
 
+    const FS_IOC_FIEMAP: libc::c_ulong = 0xc020_660b;
+
     // Asking FIEMAP for zero records returns the extent count without reading
     // file data. Files are already synced and the template is unpublished.
     #[repr(C)]
@@ -964,7 +966,6 @@ fn reflink_footprint(root: &Path) -> std::io::Result<u64> {
                 count: 0,
                 reserved: 0,
             };
-            const FS_IOC_FIEMAP: libc::c_ulong = 0xc020_660b;
             if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP, &mut map) } != 0 {
                 return Err(std::io::Error::last_os_error());
             }

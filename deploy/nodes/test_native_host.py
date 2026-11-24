@@ -728,13 +728,15 @@ class PoolMigrationTests(unittest.TestCase):
     def test_dry_run_prints_the_plan_without_changing_anything(self):
         tool = Mock(return_value=PLAN)
         output = io.StringIO()
+        image = self.root / 'native-data.xfs'
         with patch.object(host, 'mount_of', return_value=dict(source='/dev/loop0', fstype='ext4', options='rw,prjquota')), \
                 patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', tool), \
                 patch.object(host, 'active_units', return_value=[host.SERVICE]), \
                 patch.object(host.os, 'statvfs', return_value=Mock(f_bavail=1 << 40, f_frsize=1)), \
                 patch.object(host, 'checked') as checked, contextlib.redirect_stdout(output):
-            host.migrate_pool(pool_arguments(image='/var/lib/cairn-native/native-data.xfs', size='100G', dry_run=True))
+            host.migrate_pool(pool_arguments(image=str(image), size='100G', dry_run=True))
         checked.assert_not_called()
+        self.assertFalse(image.exists())
         self.assertEqual([call.args[0] for call in tool.call_args_list], ['plan'])
         self.assertFalse(host.migration_directory().exists())
         text = output.getvalue()
@@ -750,7 +752,7 @@ class PoolMigrationTests(unittest.TestCase):
         with patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', return_value=PLAN), \
                 patch.object(host.os, 'statvfs', return_value=Mock(f_bavail=1, f_frsize=1)), \
                 self.assertRaisesRegex(host.MigrationError, 'needs at least'):
-            host.migrate_pool(pool_arguments(image='/var/lib/cairn-native/native-data.xfs', size='100G'))
+            host.migrate_pool(pool_arguments(image=str(self.root / 'native-data.xfs'), size='100G'))
         self.assertFalse(host.migration_directory().exists())
 
     def test_copy_verification_must_report_no_difference(self):
