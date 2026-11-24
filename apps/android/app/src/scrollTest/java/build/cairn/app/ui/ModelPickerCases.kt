@@ -479,6 +479,71 @@ abstract class ModelPickerCases {
     }
 
     @Test
+    fun switchingProvidersLoadsModelsWhileThePreviousRefreshWaits() {
+        var provider by mutableStateOf("codex")
+        var inventories by mutableStateOf(mapOf("codex" to catalog.copy(connected = true)))
+        val requests = mutableStateListOf<String>()
+        val release = CompletableDeferred<Unit>()
+        compose.setContent {
+            CairnTheme {
+                SurfaceForTest {
+                    ModelPicker(
+                        inventories[provider] ?: ModelCatalog(),
+                        "",
+                        "",
+                        provider = provider,
+                        changeProvider = { provider = it },
+                        refreshCatalog = { ModelCatalog(connected = true) },
+                        refresh = {
+                            val requested = provider
+                            requests += requested
+                            if (requested == "codex" && requests.count { it == "codex" } > 1)
+                                release.await()
+                            val found =
+                                if (requested == "antigravity")
+                                    ModelCatalog(
+                                        connected = true,
+                                        models =
+                                            listOf(
+                                                CodingAgentModel(
+                                                    model = "fixture-neon",
+                                                    displayName = "Fixture Neon",
+                                                )
+                                            ),
+                                    )
+                                else inventories[requested] ?: ModelCatalog(connected = true)
+                            inventories = inventories + (requested to found)
+                            found
+                        },
+                    ) { _, _ ->
+                    }
+                }
+            }
+        }
+        try {
+            compose.onNodeWithTag("model-picker").performClick()
+            val button = hasTestTag("refresh-models") and isEnabled()
+            compose.waitUntil(10000) {
+                requests.contains("codex") &&
+                    compose.onAllNodes(button).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNode(button).performClick()
+            compose.waitUntil(10000) { requests.count { it == "codex" } == 2 }
+
+            val tile = hasText("Antigravity") and hasClickAction() and isEnabled()
+            compose.waitUntil(10000) { compose.onAllNodes(tile).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNode(tile).performScrollTo().performClick()
+            val model =
+                hasText("Fixture Neon") and hasAnyAncestor(hasTestTag("model-settings-sheet"))
+            compose.waitUntil(10000) {
+                compose.onAllNodes(model).fetchSemanticsNodes().isNotEmpty()
+            }
+        } finally {
+            release.complete(Unit)
+        }
+    }
+
+    @Test
     fun agentsWithoutAnAccountPointToConnectionsInsteadOfBeingOffered() {
         val catalogs =
             mapOf(

@@ -226,21 +226,23 @@ internal fun ModelPicker(
         if (inherit) defaultSpeed else shownCatalog.nativeDefaults?.speed ?: defaultSpeed
     val inheriting = inherit || shownCatalog.nativeDefaults != null
     val disconnected = shownCatalog.connected == false
-    var refreshing by remember { mutableStateOf(false) }
-    var refreshError by remember { mutableStateOf("") }
+    val refreshingProviders = remember { mutableStateMapOf<String, Unit>() }
+    val refreshErrors = remember { mutableStateMapOf<String, String>() }
+    val refreshing = provider in refreshingProviders
+    val refreshError = refreshErrors[provider].orEmpty()
     val scope = rememberCoroutineScope()
     suspend fun reload(): ModelCatalog? {
-        if (refreshing || refresh == null) return null
-        refreshing = true
-        refreshError = ""
+        if (provider in refreshingProviders || refresh == null) return null
+        refreshingProviders[provider] = Unit
+        refreshErrors.remove(provider)
         return try {
             refresh()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            refreshError = "Catalogue temporairement indisponible. Réessayez."
+            refreshErrors[provider] = "Catalogue temporairement indisponible. Réessayez."
             null
         } finally {
-            refreshing = false
+            refreshingProviders.remove(provider)
         }
     }
     val chosen = selectedModel(shownCatalog, model, inheritedModel)

@@ -203,21 +203,17 @@ impl AccountOperation {
             "list_models" => {
                 let input: ListModelsInput = decode(input)?;
                 let provider: crate::provider::Provider = input.provider.into();
-                let mut catalog: ModelCatalog = if input.availability_only == Some(true) {
-                    ModelCatalog {
-                        connected: Some(
-                            crate::coding_agent::connection_available(s, provider).await?,
-                        ),
-                        ..ModelCatalog::default()
-                    }
-                } else {
-                    serde_json::from_value(
-                        crate::coding_agent::read_model_catalog(s, provider).await?,
+                let mut catalog: ModelCatalog = serde_json::from_value(
+                    crate::coding_agent::read_model_catalog(
+                        s,
+                        provider,
+                        input.availability_only.unwrap_or(false),
                     )
-                    .map_err(|_| {
-                        Error::bad_gateway("The coding agent returned an invalid model catalog.")
-                    })?
-                };
+                    .await?,
+                )
+                .map_err(|_| {
+                    Error::bad_gateway("The coding agent returned an invalid model catalog.")
+                })?;
                 catalog.native_defaults = Some(
                     s.store
                         .read(move |db| {
