@@ -419,11 +419,6 @@ pub(super) async fn seed_with_stop(
         fetch(client, master, token, attempt, "seed", &selection),
     )
     .await?;
-    let mut storage_guard = if crate::native::enabled() {
-        Some(await_preparation(stop, crate::native::disk::lock(&crate::native::state_dir())).await?)
-    } else {
-        None
-    };
     let mut skill_hit = native_initial
         && response
             .headers()
@@ -466,18 +461,27 @@ pub(super) async fn seed_with_stop(
         skill_hit = false;
         skill_key = None;
     }
-    let budget = if crate::native::enabled() {
-        let available = await_preparation(stop, crate::native::disk::staging_budget()).await?;
+    let mut storage_guard = if crate::native::enabled() {
+        Some(await_preparation(stop, crate::native::disk::lock(&crate::native::state_dir())).await?)
+    } else {
+        None
+    };
+    let (budget, sample) = if crate::native::enabled() {
+        let measured = std::time::Instant::now();
+        let sample = await_preparation(stop, crate::native::disk::staging_sample()).await?;
         // Inbox refresh copies into an inode already mounted by the workload;
         // its received temporary tree and the replacement can coexist briefly.
         let available = if selection["kind"] == "inbox" {
-            available / 2
+            sample.available_bytes / 2
         } else {
-            available
+            sample.available_bytes
         };
-        SEED_BUDGET_BYTES.min(available)
+        (
+            SEED_BUDGET_BYTES.min(available),
+            sample.used_bytes.map(|bytes| (bytes, measured)),
+        )
     } else {
-        SEED_BUDGET_BYTES
+        (SEED_BUDGET_BYTES, None)
     };
     let allocation = response
         .headers()
@@ -487,29 +491,16 @@ pub(super) async fn seed_with_stop(
     let parent = target
         .parent()
         .ok_or_else(|| Error::bad("Invalid seed directory."))?;
-    let (mut admission, reservation) = if crate::native::enabled() {
+    let mut admission = if crate::native::enabled() {
         let state = crate::native::state_dir();
-        let admission =
-            crate::native::ingress::Admission::staging(&super::node_data_dir(), &state, parent)?;
-        if let Some(bytes) = allocation
-            && admission.reserve_staging(bytes)?
-        {
-            let reservation = crate::native::disk::Preparation::reserve_on(
-                &state,
-                &crate::config::id(),
-                bytes,
-                &super::node_data_dir(),
-            )
-            .await?;
-            (
-                Some(admission.with_new_reservation(&reservation)?),
-                Some(reservation),
-            )
-        } else {
-            (Some(admission), None)
-        }
+        Some(crate::native::ingress::Admission::staging_with_sample(
+            &super::node_data_dir(),
+            &state,
+            target,
+            sample,
+        )?)
     } else {
-        (None, None)
+        None
     };
     let entry_overhead = 2 * super::files::ENTRY_ALLOCATION;
     if let Some(admission) = &mut admission {
@@ -520,6 +511,23 @@ pub(super) async fn seed_with_stop(
     if let Some(admission) = &mut admission {
         admission.retarget_staging(temp.path())?;
     }
+    let (mut admission, reservation) = match (admission, allocation) {
+        (Some(admission), Some(bytes)) if admission.reserve_staging(bytes)? => {
+            let reservation = crate::native::disk::Preparation::reserve_staging(
+                &crate::native::state_dir(),
+                &crate::config::id(),
+                bytes,
+                &super::node_data_dir(),
+                temp.path(),
+            )
+            .await?;
+            (
+                Some(admission.with_new_reservation(&reservation)?),
+                Some(reservation),
+            )
+        }
+        (admission, _) => (admission, None),
+    };
     let mut remaining = reservation
         .as_ref()
         .map(|reserved| reserved.bytes.saturating_sub(entry_overhead));

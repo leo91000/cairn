@@ -297,6 +297,13 @@ struct Attempt {
     live_access: Arc<Mutex<()>>,
 }
 
+#[derive(Debug)]
+struct PreparationSpace {
+    incoming: u64,
+    spare: bool,
+    usage_sample: (u64, std::time::Instant),
+}
+
 #[cfg_attr(test, derive(Default))]
 pub(super) struct StorageClose {
     live_access: Arc<Mutex<()>>,
@@ -811,7 +818,7 @@ impl Controller {
         trace.phase(Phase::StorageAdmission);
         let disk = self.start_storage(id, &plan).await?;
         trace.phase(Phase::PoolAccounting);
-        let (incoming, spare) = self.check_preparation_space(&plan).await?;
+        let space = self.check_preparation_space(&plan).await?;
         let pool = workspace::data_root(&self.state);
         let filesystem = if pool.try_exists()? {
             &pool
@@ -819,7 +826,7 @@ impl Controller {
             &self.state
         };
         let preparation =
-            disk::Preparation::reserve_on(&self.state, id, incoming, filesystem).await?;
+            disk::Preparation::reserve_on(&self.state, id, space.incoming, filesystem).await?;
         trace.phase(Phase::WorkspaceOwnership);
         let owner =
             Arc::new(workspace::execution_ownership(&self.state, text(&plan, "runId")).await?);
@@ -848,7 +855,11 @@ impl Controller {
         // Keep deletion out until the environment owner and active receipt
         // are both visible. An admitted spare also keeps the gate until its
         // claim is recorded so a peer cannot claim or retire it.
-        let spare_guard = spare.then_some(disk);
+        let spare_guard = space.spare.then_some(disk);
+        let (used, observed) = space.usage_sample;
+        let ready_usage = space
+            .spare
+            .then_some((used.saturating_add(space.incoming), observed));
         let (controller, id) = (self.clone(), id.to_owned());
         let observation = Arc::new(std::mem::take(observation));
         let (lease_controller, lease_id, lease_stop) =
@@ -878,6 +889,7 @@ impl Controller {
                         execution_workspace,
                         preparation,
                         spare_guard,
+                        ready_usage,
                         execution_launch,
                     )
                     .await
@@ -1427,6 +1439,7 @@ impl Controller {
         trace: bootstrap::Trace,
         stop: CancellationToken,
         reservation: disk::Preparation,
+        ready_usage: Option<(u64, std::time::Instant)>,
     ) -> Result<Vec<super::home::Binding>> {
         let controller = self.clone();
         let ingress = mounted.ingress.clone().lock_owned().await;
@@ -1443,6 +1456,7 @@ impl Controller {
                 workspace::workload(&controller.state, text(&plan, "runId"))?,
                 limit,
                 &policy,
+                ready_usage,
             )?;
             // The admission has just taken a full usage sample; reuse it.
             let growth = disk::available(limit, admission.sampled_usage());
@@ -1530,6 +1544,7 @@ impl Controller {
         owner: Arc<crate::file_lock::Guard>,
         preparation: disk::Preparation,
         spare_guard: Option<disk::StorageGuard>,
+        ready_usage: Option<(u64, std::time::Instant)>,
         launch_guard: Arc<Mutex<()>>,
     ) -> Result<i32> {
         let trace = observation.trace();
@@ -1615,6 +1630,7 @@ impl Controller {
                 trace.clone(),
                 stop.clone(),
                 preparation,
+                ready_usage,
             )
             .await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
@@ -1658,12 +1674,6 @@ impl Controller {
             let wrapper = runtime.join("docker");
             atomic_write(&wrapper, super::docker::administrator::WRAPPER.as_bytes()).await?;
             tokio::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755)).await?;
-        }
-        trace.phase(Phase::PoolAccounting);
-        if disk::actual_used(&self.data, &self.state).await? > self.disk_limit().await? {
-            return Err(Error::conflict(
-                "Native preparation exceeds the shared node disk budget; local work is retained.",
-            ));
         }
         {
             let _pool = disk::lock(&self.state).await?;
@@ -1800,11 +1810,13 @@ impl Controller {
         };
         let plan_file = container.with_extension("plan.json");
         let encoded_plan = serde_json::to_vec(&plan)?;
+        trace.phase(Phase::PoolAccounting);
         if encoded_plan.len() as u64 > self.disk_growth().await? {
             return Err(Error::conflict(
-                "Insufficient shared native disk budget for the execution plan.",
+                "Insufficient shared native disk budget for the execution plan; local work is retained.",
             ));
         }
+        trace.phase(Phase::RuntimePrepare);
         atomic_write(&plan_file, &encoded_plan).await?;
         tokio::fs::set_permissions(&plan_file, std::fs::Permissions::from_mode(0o444)).await?;
         // The staging inbox is readonly in the workload's mount namespace.
@@ -1891,6 +1903,9 @@ impl Controller {
         if stop.is_cancelled() {
             return Ok(143);
         }
+        if let Some(mapped) = mapped {
+            mapped.retain_for_unit();
+        }
         let mut child = systemd::spawn_prepared(arguments)?;
         // Keep launch admission until systemd observed the submitted unit or
         // the submitting process has exited. Cancellation cannot attest an
@@ -1905,9 +1920,6 @@ impl Controller {
             let _ = child.wait().await;
             drop(launch_fence);
             return Err(error);
-        }
-        if let Some(mapped) = mapped {
-            mapped.close()?;
         }
         drop(launch_fence);
         let environment_task = if let Some((listener, control, uid)) = environment {
@@ -2185,7 +2197,7 @@ impl Controller {
 
     /// Ceilings are not preallocated reservations. Charge actual retained
     /// payloads, then bound every additional copy by the remaining shared pool.
-    async fn check_preparation_space(&self, plan: &Value) -> Result<(u64, bool)> {
+    async fn check_preparation_space(&self, plan: &Value) -> Result<PreparationSpace> {
         let run = text(plan, "runId");
         let root = workspace::directory(&self.state, run)?;
         let has_journal = block::exists(&self.state, run).await?;
@@ -2262,6 +2274,7 @@ impl Controller {
         // between samples: one full scan suffices unless reclamation changed
         // the pool.
         let limit = self.disk_limit().await?;
+        let observed = std::time::Instant::now();
         let mut used = disk::used(&self.data, &self.state).await?;
         let growth = disk::available(limit, used);
         let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
@@ -2322,7 +2335,11 @@ impl Controller {
                 "Retained native work leaves insufficient shared disk budget for this preparation.",
             ));
         }
-        Ok((incoming, spare_key.is_some()))
+        Ok(PreparationSpace {
+            incoming,
+            spare: spare_key.is_some(),
+            usage_sample: (used, observed),
+        })
     }
 
     /// Admission is global before it is attempt-scoped: a queued pool waiter
@@ -2843,18 +2860,26 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     // taking that same lock here would deadlock the caller.
     if path == "/staging-budget" && method == "GET" {
         let started = std::time::Instant::now();
-        let available = controller.disk_growth().await;
+        let sample = async {
+            let limit = controller.disk_limit().await?;
+            let used = disk::used(&controller.data, &controller.state).await?;
+            Ok::<_, Error>(disk::StagingSample {
+                available_bytes: disk::available(limit, used),
+                used_bytes: Some(used),
+            })
+        }
+        .await;
         let elapsed = started.elapsed();
-        if elapsed >= Duration::from_secs(1) || available.is_err() {
+        if elapsed >= Duration::from_secs(1) || sample.is_err() {
             tracing::info!(
                 target: "cairn_performance",
                 operation = "native_staging_budget",
                 elapsed_ms = elapsed.as_millis() as u64,
-                status = available.as_ref().map_or_else(|error| error.status, |_| 200),
+                status = sample.as_ref().map_or_else(|error| error.status, |_| 200),
                 "Authoritative native staging budget observation finished"
             );
         }
-        return Ok(Json(json!({"availableBytes": available?})).into_response());
+        return Ok(Json(sample?).into_response());
     }
 
     let secret = tokio::fs::read_to_string(controller.data.join("runner-secret")).await?;

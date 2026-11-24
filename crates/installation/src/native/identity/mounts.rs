@@ -129,6 +129,7 @@ fn detach(source: &Path, target: &Path) -> Result<()> {
 pub(in crate::native) struct Mapped {
     source: PathBuf,
     path: PathBuf,
+    remove_on_drop: bool,
 }
 
 impl Mapped {
@@ -145,6 +146,7 @@ impl Mapped {
         let mapping = Self {
             source: source.to_owned(),
             path,
+            remove_on_drop: true,
         };
         let mut command = tokio::process::Command::new("/usr/bin/mount")
             .args(["--internal-only", "--bind", "--options", &options, "--"])
@@ -188,9 +190,10 @@ impl Mapped {
         &self.path
     }
 
-    /// After confirming that the managed unit obtained its own bind mounts.
-    pub fn close(self) -> Result<()> {
-        detach(&self.source, &self.path)
+    /// The unit's start and stop commands both bind this source. Once the
+    /// launch is admitted, its cleanup owner retires the alias after fencing.
+    pub fn retain_for_unit(mut self) {
+        self.remove_on_drop = false;
     }
 
     pub fn recover(state: &Path, attempt: &str, run: &str) -> Result<()> {
@@ -201,7 +204,9 @@ impl Mapped {
 
 impl Drop for Mapped {
     fn drop(&mut self) {
-        if let Err(error) = detach(&self.source, &self.path) {
+        if self.remove_on_drop
+            && let Err(error) = detach(&self.source, &self.path)
+        {
             tracing::warn!(message = %error.message, "Native idmapped mount cleanup deferred");
         }
     }
@@ -295,7 +300,8 @@ mod tests {
             (storage.subuid + 4000, storage.subgid + 5000)
         );
 
-        mapped.close().unwrap();
+        mapped.retain_for_unit();
+        assert!(path.exists());
         Mapped::recover(&root, &attempt, &run).unwrap();
         assert!(!path.exists());
         std::fs::remove_dir_all(raw).unwrap();

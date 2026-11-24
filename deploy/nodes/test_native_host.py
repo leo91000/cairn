@@ -1044,6 +1044,65 @@ class PoolMigrationTests(unittest.TestCase):
             host.offline_pool_operation(lambda _: self.assertTrue(host.controller_running()), pool_arguments())
         self.assertFalse(host.controller_running())
 
+    def test_offline_writer_keeps_controller_lock_after_supervisor_death(self):
+        ready = self.root / 'writer-ready'
+        release = self.root / 'writer-release'
+        writer = '''
+from pathlib import Path
+import sys, time
+Path(sys.argv[1]).touch()
+deadline = time.monotonic() + 10
+while not Path(sys.argv[2]).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+'''
+        supervisor = '''
+from pathlib import Path
+from types import SimpleNamespace
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('native_host', sys.argv[1])
+host = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(host)
+host.ROOT = Path(sys.argv[2])
+host.require_stopped = lambda _: None
+host.offline_pool_operation(lambda _: host.checked(sys.executable, '-c', *sys.argv[3:], timeout=15),
+                            SimpleNamespace(stop=False, dry_run=False))
+'''
+        with host.subprocess.Popen([host.sys.executable, '-B', '-c', supervisor, str(SPEC.origin),
+                                    str(self.root), writer, str(ready), str(release)],
+                                   env={'PATH': '/usr/bin:/bin'}) as process:
+            try:
+                deadline = host.time.monotonic() + 5
+                while not ready.exists() and process.poll() is None and host.time.monotonic() < deadline:
+                    host.time.sleep(0.01)
+                self.assertTrue(ready.exists(), 'the offline writer did not start')
+                process.kill()
+                process.wait(timeout=5)
+                self.assertTrue(host.controller_running(), 'the live writer lost the migration fence')
+            finally:
+                release.touch()
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+        deadline = host.time.monotonic() + 5
+        while host.controller_running() and host.time.monotonic() < deadline:
+            host.time.sleep(0.01)
+        self.assertFalse(host.controller_running(), 'the finished writer retained the migration fence')
+
+    def test_activation_is_explicit_and_checks_the_mounted_pool(self):
+        host.migration_directory().mkdir()
+        host.save_migration(dict(phase='complete', uuid='f00d'))
+        with patch.object(host, 'new_pool_mounted', return_value=False):
+            with self.assertRaisesRegex(host.MigrationError, 'mounted pool'):
+                host.activate_pool(pool_arguments())
+        with patch.object(host, 'new_pool_mounted', return_value=True), patch.object(host, 'pool_tool') as check, \
+                contextlib.redirect_stdout(io.StringIO()):
+            host.activate_pool(pool_arguments(dry_run=True))
+            self.assertNotIn('activationRequested', host.load_migration())
+            host.activate_pool(pool_arguments())
+        check.assert_called_once_with('check', self.root / 'state')
+        self.assertTrue(host.load_migration()['activationRequested'])
+        self.assertNotIn('activated', host.load_migration())
+
     def test_rollback_refuses_to_reopen_the_old_pool_after_activation(self):
         host.migration_directory().mkdir()
         host.save_migration(dict(phase='complete', activated=True))

@@ -89,6 +89,7 @@ pub(crate) struct Admission {
     reservation: u64,
     progress: Option<disk::PreparationProgress>,
     credit_progress: bool,
+    staging_reservation: bool,
     submitted: u64,
     observation: Observation,
 }
@@ -119,13 +120,30 @@ impl Admission {
     /// Connector staging lives on the control filesystem, not the quota pool.
     /// Require persisted controller authority rather than inventing a fallback.
     pub(crate) fn staging(data: &Path, state: &Path, target: &Path) -> Result<Self> {
+        Self::staging_with_sample(data, state, target, None)
+    }
+
+    pub(crate) fn staging_with_sample(
+        data: &Path,
+        state: &Path,
+        target: &Path,
+        sample: Option<(u64, Instant)>,
+    ) -> Result<Self> {
         let policy =
             storage::policy::from_persisted(&std::fs::read(state.join("storage-policy.json"))?)?;
         policy.validate().map_err(Error::bad)?;
         let budget =
             serde_json::from_slice(&std::fs::read(state.join(crate::microvm::budget::FILE))?)?;
         let limit = super::native_budget(&budget)?.limits.disk_mi_b * disk::MIB;
-        Self::new(data, state, target, data, limit, &policy)
+        Self::measure_target(
+            data,
+            state,
+            AllocationTarget::Tree(target.to_owned()),
+            data,
+            limit,
+            &policy,
+            sample,
+        )
     }
 
     /// `target` is the exclusive operation's own tree, not an agent-controlled
@@ -146,6 +164,7 @@ impl Admission {
             filesystem,
             limit,
             policy,
+            None,
         )
     }
 
@@ -157,6 +176,7 @@ impl Admission {
         workload: PathBuf,
         limit: u64,
         policy: &storage::policy::Policy,
+        sample: Option<(u64, Instant)>,
     ) -> Result<Self> {
         Self::measure_target(
             data,
@@ -165,6 +185,7 @@ impl Admission {
             &workspace::data_root(state),
             limit,
             policy,
+            sample,
         )
     }
 
@@ -175,9 +196,13 @@ impl Admission {
         filesystem: &Path,
         limit: u64,
         policy: &storage::policy::Policy,
+        sample: Option<(u64, Instant)>,
     ) -> Result<Self> {
         let initial_target = target.allocated()?;
-        let used = disk::usage_sync(data, state)?;
+        let (used, measured) = match sample {
+            Some(sample) => sample,
+            None => (disk::usage_sync(data, state)?, Instant::now()),
+        };
         let peer_reservations = disk::physical_preparations(state, filesystem, None)?;
         Ok(Self {
             data: data.to_owned(),
@@ -191,9 +216,10 @@ impl Admission {
             reservation: 0,
             progress: None,
             credit_progress: false,
+            staging_reservation: false,
             submitted: 0,
             observation: Observation {
-                at: Instant::now(),
+                at: measured,
                 used,
                 submitted: 0,
                 outstanding: 0,
@@ -238,6 +264,7 @@ impl Admission {
         self.reservation = reservation.bytes;
         self.progress = Some(reservation.progress()?);
         self.credit_progress = true;
+        self.staging_reservation = true;
         Ok(self)
     }
 
@@ -265,7 +292,15 @@ impl Admission {
 
         if self.observation.at.elapsed() >= Duration::from_millis(250) {
             let started = Instant::now();
-            let used = disk::usage_sync(&self.data, &self.state)?.saturating_sub(self.reservation);
+            let used = if self.staging_reservation {
+                let progress = self
+                    .progress
+                    .as_ref()
+                    .expect("staging reservation progress");
+                disk::usage_except(&self.data, &self.state, &progress.path)?
+            } else {
+                disk::usage_sync(&self.data, &self.state)?.saturating_sub(self.reservation)
+            };
             let growth = self.target.allocated()?.saturating_sub(self.initial_target);
             if self.credit_progress
                 && let Some(progress) = &self.progress
@@ -364,6 +399,64 @@ mod tests {
         drop(peer);
         let mut available = Admission::new(&data, &state, &data, &data, u64::MAX, &policy).unwrap();
         available.admit(4096).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_seed_streams_count_materialized_peer_bytes_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let data = temp.path().join("data");
+        let first = data.join("runs/first/receive");
+        let second = data.join("runs/second/receive");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        let policy = storage::policy::Policy::default();
+        let limit = 30 * disk::MIB;
+        let promised = 12 * disk::MIB;
+        let chunk = 10 * disk::MIB;
+
+        let first_admission = Admission::new(&data, &state, &first, &data, limit, &policy).unwrap();
+        let first_reservation = disk::Preparation::reserve_staging(
+            &state,
+            &crate::config::id(),
+            promised,
+            &data,
+            &first,
+        )
+        .await
+        .unwrap();
+        let mut first_admission = first_admission
+            .with_new_reservation(&first_reservation)
+            .unwrap();
+        let second_admission =
+            Admission::new(&data, &state, &second, &data, limit, &policy).unwrap();
+        let second_reservation = disk::Preparation::reserve_staging(
+            &state,
+            &crate::config::id(),
+            promised,
+            &data,
+            &second,
+        )
+        .await
+        .unwrap();
+        let mut second_admission = second_admission
+            .with_new_reservation(&second_reservation)
+            .unwrap();
+
+        let bytes = vec![7; chunk as usize];
+        for (admission, target) in [
+            (&mut first_admission, &first),
+            (&mut second_admission, &second),
+        ] {
+            admission.admit(chunk).unwrap();
+            std::fs::write(target.join("payload"), &bytes).unwrap();
+            admission.observation.at = Instant::now() - Duration::from_secs(1);
+        }
+
+        assert_eq!(disk::usage_sync(&data, &state).unwrap(), 2 * promised);
+        first_admission.admit(promised - chunk).unwrap();
+        second_admission.admit(promised - chunk).unwrap();
     }
 
     #[tokio::test]

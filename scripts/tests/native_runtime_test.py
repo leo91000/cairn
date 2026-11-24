@@ -888,6 +888,38 @@ def main():
                 start_controller()
                 observed = api('/health', method='GET')
                 assert observed['backend'] == 'native'
+
+                prepared_run = create()
+                prepare_base(prepared_run)
+                prepared_key = base_keys[prepared_run]
+
+                def prepared_inode():
+                    for receipt in (state / 'native-base-spares').glob('*'):
+                        spare = json.loads(receipt.read_text())
+                        if spare['key'] != prepared_key:
+                            continue
+                        identifier = spare['run']
+                        marker = state / 'native' / identifier / 'spare-ready'
+                        if marker.is_file() and marker.read_text() == prepared_key:
+                            return (state / 'native-data' / identifier).stat().st_ino
+                    return None
+
+                spare_inode = eventually(prepared_inode)
+                prepared_attempt = start(prepared_run)
+                acquired = state / 'native-data' / prepared_run
+                assert acquired.stat().st_ino == spare_inode, 'Real start did not claim the prepared environment.'
+                def submitted_bootstrap():
+                    report = api('/runs/' + prepared_attempt + '/bootstrap', method='GET')['bootstrap']
+                    return report if report['status'] == 'submitted' else None
+
+                report = eventually(submitted_bootstrap)
+                metrics['preparedStartToSubmission'] = dict(ms=report['elapsedMs'], usageScans=report['usageScans'])
+                print(json.dumps(dict(preparedStartToSubmission=metrics['preparedStartToSubmission'])))
+                api('/runs/' + prepared_attempt, method='DELETE')
+                fenced(prepared_run, prepared_attempt)
+                manager('purge', run=prepared_run)
+                api('/disks/' + prepared_run + '/delete', {'permanentlyDeleted': True})
+
                 volume = 'cairn-xfs-fixture'
 
                 def write_volume(value, owner):
@@ -898,15 +930,28 @@ def main():
                         f"'printf %s {value} >/v/marker; chown {owner}:{owner} /v/marker; chmod 600 /v/marker'\n"
                     )
 
-                attempt = start(run, lease=300000, docker_script=write_volume('protected', 999))
+                gentle_stop = (
+                    f'docker run -d --name xfs-stop-fixture --stop-signal USR1 -v {volume}:/v {ALPINE} sh -ec '
+                    "'trap \"echo orderly >/v/shutdown; exit 0\" USR1; "
+                    'touch /v/stop-ready; while :; do sleep 1 & wait "$!"; done\'\n'
+                    'for tick in $(seq 1 80); do\n'
+                    '  if docker exec xfs-stop-fixture test -e /v/stop-ready; then break; fi\n'
+                    '  sleep 0.1\n'
+                    'done\n'
+                    'docker exec xfs-stop-fixture test -e /v/stop-ready\n'
+                )
+                attempt = start(run, lease=300000, docker_script=write_volume('protected', 999) + gentle_stop)
                 disk = state / 'native-data' / run / 'data'
                 storage_owner = json.loads((disk / '.cairn-identity.json').read_text())
                 assert storage_owner['user'] == 'namespace-storage-v1'
                 assert (disk / 'workspaces/persisted').stat().st_uid == storage_owner['host_engine'][0]
                 assert (disk / 'docker').stat().st_uid == storage_owner['root_uid'] == 0
-                assert not (state / 'roots' / (attempt + '.idmap')).exists(), 'Launch left its temporary mapped source attached.'
+                mapped = state / 'roots' / (attempt + '.idmap')
+                assert mapped.is_mount(), 'The stop command lost its mapped bind source.'
                 api('/runs/' + attempt, method='DELETE')
                 fenced(run, attempt)
+                assert (disk / 'docker' / 'volumes' / volume / '_data' / 'shutdown').read_text().strip() == 'orderly', 'Docker did not stop the running container gracefully.'
+                assert not mapped.exists(), 'Fencing retained the mapped bind source.'
 
                 target = dict(mode='administrator', generation=str(uuid.uuid4()))
                 assert api('/native-mode', target)['status'] == 'applied'

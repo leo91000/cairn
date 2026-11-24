@@ -54,10 +54,10 @@ recorded at publication, so cache trimming and usage accounting never walk it.
 On a reflink-capable XFS pool, protected environments store a root ID, a
 template engine ID and a subordinate range in their retained ownership marker.
 An idmapped source presents those three roles as the conversation's current
-host IDs. systemd takes private binds from that source and the controller
-detaches the temporary alias after launch admission. Fresh base clones already
-carry the backing engine owner. Protected moves keep the stored mapping even
-when the new node allocates different host IDs.
+host IDs. systemd takes private binds from that source for both launch and
+graceful shutdown. The controller detaches the alias after fencing the unit.
+Fresh base clones already carry the backing engine owner. Protected moves keep
+the stored mapping even when the new node allocates different host IDs.
 
 Existing protected environments reuse their recorded backing IDs. Their
 original backing map keeps unrelated host IDs outside the mounted namespace.

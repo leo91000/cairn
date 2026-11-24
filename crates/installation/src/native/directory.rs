@@ -199,19 +199,8 @@ pub async fn mount(
     }
     let owner = environment::ownership(state, run, DISK_BUSY).await?;
     let physical = crate::file_lock::exclusive(&owner.directory.join("lock"), DISK_BUSY)?;
-    if owner.directory.join("directory.json").exists() && owner.directory.join("lazy").exists() {
-        // The new format wins over partial source cleanup only while its
-        // independently verified replacement still exists and belongs to us.
-        quota::usage(&workload)?;
-        let proof = read_conversion_proof(&root).await?;
-        verify_conversion_target(&workload.join("data"), &proof).await?;
-        let _replacement = storage::runtime::replacement(&owner.directory).await?;
-        tokio::fs::remove_dir_all(owner.directory.join("lazy")).await?;
-        tokio::fs::File::open(&owner.directory)
-            .await?
-            .sync_all()
-            .await?;
-        remove_conversion_proof(&root).await?;
+    if owner.directory.join("directory.json").exists() {
+        settle_conversion_cleanup(&owner.directory, &root, &workload).await?;
     }
     if root.join("block-initialized").exists() && !owner.directory.join("directory.json").exists() {
         return Err(Error::conflict(
@@ -457,6 +446,47 @@ async fn remove_conversion_proof(root: &Path) -> Result<()> {
     tokio::fs::remove_file(root.join("directory-conversion-verified")).await?;
     tokio::fs::File::open(root).await?.sync_all().await?;
     Ok(())
+}
+
+async fn settle_conversion_cleanup(saved: &Path, root: &Path, workload: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let legacy = saved.join("lazy");
+    let still_retained = legacy.try_exists()?;
+    if !still_retained && !root.join("directory-conversion-verified").try_exists()? {
+        return Ok(());
+    }
+
+    quota::usage(workload)?;
+    let target = workload.join("data");
+    let proof = read_conversion_proof(root).await?;
+    let _replacement = if still_retained {
+        // Destroying the old journal requires the complete byte proof.
+        verify_conversion_target(&target, &proof).await?;
+        let replacement = storage::runtime::replacement(saved).await?;
+        tokio::fs::remove_dir_all(legacy).await?;
+        Some(replacement)
+    } else {
+        // The format was published and the old journal removed. The mounted
+        // tree may already contain subsequent writes. Confirm its identity
+        // without requiring its former contents before retiring the receipt.
+        require_retained_tree(workload)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(target)?;
+        if file.metadata()?.ino() != proof.inode || quota::pool_identity(&file)? != proof.filesystem
+        {
+            return Err(Error::conflict(
+                "Native conversion replacement changed; the verification receipt was retained.",
+            ));
+        }
+        None
+    };
+
+    // Make the journal's absence durable before making the proof dispensable.
+    tokio::fs::File::open(saved).await?.sync_all().await?;
+    remove_conversion_proof(root).await
 }
 
 async fn verify_conversion_target(target: &Path, expected: &ConversionProof) -> Result<()> {
@@ -1876,6 +1906,36 @@ mod tests {
         assert!(migrate(&state, &run, &plan, &stop, &root).await.is_err());
         assert!(source.join("lazy/journal-v2.sqlite").exists());
         assert!(!source.join("directory.json").exists());
+
+        // A crash after the committed conversion removed its old journal
+        // can leave a receipt behind. A subsequent write is retained data.
+        let data = workload.join("data");
+        for name in ["home", "workspaces", "output"] {
+            private_dir(&data.join(name)).await.unwrap();
+        }
+        let saved = data.join("workspaces/saved");
+        tokio::fs::write(&saved, b"original bytes").await.unwrap();
+        let proof = capture_conversion_proof(&data).await.unwrap();
+        let receipt = root.join("directory-conversion-verified");
+        atomic_write(&receipt, &serde_json::to_vec(&proof).unwrap())
+            .await
+            .unwrap();
+        atomic_write(
+            &source.join("directory.json"),
+            &serde_json::to_vec(&format(&plan)).unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::remove_dir_all(source.join("lazy"))
+            .await
+            .unwrap();
+        tokio::fs::write(&saved, b"later user work").await.unwrap();
+        settle_conversion_cleanup(&source, &root, &workload)
+            .await
+            .unwrap();
+        assert!(!receipt.exists());
+        assert_eq!(tokio::fs::read(&saved).await.unwrap(), b"later user work");
+
         quota::retire(&root).await.unwrap();
         let lease = environment::lock(&state, &run, DISK_BUSY).await.unwrap();
         block::action_locked(&lease.directory, true).await.unwrap();

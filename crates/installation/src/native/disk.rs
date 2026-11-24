@@ -76,7 +76,7 @@ pub(crate) async fn used(data: &Path, state: &Path) -> Result<u64> {
 
 pub(crate) async fn actual_used(data: &Path, state: &Path) -> Result<u64> {
     let (data, state) = (data.to_owned(), state.to_owned());
-    tokio::task::spawn_blocking(move || measure_usage(&data, &state, false))
+    tokio::task::spawn_blocking(move || measure_usage(&data, &state, false, None))
         .await
         .map_err(Error::internal)?
 }
@@ -84,7 +84,11 @@ pub(crate) async fn actual_used(data: &Path, state: &Path) -> Result<u64> {
 /// Admission includes reserved incoming bytes; supervision uses only bytes
 /// already materialized, so a copy cannot be charged twice and stop a peer.
 pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
-    measure_usage(data, state, true)
+    measure_usage(data, state, true, None)
+}
+
+pub(super) fn usage_except(data: &Path, state: &Path, preparation: &Path) -> Result<u64> {
+    measure_usage(data, state, true, Some(preparation))
 }
 
 static USAGE_SCANS: AtomicU64 = AtomicU64::new(0);
@@ -118,7 +122,12 @@ pub(crate) fn usage_scans_of(state: &Path) -> u64 {
 /// by allocated bytes. Mounted views refer to those same blocks and add no charge.
 /// Base contents live on the data pool and are counted there; `native-bases`
 /// holds only their small control records.
-fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Result<u64> {
+fn measure_usage(
+    data: &Path,
+    state: &Path,
+    include_reservations: bool,
+    except: Option<&Path>,
+) -> Result<u64> {
     fn size(
         path: &Path,
         physical: bool,
@@ -152,7 +161,30 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
             .or_default() += 1;
     }
     let mut seen = std::collections::HashSet::new();
-    let mut used = size(data, false, &mut seen)?;
+    let mut used = 0u64;
+    if include_reservations {
+        for (path, reservation) in preparations(state)? {
+            let materialized = match &reservation.staging {
+                Some(staging) if staging.starts_with(data.join("runs")) => {
+                    size(staging, false, &mut seen)?
+                }
+                Some(_) => return Err(Error::conflict("Invalid native staging reservation path.")),
+                None => 0,
+            };
+            // Charge the same observed inode bytes exactly once. The normal
+            // inventory shares `seen` with this sample and therefore skips
+            // bytes already covered by an in-flight transfer's commitment.
+            let outstanding = if except == Some(path.as_path()) {
+                0
+            } else {
+                reservation.bytes.saturating_sub(materialized)
+            };
+            used = used
+                .saturating_add(materialized)
+                .saturating_add(outstanding);
+        }
+    }
+    used = used.saturating_add(size(data, false, &mut seen)?);
     for entry in std::fs::read_dir(state)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -199,33 +231,7 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
                 }
             }
         } else if name == "native-preparations" {
-            if !include_reservations {
-                continue;
-            }
-            for reservation in std::fs::read_dir(entry.path())? {
-                let reservation = reservation?;
-                if reservation
-                    .file_name()
-                    .to_str()
-                    .is_none_or(|name| crate::validation::uuid(name).is_err())
-                {
-                    continue;
-                }
-                let kind = match reservation.file_type() {
-                    Ok(kind) => kind,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                if !kind.is_file() {
-                    return Err(Error::conflict("Invalid native preparation reservation."));
-                }
-                let text = match std::fs::read_to_string(reservation.path()) {
-                    Ok(text) => text,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                used = used.saturating_add(read_preparation(&text)?.bytes);
-            }
+            continue;
         } else {
             let physical = name == "native-bases"
                 || name == "native-data"
@@ -250,6 +256,8 @@ pub(crate) struct Preparation {
 struct PreparationRecord {
     bytes: u64,
     physical: Option<PhysicalClaim>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staging: Option<PathBuf>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -263,6 +271,7 @@ fn read_preparation(text: &str) -> Result<PreparationRecord> {
         return Ok(PreparationRecord {
             bytes,
             physical: None,
+            staging: None,
         });
     }
     Ok(serde_json::from_str(text)?)
@@ -302,6 +311,7 @@ impl Preparation {
             PreparationRecord {
                 bytes,
                 physical: None,
+                staging: None,
             },
         )
         .await
@@ -314,6 +324,29 @@ impl Preparation {
         bytes: u64,
         filesystem: &Path,
     ) -> Result<Self> {
+        Self::reserve_target(state, attempt, bytes, filesystem, None).await
+    }
+
+    pub(crate) async fn reserve_staging(
+        state: &Path,
+        attempt: &str,
+        bytes: u64,
+        data: &Path,
+        staging: &Path,
+    ) -> Result<Self> {
+        if !staging.starts_with(data.join("runs")) || !staging.is_dir() {
+            return Err(Error::bad("Invalid native staging reservation path."));
+        }
+        Self::reserve_target(state, attempt, bytes, data, Some(staging.to_owned())).await
+    }
+
+    async fn reserve_target(
+        state: &Path,
+        attempt: &str,
+        bytes: u64,
+        filesystem: &Path,
+        staging: Option<PathBuf>,
+    ) -> Result<Self> {
         let device = std::fs::metadata(filesystem)?.dev();
         Self::publish(
             state,
@@ -324,6 +357,7 @@ impl Preparation {
                     device,
                     remaining: bytes,
                 }),
+                staging,
             },
         )
         .await
@@ -396,12 +430,21 @@ fn sum_preparations(
     except: Option<&Path>,
     bytes_for: impl Fn(PreparationRecord) -> u64,
 ) -> Result<u64> {
+    Ok(preparations(state)?
+        .into_iter()
+        .filter(|(path, _)| except != Some(path.as_path()))
+        .fold(0u64, |bytes, (_, record)| {
+            bytes.saturating_add(bytes_for(record))
+        }))
+}
+
+fn preparations(state: &Path) -> Result<Vec<(PathBuf, PreparationRecord)>> {
     let entries = match std::fs::read_dir(state.join("native-preparations")) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
-    let mut bytes = 0u64;
+    let mut records = Vec::new();
     for entry in entries {
         let entry = entry?;
         if !entry
@@ -411,19 +454,20 @@ fn sum_preparations(
         {
             continue;
         }
-        let path = entry.path();
-        if except == Some(path.as_path()) {
-            continue;
+        match entry.file_type() {
+            Ok(kind) if kind.is_file() => {}
+            Ok(_) => return Err(Error::conflict("Invalid native preparation reservation.")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
         }
-        match std::fs::read_to_string(path) {
-            Ok(amount) => {
-                bytes = bytes.saturating_add(bytes_for(read_preparation(&amount)?));
-            }
+        let path = entry.path();
+        match std::fs::read_to_string(&path) {
+            Ok(amount) => records.push((path, read_preparation(&amount)?)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(bytes)
+    Ok(records)
 }
 
 pub(super) fn recover_preparations(
@@ -533,10 +577,26 @@ pub(crate) async fn lock(state: &Path) -> Result<StorageGuard> {
 /// Called with the storage lock held, before receiving a temporary seed. A
 /// missing or incompatible controller cannot authorize unbounded staging.
 pub(crate) async fn staging_budget() -> Result<u64> {
-    staging_budget_from(&crate::nodes::local_client()?, "http://localhost").await
+    Ok(staging_sample().await?.available_bytes)
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StagingSample {
+    pub available_bytes: u64,
+    pub used_bytes: Option<u64>,
+}
+
+pub(crate) async fn staging_sample() -> Result<StagingSample> {
+    staging_sample_from(&crate::nodes::local_client()?, "http://localhost").await
+}
+
+#[cfg(test)]
 pub(super) async fn staging_budget_from(client: &reqwest::Client, origin: &str) -> Result<u64> {
+    Ok(staging_sample_from(client, origin).await?.available_bytes)
+}
+
+async fn staging_sample_from(client: &reqwest::Client, origin: &str) -> Result<StagingSample> {
     let started = std::time::Instant::now();
     let response = client
         .get(format!("{origin}/staging-budget"))
@@ -564,10 +624,7 @@ pub(super) async fn staging_budget_from(client: &reqwest::Client, origin: &str) 
         );
         return Err(Error::unavailable("Native disk budget is unavailable."));
     }
-    let budget: serde_json::Value = response.json().await.map_err(Error::internal)?;
-    budget["availableBytes"]
-        .as_u64()
-        .ok_or_else(|| Error::unavailable("Native disk budget is unavailable."))
+    response.json().await.map_err(Error::internal)
 }
 
 #[cfg(test)]
@@ -593,6 +650,7 @@ mod tests {
                     device: std::fs::metadata(path).unwrap().dev().wrapping_add(1),
                     remaining: 40 * MIB,
                 }),
+                staging: None,
             },
         )
         .await

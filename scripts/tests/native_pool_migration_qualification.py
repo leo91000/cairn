@@ -131,6 +131,10 @@ def main(binary, cairn, fixture):
         second = root / 'native-data-2.xfs'
         host(root, cairn, 'migrate-pool', '--image', second, '--size', '2G')
         assert mounted(pool) == 'xfs' and direct_io(second), 'Second migration did not mount its pool.'
+        phase(binary, root, 'migrated')
+        host(root, cairn, 'activate-pool', '--dry-run')
+        phase(binary, root, 'migrated')
+        host(root, cairn, 'activate-pool')
         phase(binary, root, 'exercise')
     finally:
         cleanup(root, pool, unit)

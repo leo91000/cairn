@@ -15,9 +15,15 @@ async fn controller_refuses_incomplete_or_incorrectly_mounted_migrations() {
     std::fs::create_dir(workspace::data_root(&state)).unwrap();
     let expected = json!({"phase": "complete", "uuid": crate::config::id()});
     std::fs::write(&record, serde_json::to_vec(&expected).unwrap()).unwrap();
-    assert!(require_settled(&state).await.unwrap_err().is_conflict());
-    let receipt: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+    let error = require_settled(&state).await.unwrap_err();
+    assert!(error.is_conflict() && error.message.contains("activate-pool"));
+    let receipt: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
     assert_eq!(receipt, expected);
+
+    let mut authorized = expected;
+    authorized["activationRequested"] = true.into();
+    std::fs::write(&record, serde_json::to_vec(&authorized).unwrap()).unwrap();
+    assert!(require_settled(&state).await.unwrap_err().is_conflict());
 }
 
 #[test]
@@ -446,7 +452,11 @@ async fn kernel_pool_migration_qualification() {
         .as_str()
     {
         "seed" => seed(&state).await,
-        "migrated" => verify(&state, "xfs"),
+        "migrated" => {
+            verify(&state, "xfs");
+            let error = require_settled(&state).await.unwrap_err();
+            assert!(error.is_conflict() && error.message.contains("activate-pool"));
+        }
         "rolled-back" => verify(&state, "ext4"),
         "exercise" => {
             verify(&state, "xfs");

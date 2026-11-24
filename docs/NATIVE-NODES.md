@@ -278,12 +278,15 @@ pour préserver l’allocation du fichier. Pour un pool source déclaré dans `/
 d’abord une unité `.mount` persistante équivalente et vérifiez le montage ext4.
 
 Après interruption, relancez `migrate-pool` avec la même cible pour reprendre.
-Le nœud reste arrêté à la fin. À ce stade, `rollback-pool` restaure l’ancien
-montage et ses reçus. Le démarrage suivant ferme cette possibilité pour
-préserver les nouvelles écritures sur XFS. Conservez le pool ext4 et la
-sauvegarde pendant la vérification.
+Le nœud reste arrêté à la fin. `rollback-pool` restaure l’ancien montage et ses
+reçus. Le contrôleur attend l’autorisation explicite `activate-pool`, même après
+un redémarrage de la machine. Après cette autorisation, la première ouverture
+du pool XFS ferme la possibilité de basculer vers ext4, afin de préserver les
+nouvelles écritures. Conservez le pool ext4 et la sauvegarde pendant la
+vérification.
 
 ```sh
+sudo python3 /opt/cairn-native/host.py activate-pool
 sudo systemctl start cairn-native-node.service
 findmnt --mountpoint /var/lib/cairn-native/state/native-data
 ```

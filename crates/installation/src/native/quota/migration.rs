@@ -41,6 +41,11 @@ pub(in crate::native) async fn require_settled(state: &Path) -> Result<()> {
                     "Native data pool migration is incomplete. Resume it or roll it back before starting the node.",
                 ));
             }
+            if value["activated"] != true && value["activationRequested"] != true {
+                return Err(Error::conflict(
+                    "Native XFS pool is ready. Authorize activation with native-host.py activate-pool before starting the node.",
+                ));
+            }
             let pool = open(&workspace::data_root(state))?;
             let uuid = value["uuid"]
                 .as_str()

@@ -850,6 +850,7 @@ def run():
 XFS_ACL_MIRRORS = ['--filter=-x trusted.SGI_ACL_FILE', '--filter=-x trusted.SGI_ACL_DEFAULT']
 SAFE_PATH = re.compile(r'/[A-Za-z0-9._/-]+')
 PHASES = ('planned', 'formatted', 'copied', 'switched', 'complete')
+OFFLINE_LOCK_FDS = ()
 
 
 class MigrationError(ValueError):
@@ -872,7 +873,10 @@ def require_migration_running():
 def offline_command(args, timeout, env=None):
     require_migration_running()
     deadline = None if timeout is None else time.monotonic() + timeout
-    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, env=env) as child:
+    # Each offline command inherits the lock's open file description. Even a
+    # killed supervisor cannot release the fence while its writer remains live.
+    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          start_new_session=True, env=env, pass_fds=OFFLINE_LOCK_FDS) as child:
         try:
             while True:
                 require_migration_running()
@@ -981,6 +985,7 @@ def require_stopped(stop_services):
 
 
 def offline_pool_operation(operation, arguments):
+    global OFFLINE_LOCK_FDS
     if arguments.dry_run:
         return operation(arguments)
     require_stopped(arguments.stop)
@@ -991,7 +996,11 @@ def offline_pool_operation(operation, arguments):
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise MigrationError('The native controller or another migration acquired state/controller.lock.') from None
-        return operation(arguments)
+        OFFLINE_LOCK_FDS = (descriptor,)
+        try:
+            return operation(arguments)
+        finally:
+            OFFLINE_LOCK_FDS = ()
     finally:
         os.close(descriptor)
 
@@ -1534,10 +1543,27 @@ def finish_migration(record, arguments, pool, state):
     record['phase'] = 'complete'
     save_migration(record)
     print(f'Native data pool migrated to XFS (reflink: {str(result["reflink"]).lower()}), {result["environments"]} environments checked.')
-    print(f'Start the node with: systemctl start {SERVICE}')
-    if not record.get('activated'):
-        print(f'The ext4 pool {record["old"]["what"]} was preserved. To roll back before starting the node, run '
+    if not record.get('activated') and not record.get('activationRequested'):
+        print(f'Authorize activation with: python3 {INSTALL}/host.py activate-pool')
+        print(f'The ext4 pool {record["old"]["what"]} was preserved. To roll back before activation, run '
               f'"python3 {INSTALL}/host.py rollback-pool" while the node is stopped.')
+    else:
+        print(f'Start the node with: systemctl start {SERVICE}')
+
+
+def activate_pool(arguments):
+    record = load_migration()
+    if not record or record.get('phase') != 'complete':
+        raise MigrationError('Finish the XFS pool migration before activating it.')
+    if not new_pool_mounted(record, pool_path()):
+        raise MigrationError('The mounted pool does not match the completed XFS migration.')
+    if arguments.dry_run:
+        print('Would authorize the node to open the verified XFS pool on its next start.')
+        return
+    pool_tool('check', ROOT / 'state')
+    record['activationRequested'] = True
+    save_migration(record)
+    print(f'XFS activation authorized. Start the node with: systemctl start {SERVICE}')
 
 
 def rollback_pool(arguments):
@@ -1654,10 +1680,12 @@ if __name__ == '__main__':
             run()
         elif len(sys.argv) >= 2 and sys.argv[1] == 'migrate-pool':
             offline_pool_operation(migrate_pool, pool_arguments(sys.argv[1:]))
+        elif len(sys.argv) >= 2 and sys.argv[1] == 'activate-pool':
+            offline_pool_operation(activate_pool, pool_arguments(sys.argv[1:]))
         elif len(sys.argv) >= 2 and sys.argv[1] == 'rollback-pool':
             offline_pool_operation(rollback_pool, pool_arguments(sys.argv[1:]))
         else:
-            raise ValueError('Use install <manager HTTPS origin>, run, migrate-pool or rollback-pool.')
+            raise ValueError('Use install <manager HTTPS origin>, run, migrate-pool, activate-pool or rollback-pool.')
     except PrerequisiteError as error:
         print('Native node prerequisites unavailable: ' + error.diagnostic, file=sys.stderr)
         sys.exit(1)
