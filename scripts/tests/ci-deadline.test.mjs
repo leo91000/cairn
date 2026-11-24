@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statfsSync,
   writeFileSync,
 } from 'node:fs'
 import os from 'node:os'
@@ -42,14 +43,21 @@ function deadlineFixture(t) {
 
   // The evidence rename is synchronous. Prefer the standard shared-memory
   // mount so disk writeback cannot hold the timed fixture.
+  const sharedMemory = '/dev/shm'
+  const tmpfsMagic = 0x01021994
   try {
-    return allocate('/dev/shm')
+    if (process.platform === 'linux') {
+      const filesystem = statfsSync(sharedMemory)
+      if (filesystem.type === tmpfsMagic && filesystem.bavail > 0)
+        return allocate(sharedMemory)
+    }
   }
   catch (error) {
     if (!['EACCES', 'EDQUOT', 'ENOENT', 'ENOSPC', 'ENOTDIR', 'EPERM', 'EROFS'].includes(error.code))
       throw error
-    return allocate(os.tmpdir())
   }
+
+  return allocate(os.tmpdir())
 }
 
 function live(pid) {
