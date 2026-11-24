@@ -30,6 +30,7 @@ export interface Workspace {
   emailProof: () => { email: string, code: string }
   setAccountUsage: (id: string, value: unknown) => Promise<void>
   setOpenCodeGoUsage: (id: string, apiKey: string, value: unknown) => void
+  setLegacyCodexLogin: (available: boolean) => Promise<void>
 }
 
 // One application per worker; navigation and sign-in share its real beacon context.
@@ -91,6 +92,21 @@ async function withWorkspace(
   isolatedDatabase.searchParams.set('options', `-c search_path=${schema}`)
   const accountEmail = `${schema}@example.test`
   await Promise.all([mkdir(home), mkdir(projectPath)])
+  const codexHome = path.join(home, '.codex')
+  const codexAuth = path.join(codexHome, 'auth.json')
+  let legacyCodexLogin = true
+  const syncLegacyCodexLogin = async () => {
+    if (!legacyCodexLogin) {
+      await rm(codexAuth, { force: true })
+      return
+    }
+
+    await mkdir(codexHome, { recursive: true })
+    await writeFile(codexAuth, JSON.stringify({
+      tokens: { access_token: 'synthetic-browser-access', refresh_token: 'synthetic-browser-refresh', account_id: 'fixture' },
+    }), { mode: 0o600 })
+  }
+
   const config = {
     dataDir: path.join(directory, 'data'),
     home,
@@ -313,6 +329,11 @@ async function withWorkspace(
       signIn,
     }
 
+    // Use the legacy host login until a journey adds its own managed account.
+    // Set it after the one-time account import so Connections still starts empty.
+    await api('/api/accounts')
+    await syncLegacyCodexLogin()
+
     if (workerInfo.project.name !== 'journeys') {
       const agent = service.agent({ name: 'Release engineer' })
       const project = await service.project({ name: 'Design system', path: projectPath })
@@ -346,6 +367,7 @@ async function withWorkspace(
       api,
       restart: async () => {
         await stop()
+        await rm(codexAuth, { force: true })
         claimCode = ''
         child = start()
         closed = once(child, 'exit')
@@ -355,6 +377,12 @@ async function withWorkspace(
           const response = await fetch(`${url}${apiPath('/api/agents')}`, { headers })
           return response.ok
         }, { timeout: 15000 }).toBe(true)
+        await api('/api/accounts')
+        await syncLegacyCodexLogin()
+      },
+      setLegacyCodexLogin: async (available) => {
+        legacyCodexLogin = available
+        await syncLegacyCodexLogin()
       },
       setAccountUsage: async (id, value) => {
         usage[id] = value

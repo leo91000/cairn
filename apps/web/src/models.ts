@@ -2,33 +2,38 @@ import type { Provider } from '../../../packages/contracts/accounts'
 import type { ModelCatalog } from '../../../packages/contracts/models'
 import { reactive } from 'vue'
 import { providers } from '../../../packages/contracts/accounts'
+import { listModelAvailability } from '../../../packages/contracts/generated/listModelAvailability'
 import { listModels } from '../../../packages/contracts/generated/listModels'
-import { api, state } from './api'
+import { api, ApiError, state } from './api'
 
 // The last catalog is kept locally so pickers can label saved models without
 // fetching on every page load; opening a picker refreshes it.
 const installationScope = state.installationId ? `${state.installationId}:` : ''
 
-function stored(key: string): ModelCatalog['models'] {
+function stored(key: string): Pick<ModelCatalog, 'models' | 'connected'> {
   try {
-    return JSON.parse(localStorage.getItem(`${installationScope}${key}`) || 'null')?.models ?? []
+    const value = JSON.parse(localStorage.getItem(`${installationScope}${key}`) || 'null')
+    return { models: value?.models ?? [], connected: typeof value?.connected === 'boolean' ? value.connected : undefined }
   }
   catch {
-    return []
+    return { models: [] }
   }
 }
 
 function store(key: string, catalog: ModelCatalog) {
   try {
-    localStorage.setItem(`${installationScope}${key}`, JSON.stringify({ models: catalog.models }))
+    localStorage.setItem(`${installationScope}${key}`, JSON.stringify({ models: catalog.models, connected: catalog.connected }))
   }
   catch {}
 }
 
 function createCatalog(provider: Provider) {
   const key = `cairn-models:${provider}`
+  const saved = stored(key)
   const catalog = reactive({
-    models: stored(key),
+    models: saved.models,
+    // Unknown until a listing says so, or from an installation that predates it.
+    connected: saved.connected as boolean | undefined,
     checkedAt: null as number | null,
     stale: false,
     error: '',
@@ -36,20 +41,70 @@ function createCatalog(provider: Provider) {
     loaded: false,
     nativeDefaults: undefined as ModelCatalog['nativeDefaults'],
   })
+  const connection = reactive({ loading: false, loaded: false, failed: false })
+  let pendingConnection: Promise<void> | undefined
   let pending: Promise<void> | undefined
   let revision = 0
+  let nextConnectionRequest = 0
+  let appliedConnectionRequest = 0
+
+  function applyConnection(value: ModelCatalog['connected'], request: number) {
+    if (request < appliedConnectionRequest)
+      return
+    appliedConnectionRequest = request
+    catalog.connected = value
+  }
+
+  function checkConnection() {
+    if (pendingConnection)
+      return pendingConnection
+    const request = ++nextConnectionRequest
+    const signal = AbortSignal.timeout(30000)
+    connection.loading = true
+    pendingConnection = listModelAvailability((path, options) => api(path, { ...options, signal }), { provider })
+      .then((value) => {
+        applyConnection(value.connected, request)
+        connection.failed = false
+        store(key, catalog)
+      })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 404 && error.message === 'Not found') {
+          // Older servers have no lightweight route. Keep their picker behavior.
+          applyConnection(undefined, request)
+          connection.failed = false
+          store(key, catalog)
+        }
+        else {
+          connection.failed = true
+        }
+      })
+      .finally(() => {
+        connection.loading = false
+        connection.loaded = true
+        pendingConnection = undefined
+      })
+    return pendingConnection
+  }
 
   function load() {
     if (pending)
       return pending
     const requestRevision = revision
+    const connectionRequest = ++nextConnectionRequest
     catalog.loading = true
     pending = listModels(api, { provider })
       .then((value) => {
         if (requestRevision !== revision)
           return
-        Object.assign(catalog, value, { nativeDefaults: value.nativeDefaults })
-        store(key, value)
+        // A stale, empty inventory can still confirm the account pool.
+        const models = value.connected === true && value.stale && !value.models.length ? catalog.models : value.models
+        applyConnection(value.connected, connectionRequest)
+        const connected = catalog.connected
+        Object.assign(catalog, value, { models, nativeDefaults: value.nativeDefaults, connected })
+        store(key, catalog)
+        // Inventory can discover a rejected credential during its own provider call.
+        if (value.connected !== connected)
+          void (pendingConnection ?? Promise.resolve()).then(checkConnection)
       })
       .catch((error: Error) => {
         if (requestRevision === revision)
@@ -75,7 +130,13 @@ function createCatalog(provider: Provider) {
     await load()
   }
 
-  return { catalog, load, refresh }
+  return {
+    catalog,
+    connection,
+    checkConnection,
+    load,
+    refresh,
+  }
 }
 
 export const modelCatalogs = Object.fromEntries(

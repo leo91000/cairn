@@ -204,7 +204,12 @@ impl AccountOperation {
                 let input: ListModelsInput = decode(input)?;
                 let provider: crate::provider::Provider = input.provider.into();
                 let mut catalog: ModelCatalog = serde_json::from_value(
-                    provider.adapter().model_catalog(s).await?,
+                    crate::coding_agent::read_model_catalog(
+                        s,
+                        provider,
+                        input.availability_only.unwrap_or(false),
+                    )
+                    .await?,
                 )
                 .map_err(|_| {
                     Error::bad_gateway("The coding agent returned an invalid model catalog.")

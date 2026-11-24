@@ -126,10 +126,9 @@ pub async fn models(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
     }
     let token = bearer.to_owned();
     s.store.read(move |db| requester(db, &token)).await?;
-    let catalog = Provider::parse(text(input, "provider"))?
-        .adapter()
-        .model_catalog(s)
-        .await?;
+    let provider = Provider::parse(text(input, "provider"))?;
+    let availability_only = input["availabilityOnly"].as_bool().unwrap_or(false);
+    let catalog = crate::coding_agent::read_model_catalog(s, provider, availability_only).await?;
     // Discovery may take time; do not return metadata after a grant was revoked.
     let token = bearer.to_owned();
     s.store.read(move |db| requester(db, &token)).await?;

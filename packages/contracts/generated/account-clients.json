@@ -3,8 +3,21 @@
     "input": "ListModelsInput",
     "method": "GET",
     "name": "listModels",
+    "optionalQuery": [
+      "availabilityOnly"
+    ],
     "output": "ModelCatalog",
-    "path": "/{provider}/models"
+    "path": "/{provider}/models",
+    "query": [
+      "availabilityOnly"
+    ]
+  },
+  {
+    "input": "ListModelsInput",
+    "method": "GET",
+    "name": "listModelAvailability",
+    "output": "ModelCatalog",
+    "path": "/{provider}/model-availability"
   },
   {
     "input": "AccountProviderInput",

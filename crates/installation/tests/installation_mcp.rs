@@ -6149,10 +6149,15 @@ async fn account_http(
 async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_transports() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
+    let opencode = root.path().join("opencode-fixture");
+    std::os::unix::fs::symlink(common::fixture_path("opencode.mjs"), &opencode).unwrap();
+    let antigravity = root.path().join("antigravity-fixture");
+    std::os::unix::fs::symlink(common::fixture_path("antigravity.mjs"), &antigravity).unwrap();
     let s = Service::new(cairn_installation::config::Config {
         codex_bin: common::fixture("codex.mjs"),
         claude_bin: common::fixture("claude.mjs"),
-        opencode_bin: common::fixture("opencode.mjs"),
+        opencode_bin: opencode.to_string_lossy().into_owned(),
+        antigravity_bin: antigravity.to_string_lossy().into_owned(),
         ..common::config(root.path())
     })
     .await
@@ -6189,12 +6194,30 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
                 let _: cairn_contracts::ModelCatalog =
                     serde_json::from_value(expected.clone()).unwrap();
                 assert!(expected.get("source").is_none());
+                if provider == "codex" {
+                    assert_eq!(expected["connected"], false, "{expected}");
+                }
             } else if provider != "opencode" {
                 assert_eq!(expected["kind"], "unsupported");
                 assert_eq!(expected["capability"], "apiKey");
             }
         }
     }
+    let codex_home = s.config.home.join(".codex");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let host_auth = codex_home.join("auth.json");
+    std::fs::write(
+        &host_auth,
+        br#"{"tokens":{"access_token":"synthetic-host-login"}}"#,
+    )
+    .unwrap();
+    let (status, codex) =
+        account_http(&app, &member, "GET", "/api/codex/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{codex}");
+    assert_eq!(codex["connected"], true, "{codex}");
+    assert!(!codex.to_string().contains("synthetic-host-login"));
+    std::fs::remove_file(host_auth).unwrap();
+
     let (status, _) = account_http(&app, &member, "GET", "/api/accounts", Value::Null).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (_, unsupported) = account_http(
@@ -6281,6 +6304,7 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
             account_http(&app, &owner, "GET", "/api/opencode/models", Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{expected}");
         assert!(!expected["models"].as_array().unwrap().is_empty());
+        assert_eq!(expected["connected"], true, "{expected}");
         let (_, response) = node_management_call(
             &app,
             endpoint,
@@ -6290,11 +6314,136 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
         )
         .await;
         assert_eq!(result(&response), &expected);
+
+        // An agent without an account says so, for clients to point to Connections.
+        let (status, unconnected) =
+            account_http(&app, &owner, "GET", "/api/antigravity/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{unconnected}");
+        assert_eq!(unconnected["connected"], false, "{unconnected}");
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_models",
+            json!({"provider":"antigravity"}),
+        )
+        .await;
+        assert_eq!(result(&response), &unconnected);
     }
+
+    // A changed pool invalidates cached inventory. Failure to launch discovery does not erase
+    // the other enabled account, and callers can still select a pinned model.
+    let mut paused = s.accounts.account(&s, &ids[0]).await.unwrap();
+    paused.enabled = false;
+    s.store.save_coding_account(&paused).await.unwrap();
+    std::fs::remove_file(opencode).unwrap();
+    let (status, stale) =
+        account_http(&app, &member, "GET", "/api/opencode/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{stale}");
+    assert_eq!(stale["connected"], true, "{stale}");
+    assert_eq!(stale["stale"], true, "{stale}");
+    assert!(!text(&stale, "error").is_empty(), "{stale}");
+
+    let (status, available) = account_http(
+        &app,
+        &member,
+        "GET",
+        "/api/opencode/models?availabilityOnly=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{available}");
+    assert_eq!(available["connected"], true, "{available}");
+    assert_eq!(available["models"], json!([]), "{available}");
+    assert_eq!(available["error"], "", "{available}");
+    let (status, availability_route) = account_http(
+        &app,
+        &member,
+        "GET",
+        "/api/opencode/model-availability",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{availability_route}");
+    assert_eq!(availability_route, available);
+
+    let mut google = cairn_installation::accounts::Account::new(
+        cairn_installation::provider::Provider::Antigravity,
+        "Expired fixture login",
+        cairn_installation::accounts::AccountState::Ready,
+    );
+    google.model_provider = Some("google".into());
+    s.store.save_coding_account(&google).await.unwrap();
+    s.vault
+        .set(
+            &format!("antigravity-account:{}", google.id),
+            &json!({
+                "kind": "google",
+                "token": {
+                    "token": {
+                        "access_token": "synthetic-expired-google-token",
+                        "expiry": "2000-01-01T00:00:00Z",
+                    },
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let (status, reconnect) =
+        account_http(&app, &member, "GET", "/api/antigravity/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{reconnect}");
+    assert_eq!(reconnect["connected"], false, "{reconnect}");
+    let (status, connections) =
+        account_http(&app, &owner, "GET", "/api/accounts", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let expired = connections["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["id"] == google.id)
+        .unwrap();
+    assert_eq!(expired["status"], "reconnect", "{expired}");
+    assert!(text(expired, "error").contains("Reconnect this Antigravity Google account"));
+    assert!(
+        !reconnect
+            .to_string()
+            .contains("synthetic-expired-google-token")
+    );
+
     for (endpoint, token) in [
         ("/mcp", public.as_str()),
         ("/mcp-installation", agent_token),
     ] {
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_models",
+            json!({
+                "provider": "opencode",
+                "availabilityOnly": true,
+            }),
+        )
+        .await;
+        assert_eq!(result(&response), &available);
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_models",
+            json!({"provider":"opencode"}),
+        )
+        .await;
+        assert_eq!(result(&response), &stale);
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_models",
+            json!({"provider":"antigravity"}),
+        )
+        .await;
+        assert_eq!(result(&response), &reconnect);
         let (_, invalid) = node_management_call(
             &app,
             endpoint,
@@ -6305,6 +6454,109 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
         .await;
         assert_eq!(invalid["result"]["isError"], true);
     }
+
+    let (status, gemini) = account_http(
+        &app,
+        &owner,
+        "POST",
+        "/api/accounts",
+        json!({
+            "provider": "antigravity",
+            "name": "Gemini fixture key",
+            "modelProvider": "gemini",
+            "apiKey": "synthetic-gemini-fixture-key",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{gemini}");
+    assert_eq!(gemini["kind"], "connected", "{gemini}");
+    let gemini_id = text(&gemini["account"], "id");
+    std::fs::remove_file(antigravity).unwrap();
+
+    // When Gemini inventory is temporarily unavailable, order must not turn a separate
+    // expired login into an installation-wide reconnection requirement.
+    let google_id = google.id.clone();
+    for ordered_accounts in [[gemini_id, &google_id], [&google_id, gemini_id]] {
+        google.mark_ready();
+        s.store.save_coding_account(&google).await.unwrap();
+        let (status, ordered) = account_http(
+            &app,
+            &owner,
+            "POST",
+            "/api/accounts/order",
+            json!({
+                "provider": "antigravity",
+                "ids": ordered_accounts,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{ordered}");
+        assert_eq!(ordered["kind"], "ordered", "{ordered}");
+
+        let (status, mixed) =
+            account_http(&app, &member, "GET", "/api/antigravity/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{mixed}");
+        assert_eq!(mixed["connected"], true, "{mixed}");
+        assert_eq!(mixed["stale"], true, "{mixed}");
+        for (endpoint, token) in [
+            ("/mcp", public.as_str()),
+            ("/mcp-installation", agent_token),
+        ] {
+            let (_, response) = node_management_call(
+                &app,
+                endpoint,
+                token,
+                "list_models",
+                json!({"provider":"antigravity"}),
+            )
+            .await;
+            assert_eq!(result(&response), &mixed);
+        }
+    }
+
+    // A vanished executable is transient even for an expired Google access token if
+    // the refresh credential has not been rejected.
+    let mut gemini = s.accounts.account(&s, gemini_id).await.unwrap();
+    gemini.enabled = false;
+    s.store.save_coding_account(&gemini).await.unwrap();
+    google.mark_ready();
+    s.store.save_coding_account(&google).await.unwrap();
+    let google_secret = format!("antigravity-account:{}", google.id);
+    let mut credentials = s.vault.get(&google_secret).await.unwrap().unwrap();
+    credentials["token"]["token"]["refresh_token"] = "synthetic-google-refresh-token".into();
+    s.vault.set(&google_secret, &credentials).await.unwrap();
+    let (status, failed_renewal) =
+        account_http(&app, &member, "GET", "/api/antigravity/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{failed_renewal}");
+    assert_eq!(failed_renewal["connected"], true, "{failed_renewal}");
+    assert_eq!(failed_renewal["stale"], true, "{failed_renewal}");
+    s.accounts.refresh(&s, &google.id).await.unwrap();
+    assert!(
+        s.accounts
+            .account(&s, &google.id)
+            .await
+            .unwrap()
+            .is_active()
+    );
+    let (_, after_poll) =
+        account_http(&app, &member, "GET", "/api/antigravity/models", Value::Null).await;
+    assert_eq!(after_poll, failed_renewal);
+
+    let temporary_accounts = s.config.data_dir.join("antigravity-accounts");
+    std::fs::create_dir_all(&temporary_accounts).unwrap();
+    std::fs::write(
+        temporary_accounts.join(&google.id),
+        b"fixture blocking staging",
+    )
+    .unwrap();
+    s.accounts.refresh(&s, &google.id).await.unwrap();
+    assert!(
+        s.accounts
+            .account(&s, &google.id)
+            .await
+            .unwrap()
+            .is_active()
+    );
 }
 
 #[tokio::test]

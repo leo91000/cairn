@@ -2,7 +2,7 @@
 //! with their project and region, or a Google account signed in through `agy`. Secrets
 //! are encrypted on the manager and reach a run only through its broker. A Google
 //! account's refresh token stays on the manager: runs receive access tokens only.
-use super::{Account, Driver, Lease, Login, broker, remove_file};
+use super::{Account, AccountState, Driver, Lease, Login, broker, remove_file};
 use crate::{
     antigravity::{ADC_FILE, GEMINI, GOOGLE, GOOGLE_CLOUD, TOKEN_FILE, kind_name},
     auth::hex_digest,
@@ -21,6 +21,16 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(super) struct Antigravity;
+
+pub(crate) const RECONNECT_REQUIRED: &str = "antigravity_google_reconnect_required";
+
+fn reconnect_required() -> Error {
+    Error::coded(
+        409,
+        RECONNECT_REQUIRED,
+        "Reconnect this Antigravity Google account in Connections.",
+    )
+}
 
 fn secret_id(id: &str) -> String {
     format!("antigravity-account:{id}")
@@ -45,34 +55,47 @@ fn token_home(s: &Service, id: &str) -> PathBuf {
     s.config.data_dir.join("antigravity-accounts").join(id)
 }
 
-/// Lets `agy` renew a Google account's access token on the manager: it refreshes a
-/// saved token it considers expired and rewrites its token file. Cairn never needs
-/// the CLI's OAuth client secret.
-async fn renew(s: &Service, id: &str) -> Result<Value> {
-    static RENEWING: std::sync::LazyLock<
+fn google_token_lock(id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static TOKENS: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     > = std::sync::LazyLock::new(Default::default);
-    let lock = RENEWING
+    TOKENS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .entry(id.to_owned())
         .or_default()
-        .clone();
+        .clone()
+}
+
+/// Lets `agy` renew a Google account's access token on the manager: it refreshes a
+/// saved token it considers expired and rewrites its token file. Cairn never needs
+/// the CLI's OAuth client secret.
+async fn renew(s: &Service, id: &str) -> Result<Value> {
+    let lock = google_token_lock(id);
     let _renewing = lock.lock().await;
     // Another request may have renewed the token while this one waited.
     let saved = stored_credentials(s, id).await?;
     if expiry(&saved["token"]["token"]) - now() >= RENEW_BEFORE_MS {
         return Ok(saved);
     }
+    if text(&saved["token"]["token"], "refresh_token").is_empty() {
+        return Err(reconnect_required());
+    }
     let saved = &saved;
     let home = token_home(s, id);
     let mut file = saved["token"].clone();
     file["token"]["expiry"] = "2000-01-01T00:00:00Z".into();
-    crate::antigravity::prepare_native_home(&s.config, &home, None).await?;
-    crate::antigravity::write_token(&home, &file).await?;
-    let env = crate::antigravity::environment(&s.config, &home, None);
     let renewed = async {
-        crate::process::bounded_output(
+        let staging_error =
+            || Error::unavailable("Antigravity could not prepare temporary credentials.");
+        crate::antigravity::prepare_native_home(&s.config, &home, None)
+            .await
+            .map_err(|_| staging_error())?;
+        crate::antigravity::write_token(&home, &file)
+            .await
+            .map_err(|_| staging_error())?;
+        let env = crate::antigravity::environment(&s.config, &home, None);
+        let output = crate::process::bounded_output(
             crate::process::command(
                 &s.config.antigravity_bin,
                 &["models".into()],
@@ -82,18 +105,32 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
             Duration::from_secs(60),
             1_000_000,
         )
-        .await?;
-        let bytes = tokio::fs::read(home.join(TOKEN_FILE)).await?;
-        Ok::<_, Error>(serde_json::from_slice::<Value>(&bytes)?)
+        .await
+        .map_err(|error| {
+            if error.is_internal() {
+                Error::bad_gateway("Antigravity could not read the token helper output.")
+            } else {
+                error
+            }
+        })?;
+        if !output.success
+            && (output.stdout.contains("invalid_grant") || output.stderr.contains("invalid_grant"))
+        {
+            return Err(reconnect_required());
+        }
+        let unavailable =
+            || Error::bad_gateway("Antigravity could not refresh Google credentials.");
+        let bytes = tokio::fs::read(home.join(TOKEN_FILE))
+            .await
+            .map_err(|_| unavailable())?;
+        serde_json::from_slice::<Value>(&bytes).map_err(|_| unavailable())
     }
     .await;
     let _ = crate::accounts::remove_directory(&home).await;
-    let renewed = renewed.map_err(|_| {
-        Error::conflict("Reconnect this Antigravity Google account in Connections.")
-    })?;
+    let renewed = renewed?;
     if text(&renewed["token"], "access_token").is_empty() || expiry(&renewed["token"]) <= now() {
-        return Err(Error::conflict(
-            "Reconnect this Antigravity Google account in Connections.",
+        return Err(Error::bad_gateway(
+            "Antigravity could not refresh Google credentials.",
         ));
     }
     let mut credential = saved.clone();
@@ -119,7 +156,7 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
 
 /// What a run or the manager's catalog uses: a Google account's current access token
 /// without its refresh token, or the saved API key or Google Cloud credentials.
-pub(crate) async fn credentials(s: &Service, id: &str) -> Result<Value> {
+async fn credentials(s: &Service, id: &str) -> Result<Value> {
     let mut credential = stored_credentials(s, id).await?;
     if credential["kind"] != GOOGLE {
         return Ok(credential);
@@ -131,6 +168,35 @@ pub(crate) async fn credentials(s: &Service, id: &str) -> Result<Value> {
         token.remove("refresh_token");
     }
     Ok(credential)
+}
+
+/// The catalog and broker hold the account lock while checking credentials and
+/// recording a definitive rejection.
+async fn credentials_with_status(s: &Service, id: &str) -> Result<Value> {
+    let result = credentials(s, id).await;
+    if let Err(error) = &result
+        && error.code.as_deref() == Some(RECONNECT_REQUIRED)
+        && let Some(mut account) = s.accounts.find(s, id).await?
+        && (account.state != AccountState::Error || account.error != error.message)
+    {
+        account.state = AccountState::Error;
+        account.error.clone_from(&error.message);
+        super::save(s, &account).await?;
+    }
+    result
+}
+
+pub(crate) async fn catalog_credentials(s: &Service, id: &str) -> Result<Option<Value>> {
+    let _guard = s.accounts.lock(id).await;
+    if !s
+        .accounts
+        .find(s, id)
+        .await?
+        .is_some_and(|account| account.is_active())
+    {
+        return Ok(None);
+    }
+    credentials_with_status(s, id).await.map(Some)
 }
 
 /// Reads the token `agy` saved after signing in within `home`.
@@ -450,6 +516,8 @@ impl Driver for Antigravity {
 
     async fn adopt(&self, s: &Service, id: &str, home: &Path) -> Result<()> {
         let token = signed_in_token(home).await?;
+        let lock = google_token_lock(id);
+        let token_guard = lock.lock().await;
         let email = text(&token, "id_token_email").to_owned();
         let mut account = s.accounts.account(s, id).await?;
         let fingerprint = hex_digest(&format!("{GOOGLE}:{}", email.to_lowercase()));
@@ -468,6 +536,8 @@ impl Driver for Antigravity {
         s.vault
             .set(&secret_id(id), &json!({ "kind": GOOGLE, "token": token }))
             .await?;
+        s.antigravity.invalidate();
+        drop(token_guard);
         let _ = remove_file(&home.join(TOKEN_FILE)).await;
         Ok(())
     }
@@ -558,7 +628,7 @@ impl Driver for Antigravity {
         lease: &Lease,
         _request: &broker::Request,
     ) -> Result<Value> {
-        credentials(s, &lease.account_id).await
+        credentials_with_status(s, &lease.account_id).await
     }
 
     async fn redactions(&self, s: &Service, id: &str) -> Result<Vec<String>> {

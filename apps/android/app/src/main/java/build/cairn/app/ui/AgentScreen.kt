@@ -39,6 +39,7 @@ import build.cairn.contracts.ReplaceAgentInput
 import build.cairn.contracts.ReplaceAgentPluginGrantsInput
 import build.cairn.contracts.createAgent
 import build.cairn.contracts.deleteAgent
+import build.cairn.contracts.getAgent
 import build.cairn.contracts.getAgentPluginGrants
 import build.cairn.contracts.listAgents
 import build.cairn.contracts.previewAgent
@@ -271,11 +272,47 @@ private fun AgentPage(
     }
     BackHandler(enabled = !saving) { leave() }
 
+    suspend fun requireCodingAgentConnection(provider: String) {
+        val catalog =
+            checkNotNull(vm.refreshModels(provider, availabilityOnly = true)) {
+                "Impossible de vérifier la connexion de cet assistant de code. Réessayez."
+            }
+        check(catalog.connected != false) {
+            "Connectez ${providerLabel(provider)} ou choisissez un autre assistant de code."
+        }
+    }
+
+    suspend fun retryAgentCreation(input: CreateAgentInput, latest: () -> CreateAgentInput): Agent {
+        val agentId = input.creationId ?: return vm.api.createAgent(input)
+        try {
+            requireCodingAgentConnection(input.settings.provider)
+        } catch (connectionError: IllegalStateException) {
+            if (connectionError is CancellationException) throw connectionError
+            // Recover an existing agent without writing the original disconnected provider.
+            try {
+                return vm.api.getAgent(AgentInput(agentId))
+            } catch (readError: ApiException) {
+                if (readError.status != 404) throw readError
+            }
+
+            val current = latest().copy(creationId = agentId)
+            if (current.settings.provider == input.settings.provider) throw connectionError
+            requireCodingAgentConnection(current.settings.provider)
+            return vm.api.createAgent(current)
+        }
+        return vm.api.createAgent(input)
+    }
+
     suspend fun commit(
         edited: Agent,
         approved: List<String>,
         nativeNodes: List<String> = emptyList(),
     ) {
+        val needsConnection =
+            if (creating) creation.id.isBlank() && !creation.pendingCreation
+            else edited.provider != baseline.provider
+        if (needsConnection) requireCodingAgentConnection(edited.provider)
+
         // Explicit reapproval uses the revision-checked profile API, including grant-only edits.
         val profilePending =
             (creating && creation.id.isBlank()) ||
@@ -287,6 +324,16 @@ private fun AgentPage(
                 creating -> {
                     // Once created, the agent's revision guards the recovery update, so a change
                     // made elsewhere meanwhile is reported as a conflict instead of overwritten.
+                    val replaying = creation.pendingCreation
+                    val createBody = {
+                        agentSaveBody(
+                                edited.copy(revision = ""),
+                                approved,
+                                mcpIds,
+                                nativeNodeReviews = nativeNodes,
+                            )
+                            .let { JsonObject(it - "agentId" - "revision") }
+                    }
                     val response =
                         try {
                             creation.save(
@@ -300,32 +347,35 @@ private fun AgentPage(
                                         nativeNodeReviews = nativeNodes,
                                     )
                                 },
-                                createValue = {
-                                    agentSaveBody(
-                                            edited.copy(revision = ""),
-                                            approved,
-                                            mcpIds,
-                                            nativeNodeReviews = nativeNodes,
-                                        )
-                                        .let { JsonObject(it - "agentId" - "revision") }
-                                },
+                                createValue = createBody,
                                 onCreated = {
                                     baseline = wireJson.decodeFromJsonElement<Agent>(it)
                                 },
                                 request = { method, _, payload ->
                                     val saved =
-                                        if (method == "POST")
-                                            vm.api.createAgent(
+                                        if (method == "POST") {
+                                            val input =
                                                 wireJson.decodeFromJsonElement<CreateAgentInput>(
                                                     payload
                                                 )
-                                            )
-                                        else
+                                            if (replaying)
+                                                retryAgentCreation(input) {
+                                                    wireJson.decodeFromJsonElement<
+                                                        CreateAgentInput
+                                                    >(
+                                                        createBody()
+                                                    )
+                                                }
+                                            else vm.api.createAgent(input)
+                                        } else {
+                                            if (edited.provider != baseline.provider)
+                                                requireCodingAgentConnection(edited.provider)
                                             vm.api.replaceAgent(
                                                 wireJson.decodeFromJsonElement<ReplaceAgentInput>(
                                                     payload
                                                 )
                                             )
+                                        }
                                     wireJson.encodeToJsonElement(saved)
                                 },
                             )
@@ -683,7 +733,15 @@ private fun AgentPage(
                     AgentSection.Identity ->
                         IdentitySection(vm, state, baseline, draft.agent, creating, ::update)
                     AgentSection.Engine ->
-                        EngineSection(vm, state, draft.agent, ::update, !creating && !dirty) {
+                        EngineSection(
+                            vm,
+                            state,
+                            draft.agent,
+                            ::update,
+                            !creating && !dirty,
+                            saved = baseline.takeUnless { creating && creation.id.isBlank() },
+                            openConnections = { navigate("connections") },
+                        ) {
                             navigate(
                                 "agents/${draft.agent.id}/configuration/${draft.agent.provider}"
                             )
@@ -2229,6 +2287,8 @@ private fun EngineSection(
     agent: Agent,
     update: ((Agent) -> Agent) -> Unit,
     configurationEnabled: Boolean,
+    saved: Agent?,
+    openConnections: () -> Unit,
     configuration: () -> Unit,
 ) {
     ModelPicker(
@@ -2243,11 +2303,25 @@ private fun EngineSection(
         refresh = { vm.refreshModels(agent.provider) },
         provider = agent.provider,
         changeProvider = { provider ->
-            update { it.copy(provider = provider, model = "", reasoning = "", speed = "") }
+            val previous = saved?.takeIf { it.provider == provider }
+            update {
+                it.copy(
+                    provider = provider,
+                    model = previous?.model.orEmpty(),
+                    reasoning = previous?.reasoning.orEmpty(),
+                    speed = previous?.speed.orEmpty(),
+                )
+            }
         },
         field = true,
         speed = agent.speed,
         changeSpeed = { speed -> update { it.copy(speed = speed) } },
+        catalogs = state.modelCatalogs,
+        savedProvider = saved?.provider,
+        requireConnection = agent.provider != saved?.provider,
+        refreshCatalog = { vm.refreshModels(it, availabilityOnly = true) },
+        // Connections is pushed on the navigation stack, so Back restores the saved draft.
+        openConnections = openConnections,
     ) { model, reasoning ->
         update { it.copy(model = model, reasoning = reasoning) }
     }

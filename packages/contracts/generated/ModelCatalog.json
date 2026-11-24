@@ -167,6 +167,13 @@
         "null"
       ]
     },
+    "connected": {
+      "description": "Whether runs of the coding agent can start without connecting or resuming an account.\nAbsent from installations that predate it, where clients assume it can.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "error": {
       "default": "",
       "type": "string"

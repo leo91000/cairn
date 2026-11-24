@@ -24,8 +24,10 @@ test.beforeAll(async () => {
               import { createApp, h, nextTick } from 'vue'
               import AssistantPicker from '/apps/web/src/components/AssistantPicker.vue'
               import { modelCatalogs } from '/apps/web/src/models.ts'
-              // Control catalog completion independently of the pointer sequence.
-              modelCatalogs.opencode.load = async () => {}
+              // Control catalog completion independently of the pointer sequence. The picker
+              // loads every agent's catalog, and this page has no installation to answer.
+              for (const catalog of Object.values(modelCatalogs))
+                catalog.load = async () => {}
               window.populateCatalog = async () => {
                 Object.assign(modelCatalogs.opencode.catalog, {
                   loaded: true,

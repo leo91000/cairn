@@ -563,6 +563,7 @@ test('a Claude limit that stops requests waits for an account and shows the repo
 })
 
 test('Claude default names follow available metadata without pinning the model', async ({ page, workspace }, testInfo) => {
+  expect((await connectClaude(workspace, 'Default labels')).state).toBe('complete')
   await useRelayForHttpMocks(page)
   let displayName = 'Opus Fixture (1M context)'
   let description = 'Model recommended for your subscription'
@@ -691,6 +692,7 @@ test('plan drafts keep their mode across conversation switches and reloads', asy
 
 test('a Plan draft never becomes ordinary when its engine resolves to OpenCode', async ({ page, workspace }) => {
   test.setTimeout(120000)
+  await seedCodexAccount(workspace, 'Plan intent fallback', limits(10, 20))
   await workspace.api('/api/accounts', 'POST', {
     provider: 'opencode',
     name: 'Plan intent control',

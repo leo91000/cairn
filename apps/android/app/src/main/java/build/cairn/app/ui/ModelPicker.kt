@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 internal fun effortLabel(value: String): String =
@@ -174,12 +175,18 @@ private val GeminiMark by lazy {
     )
 }
 
+private data class ConnectionObservation(val request: Long, val connected: Boolean?)
+
 /**
  * One entry point for the coding agent, model, reasoning effort and Codex speed, shared by the
  * composer and agent settings. Empty values preserve server inheritance. When [changeProvider] is
  * set, the sheet also switches between Codex and Claude Code; the caller supplies that provider's
  * catalog. When [changeSpeed] is set, Codex models listing speeds offer them; the speed is kept
- * across model changes.
+ * across model changes. With [catalogs], agents whose catalog says no account can run are not
+ * offered, except the chosen one and [savedProvider], the conversation's or saved agent's: the
+ * sheet names them and, with [openConnections], leads to Connections. Opening the sheet refreshes
+ * every agent's availability with [refreshCatalog]. A new choice waits for that check, which may
+ * omit the connection field on older installations.
  */
 @Composable
 internal fun ModelPicker(
@@ -190,7 +197,7 @@ internal fun ModelPicker(
     defaultReasoning: String = "",
     inherit: Boolean = false,
     enabled: Boolean = true,
-    refresh: (suspend () -> Unit)? = null,
+    refresh: (suspend () -> ModelCatalog?)? = null,
     modifier: Modifier = Modifier,
     provider: String = "codex",
     changeProvider: ((String) -> Unit)? = null,
@@ -201,44 +208,71 @@ internal fun ModelPicker(
     defaultSpeed: String = "",
     changeSpeed: ((String) -> Unit)? = null,
     onReasoningIntent: (ResumeReasoningIntent) -> Unit = {},
+    catalogs: Map<String, ModelCatalog>? = null,
+    savedProvider: String? = null,
+    requireConnection: Boolean = false,
+    refreshCatalog: (suspend (String) -> ModelCatalog?)? = null,
+    openConnections: (() -> Unit)? = null,
     change: (String, String) -> Unit,
 ) {
-    val inheritedModel =
-        if (inherit) defaultModel else catalog.nativeDefaults?.model ?: defaultModel
-    val inheritedReasoning =
-        if (inherit) defaultReasoning else catalog.nativeDefaults?.reasoning ?: defaultReasoning
-    val inheritedSpeedValue =
-        if (inherit) defaultSpeed else catalog.nativeDefaults?.speed ?: defaultSpeed
-    val inheriting = inherit || catalog.nativeDefaults != null
     var open by rememberSaveable { mutableStateOf(false) }
-    var refreshing by remember { mutableStateOf(false) }
-    var refreshError by remember { mutableStateOf("") }
+    val lastConnection = remember { mutableStateMapOf<String, ConnectionObservation>() }
+    val verified = remember(open) { mutableStateMapOf<String, Boolean>() }
+    var nextConnectionRequest by remember { mutableLongStateOf(0L) }
+    fun applyConnection(value: String, connected: Boolean?, request: Long) {
+        val previous = lastConnection[value]
+        if (previous == null || request >= previous.request)
+            lastConnection[value] = ConnectionObservation(request, connected)
+    }
+    fun connectionFor(value: String): Boolean? =
+        when {
+            value in lastConnection -> lastConnection[value]?.connected
+            value == provider -> catalog.connected
+            else -> catalogs?.get(value)?.connected
+        }
+    val shownCatalog = catalog.copy(connected = connectionFor(provider))
+    val inheritedModel =
+        if (inherit) defaultModel else shownCatalog.nativeDefaults?.model ?: defaultModel
+    val inheritedReasoning =
+        if (inherit) defaultReasoning
+        else shownCatalog.nativeDefaults?.reasoning ?: defaultReasoning
+    val inheritedSpeedValue =
+        if (inherit) defaultSpeed else shownCatalog.nativeDefaults?.speed ?: defaultSpeed
+    val inheriting = inherit || shownCatalog.nativeDefaults != null
+    val disconnected = shownCatalog.connected == false
+    val refreshingProviders = remember { mutableStateMapOf<String, Unit>() }
+    val refreshErrors = remember { mutableStateMapOf<String, String>() }
+    val refreshing = provider in refreshingProviders
+    val refreshError = refreshErrors[provider].orEmpty()
     val scope = rememberCoroutineScope()
-    suspend fun reload() {
-        if (refreshing || refresh == null) return
-        refreshing = true
-        refreshError = ""
-        try {
+    suspend fun reload(): ModelCatalog? {
+        if (provider in refreshingProviders || refresh == null) return null
+        refreshingProviders[provider] = Unit
+        refreshErrors.remove(provider)
+        return try {
             refresh()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            refreshError = "Catalogue temporairement indisponible. Réessayez."
+            refreshErrors[provider] = "Catalogue temporairement indisponible. Réessayez."
+            null
         } finally {
-            refreshing = false
+            refreshingProviders.remove(provider)
         }
     }
-    val chosen = selectedModel(catalog, model, inheritedModel)
+    val chosen = selectedModel(shownCatalog, model, inheritedModel)
     // A pinned route offers its own reasoning levels; Auto offers those all routes share.
     val route = chosen?.route(model.ifBlank { inheritedModel })
     val selected =
         route?.let { chosen.copy(supportedReasoningEfforts = it.supportedReasoningEfforts) }
             ?: chosen
-    LaunchedEffect(provider, catalog.models, model, inheritedModel, inheriting) {
-        if (codingAgent(provider).requiresModel && model.isBlank() && !inheriting) {
+    LaunchedEffect(provider, shownCatalog.models, model, inheritedModel, inheriting, disconnected) {
+        if (
+            !disconnected && codingAgent(provider).requiresModel && model.isBlank() && !inheriting
+        ) {
             onReasoningIntent(ResumeReasoningIntent.Untouched)
             val next =
-                catalog.models.find { it.isDefault && !it.hidden }
-                    ?: catalog.models.find { !it.hidden }
+                shownCatalog.models.find { it.isDefault && !it.hidden }
+                    ?: shownCatalog.models.find { !it.hidden }
             if (next != null) change(next.model, "")
         }
     }
@@ -251,7 +285,7 @@ internal fun ModelPicker(
         else selected?.defaultReasoningEffort.orEmpty()
     val effectiveEffort = pickerAppliedReasoning(selected, reasoning, inheritedEffort)
     // Speeds Codex names in this catalog, to label a saved speed the selected model lacks.
-    val knownTiers = catalog.models.flatMap { it.serviceTiers.orEmpty() }
+    val knownTiers = shownCatalog.models.flatMap { it.serviceTiers.orEmpty() }
     val inheritedSpeed = if (inheriting) inheritedSpeedValue else ""
     val currentSpeed = effectiveSpeed(speed, inheritedSpeed)
     val speedShown =
@@ -299,12 +333,44 @@ internal fun ModelPicker(
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
-            if (refresh != null) Poll(provider, 300_000) { reload() }
+            var discoveryAttempt by remember { mutableIntStateOf(0) }
+            val checkingConnections = refreshCatalog != null && verified.size < codingAgents.size
+            suspend fun refreshInventory() {
+                val request = ++nextConnectionRequest
+                val fresh = reload() ?: return
+                if (refreshCatalog == null) return
+                applyConnection(provider, fresh.connected, request)
+                // A discarded inventory result can reflect a credential rejected by the CLI.
+                if (fresh.connected != lastConnection[provider]?.connected) discoveryAttempt++
+            }
+            if (refreshCatalog != null) {
+                Poll(discoveryAttempt, 300_000) {
+                    verified.clear()
+                    coroutineScope {
+                        codingAgents.forEach { agent ->
+                            launch {
+                                val request = ++nextConnectionRequest
+                                val fresh = refreshCatalog(agent.provider)
+                                if (fresh != null)
+                                    applyConnection(agent.provider, fresh.connected, request)
+                                verified[agent.provider] = fresh != null
+                            }
+                        }
+                    }
+                }
+            }
+            if (refresh != null) Poll(provider, 300_000) { refreshInventory() }
             var query by rememberSaveable { mutableStateOf("") }
+            val connect = openConnections?.let {
+                {
+                    open = false
+                    it()
+                }
+            }
             // Claude lists its own "default" alias. When the default row already resolves to it,
             // show one row instead of two equivalent choices.
             val alias =
-                catalog.models
+                shownCatalog.models
                     .find { it.model == "default" }
                     ?.takeIf { !inheriting || inheritedModel.isBlank() }
             val defaultName =
@@ -312,7 +378,7 @@ internal fun ModelPicker(
                     provider == "claude" && it.isNotBlank() && !it.startsWith("Default")
                 }
             val visible =
-                catalog.models.filter {
+                shownCatalog.models.filter {
                     (!it.hidden || it.matches(model)) && (it != alias || model == it.model)
                 }
             val models = visible.filter {
@@ -371,37 +437,74 @@ internal fun ModelPicker(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                     }
-                    if (refresh != null)
+                    if (refresh != null || refreshCatalog != null)
                         IconButton(
-                            onClick = { scope.launch { reload() } },
-                            enabled = !refreshing,
+                            onClick = {
+                                if (refreshCatalog != null) discoveryAttempt++
+                                if (refresh != null) scope.launch { refreshInventory() }
+                            },
+                            enabled =
+                                if (refreshCatalog != null) !checkingConnections else !refreshing,
                             modifier =
                                 Modifier.testTag("refresh-models").semantics {
                                     contentDescription =
-                                        if (refreshing) "Actualisation des modèles…"
+                                        if (refreshing || checkingConnections)
+                                            "Actualisation des modèles…"
                                         else "Actualiser les modèles"
                                 },
                         ) {
-                            if (refreshing)
+                            if (refreshing || checkingConnections)
                                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                             else Icon(Icons.Default.Refresh, null, Modifier.size(20.dp))
                         }
                     FilledTonalButton(onClick = { open = false }) { Text("Terminé") }
                 }
                 if (changeProvider != null) {
+                    // A chat can return to its saved agent even if its account went away.
+                    fun retained(value: String) =
+                        value == savedProvider || (!requireConnection && value == provider)
+                    val (offered, unconnected) =
+                        codingAgents.partition {
+                            retained(it.provider) || connectionFor(it.provider) != false
+                        }
                     SectionLabel("Assistant de code")
-                    ProviderTiles(codingAgents.map { it.provider to it.vendor }) {
+                    ProviderTiles(offered.map { it.provider to it.vendor }) {
                         value,
                         vendor,
                         tileModifier ->
-                        ProviderTile(value, vendor, provider == value, enabled, tileModifier) {
+                        ProviderTile(
+                            value,
+                            vendor,
+                            provider == value,
+                            enabled &&
+                                (retained(value) ||
+                                    refreshCatalog == null ||
+                                    verified[value] == true),
+                            tileModifier,
+                            connectionRequired = connectionFor(value) == false,
+                        ) {
                             if (provider != value) {
                                 query = ""
                                 changeProvider(value)
                             }
                         }
                     }
-                    AnimatedVisibility(switching) {
+                    if (unconnected.isNotEmpty())
+                        UnconnectedAgents(unconnected.map { it.provider }, connect)
+                    val alternateAgents = codingAgents.filterNot { retained(it.provider) }
+                    if (checkingConnections && alternateAgents.any { it.provider !in verified })
+                        Text(
+                            "Vérification des connexions…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    else if (alternateAgents.any { verified[it.provider] == false })
+                        Text(
+                            "Certaines connexions n’ont pas pu être vérifiées.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    AnimatedVisibility(switching && !disconnected) {
                         Row(
                             Modifier.fillMaxWidth()
                                 .background(
@@ -427,6 +530,48 @@ internal fun ModelPicker(
                     Spacer(Modifier.height(4.dp))
                 }
                 SectionLabel("Modèle")
+                if (disconnected) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(
+                            Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                "${providerLabel(provider)} a besoin d’une connexion",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            Text(
+                                when {
+                                    requireConnection ->
+                                        "Connectez cet assistant ou choisissez-en un autre."
+                                    field -> "Les exécutions ont besoin d’une connexion."
+                                    else -> "Le prochain tour a besoin d’une connexion."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            if (connect != null)
+                                TextButton(onClick = connect) { Text("Ouvrir les connexions") }
+                        }
+                    }
+                    Surface(
+                        shape = ModelCardShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            modelLabel,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    return@Column
+                }
                 if (provider == "opencode" || provider == "antigravity")
                     Surface(
                         shape = RoundedCornerShape(12.dp),
@@ -458,7 +603,7 @@ internal fun ModelPicker(
                     )
                 if (visible.size > 6) SearchField("Rechercher un modèle", query) { query = it }
                 val fallback =
-                    selectedModel(catalog, "", inheritedModel)?.let {
+                    selectedModel(shownCatalog, "", inheritedModel)?.let {
                         it.displayName.ifBlank { it.model }
                     } ?: inheritedModel
                 if (
@@ -467,7 +612,7 @@ internal fun ModelPicker(
                 )
                     ModelCard(
                         if (inheriting) {
-                            if (!inherit && catalog.nativeDefaults != null)
+                            if (!inherit && shownCatalog.nativeDefaults != null)
                                 "Modèle de l’installation"
                             else if (conversationDefault) "Modèle de la conversation"
                             else "Modèle de l’agent"
@@ -556,7 +701,7 @@ internal fun ModelPicker(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                if (model.isNotBlank() && catalog.models.none { it.matches(model) })
+                if (model.isNotBlank() && shownCatalog.models.none { it.matches(model) })
                     ModelCard(
                         model,
                         "Modèle enregistré · absent du catalogue",
@@ -564,7 +709,7 @@ internal fun ModelPicker(
                         enabled,
                         reasoning = reasoningFor,
                     ) {}
-                if (catalog.models.isEmpty())
+                if (shownCatalog.models.isEmpty())
                     Field(
                         "Nom du modèle",
                         model,
@@ -574,9 +719,9 @@ internal fun ModelPicker(
                         },
                         keyboardOptions = InputKeyboards.Literal,
                     )
-                if (catalog.stale || catalog.error.isNotBlank())
+                if (shownCatalog.stale || shownCatalog.error.isNotBlank())
                     Text(
-                        catalog.error.ifBlank {
+                        shownCatalog.error.ifBlank {
                             "Catalogue enregistré ; actualisation en attente."
                         },
                         style = MaterialTheme.typography.bodySmall,
@@ -765,6 +910,39 @@ internal fun ProviderTiles(
     }
 }
 
+/** Agents without an account that can run, pointing to Connections when the viewer may open it. */
+@Composable
+private fun UnconnectedAgents(providers: List<String>, openConnections: (() -> Unit)?) {
+    Row(
+        Modifier.fillMaxWidth()
+            .testTag("unconnected-agents")
+            .semantics(mergeDescendants = true) {}
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
+            .padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+            .heightIn(min = 44.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        providers.forEach {
+            ProviderMark(it, 18.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(
+            providers.joinToString(", ") { providerLabel(it) },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        if (openConnections != null) TextButton(onClick = openConnections) { Text("Connecter") }
+        else
+            Text(
+                "Non connecté",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 10.dp),
+            )
+    }
+}
+
 @Composable
 internal fun ProviderTile(
     provider: String,
@@ -772,6 +950,7 @@ internal fun ProviderTile(
     selected: Boolean,
     enabled: Boolean,
     modifier: Modifier,
+    connectionRequired: Boolean = false,
     choose: () -> Unit,
 ) {
     val accent = if (provider == "claude") ClaudeTint else MaterialTheme.colorScheme.primary
@@ -810,6 +989,13 @@ internal fun ProviderTile(
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center,
             )
+            if (connectionRequired)
+                Text(
+                    "Connexion requise",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center,
+                )
         }
     }
 }
