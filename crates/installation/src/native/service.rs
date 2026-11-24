@@ -4416,16 +4416,22 @@ pub(crate) mod tests {
     async fn activation_fences_retirement_until_the_attempt_is_registered() {
         let (_fixture, controller) = fixture().await;
         let (run, id, _) = busy_disk_fixture(&controller).await;
-        let workspace = controller.data.join("runs").join(&run).join("workspace");
+        let stage = controller.data.join("runs").join(&run);
+        let workspace = stage.join("workspace");
+        let home = stage.join("home");
         let plans = controller.data.join("runner-plans");
-        private_dir(&workspace).await.unwrap();
-        private_dir(&plans).await.unwrap();
+        for directory in [&workspace, &home, &plans] {
+            private_dir(directory).await.unwrap();
+        }
         let plan = json!({
             "id": id, "runId": run, "backend": "native", "nodeLeaseRequired": true,
             "cwd": workspace, "projectRoot": workspace, "sandbox": "workspace-write",
-            "args": [], "prompt": "fixture",
+            "args": [], "prompt": "fixture", "expires": null,
             "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
-            "imports": [{ "source": workspace, "target": workspace }],
+            "imports": [
+                { "source": workspace, "target": workspace },
+                { "source": home, "target": "/home/node" },
+            ],
         });
         atomic_write(
             &plans.join(format!("{id}.json")),
@@ -4434,15 +4440,19 @@ pub(crate) mod tests {
         .await
         .unwrap();
         let capacity = controller.capacity.lock().await;
-        let starting = {
+        let mut starting = {
             let controller = controller.clone();
             let id = id.clone();
             tokio::spawn(async move { controller.start(&id).await })
         };
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !controller.active.lock().await.contains_key(&id) {
-                assert!(!starting.is_finished(), "preparation must reach activation");
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::select! {
+                result = &mut starting => panic!("Start exited before activation: {result:?}"),
+                () = async {
+                    while !controller.active.lock().await.contains_key(&id) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } => {},
             }
         })
         .await
