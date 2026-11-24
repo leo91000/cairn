@@ -39,6 +39,16 @@ pub(in crate::native) async fn require_settled(state: &Path) -> Result<()> {
                     "Native data pool migration is incomplete. Resume it or roll it back before starting the node.",
                 ));
             }
+            let pool = open(&workspace::data_root(state))?;
+            let uuid = value["uuid"]
+                .as_str()
+                .and_then(|uuid| uuid::Uuid::parse_str(uuid).ok())
+                .ok_or_else(|| Error::conflict("Missing migrated native pool UUID."))?;
+            if Pool::of(&pool)? != Some(Pool::Xfs) || pool_identity(&pool)? != uuid.as_bytes() {
+                return Err(Error::conflict(
+                    "The mounted native data pool does not match the completed XFS migration.",
+                ));
+            }
             if value["activated"] != true {
                 // The old pool is a pre-migration snapshot. Prohibit rollback
                 // before this controller can change ownership or start writers.
@@ -210,7 +220,64 @@ fn inventory(state: &Path) -> Result<Inventory> {
                 .push(format!("Environment {name} {}.", error.message)),
         }
     }
+    inventory.blockers.extend(orphaned_controls(state)?);
+    inventory.blockers.extend(unfinished_bases(state)?);
     Ok(inventory)
+}
+
+fn unfinished_bases(state: &Path) -> Result<Vec<String>> {
+    let mut blockers = Vec::new();
+    for root in crate::storage::environment::ROOTS {
+        let entries = match std::fs::read_dir(state.join(root)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let directory = entry.path();
+            if entry.file_type()?.is_dir()
+                && !directory.join("directory.json").try_exists()?
+                && crate::native::bases::has_initializing_base(&directory)?
+            {
+                blockers.push(format!(
+                    "Environment {} has an unfinished base clone; complete preparation before migration.",
+                    entry.file_name().to_string_lossy()
+                ));
+            }
+        }
+    }
+    blockers.sort_unstable();
+    Ok(blockers)
+}
+
+fn orphaned_controls(state: &Path) -> Result<Vec<String>> {
+    let entries = match std::fs::read_dir(state.join("native")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut blockers = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(run) = name
+            .to_str()
+            .filter(|name| crate::validation::uuid(name).is_ok())
+        else {
+            continue;
+        };
+        let control = workspace::directory(state, run)?;
+        if !workspace::workload(state, run)?.try_exists()?
+            && (control.join(OWNER).try_exists()? || control.join(RETIREMENT).try_exists()?)
+        {
+            blockers.push(format!(
+                "Environment {run} has a quota receipt without a workload; complete its retirement before migration."
+            ));
+        }
+    }
+    blockers.sort_unstable();
+    Ok(blockers)
 }
 
 fn environment(state: &Path, run: &str) -> Result<Environment> {

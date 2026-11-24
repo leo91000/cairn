@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 const CLONE_RESERVE: u64 = 16 * disk::MIB;
 const MAX_BASE_BYTES: u64 = 64 * 1024 * disk::MIB;
 const FORMAT: u8 = 3;
+const INLINE_FORMAT: u8 = 2;
 
 /// Root-only directory on the data pool. Nothing below it is ever bound into
 /// a workload: environments receive private clones under their own run.
@@ -94,8 +95,10 @@ pub(crate) struct Ready {
     pub metadata_bytes: u64,
     /// Physical allocation of the contents, measured once at publication.
     /// Cache budgets and trimming use it instead of walking the tree.
+    #[serde(default)]
     pub allocated_bytes: u64,
     /// Binds this record to the published contents directory on the pool.
+    #[serde(default)]
     contents_inode: u64,
     inputs: Inputs,
 }
@@ -272,6 +275,46 @@ impl Bases {
                 let _ = tokio::fs::remove_file(root.join("ready.json")).await;
                 return Ok(None);
             }
+        }
+        Ok(Some(ready))
+    }
+
+    /// Format 2 stored extracted contents beside the control record. Only an
+    /// existing durable initialization may read that layout after an upgrade.
+    async fn pinned_inline_base(
+        &self,
+        archives: &[Archive],
+        disk_mib: u64,
+        pending: &InitializingBase,
+    ) -> Result<Option<Ready>> {
+        let mut inputs = Inputs::new(archives, disk_mib, self.identity)?;
+        inputs.format = INLINE_FORMAT;
+        if inputs.key()? != pending.key {
+            return Ok(None);
+        }
+        let root = self.root().join(&pending.key);
+        let mut ready: Ready =
+            serde_json::from_slice(&tokio::fs::read(root.join("ready.json")).await?)?;
+        if ready.key != pending.key || ready.inputs != inputs {
+            return Err(Error::conflict("Pinned inline native base inputs changed."));
+        }
+        let source = root.join("contents");
+        let measured = tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
+            if !std::fs::symlink_metadata(&source)?.is_dir() {
+                return Err(std::io::Error::other(
+                    "Pinned inline base is not a directory.",
+                ));
+            }
+            verify_cached_base(&root, &source)?;
+            clone_footprint(&source)
+        })
+        .await
+        .map_err(Error::internal)??;
+        ready.metadata_bytes = measured.saturating_add(CLONE_RESERVE);
+        if ready.metadata_bytes > MAX_BASE_BYTES {
+            return Err(Error::conflict(
+                "Pinned inline native base exceeds the cache limit.",
+            ));
         }
         Ok(Some(ready))
     }
@@ -672,15 +715,27 @@ impl Bases {
         let size = plan["resources"]["diskMiB"]
             .as_u64()
             .ok_or_else(|| Error::bad("Missing native disk size."))?;
-        let Some(ready) = self.lookup(&archives, size).await? else {
+        let inline = if let Some(pending) = &pending {
+            self.pinned_inline_base(&archives, size, pending).await?
+        } else {
+            None
+        };
+        let is_inline = inline.is_some();
+        let ready = if is_inline {
+            inline
+        } else {
+            self.lookup(&archives, size).await?
+        };
+        let Some(ready) = ready else {
             if plan.get("nativeProjectBase").is_some() || pending.is_some() {
                 return Err(Error::conflict("Pinned native base is unavailable."));
             }
             return Ok(false);
         };
-        if plan
-            .get("nativeProjectBase")
-            .is_some_and(|key| key != &ready.key)
+        if !is_inline
+            && plan
+                .get("nativeProjectBase")
+                .is_some_and(|key| key != &ready.key)
         {
             return Err(Error::conflict("Pinned native base changed."));
         }
@@ -754,7 +809,11 @@ impl Bases {
         super::quota::prepare(&self.state, &workload, size * disk::MIB).await?;
         let data = workload.join("data");
         let staging = workload.join("base.partial");
-        let source = self.contents(&ready.key);
+        let source = if is_inline {
+            self.root().join(&ready.key).join("contents")
+        } else {
+            self.contents(&ready.key)
+        };
         // Both monitored copy and verification check capacity before starting.
         let capacity = super::directory::CopyCapacity::new(
             &self.state,
@@ -789,9 +848,10 @@ impl Bases {
             }
             private_dir(&staging).await?;
             let pool = self.pool();
-            let reflink = tokio::task::spawn_blocking(move || reflink_supported(&pool))
-                .await
-                .map_err(Error::internal)?;
+            let reflink = !is_inline
+                && tokio::task::spawn_blocking(move || reflink_supported(&pool))
+                    .await
+                    .map_err(Error::internal)?;
             if let Err(error) =
                 super::directory::copy_verified(&source, &staging, stop, &capacity, reflink).await
             {
@@ -873,6 +933,10 @@ fn initializing_base(directory: &Path) -> Result<Option<InitializingBase>> {
         });
     }
     Ok(pending)
+}
+
+pub(in crate::native) fn has_initializing_base(directory: &Path) -> Result<bool> {
+    Ok(initializing_base(directory)?.is_some())
 }
 
 async fn finish_initializing_base(
@@ -1185,6 +1249,68 @@ pub(crate) async fn request(operation: &str, value: &Value) -> Result<Value> {
 #[cfg(test)]
 mod payload_size_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn durable_format_two_intent_opens_its_inline_base_after_upgrade() {
+        let fixture = tempfile::tempdir().unwrap();
+        let bases = Bases {
+            data: fixture.path().join("data"),
+            state: fixture.path().join("state"),
+            identity: (1000, 1000),
+            build_entered: None,
+        };
+        let archive = Archive {
+            project_id: crate::config::id(),
+            revision: "a".repeat(40),
+            origin_hash: None,
+            key: "b".repeat(64),
+            hash: "c".repeat(64),
+            bytes: 1,
+            logical_bytes: 1,
+        };
+        let archives = [archive];
+        let mut inputs = Inputs::new(&archives, 128, bases.identity).unwrap();
+        inputs.format = INLINE_FORMAT;
+        let key = inputs.key().unwrap();
+        let record = bases.root().join(&key);
+        let contents = record.join("contents");
+        private_dir(&contents).await.unwrap();
+        std::fs::write(contents.join("payload"), b"old verified template").unwrap();
+        std::fs::write(
+            record.join("contents.digest"),
+            base_signature(&contents).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            record.join("ready.json"),
+            serde_json::to_vec(
+                &json!({ "key": key, "metadataBytes": CLONE_RESERVE, "inputs": inputs }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        let environment = environment::directory(&bases.state, &run).unwrap();
+        private_dir(&environment).await.unwrap();
+        std::fs::write(record.join("pin"), b"").unwrap();
+        std::fs::hard_link(
+            record.join("pin"),
+            environment.join(format!("{INITIALIZING_BASE}{key}.{attempt}.pin")),
+        )
+        .unwrap();
+
+        recover_cache(&bases.state).await.unwrap();
+        assert!(bases.lookup(&archives, 128).await.unwrap().is_none());
+        let intent = initializing_base(&environment).unwrap().unwrap();
+        let recovered = bases
+            .pinned_inline_base(&archives, 128, &intent)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.key, key);
+        assert!(recovered.metadata_bytes > CLONE_RESERVE);
+    }
 
     #[tokio::test]
     async fn cache_publication_exposes_only_fully_sealed_contents() {

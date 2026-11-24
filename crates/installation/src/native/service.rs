@@ -1559,15 +1559,26 @@ impl Controller {
         }
         let view = block::view(&self.state, text(plan, "runId")).await?;
         let data = view.filesystems[0].clone();
-        let idmapped = !administrator
-            && super::quota::reflink(&std::fs::File::open(workspace::data_root(&self.state))?)?;
+        let pool = workspace::data_root(&self.state);
+        let mapping_supported = !administrator
+            && super::quota::reflink(&std::fs::File::open(&pool)?)?
+            && super::identity::idmapped_mounts_supported(&pool, &identity).await;
+        let previous = if mapping_supported {
+            super::identity::stored_owner(&data).await?
+        } else {
+            None
+        };
+        // Reassigning existing protected files to a different backing range
+        // could map unrelated host IDs. Keep the original map. A previous
+        // administrator owner first follows the journaled protected transition.
+        let idmapped = mapping_supported
+            && previous
+                .as_ref()
+                .is_none_or(|owner| owner.host_engine.is_none() || owner.is_storage());
         let storage_identity = if idmapped {
-            super::identity::stored_owner(&data)
-                .await?
-                .filter(super::identity::Identity::is_storage)
-                .unwrap_or_else(|| {
-                    super::identity::Identity::storage((self.identity.uid, self.identity.gid))
-                })
+            previous.unwrap_or_else(|| {
+                super::identity::Identity::storage((self.identity.uid, self.identity.gid))
+            })
         } else {
             identity.clone()
         };
@@ -2182,7 +2193,11 @@ impl Controller {
                     .as_u64()
                     .ok_or_else(|| Error::bad("Missing native disk size."))?;
                 if let Some(base) = self.bases().lookup(&descriptors, size).await? {
-                    base.metadata_bytes
+                    if super::spares::has_ready(&self.state, &base.key)? {
+                        0
+                    } else {
+                        base.metadata_bytes
+                    }
                 } else {
                     archives.iter().try_fold(0u64, |bytes, archive| {
                         bytes
@@ -2208,15 +2223,17 @@ impl Controller {
         let limit = self.disk_limit().await?;
         let mut used = disk::used(&self.data, &self.state).await?;
         let growth = disk::available(limit, used);
-        if incoming > growth {
-            super::spares::discard_unclaimed(&self.state).await?;
+        if incoming > growth && super::spares::discard_unclaimed(&self.state).await? {
             used = disk::used(&self.data, &self.state).await?;
         }
         let growth = disk::available(limit, used);
         if incoming > growth {
-            crate::project_archives::reclaim_for_foreground(&self.data, incoming - growth, &[])
-                .await?;
-            used = disk::used(&self.data, &self.state).await?;
+            let reclaimed =
+                crate::project_archives::reclaim_for_foreground(&self.data, incoming - growth, &[])
+                    .await?;
+            if reclaimed > 0 {
+                used = disk::used(&self.data, &self.state).await?;
+            }
         }
         if current.saturating_add(incoming) > self.disk_budget(plan)
             || incoming > disk::available(limit, used)
@@ -3223,6 +3240,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         &state.join("controller.lock"),
         "Another native controller owns this storage.",
     )?;
+    super::quota::require(&state)?;
     super::quota::migration::require_settled(&state).await?;
     disk::recover_exports(&state).await?;
     atomic_write(
@@ -3230,7 +3248,6 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         &serde_json::to_vec(&json!({ "data": data }))?,
     )
     .await?;
-    super::quota::require(&state)?;
     super::spares::discard_unclaimed(&state).await?;
     let identity = Arc::new(systemd::identity().await?);
     private_dir(&state.join("roots")).await?;

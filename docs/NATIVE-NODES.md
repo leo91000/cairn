@@ -9,7 +9,9 @@ never crash a driver. Review code before testing on a personal workstation.
 ## Requirements and enrollment
 
 Use Linux x86-64 with systemd 255+, cgroup v2, Python 3, curl, useradd/usermod,
-e2fsprogs, rsync and a dedicated ext4 project-quota data pool (see below).
+e2fsprogs, rsync and a dedicated XFS or ext4 project-quota data pool. Protected
+XFS launch uses idmapped mounts with a compatible kernel and util-linux 2.39
+or later. A missing mount capability uses journaled host ownership.
 Legacy journal conversion also needs io_uring and a working `ublk_drv` driver.
 Host libraries must be
 compatible with the published coding engines. The installed GPU
@@ -156,7 +158,7 @@ explicitly declare permanent conversation deletion. A manager-owned run namespac
 is never erased as native node staging, and its marker is excluded from remote
 seeds.
 
-Native environments keep ordinary retained directories on the dedicated ext4
+Native environments keep ordinary retained directories on the dedicated XFS or ext4
 project-quota pool at `state/native-data/<run>/`. Controller receipts and locks are
 on the separate host filesystem at `state/native/<run>/`. Stopping execution fences
 its consumers, flushes work and removes managed temporary files; retained workspace,

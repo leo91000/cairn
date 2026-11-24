@@ -686,12 +686,22 @@ pub(super) async fn retire(control_root: &Path) -> Result<()> {
     }
     let mut usage = current(&pool, retirement.project)?;
     if (usage.space != 0 || usage.inodes != 0) && Pool::of(&pool)? == Some(Pool::Xfs) {
-        // XFS releases unlinked inodes in the background; a filesystem sync
-        // waits for that release. Open-unlinked consumers still hold quota.
+        // XFS releases unlinked inodes through its asynchronous inode GC.
+        // A sync submits pending work. The affected project may report the
+        // old counters for a short time after the syscall returns.
         if unsafe { libc::syncfs(pool.as_raw_fd()) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        usage = current(&pool, retirement.project)?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            usage = current(&pool, retirement.project)?;
+            if (usage.space == 0 && usage.inodes == 0) || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            // An open-unlinked consumer can retain quota indefinitely. Leave
+            // its durable retirement receipt in place if it remains charged.
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
     if usage.space != 0 || usage.inodes != 0 {
         return Err(Error::conflict(

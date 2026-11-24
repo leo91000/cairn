@@ -9,7 +9,7 @@ use std::path::Path;
 mod mounts;
 mod reconcile;
 
-pub(super) use mounts::Mapped;
+pub(super) use mounts::{Mapped, supported as idmapped_mounts_supported};
 pub(super) use reconcile::{mark_base_owner, rebind_pending, reconcile, stored_owner};
 use tokio::process::Command;
 

@@ -59,9 +59,11 @@ detaches the temporary alias after launch admission. Fresh base clones already
 carry the backing engine owner. Protected moves keep the stored mapping even
 when the new node allocates different host IDs.
 
-The journaled translation converts existing protected environments and handles
-changes between protected and administrator ownership. Administrator execution
-keeps host ownership, including a separate Docker store. ext4 uses the existing
+Existing protected environments reuse their recorded backing IDs. Their
+original backing map keeps unrelated host IDs outside the mounted namespace.
+The journaled translation handles changes between protected and administrator
+ownership. Administrator execution keeps host ownership, including a separate
+Docker store. ext4 and hosts without usable idmapped mounts use the existing
 host-owner path.
 
 ### Accounting

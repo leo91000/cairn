@@ -1,6 +1,6 @@
 //! Temporary idmapped sources for the workload manager's private bind mounts.
 //! The canonical data tree remains accessible to controller-side recovery.
-use super::{COUNT, Identity, STORAGE_OWNER};
+use super::{COUNT, Identity};
 use crate::error::{Error, Result};
 use std::{
     ffi::CString,
@@ -10,10 +10,7 @@ use std::{
 };
 
 fn options(storage: &Identity, workload: &Identity) -> Result<String> {
-    let Some((uid, gid)) = storage.host_engine else {
-        return Err(Error::conflict("Native storage owner has no engine ID."));
-    };
-    if storage.user != STORAGE_OWNER || workload.host_engine.is_some() || uid == 0 || gid == 0 {
+    if (storage.host_engine.is_some() && !storage.is_storage()) || workload.host_engine.is_some() {
         return Err(Error::conflict("Invalid native mount identity."));
     }
     // Disk IDs map root, engine and the two halves of the subordinate range.
@@ -24,7 +21,7 @@ fn options(storage: &Identity, workload: &Identity) -> Result<String> {
             'u',
             storage.root_uid,
             storage.subuid,
-            uid,
+            storage.uid(),
             workload.root_uid,
             workload.subuid,
         ),
@@ -32,24 +29,69 @@ fn options(storage: &Identity, workload: &Identity) -> Result<String> {
             'g',
             storage.root_gid,
             storage.subgid,
-            gid,
+            storage.gid(),
             workload.root_gid,
             workload.subgid,
         ),
     ] {
-        mappings.extend([
-            format!("{kind}:{root}:{host_root}:1"),
-            format!("{kind}:{engine}:{}:1", host_sub + 999),
-            format!("{kind}:{disk}:{host_sub}:999"),
-            format!(
-                "{kind}:{}:{}:{}",
-                disk + 1000,
-                host_sub + 1000,
-                COUNT - 1000
-            ),
-        ]);
+        mappings.push(format!("{kind}:{root}:{host_root}:1"));
+        if storage.host_engine.is_some() {
+            mappings.extend([
+                format!("{kind}:{engine}:{}:1", host_sub + 999),
+                format!("{kind}:{disk}:{host_sub}:999"),
+                format!(
+                    "{kind}:{}:{}:{}",
+                    disk + 1000,
+                    host_sub + 1000,
+                    COUNT - 1000
+                ),
+            ]);
+        } else {
+            // A retained protected tree already has a disjoint backing map.
+            // Keep that map so unrelated IDs elsewhere on disk stay unmapped.
+            mappings.push(format!("{kind}:{disk}:{host_sub}:{COUNT}"));
+        }
     }
     Ok(format!("X-mount.idmap={}", mappings.join(" ")))
+}
+
+/// libc/libmount and the filesystem must both support the mount operation.
+/// Probe in a private mount namespace before changing retained ownership.
+pub(in crate::native) async fn supported(pool: &Path, workload: &Identity) -> bool {
+    static SUPPORT: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+    *SUPPORT.get_or_init(|| async {
+        let result = async {
+            let temporary = tempfile::Builder::new().prefix(".cairn-idmap-probe-").tempdir_in(pool)?;
+            let source = temporary.path().join("source");
+            let view = temporary.path().join("view");
+            std::fs::create_dir(&source)?;
+            std::fs::create_dir(&view)?;
+            let storage = Identity::storage((1000, 1000));
+            std::os::unix::fs::lchown(&source, Some(storage.uid()), Some(storage.gid()))?;
+            let options = options(&storage, workload)?;
+            let expected = format!("{}:{}", workload.uid(), workload.gid());
+            let status = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::process::Command::new("/usr/bin/unshare")
+                    .args(["--mount", "--propagation", "private", "/bin/sh", "-ec"])
+                    .arg(r#"mount -i --bind -o "$1" -- "$2" "$3"; test "$(stat -c %u:%g "$3")" = "$4""#)
+                    .arg("cairn-idmap-probe")
+                    .arg(options)
+                    .arg(source)
+                    .arg(view)
+                    .arg(expected)
+                    .env_clear()
+                    .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+                    .kill_on_drop(true)
+                    .output(),
+            ).await.map_err(|_| Error::timeout("Native idmapped mount probe timed out."))??;
+            Ok::<_, Error>(status.status.success())
+        }.await;
+        if !matches!(result, Ok(true)) {
+            tracing::warn!("Native pool idmapped mount probe failed; using journaled host ownership.");
+        }
+        result.unwrap_or(false)
+    }).await
 }
 
 fn target(state: &Path, attempt: &str) -> Result<PathBuf> {
@@ -169,6 +211,30 @@ impl Drop for Mapped {
 mod tests {
     use super::*;
     use std::os::unix::fs::lchown;
+
+    #[test]
+    fn existing_protected_owners_keep_only_their_original_root_and_subordinate_ids() {
+        let previous = Identity {
+            user: "previous".into(),
+            root_uid: 500_000_000,
+            root_gid: 500_000_001,
+            subuid: 1_000_013_824,
+            subgid: 1_000_079_360,
+            host_engine: None,
+        };
+        let current = Identity {
+            user: "current".into(),
+            root_uid: 500_000_002,
+            root_gid: 500_000_003,
+            subuid: 1_000_144_896,
+            subgid: 1_000_210_432,
+            host_engine: None,
+        };
+        assert_eq!(
+            options(&previous, &current).unwrap(),
+            "X-mount.idmap=u:500000000:500000002:1 u:1000013824:1000144896:65536 g:500000001:500000003:1 g:1000079360:1000210432:65536"
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires an explicitly disposable host and the native quota fixture"]

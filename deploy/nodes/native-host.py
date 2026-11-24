@@ -297,22 +297,31 @@ def origin(value):
     return value.rstrip('/')
 
 
-def atomic_json(path, value):
+def sync_directory(path):
+    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def atomic_bytes(path, value, mode=0o600):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent)
     try:
-        with os.fdopen(descriptor, 'w') as output:
-            json.dump(value, output)
+        with os.fdopen(descriptor, 'wb') as output:
+            os.fchmod(output.fileno(), mode)
+            output.write(value)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        sync_directory(path.parent)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def atomic_json(path, value):
+    atomic_bytes(path, json.dumps(value).encode())
 
 
 def request(manager, endpoint, payload=None, token=None, limit=1_000_000):
@@ -960,6 +969,7 @@ def load_migration():
 
 def save_migration(record):
     atomic_json(migration_directory() / 'state.json', record)
+    sync_directory(migration_directory().parent)
 
 
 def cairn_binary():
@@ -990,8 +1000,10 @@ def old_pool(pool):
     fragment = properties.get('FragmentPath') or ''
     source = mounted.get('source', '')
     what, options = source, ['prjquota']
+    fragment_bytes = None
     if fragment and Path(fragment).is_file():
-        for line in Path(fragment).read_text().splitlines():
+        fragment_bytes = Path(fragment).read_bytes()
+        for line in fragment_bytes.decode().splitlines():
             key, _, value = line.partition('=')
             if key.strip() == 'What':
                 what = value.strip()
@@ -999,7 +1011,8 @@ def old_pool(pool):
                 options = value.strip().split(',')
     elif source.startswith('/dev/loop'):
         what, options = checked('losetup', '--noheadings', '--output', 'BACK-FILE', source).strip(), ['loop', 'prjquota']
-    return {'unit': unit, 'fragment': fragment if fragment and Path(fragment).is_file() else None,
+    return {'unit': unit, 'fragment': fragment if fragment_bytes is not None else None,
+            'unitSha256': hashlib.sha256(fragment_bytes).hexdigest() if fragment_bytes is not None else None,
             'what': what, 'type': 'ext4', 'options': ','.join(options),
             'uuid': filesystem_uuid(source)}
 
@@ -1098,11 +1111,21 @@ def plan_steps(record, old, plan, pool):
 
 
 def back_up_unit(old):
+    if old['fragment'] is None:
+        return None
     backup = migration_directory() / 'units' / old['unit']
-    if old['fragment'] and not backup.exists():
-        backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        shutil.copy2(old['fragment'], backup.with_name(backup.name + '.partial'))
-        os.replace(backup.with_name(backup.name + '.partial'), backup)
+    present = backup.is_file()
+    source = backup if present else Path(old['fragment'])
+    try:
+        content = source.read_bytes()
+    except FileNotFoundError:
+        raise MigrationError(f'Cannot prove the original mount unit {old["unit"]}; keep both pool volumes.') from None
+    if hashlib.sha256(content).hexdigest() != old.get('unitSha256'):
+        raise MigrationError(f'Original mount unit {old["unit"]} changed; inspect it before continuing.')
+    if not present:
+        atomic_bytes(backup, content)
+        sync_directory(backup.parent.parent)
+    return content
 
 
 def remount_old_pool(old, pool):
@@ -1124,11 +1147,19 @@ def mount_new_pool(record, old, pool):
     unit = UNIT_DIRECTORY / old['unit']
     back_up_unit(old)
     if image:
-        (UNIT_DIRECTORY / LOOP_SERVICE).write_text(loop_unit(Path(image), old['unit']))
-    unit.write_text(pool_unit(pool, record['uuid'], image))
+        loop_path = UNIT_DIRECTORY / LOOP_SERVICE
+        expected = loop_unit(Path(image), old['unit']).encode()
+        if loop_path.exists() and loop_path.read_bytes() != expected:
+            raise MigrationError(f'{LOOP_SERVICE} belongs to another pool.')
+        atomic_bytes(loop_path, expected, 0o644)
+    atomic_bytes(unit, pool_unit(pool, record['uuid'], image).encode(), 0o644)
     checked('systemctl', 'daemon-reload')
     units = ([LOOP_SERVICE] if image else []) + [old['unit']]
     checked('systemctl', 'enable', *units)
+    wants = UNIT_DIRECTORY / 'local-fs.target.wants'
+    if wants.is_dir():
+        sync_directory(wants)
+    sync_directory(UNIT_DIRECTORY)
     for name in units:
         checked('systemctl', 'start', name, timeout=300)
     mounted = mount_of(pool)
@@ -1318,6 +1349,7 @@ def rollback_pool(arguments):
         print(f'Rollback would unmount the XFS pool (phase {record["phase"]}), restore {record["old"]["unit"]} and the original ownership records.')
         return
     old = record['old']
+    original_unit = back_up_unit(old)
     image = record['target'].get('image')
     mountpoint = migration_directory() / 'target'
     if mount_of(mountpoint):
@@ -1328,23 +1360,26 @@ def rollback_pool(arguments):
     elif mounted:
         verify_old_pool(old, mounted)
     if image:
-        if (UNIT_DIRECTORY / LOOP_SERVICE).exists():
+        loop_path = UNIT_DIRECTORY / LOOP_SERVICE
+        if loop_path.exists():
+            if loop_path.read_bytes() != loop_unit(Path(image), old['unit']).encode():
+                raise MigrationError(f'{LOOP_SERVICE} belongs to another pool.')
             checked('systemctl', 'disable', '--now', LOOP_SERVICE, timeout=300)
-        (UNIT_DIRECTORY / LOOP_SERVICE).unlink(missing_ok=True)
+        loop_path.unlink(missing_ok=True)
         loop = attached_loop(Path(image))
         if loop:
             checked('losetup', '--detach', str(loop))
-    backup = migration_directory() / 'units' / old['unit']
     unit = UNIT_DIRECTORY / old['unit']
-    if backup.exists():
-        shutil.copy2(backup, unit)
+    if original_unit is not None:
+        atomic_bytes(unit, original_unit, 0o644)
     elif old['fragment'] is None and unit.exists() and NEW_POOL_UNIT in unit.read_text():
         # The original pool was mounted by hand: remove only the unit we wrote.
         unit.unlink()
+    sync_directory(UNIT_DIRECTORY)
     checked('systemctl', 'daemon-reload')
     mounted = mount_of(pool)
     if mounted is None:
-        if backup.exists():
+        if original_unit is not None:
             checked('systemctl', 'start', old['unit'], timeout=300)
         else:
             checked('mount', '-t', old['type'], '-o', old['options'], old['what'], str(pool), timeout=300)
@@ -1352,7 +1387,8 @@ def rollback_pool(arguments):
     verify_old_pool(old, mounted)
     pool_tool('rollback', state, migration_directory())
     pool_tool('check', state)
-    migration_directory().rename(migration_directory().with_name(f'native-pool-migration.rolled-back-{int(time.time())}'))
+    migration_directory().rename(migration_directory().with_name(f'native-pool-migration.rolled-back-{time.time_ns()}'))
+    sync_directory(migration_directory().parent)
     print(f'Rolled back to the ext4 pool {old["what"]}. The XFS target {image or record["target"]["device"]} was kept; remove it when no longer needed.')
 
 

@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn controller_refuses_incomplete_migrations_and_records_activation_before_writes() {
+async fn controller_refuses_incomplete_or_incorrectly_mounted_migrations() {
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("state");
     let migration = root.path().join("native-pool-migration");
@@ -12,14 +12,44 @@ async fn controller_refuses_incomplete_migrations_and_records_activation_before_
     std::fs::write(&record, br#"{"phase":"switched"}"#).unwrap();
     assert!(require_settled(&state).await.unwrap_err().is_conflict());
 
-    std::fs::write(&record, br#"{"phase":"complete","uuid":"new-pool"}"#).unwrap();
-    require_settled(&state).await.unwrap();
-    require_settled(&state).await.unwrap();
+    std::fs::create_dir(workspace::data_root(&state)).unwrap();
+    let expected = json!({"phase": "complete", "uuid": crate::config::id()});
+    std::fs::write(&record, serde_json::to_vec(&expected).unwrap()).unwrap();
+    assert!(require_settled(&state).await.unwrap_err().is_conflict());
     let receipt: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
-    assert_eq!(
-        receipt,
-        json!({"phase": "complete", "uuid": "new-pool", "activated": true})
-    );
+    assert_eq!(receipt, expected);
+}
+
+#[test]
+fn retirement_receipts_outlive_an_unlinked_workload() {
+    let state = tempfile::tempdir().unwrap();
+    let run = crate::config::id();
+    let root = workspace::directory(state.path(), &run).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join(RETIREMENT), b"preserved retirement receipt").unwrap();
+    assert_eq!(orphaned_controls(state.path()).unwrap().len(), 1);
+    std::fs::remove_file(root.join(RETIREMENT)).unwrap();
+    assert!(orphaned_controls(state.path()).unwrap().is_empty());
+}
+
+#[test]
+fn base_initialization_pin_must_settle_even_before_allocating_a_workload() {
+    let state = tempfile::tempdir().unwrap();
+    let run = crate::config::id();
+    let attempt = crate::config::id();
+    let directory = crate::storage::environment::directory(state.path(), &run).unwrap();
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join(format!(
+            "native-base-initializing-v1.{}.{attempt}.pin",
+            "a".repeat(64)
+        )),
+        b"",
+    )
+    .unwrap();
+    assert_eq!(unfinished_bases(state.path()).unwrap().len(), 1);
+    std::fs::write(directory.join("directory.json"), b"{}").unwrap();
+    assert!(unfinished_bases(state.path()).unwrap().is_empty());
 }
 
 use std::{collections::BTreeMap, io::Write};
@@ -379,6 +409,18 @@ async fn kernel_pool_migration_qualification() {
         "rolled-back" => verify(&state, "ext4"),
         "exercise" => {
             verify(&state, "xfs");
+            require_settled(&state).await.unwrap();
+            let receipt: Value = serde_json::from_slice(
+                &std::fs::read(
+                    state
+                        .parent()
+                        .unwrap()
+                        .join("native-pool-migration/state.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(receipt["activated"], true);
             exercise(&state).await;
         }
         phase => panic!("unsupported migration fixture phase {phase}"),

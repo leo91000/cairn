@@ -690,9 +690,14 @@ async fn check_copy_headroom(
         };
         let (total, free) = storage::policy::physical_space(&workspace::data_root(&state))?;
         let pending = storage::cache::pending_write_bytes();
+        // Other preparations may allocate before this copy's next sample.
+        // Their reservations count against physical headroom as well as the
+        // logical node budget, even when their bytes are not yet materialized.
+        let others = super::disk::preparation_bytes(&state)?.saturating_sub(reserved);
         let physical = free
             .saturating_sub(policy.reserve(total))
-            .saturating_sub(pending);
+            .saturating_sub(pending)
+            .saturating_sub(others);
         let shared = match std::fs::read(state.join(crate::microvm::budget::FILE)) {
             Ok(bytes) => {
                 let budget = super::native_budget(&serde_json::from_slice(&bytes)?)?;
@@ -1327,6 +1332,31 @@ fn observe(volume: std::sync::Weak<Volume>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shared_copy_headroom_honors_a_peer_reservation_before_bytes_arrive() {
+        let state = tempfile::tempdir().unwrap();
+        let pool = workspace::data_root(state.path());
+        std::fs::create_dir(&pool).unwrap();
+        let policy = storage::policy::Policy::default();
+        let incoming = 1024 * 1024;
+        check_copy_headroom(state.path(), incoming, &policy, 0)
+            .await
+            .unwrap();
+        let (_, free) = storage::policy::physical_space(&pool).unwrap();
+        let peer =
+            super::super::disk::Preparation::reserve(state.path(), &crate::config::id(), free)
+                .await
+                .unwrap();
+        let error = check_copy_headroom(state.path(), incoming, &policy, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 507);
+        drop(peer);
+        check_copy_headroom(state.path(), incoming, &policy, 0)
+            .await
+            .unwrap();
+    }
     use std::io::Read;
 
     async fn copy_budget(state: &Path, disk_mib: u64) {

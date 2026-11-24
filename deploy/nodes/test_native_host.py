@@ -710,7 +710,7 @@ class PoolMigrationTests(unittest.TestCase):
                 patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), \
                 patch.object(host, 'checked', side_effect=lambda *args, **_: responses[args[0]]):
             old = host.old_pool(host.pool_path())
-        self.assertEqual(dict(OLD, fragment=str(fragment)), old)
+        self.assertEqual(dict(OLD, fragment=str(fragment), unitSha256=host.hashlib.sha256(fragment.read_bytes()).hexdigest()), old)
 
     def test_dry_run_prints_the_plan_without_changing_anything(self):
         tool = Mock(return_value=PLAN)
@@ -764,6 +764,7 @@ class PoolMigrationTests(unittest.TestCase):
         def new_pool(record, old, pool):
             events.append(('mount-new', record['phase']))
         return [patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', side_effect=tool),
+                patch.object(host, 'back_up_unit'),
                 patch.object(host, 'require_stopped'), patch.object(host, 'prepare_target', return_value=mountpoint),
                 patch.object(host, 'copy_environment', side_effect=lambda run, *_: events.append(('copy', run))),
                 patch.object(host, 'checked', side_effect=lambda *args, **_: events.append(args[:1]) or ''),
@@ -819,13 +820,16 @@ class PoolMigrationTests(unittest.TestCase):
 
     def test_rollback_restores_the_original_unit_and_records(self):
         host.migration_directory().mkdir()
+        image = '/var/lib/cairn-native/native-data.xfs'
+        original = b'original ext4 unit\n'
+        old = dict(OLD, unitSha256=host.hashlib.sha256(original).hexdigest())
         host.save_migration(dict(version=1, target=dict(image='/var/lib/cairn-native/native-data.xfs', size=1 << 30),
-                                 phase='complete', old=OLD, uuid='f00d'))
+                                 phase='complete', old=old, uuid='f00d'))
         backup = host.migration_directory() / 'units' / OLD['unit']
         backup.parent.mkdir()
-        backup.write_text('original ext4 unit\n')
+        backup.write_bytes(original)
         (self.units / OLD['unit']).write_text(host.pool_unit(host.pool_path(), 'f00d', 'image'))
-        (self.units / host.LOOP_SERVICE).write_text('loop\n')
+        (self.units / host.LOOP_SERVICE).write_text(host.loop_unit(Path(image), OLD['unit']))
         mounts = iter([None, dict(fstype='xfs', source='/dev/loop1'), None, dict(fstype='ext4', source='/dev/loop0')])
         commands = []
         with patch.object(host, 'require_stopped'), patch.object(host, 'mount_of', side_effect=lambda *_: next(mounts)), \
@@ -843,6 +847,18 @@ class PoolMigrationTests(unittest.TestCase):
                                     ('systemctl', 'start', OLD['unit']), ('pool', 'rollback'), ('pool', 'check')])
         self.assertFalse(host.migration_directory().exists())
         self.assertTrue(any(path.name.startswith('native-pool-migration.rolled-back-') for path in self.root.iterdir()))
+
+    def test_original_mount_unit_backup_cannot_be_reconstructed_from_replacement(self):
+        original = b'ext4 original\n'
+        fragment = self.units / OLD['unit']
+        fragment.write_bytes(original)
+        old = dict(OLD, fragment=str(fragment), unitSha256=host.hashlib.sha256(original).hexdigest())
+        self.assertEqual(original, host.back_up_unit(old))
+        fragment.write_text(host.pool_unit(host.pool_path(), 'f00d', None))
+        self.assertEqual(original, host.back_up_unit(old))
+        (host.migration_directory() / 'units' / OLD['unit']).unlink()
+        with self.assertRaisesRegex(host.MigrationError, 'changed'):
+            host.back_up_unit(old)
 
     def test_migration_refusals_are_printed_for_the_operator(self):
         source = Path(SPEC.origin).read_text()

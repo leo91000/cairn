@@ -123,14 +123,32 @@ async fn retire(state: &Path, spare: &Spare) -> Result<()> {
 }
 
 /// Called only while no background builder can own the index.
-pub(super) async fn discard_unclaimed(state: &Path) -> Result<()> {
+pub(super) async fn discard_unclaimed(state: &Path) -> Result<bool> {
+    let mut removed = false;
     for spare in files(state)? {
         let control = workspace::directory(state, &spare.run)?;
         if !control.join(ADOPTED_BY).exists() {
             retire(state, &spare).await?;
+            removed = true;
         }
     }
-    Ok(())
+    Ok(removed)
+}
+
+fn ready(state: &Path, key: &str) -> Result<Option<Spare>> {
+    for spare in files(state)?.into_iter().filter(|spare| spare.key == key) {
+        let source = workspace::directory(state, &spare.run)?;
+        if !source.join(ADOPTED_BY).exists()
+            && std::fs::read_to_string(source.join("spare-ready")).is_ok_and(|ready| ready == key)
+        {
+            return Ok(Some(spare));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn has_ready(state: &Path, key: &str) -> Result<bool> {
+    Ok(ready(state, key)?.is_some())
 }
 
 pub(super) async fn warm(
@@ -210,19 +228,7 @@ pub(super) async fn claim(state: &Path, run: &str, key: &str) -> Result<bool> {
         Some(_) => return Err(Error::conflict("Prepared native claim changed its base.")),
         None if workload.try_exists()? => return Ok(false),
         None => {
-            let mut selected = None;
-            for spare in files(state)?.into_iter().filter(|spare| spare.key == key) {
-                let source = workspace::directory(state, &spare.run)?;
-                if !source.join(ADOPTED_BY).exists()
-                    && tokio::fs::read_to_string(source.join("spare-ready"))
-                        .await
-                        .is_ok_and(|ready| ready == key)
-                {
-                    selected = Some(spare);
-                    break;
-                }
-            }
-            let Some(spare) = selected else {
+            let Some(spare) = ready(state, key)? else {
                 return Ok(false);
             };
             let claim = Claim::prepare(state, spare)?;
