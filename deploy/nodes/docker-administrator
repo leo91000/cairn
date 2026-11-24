@@ -33,7 +33,9 @@ case "$docker_command" in
     esac
     ;;
 esac
-sudo -n /run/cairn-entrypoint/cairn native-administrator-docker >>/tmp/cairn-docker-supervisor.log 2>&1 &
+if ! test -d /run/cairn-docker/activate; then
+  sudo -n /run/cairn-entrypoint/cairn native-administrator-docker >>/tmp/cairn-docker-supervisor.log 2>&1 &
+fi
 cgroup_parent=$(/run/cairn-entrypoint/cairn native-administrator-docker-ready)
 export DOCKER_HOST=unix:///run/cairn-docker/docker.sock
 case "$docker_command" in

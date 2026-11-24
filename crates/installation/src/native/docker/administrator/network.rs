@@ -302,10 +302,6 @@ pub(super) async fn start(pid: u32) -> Result<Child> {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/cairn-slirp.log")?;
         // Administrator host authority includes loopback. Disabling it in
         // slirp also blocks UDP publication replies to local clients.
         let mut command = Command::new("/opt/cairn-docker/bin/slirp4netns");
@@ -322,8 +318,8 @@ pub(super) async fn start(pid: u32) -> Result<Child> {
             .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::from(log))
             .kill_on_drop(true);
+        super::redirect_log(&mut command, Path::new("/tmp/cairn-slirp.log"), false);
         // Slirp's sandbox makes only / private, then detaches the old tree.
         // Shared submounts must become slaves before that recursive teardown,
         // otherwise it can propagate their removal back to the supervisor.

@@ -361,6 +361,11 @@ async fn environment_entry(stop: CancellationToken) -> Result<i32> {
         return Err(Error::internal(std::io::Error::last_os_error()));
     }
     let plan: Value = serde_json::from_slice(&tokio::fs::read("/run/cairn-plan.json").await?)?;
+    let _docker_activation = if plan["nativeMode"]["mode"] == "administrator" {
+        Some(cairn_installation::native::docker::administrator::activate_on_request()?)
+    } else {
+        None
+    };
     let launch = provider_launch(&plan).await?;
     let remaining = plan["expires"].as_i64().map_or(86_400_000, |expiry| {
         expiry

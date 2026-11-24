@@ -67,7 +67,10 @@ without deleting their files or preventing healthy records from loading. Bundled
 Buildx are registered in the client's plugin directory. Explicitly starting a saved container remains possible;
 starting dockerd alone never starts a saved service. An uncertain startup is not
 retried in the same attempt. The daemon and plugin supervisor inherit the workload
-cgroup and cannot retain its client stdout/stderr pipes.
+cgroup and cannot retain its client stdout/stderr pipes. In a managed background
+environment, the wrapper requests this same lazy start through an attempt-local
+socket. The environment starts the supervisor outside individual provider and
+job process trees, while the attempt's service still owns the entire cgroup.
 
 Rootful metadata lives in `docker-administrator` next to the protected `docker`
 store on the conversation's filesystem. They have different UID mapping and

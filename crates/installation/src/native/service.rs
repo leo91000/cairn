@@ -1587,6 +1587,13 @@ impl Controller {
             }
         }
         if administrator {
+            if plan["environmentProtocol"] == 1 {
+                let activation = runtime
+                    .join("runtime")
+                    .join(super::docker::administrator::ACTIVATION_DIRECTORY);
+                private_dir(&activation).await?;
+                std::os::unix::fs::lchown(&activation, Some(identity.uid()), Some(identity.gid()))?;
+            }
             atomic_write(&runtime.join("runtime/daemon.json"), b"{}").await?;
             let wrapper = runtime.join("docker");
             atomic_write(&wrapper, super::docker::administrator::WRAPPER.as_bytes()).await?;

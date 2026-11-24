@@ -10,11 +10,13 @@ WRAPPER = Path(__file__).resolve().parents[2] / "deploy/nodes/docker-administrat
 
 
 class AdministratorWrapperTests(unittest.TestCase):
-    def invoke(self, args):
+    def invoke(self, args, managed=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for directory in ["bin", "tools/bin", "tools/plugins", "entry", "home", "config"]:
                 (root / directory).mkdir(parents=True)
+            if managed:
+                (root / "activate").mkdir()
             docker = root / "tools/bin/docker"
             docker.write_text(
                 """#!/usr/bin/python3
@@ -30,7 +32,11 @@ with Path(os.environ['FIXTURE_CALLS']).open('a') as output:
                 """#!/bin/sh
 case "$1" in
   native-administrator-docker-ready)
-    while ! test -e "$FIXTURE_STARTED"; do sleep 0.01; done
+    if test -d "$FIXTURE_ACTIVATION"; then
+      test ! -e "$FIXTURE_STARTED" || exit 1
+    else
+      while ! test -e "$FIXTURE_STARTED"; do sleep 0.01; done
+    fi
     echo /fixture.service ;;
   *) touch "$FIXTURE_STARTED" ;;
 esac
@@ -46,6 +52,7 @@ esac
                 .replace("/run/cairn-entrypoint", str(root / "entry"))
                 .replace("/home/node", str(root / "home"))
                 .replace("/tmp/cairn-docker-supervisor.log", str(root / "supervisor.log"))
+                .replace("/run/cairn-docker/activate", str(root / "activate"))
             )
             wrapper = root / "docker"
             wrapper.write_text(source)
@@ -57,6 +64,7 @@ esac
                 HOME=str(root / "home"),
                 FIXTURE_CALLS=str(root / "calls"),
                 FIXTURE_STARTED=str(root / "started"),
+                FIXTURE_ACTIVATION=str(root / "activate"),
             )
             result = subprocess.run(
                 ["/bin/sh", str(wrapper), *args],
@@ -73,6 +81,11 @@ esac
                 root / "tools/plugins/docker-compose",
             )
             return calls, (root / "started").exists()
+
+    def test_managed_turn_leaves_supervisor_start_to_the_environment(self):
+        calls, started = self.invoke(["info"], managed=True)
+        self.assertFalse(started)
+        self.assertEqual(calls[0]["args"], ["info"])
 
     def test_builds_with_global_options_and_aliases_use_current_attempt_builder(self):
         for args in [

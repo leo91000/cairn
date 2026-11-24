@@ -5,14 +5,106 @@ use crate::{
     validation::text,
 };
 use serde_json::{Value, json};
-use std::{path::Path, process::Stdio, time::Duration};
-use tokio::process::Command;
+use std::{
+    fs::{File, OpenOptions},
+    io,
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
+use tokio::{
+    net::{UnixListener, UnixStream},
+    process::Command,
+};
+use tokio_util::task::AbortOnDropHandle;
 
 mod network;
 
 pub use network::daemon;
 
 pub(crate) const WRAPPER: &str = include_str!("../../../../../deploy/nodes/docker-administrator");
+pub(crate) const ACTIVATION_DIRECTORY: &str = "activate";
+
+fn activation_socket() -> PathBuf {
+    Path::new(super::RUNTIME)
+        .join(ACTIVATION_DIRECTORY)
+        .join("docker.sock")
+}
+
+pub fn activate_on_request() -> Result<AbortOnDropHandle<()>> {
+    let listener = UnixListener::bind(activation_socket())?;
+    Ok(AbortOnDropHandle::new(tokio::spawn(async move {
+        if let Err(error) = serve_activation(listener).await {
+            tracing::warn!(%error, "Managed administrator Docker supervisor unavailable");
+        }
+    })))
+}
+
+fn open_log(path: &Path) -> io::Result<File> {
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_NOCTTY)
+        .open(path)?;
+    if !log.metadata()?.is_file() {
+        return Err(io::Error::other("Docker log must be a regular file"));
+    }
+    Ok(log)
+}
+
+fn redirect_log(command: &mut Command, path: &Path, include_stdout: bool) {
+    let stderr = open_log(path).and_then(|log| {
+        if include_stdout {
+            command.stdout(log.try_clone()?);
+        }
+        Ok(log)
+    });
+    match stderr {
+        Ok(log) => {
+            command.stderr(log);
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "Could not open administrator Docker log");
+            if include_stdout {
+                command.stdout(Stdio::null());
+            }
+            command.stderr(Stdio::null());
+        }
+    }
+}
+
+async fn serve_activation(listener: UnixListener) -> Result<()> {
+    // The controller creates this private directory for the attempt's UID.
+    // The connection requests only the fixed command in these namespaces.
+    drop(listener.accept().await?);
+    let mut command = Command::new("/usr/bin/sudo");
+    command
+        .args([
+            "-n",
+            "/run/cairn-entrypoint/cairn",
+            "native-administrator-docker",
+        ])
+        .stdin(Stdio::null());
+    redirect_log(
+        &mut command,
+        Path::new("/tmp/cairn-docker-supervisor.log"),
+        true,
+    );
+    let mut child = command.spawn()?;
+    // The one supervisor belongs to the environment. Systemd's existing stop
+    // path can still reach the daemon when the environment process exits.
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => drop(accepted?),
+            status = child.wait() => {
+                return Err(Error::unavailable(format!(
+                    "Managed administrator Docker supervisor exited ({}).", status?
+                )));
+            }
+        }
+    }
+}
 
 /// Accept only this attempt's service (or its delegated runner subgroup), never
 /// an unrelated system service, a reused PID, or an agent-supplied parent.
@@ -176,12 +268,9 @@ pub async fn ensure(stop: tokio_util::sync::CancellationToken) -> Result<()> {
             .with_graceful_shutdown(plugin_stop.cancelled_owned())
             .await;
     });
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/cairn-dockerd.log")?;
     tokio::fs::write(runtime.join("resolv.conf"), b"nameserver 10.0.2.3\n").await?;
-    let mut daemon = Command::new(std::env::current_exe()?)
+    let mut daemon = Command::new(std::env::current_exe()?);
+    daemon
         .arg("native-administrator-daemon")
         .args([
             "--host=unix:///run/cairn-docker/docker.sock",
@@ -208,10 +297,9 @@ pub async fn ensure(stop: tokio_util::sync::CancellationToken) -> Result<()> {
             "/opt/cairn-docker/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         )
         .env("HOME", super::RUNTIME)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log))
-        .spawn()?;
+        .stdin(Stdio::null());
+    redirect_log(&mut daemon, Path::new("/tmp/cairn-dockerd.log"), true);
+    let mut daemon = daemon.spawn()?;
     let mut network = network::start(
         daemon
             .id()
@@ -264,6 +352,9 @@ pub async fn ready() -> Result<String> {
         &tokio::fs::read_to_string("/proc/self/cgroup").await?,
         text(&plan, "id"),
     )?;
+    if plan["environmentProtocol"] == 1 {
+        drop(UnixStream::connect(activation_socket()).await?);
+    }
     let client = crate::native::controller_client(Path::new(super::SOCKET))?;
     tokio::time::timeout(Duration::from_secs(35), async {
         loop {
@@ -368,6 +459,23 @@ async fn authorize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_log_requires_a_regular_file_without_following_links() {
+        let runtime = tempfile::tempdir().unwrap();
+        let log = runtime.path().join("log");
+        assert!(open_log(&log).is_ok());
+
+        let link = runtime.path().join("link");
+        std::os::unix::fs::symlink(&log, &link).unwrap();
+        assert!(open_log(&link).is_err());
+
+        let pipe = runtime.path().join("pipe");
+        let name = std::ffi::CString::new(pipe.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let error = open_log(&pipe).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENXIO));
+    }
 
     #[test]
     fn administrator_docker_cannot_default_to_a_host_scope() {
