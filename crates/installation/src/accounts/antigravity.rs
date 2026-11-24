@@ -143,7 +143,7 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
 
 /// What a run or the manager's catalog uses: a Google account's current access token
 /// without its refresh token, or the saved API key or Google Cloud credentials.
-pub(crate) async fn credentials(s: &Service, id: &str) -> Result<Value> {
+async fn credentials(s: &Service, id: &str) -> Result<Value> {
     let mut credential = stored_credentials(s, id).await?;
     if credential["kind"] != GOOGLE {
         return Ok(credential);
@@ -157,22 +157,33 @@ pub(crate) async fn credentials(s: &Service, id: &str) -> Result<Value> {
     Ok(credential)
 }
 
-/// Checks a currently eligible catalog account and records a definitive credential
-/// rejection under the same lock as account settings, admission and sign-in.
-pub(crate) async fn catalog_credentials(s: &Service, id: &str) -> Result<Option<Value>> {
-    let _guard = s.accounts.lock(id).await;
-    let Some(mut account) = s.accounts.find(s, id).await?.filter(Account::is_active) else {
-        return Ok(None);
-    };
+/// The catalog and broker hold the account lock while checking credentials and
+/// recording a definitive rejection.
+async fn credentials_with_status(s: &Service, id: &str) -> Result<Value> {
     let result = credentials(s, id).await;
     if let Err(error) = &result
         && error.code.as_deref() == Some(RECONNECT_REQUIRED)
+        && let Some(mut account) = s.accounts.find(s, id).await?
+        && (account.state != AccountState::Error || account.error != error.message)
     {
         account.state = AccountState::Error;
         account.error.clone_from(&error.message);
         super::save(s, &account).await?;
     }
-    result.map(Some)
+    result
+}
+
+pub(crate) async fn catalog_credentials(s: &Service, id: &str) -> Result<Option<Value>> {
+    let _guard = s.accounts.lock(id).await;
+    if !s
+        .accounts
+        .find(s, id)
+        .await?
+        .is_some_and(|account| account.is_active())
+    {
+        return Ok(None);
+    }
+    credentials_with_status(s, id).await.map(Some)
 }
 
 /// Reads the token `agy` saved after signing in within `home`.
@@ -604,7 +615,7 @@ impl Driver for Antigravity {
         lease: &Lease,
         _request: &broker::Request,
     ) -> Result<Value> {
-        credentials(s, &lease.account_id).await
+        credentials_with_status(s, &lease.account_id).await
     }
 
     async fn redactions(&self, s: &Service, id: &str) -> Result<Vec<String>> {

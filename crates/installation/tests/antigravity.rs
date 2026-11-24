@@ -1142,6 +1142,38 @@ async fn sign_in_google(s: &Arc<Service>) -> String {
 }
 
 #[tokio::test]
+async fn broker_rejection_marks_the_account_unavailable_with_a_warm_catalog() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let id = sign_in_google(&s).await;
+    let lease = s
+        .accounts
+        .acquire(&s, RUN, Provider::Antigravity, "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.account_id, id);
+    let before = s.antigravity.models(&s).await.unwrap();
+    assert!(!before["models"].as_array().unwrap().is_empty());
+
+    let secret = format!("antigravity-account:{id}");
+    let mut expired = s.vault.get(&secret).await.unwrap().unwrap();
+    expired["token"]["token"]["expiry"] = "2000-01-01T00:00:00Z".into();
+    expired["token"]["token"]["refresh_token"] = "".into();
+    s.vault.set(&secret, &expired).await.unwrap();
+
+    let error = s.accounts.access(&s, &lease, &json!({})).await.unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("Reconnect this Antigravity Google account")
+    );
+    assert!(!s.accounts.account(&s, &id).await.unwrap().is_active());
+    let after = s.antigravity.models(&s).await.unwrap();
+    assert!(after["models"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn reconnecting_google_refreshes_a_partial_catalog_immediately() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

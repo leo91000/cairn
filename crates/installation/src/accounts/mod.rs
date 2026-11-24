@@ -693,6 +693,13 @@ impl Accounts {
 
     /// Answers a run's broker request.
     pub async fn access(&self, s: &Service, lease: &Lease, request: &Value) -> Result<Value> {
+        // Antigravity can update account status when Google rejects the refresh grant.
+        // Check the lease and record that result under the normal account lock.
+        let _guard = if lease.provider == Provider::Antigravity {
+            Some(self.lock(&lease.account_id).await)
+        } else {
+            None
+        };
         let request = broker::Request::deserialize(request).unwrap_or_default();
         let ended = self
             .lease(s, &lease.run_id)
