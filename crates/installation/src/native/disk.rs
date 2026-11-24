@@ -3,7 +3,7 @@
 use crate::error::{Error, Result};
 use std::{
     io::Write,
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -265,11 +265,23 @@ struct PreparationRecord {
 #[derive(serde::Deserialize, serde::Serialize)]
 struct StagingReceipt {
     path: PathBuf,
-    device: u64,
+    filesystem: Vec<u8>,
     inode: u64,
 }
 
 impl StagingReceipt {
+    fn open(&self) -> std::io::Result<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&self.path)
+    }
+
+    fn owns(&self, file: &std::fs::File) -> Result<bool> {
+        Ok(file.metadata()?.ino() == self.inode
+            && crate::storage::policy::filesystem_id(file)? == self.filesystem)
+    }
+
     fn validate_location(&self, parent: &Path) -> Result<()> {
         if self.path.parent() != Some(parent)
             || !self
@@ -285,16 +297,12 @@ impl StagingReceipt {
 
     fn remove(&self, parent: &Path) -> Result<()> {
         self.validate_location(parent)?;
-        let metadata = match std::fs::symlink_metadata(&self.path) {
-            Ok(metadata) => metadata,
+        let file = match self.open() {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         };
-        if !metadata.is_dir()
-            || metadata.dev() != self.device
-            || metadata.ino() != self.inode
-            || std::fs::canonicalize(parent)? != parent
-        {
+        if !self.owns(&file)? || std::fs::canonicalize(parent)? != parent {
             return Err(Error::conflict(
                 "The native staging tree no longer belongs to its reservation.",
             ));
@@ -380,14 +388,14 @@ impl Preparation {
         data: &Path,
         staging: &Path,
     ) -> Result<Self> {
-        let metadata = std::fs::symlink_metadata(staging)?;
-        if !metadata.is_dir() {
-            return Err(Error::bad("Invalid native staging reservation path."));
-        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(staging)?;
         let receipt = StagingReceipt {
             path: staging.to_owned(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            filesystem: crate::storage::policy::filesystem_id(&file)?,
+            inode: file.metadata()?.ino(),
         };
         receipt.validate_location(&data.join("runs"))?;
         Self::reserve_target(state, attempt, bytes, data, Some(receipt)).await
@@ -497,11 +505,11 @@ pub(super) fn reconciled_physical_preparations(
             continue;
         };
         let remaining = if let Some(staged) = record.staging {
-            let owned = std::fs::symlink_metadata(&staged.path).is_ok_and(|metadata| {
-                metadata.is_dir()
-                    && metadata.dev() == staged.device
-                    && metadata.ino() == staged.inode
-            });
+            let owned = match staged.open() {
+                Ok(file) => staged.owns(&file)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.into()),
+            };
             if owned {
                 claim.remaining.min(
                     record
@@ -770,7 +778,10 @@ mod tests {
                 physical: None,
                 staging: Some(StagingReceipt {
                     path: temp.clone(),
-                    device: metadata.dev(),
+                    filesystem: crate::storage::policy::filesystem_id(
+                        &std::fs::File::open(&temp).unwrap(),
+                    )
+                    .unwrap(),
                     inode: metadata.ino(),
                 }),
             };

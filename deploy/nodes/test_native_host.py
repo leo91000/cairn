@@ -1027,14 +1027,18 @@ class PoolMigrationTests(unittest.TestCase):
         image = self.root / 'new.xfs'
         size = 64 * 1024
         record = dict(phase='planned', target={'image': str(image), 'size': size})
-        with patch.object(host.os, 'link', side_effect=host.MigrationError('interrupted before publication')), \
+        def allocated(descriptor, length):
+            return min(os.fstat(descriptor).st_blocks * 512, length)
+        with patch.object(host, 'image_allocation', side_effect=allocated), \
+                patch.object(host.os, 'link', side_effect=host.MigrationError('interrupted before publication')), \
                 self.assertRaisesRegex(host.MigrationError, 'before publication'):
             host.prepare_image(record, image, False)
         self.assertFalse(image.exists())
         saved = host.load_migration()
         staged = image.with_name(saved['createdImage']['name'])
         self.assertTrue(staged.is_file())
-        host.prepare_image(saved, image, False)
+        with patch.object(host, 'image_allocation', side_effect=allocated):
+            host.prepare_image(saved, image, False)
         self.assertEqual(image.stat().st_ino, saved['createdImage']['inode'])
         self.assertEqual(image.stat().st_size, size)
         self.assertGreaterEqual(image.stat().st_blocks * 512, size)
@@ -1054,9 +1058,11 @@ class PoolMigrationTests(unittest.TestCase):
         staged = self.root / '.cairn-native-xfs-resume'
         staged.write_bytes(b'x' * 4096)
         metadata = staged.stat()
-        record['createdImage'] = dict(name=staged.name, device=metadata.st_dev, inode=metadata.st_ino)
+        with staged.open('rb') as backing:
+            record['createdImage'] = dict(name=staged.name, **host.image_identity(backing.fileno()))
         remaining = size - metadata.st_blocks * 512
-        with patch.object(host.os, 'statvfs', return_value=Mock(f_bavail=remaining, f_frsize=1)), \
+        with patch.object(host, 'image_allocation', return_value=metadata.st_blocks * 512), \
+                patch.object(host.os, 'statvfs', return_value=Mock(f_bavail=remaining, f_frsize=1)), \
                 patch.object(host.os, 'posix_fallocate') as allocate, \
                 self.assertRaisesRegex(host.MigrationError, 'controller recovery receipts'):
             host.prepare_image(record, image, False)
@@ -1086,7 +1092,8 @@ class PoolMigrationTests(unittest.TestCase):
             self.assertEqual(host.load_migration()['createdImage'], record['createdImage'])
             raise OSError('interrupted allocation')
 
-        with patch.object(host.os, 'posix_fallocate', side_effect=interrupted), self.assertRaisesRegex(OSError, 'interrupted allocation'):
+        with patch.object(host, 'image_allocation', return_value=0), \
+                patch.object(host.os, 'posix_fallocate', side_effect=interrupted), self.assertRaisesRegex(OSError, 'interrupted allocation'):
             host.prepare_image(record, image, False)
 
         staged = host.staged_image_path(image, record['createdImage'])
@@ -1120,12 +1127,64 @@ class PoolMigrationTests(unittest.TestCase):
 
     def test_buffered_image_is_refused_before_formatting(self):
         image = self.root / 'buffered.img'
+        image.touch()
+        device = self.root / 'synthetic-loop'
+        device.touch()
+        with image.open('rb') as file:
+            identity = host.image_identity(file.fileno())
         record = dict(phase='planned', old=OLD, target={'image': str(image)}, uuid='f00d')
-        with patch.object(host, 'prepare_image'), patch.object(host, 'owned_loop', return_value=Path('/dev/loop0')), \
-                patch.object(host, 'checked', return_value='0') as commands, \
+        metadata = image.stat()
+        backing = f'{os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)}'
+        with patch.object(host, 'prepare_image', return_value=identity), patch.object(host, 'owned_loop', return_value=device), \
+                patch.object(host, 'checked', return_value=f'{metadata.st_ino} {backing} 0') as commands, \
                 self.assertRaisesRegex(host.MigrationError, 'does not support direct I/O'):
             host.prepare_target(record, False)
-        commands.assert_called_once_with('losetup', '--noheadings', '--output', 'DIO', '/dev/loop0')
+        commands.assert_called_once_with('losetup', '--noheadings', '--output', 'BACK-INO,BACK-MAJ:MIN,DIO', str(device))
+
+    def test_replaced_loop_backing_is_rejected_before_formatting(self):
+        image = self.root / 'image.xfs'
+        image.touch()
+        device = self.root / 'synthetic-loop'
+        device.touch()
+        with image.open('rb') as file:
+            identity = host.image_identity(file.fileno())
+        record = dict(phase='planned', target={'image': str(image)})
+        with patch.object(host, 'prepare_image', return_value=identity), patch.object(host, 'owned_loop', return_value=device), \
+                patch.object(host, 'checked', return_value='0 1:1 1') as commands, \
+                self.assertRaisesRegex(host.MigrationError, 'does not bind the verified pool inode'):
+            host.prepare_target(record, False)
+        self.assertEqual(commands.call_count, 1)
+        self.assertEqual(commands.call_args.args[0], 'losetup')
+
+    def test_image_allocation_counts_only_private_extents_in_the_loop_range(self):
+        size = 8192
+
+        def allocation(logical, flags):
+            def reply(_descriptor, request, buffer):
+                self.assertEqual(request, host.GET_FILE_EXTENTS)
+                host.EXTENT_HEADER.pack_into(buffer, 0, 0, size, 1, 1, 64, 0)
+                host.FILE_EXTENT.pack_into(buffer, host.EXTENT_HEADER.size, logical, 4096, size, 0, 0, flags, 0, 0, 0)
+            return reply
+
+        with patch.object(host.fcntl, 'ioctl', side_effect=allocation(size, 0x0801)):
+            self.assertEqual(host.image_allocation(3, size), 0)
+        with patch.object(host.fcntl, 'ioctl', side_effect=allocation(4096, 0x0801)):
+            self.assertEqual(host.image_allocation(3, size), 4096)
+        with patch.object(host.fcntl, 'ioctl', side_effect=allocation(0, 0x2001)), \
+                self.assertRaisesRegex(host.MigrationError, 'shared or unverified'):
+            host.image_allocation(3, size)
+
+    def test_failed_target_image_may_disappear_before_early_rollback(self):
+        image = self.root / 'missing.xfs'
+        host.save_migration(dict(phase='formatted', old=OLD, target={'image': str(image)}, uuid='f00d',
+                                 imageLoop={'loop': '/dev/loop1', 'filesystem': 42, 'inode': 43}))
+        mounted = dict(fstype='ext4', source='/dev/original')
+        with patch.object(host, 'mount_of', side_effect=[None, mounted, mounted]), \
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), \
+                patch.object(host, 'checked') as commands, contextlib.redirect_stdout(io.StringIO()):
+            host.rollback_pool(pool_arguments())
+        commands.assert_not_called()
+        self.assertIsNone(host.load_migration())
 
     def test_planned_device_can_repeat_mkfs_using_only_its_recorded_signature(self):
         device = self.root / 'synthetic-device'

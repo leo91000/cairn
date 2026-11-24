@@ -420,7 +420,23 @@ pub(super) async fn lock_live_staging(
         .and_then(|part| part.as_os_str().to_str())
         .ok_or_else(|| Error::bad("Missing native staging conversation."))?;
     let state = crate::native::state_dir();
-    let owner = crate::native::disk::lock_staging(&state, run).await?;
+    // Connector writers can queue here before taking the node-wide gate.
+    // Retirement holds that gate and must keep using its nonblocking check.
+    let owner = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+        loop {
+            match crate::native::disk::lock_staging(&state, run).await {
+                Ok(owner) => return Ok(owner),
+                Err(error) if error.is_conflict() => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        Error::unavailable("Native staging ownership did not finish before its deadline.")
+    })??;
     for terminal in ["stopped", "exit"] {
         if state.join(format!("{attempt}.{terminal}")).try_exists()? {
             return Err(Error::conflict(

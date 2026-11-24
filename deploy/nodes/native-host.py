@@ -5,6 +5,7 @@ The manager's HTTPS origin authenticates the release manifest. Exact binary and
 tool digests authenticate its payloads. Credentials never enter command arguments.
 """
 import ctypes
+from contextlib import ExitStack
 import getpass
 import fcntl
 import grp
@@ -862,6 +863,10 @@ OFFLINE_LOCK_FDS = ()
 CONTROLLER_RECEIPT_RESERVE = 64 * 1024 ** 2
 MOUNT_RESTRICTIONS = ('nosuid', 'nodev', 'noexec', 'nosymfollow')
 GET_INODE_FLAGS = 0x80086601  # FS_IOC_GETFLAGS on the supported Linux x86-64 host.
+GET_FILE_EXTENTS = 0xc020660b  # FS_IOC_FIEMAP
+EXTENT_HEADER = struct.Struct('=QQIIII')
+FILE_EXTENT = struct.Struct('=QQQQQIIII')
+EXTENT_PRIVATE_FLAGS = 0x0001 | 0x0800 | 0x1000  # LAST, UNWRITTEN, MERGED
 EXT4_LAYOUT_FLAGS = 0x00001000 | 0x00040000 | 0x00080000 | 0x00200000 | 0x00400000 | 0x10000000
 PROJECT_INHERIT_FLAG = 0x20000000
 
@@ -883,13 +888,13 @@ def require_migration_running():
         raise MigrationError('Pool migration interrupted. Rerun the command to resume the current phase.')
 
 
-def offline_command(args, timeout, env=None):
+def offline_command(args, timeout, env=None, descriptors=()):
     require_migration_running()
     deadline = None if timeout is None else time.monotonic() + timeout
     # Each offline command inherits the lock's open file description. Even a
     # killed supervisor cannot release the fence while its writer remains live.
     with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          start_new_session=True, env=env, pass_fds=OFFLINE_LOCK_FDS) as child:
+                          start_new_session=True, env=env, pass_fds=OFFLINE_LOCK_FDS + descriptors) as child:
         try:
             while True:
                 require_migration_running()
@@ -914,9 +919,9 @@ def offline_command(args, timeout, env=None):
             raise
 
 
-def checked(*args, timeout=120):
+def checked(*args, timeout=120, descriptors=()):
     try:
-        result = offline_command(args, timeout)
+        result = offline_command(args, timeout, descriptors=descriptors)
         result.check_returncode()
         return result.stdout
     except subprocess.CalledProcessError as error:
@@ -1466,9 +1471,50 @@ def staged_image_path(image, receipt):
     return image.with_name(name)
 
 
-def check_image_inode(metadata, receipt):
-    if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (receipt['device'], receipt['inode']):
+def image_identity(descriptor):
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise MigrationError('A native pool backing file must be a regular file.')
+    return {'filesystem': os.fstatvfs(descriptor).f_fsid, 'inode': metadata.st_ino}
+
+
+def check_image_inode(descriptor, receipt):
+    if image_identity(descriptor) != {key: receipt[key] for key in ('filesystem', 'inode')}:
         raise MigrationError('New pool image does not match the inode created for this migration.')
+
+
+def image_allocation(descriptor, size):
+    """Count private allocation inside the future loop device's byte range."""
+    cursor = 0
+    allocated = 0
+    limit = 64
+    while cursor < size:
+        query = bytearray(EXTENT_HEADER.size + limit * FILE_EXTENT.size)
+        EXTENT_HEADER.pack_into(query, 0, cursor, size - cursor, 1, 0, limit, 0)
+        try:
+            fcntl.ioctl(descriptor, GET_FILE_EXTENTS, query)
+        except OSError as error:
+            raise MigrationError('Cannot verify private allocation for the pool image. Use a supported image filesystem or a block device.') from error
+        mapped = EXTENT_HEADER.unpack_from(query)[3]
+        if mapped > limit:
+            raise MigrationError('Invalid file extent allocation report.')
+        if mapped == 0:
+            break
+        for index in range(mapped):
+            logical, _, length, _, _, flags, *_ = FILE_EXTENT.unpack_from(query, EXTENT_HEADER.size + index * FILE_EXTENT.size)
+            if logical >= size:
+                return allocated
+            end = min(size, logical + length)
+            start = max(cursor, logical)
+            if end <= start:
+                raise MigrationError('Invalid file extent allocation range.')
+            if flags & ~EXTENT_PRIVATE_FLAGS:
+                raise MigrationError('The pool image contains shared or unverified file extents.')
+            allocated += end - start
+            cursor = end
+        if flags & 1:
+            break
+    return allocated
 
 
 def check_image_headroom(record, image, allocated=0):
@@ -1508,55 +1554,64 @@ def check_migration_image(record, image, force, plan=None):
     if published and not created and record['phase'] == 'planned' and not force:
         raise MigrationError(f'{image} already exists; pass --force to reuse and overwrite it.')
     actual = image if published or not created else staged_image_path(image, created)
+    identity = None
     if actual.exists():
-        metadata = actual.stat(follow_symlinks=False)
-        if created:
-            check_image_inode(metadata, created)
-        allocated = metadata.st_blocks * 512
-        if published and (metadata.st_size != size or allocated < size):
+        descriptor = os.open(actual, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        try:
+            metadata = os.fstat(descriptor)
+            identity = image_identity(descriptor)
+            if created:
+                check_image_inode(descriptor, created)
+            if published and metadata.st_size != size:
+                raise MigrationError('An existing target image must be fully allocated at the requested size.')
+            if not published and metadata.st_size > size:
+                raise MigrationError('The recorded staging image exceeds the requested size.')
+            allocated = image_allocation(descriptor, size)
+        finally:
+            os.close(descriptor)
+        if published and allocated < size:
             raise MigrationError('An existing target image must be fully allocated at the requested size.')
-        if not published and metadata.st_size > size:
-            raise MigrationError('The recorded staging image exceeds the requested size.')
     elif created or record['phase'] != 'planned':
         raise MigrationError(f'The image for this migration is missing: {actual}.')
     else:
         allocated = 0
     check_image_headroom(record, image, allocated)
+    return identity
 
 
 def prepare_image(record, image, force):
-    check_migration_image(record, image, force)
+    identity = check_migration_image(record, image, force)
     created = record.get('createdImage')
     if not created:
         if image.exists():
-            return
+            return identity
         # Commit ownership while the staging file is empty, so an interrupted
         # full allocation can always be resumed or released by rollback.
         with tempfile.NamedTemporaryFile(prefix='.cairn-native-xfs-', dir=image.parent, delete=False) as output:
             os.fsync(output.fileno())
-            metadata = os.fstat(output.fileno())
-            created = {'name': Path(output.name).name, 'device': metadata.st_dev, 'inode': metadata.st_ino}
+            created = {'name': Path(output.name).name, **image_identity(output.fileno())}
         sync_directory(image.parent)
         record['createdImage'] = created
         save_migration(record)
 
     staged = staged_image_path(image, created)
     published = image.exists()
-    actual = (image if published else staged).stat(follow_symlinks=False)
-    check_image_inode(actual, created)
     size = record['target']['size']
-    check_image_headroom(record, image, actual.st_blocks * 512)
-    if actual.st_size != size or actual.st_blocks * 512 < size:
-        if published or actual.st_size > size:
-            raise MigrationError('The recorded pool image is no longer fully allocated at the requested size.')
+    if not published:
         descriptor = os.open(staged, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             measured = os.fstat(descriptor)
-            check_image_inode(measured, created)
-            check_image_headroom(record, image, measured.st_blocks * 512)
-            require_migration_running()
-            os.posix_fallocate(descriptor, 0, size)
-            os.fsync(descriptor)
+            check_image_inode(descriptor, created)
+            allocated = image_allocation(descriptor, size)
+            check_image_headroom(record, image, allocated)
+            if measured.st_size != size or allocated < size:
+                if measured.st_size > size:
+                    raise MigrationError('The staging image exceeds the requested size.')
+                require_migration_running()
+                os.posix_fallocate(descriptor, 0, size)
+                os.fsync(descriptor)
+                if image_allocation(descriptor, size) != size:
+                    raise MigrationError('The new pool image is not fully privately allocated.')
         finally:
             os.close(descriptor)
     require_migration_running()
@@ -1564,19 +1619,30 @@ def prepare_image(record, image, force):
         os.link(staged, image, follow_symlinks=False)
         sync_directory(image.parent)
     if staged.exists():
-        metadata = staged.stat(follow_symlinks=False)
-        check_image_inode(metadata, created)
+        descriptor = os.open(staged, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        try:
+            check_image_inode(descriptor, created)
+        finally:
+            os.close(descriptor)
         staged.unlink()
         sync_directory(image.parent)
+    return created
 
 
 def owned_loop(record, image):
     receipt = record.get('imageLoop')
     if receipt is None:
         return None
-    stat_image = image.stat(follow_symlinks=False)
-    if not stat.S_ISREG(stat_image.st_mode) or (stat_image.st_dev, stat_image.st_ino) != (receipt['dev'], receipt['ino']):
-        raise MigrationError('The loop backing file no longer belongs to this pool migration.')
+    try:
+        descriptor = os.open(image, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except FileNotFoundError:
+        if record['phase'] in ('planned', 'formatted'):
+            return None
+        raise
+    try:
+        check_image_inode(descriptor, receipt)
+    finally:
+        os.close(descriptor)
     device = attached_loop(image)
     if device is None:
         return None
@@ -1600,24 +1666,47 @@ def disable_loop_discard(device):
         raise MigrationError(f'Cannot preserve the allocated backing space of {device}.')
 
 
+def prepare_loop(record, force, handles):
+    image = Path(record['target']['image'])
+    identity = prepare_image(record, image, force)
+    if identity is None:
+        raise MigrationError('The pool image changed while preparing it.')
+    image_fd = os.open(image, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    handles.callback(os.close, image_fd)
+    check_image_inode(image_fd, identity)
+    device = owned_loop(record, image)
+    if device is None:
+        if attached_loop(image) is not None:
+            raise MigrationError('The new image is already attached outside the migration.')
+        device = Path(checked('losetup', '--find').strip())
+        record['imageLoop'] = {**image_identity(image_fd), 'loop': str(device)}
+        save_migration(record)
+        checked('losetup', '--direct-io=on', str(device), f'/proc/self/fd/{image_fd}', descriptors=(image_fd,))
+    # Keep a kernel reference during attestation and formatting. A detached
+    # loop cannot be assigned another backing file while this reference lives.
+    device_fd = os.open(device, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+    handles.callback(os.close, device_fd)
+    backing = os.fstat(image_fd)
+    expected_device = f'{os.major(backing.st_dev)}:{os.minor(backing.st_dev)}'
+    actual = checked('losetup', '--noheadings', '--output', 'BACK-INO,BACK-MAJ:MIN,DIO', str(device)).split()
+    if actual[:2] != [str(backing.st_ino), expected_device]:
+        raise MigrationError('The loop device does not bind the verified pool inode.')
+    if actual[2:] != ['1']:
+        raise MigrationError(f'{device} does not support direct I/O for this image. Choose a partition, logical volume or another image filesystem.')
+    disable_loop_discard(device)
+    return device
+
+
 def prepare_target(record, force):
+    with ExitStack() as handles:
+        return prepare_target_with_handles(record, force, handles)
+
+
+def prepare_target_with_handles(record, force, handles):
     target = record['target']
     work = migration_directory()
     if 'image' in target:
-        image = Path(target['image'])
-        prepare_image(record, image, force)
-        device = owned_loop(record, image)
-        if device is None:
-            if attached_loop(image) is not None:
-                raise MigrationError('The new image is already attached outside the migration.')
-            device = Path(checked('losetup', '--find').strip())
-            metadata = image.stat(follow_symlinks=False)
-            record['imageLoop'] = {'dev': metadata.st_dev, 'ino': metadata.st_ino, 'loop': str(device)}
-            save_migration(record)
-            checked('losetup', '--direct-io=on', str(device), str(image))
-        if checked('losetup', '--noheadings', '--output', 'DIO', str(device)).strip() != '1':
-            raise MigrationError(f'{device} does not support direct I/O for this image. Choose a partition, logical volume or another image filesystem.')
-        disable_loop_discard(device)
+        device = prepare_loop(record, force, handles)
     else:
         device = Path(target['device'])
     expected = record['uuid']
@@ -1848,7 +1937,11 @@ def rollback_pool(arguments):
             image_path = Path(image)
             staged = staged_image_path(image_path, record['createdImage'])
             if staged.exists():
-                check_image_inode(staged.stat(follow_symlinks=False), record['createdImage'])
+                descriptor = os.open(staged, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+                try:
+                    check_image_inode(descriptor, record['createdImage'])
+                finally:
+                    os.close(descriptor)
                 staged.unlink()
                 sync_directory(image_path.parent)
         finish_rollback(record)

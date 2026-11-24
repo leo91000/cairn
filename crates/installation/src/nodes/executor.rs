@@ -391,9 +391,15 @@ impl Executor {
                 if self.native {
                     let data = self.data.clone();
                     let attempt = (*attempt).to_owned();
+                    let stop = CancellationToken::new();
+                    let _cancel = stop.clone().drop_guard();
                     tokio::spawn(async move {
-                        let _staging =
-                            super::workspace::lock_live_staging(&data, &home, &attempt).await?;
+                        let _staging = await_preparation(
+                            &stop,
+                            super::workspace::lock_live_staging(&data, &home, &attempt),
+                        )
+                        .await?;
+                        check_preparing(&stop)?;
                         refresh_credential_manifest(&home, &credentials).await
                     })
                     .await
@@ -905,9 +911,14 @@ mod tests {
             let _retirement = crate::native::disk::lock_staging(state, &run)
                 .await
                 .unwrap();
+            reply.notify_one();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut seed)
+                    .await
+                    .is_err()
+            );
             tokio::fs::remove_file(plan).await.unwrap();
         }
-        reply.notify_one();
         let error = tokio::time::timeout(Duration::from_secs(5), seed)
             .await
             .unwrap()
