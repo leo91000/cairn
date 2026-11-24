@@ -701,6 +701,7 @@ abstract class AgentPageCases {
                             path == "/plugins" -> wireJson.encodeToString(pluginCatalog.get())
                             path == "/api/installations" -> beaconInstallationsFixture()
                             path == "/api/account/session" -> beaconAccountFixture("fixture")
+                            path == "/antigravity/models" -> """{"models":[],"connected":false}"""
                             path.endsWith("/models") -> """{"models":[]}"""
                             path.endsWith("/overview") -> installationOverviewFixture()
                             else ->
@@ -764,6 +765,7 @@ abstract class AgentPageCases {
     private fun journey(
         agentId: String,
         prepare: (Fixture) -> Unit = {},
+        navigate: (String) -> Unit = {},
         body: (Fixture) -> Unit,
     ) {
         val fixture = fixture().also(prepare)
@@ -800,7 +802,7 @@ abstract class AgentPageCases {
                                         agentId,
                                         back = { left.set(true) },
                                         chat = {},
-                                        navigate = {},
+                                        navigate = navigate,
                                     )
                             }
                         }
@@ -820,6 +822,32 @@ abstract class AgentPageCases {
     private fun open(section: AgentSection) {
         compose.onNodeWithTag("agent-section-${section.name}").performScrollTo().performClick()
         compose.waitForIdle()
+    }
+
+    @Test
+    fun returningToADisconnectedEngineRestoresItsSavedModel() {
+        val disconnected = release.copy(provider = "antigravity", model = "gemini-saved")
+        val route = AtomicReference<String>()
+        journey(
+            release.id,
+            prepare = { it.agents.set(listOf(main, disconnected)) },
+            navigate = route::set,
+        ) {
+            open(AgentSection.Engine)
+            compose.onNodeWithTag("model-picker").performScrollTo().performClick()
+            compose.onNode(hasText("Codex") and hasClickAction()).performScrollTo().performClick()
+            compose
+                .onNode(hasText("Antigravity") and hasClickAction())
+                .performScrollTo()
+                .performClick()
+            compose
+                .onNode(
+                    hasText("gemini-saved") and hasAnyAncestor(hasTestTag("model-settings-sheet"))
+                )
+                .assertExists()
+            compose.onNodeWithText("Ouvrir les connexions").performScrollTo().performClick()
+            assertEquals("connections", route.get())
+        }
     }
 
     private fun back() {

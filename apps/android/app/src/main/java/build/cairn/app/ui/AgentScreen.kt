@@ -689,6 +689,7 @@ private fun AgentPage(
                             draft.agent,
                             ::update,
                             !creating && !dirty,
+                            saved = baseline.takeUnless { creating },
                             openConnections = { navigate("connections") },
                         ) {
                             navigate(
@@ -2236,6 +2237,7 @@ private fun EngineSection(
     agent: Agent,
     update: ((Agent) -> Agent) -> Unit,
     configurationEnabled: Boolean,
+    saved: Agent?,
     openConnections: () -> Unit,
     configuration: () -> Unit,
 ) {
@@ -2251,13 +2253,21 @@ private fun EngineSection(
         refresh = { vm.refreshModels(agent.provider) },
         provider = agent.provider,
         changeProvider = { provider ->
-            update { it.copy(provider = provider, model = "", reasoning = "", speed = "") }
+            val previous = saved?.takeIf { it.provider == provider }
+            update {
+                it.copy(
+                    provider = provider,
+                    model = previous?.model.orEmpty(),
+                    reasoning = previous?.reasoning.orEmpty(),
+                    speed = previous?.speed.orEmpty(),
+                )
+            }
         },
         field = true,
         speed = agent.speed,
         changeSpeed = { speed -> update { it.copy(speed = speed) } },
         catalogs = state.modelCatalogs,
-        savedProvider = state.agents.find { it.id == agent.id }?.provider,
+        savedProvider = saved?.provider,
         refreshCatalog = { vm.refreshModels(it) },
         // Connections is pushed on the navigation stack, so Back restores the saved draft.
         openConnections = openConnections,

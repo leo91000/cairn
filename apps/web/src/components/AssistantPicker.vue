@@ -51,8 +51,13 @@ const props = withDefaults(defineProps<{
   defaultReasoning?: string
   defaultSpeed?: string
   defaultSource?: 'agent' | 'conversation'
-  /** The conversation's or saved agent's coding agent, offered even without an account. */
-  savedProvider?: Provider
+  /** Retain the saved coding agent, and restore explicit settings when supplied by the editor. */
+  savedAssistant?: {
+    provider: Provider
+    model?: string
+    reasoning?: string
+    speed?: string
+  }
   disabled?: boolean
   switching?: boolean
   variant?: 'pill' | 'field'
@@ -84,7 +89,7 @@ const disconnected = computed(() => catalog.value.connected === false)
 const reload = () => modelCatalogs[provider.value].load()
 const current = computed(() => providers.find(item => item.value === provider.value) ?? providers[0])
 // A chat can return to its saved agent even if that agent's account went away.
-const retainedProvider = (value: Provider) => value === provider.value || value === props.savedProvider
+const retainedProvider = (value: Provider) => value === provider.value || value === props.savedAssistant?.provider
 const offered = computed(() => providers.filter(item => retainedProvider(item.value) || modelCatalogs[item.value].catalog.connected !== false))
 const unconnected = computed(() => providers.filter(item => !offered.value.includes(item)))
 const checkingConnections = computed(() => providers.some(item => !retainedProvider(item.value) && modelCatalogs[item.value].catalog.loading))
@@ -203,11 +208,12 @@ const unsupported = computed(() => !!reasoning.value && !!selected.value && !eff
 function chooseProvider(value: Provider) {
   if (value === provider.value || !canChooseProvider(value))
     return
+  const saved = value === props.savedAssistant?.provider ? props.savedAssistant : undefined
   emit('reasoningChoice', { kind: 'untouched' })
   provider.value = value
-  model.value = ''
-  reasoning.value = ''
-  speed.value = ''
+  model.value = saved?.model ?? ''
+  reasoning.value = saved?.reasoning ?? ''
+  speed.value = saved?.speed ?? ''
   query.value = ''
 }
 

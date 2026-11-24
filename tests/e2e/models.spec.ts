@@ -235,14 +235,37 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   await menu.getByRole('radio', { name: 'Antigravity', exact: true }).click()
   await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
   await expect(menu.getByText(hidden.filter(label => label !== 'Antigravity').join(', '), { exact: true })).toBeVisible()
-
-  // A disconnected current choice keeps its selection and shows the reconnection action.
   await page.keyboard.press('Escape')
+
+  await page.goto(workspacePath('/agents'))
+  await page.getByRole('link', { name: 'New agent', exact: true }).click()
+  await page.getByLabel('Name', { exact: true }).fill('Picker Antigravity helper')
+  await openAgentSection(page, 'Coding agent & model')
+  await picker.click()
+  const antigravity = menu.getByRole('radio', { name: 'Antigravity', exact: true })
+  await antigravity.click()
+  await menu.getByRole('radio', { name: 'Gemini 4 Neon', exact: true }).click()
+  await menu.getByRole('radiogroup', { name: 'Reasoning' }).getByRole('radio', { name: 'High', exact: true }).click()
+  await page.keyboard.press('Escape')
+  const agentId = await createAgent(page)
+  await page.getByRole('link', { name: 'Chat with this agent' }).click()
+
+  // A disconnected saved choice keeps its selection and shows the reconnection action.
   await workspace.api(`/api/accounts/${account.id}`, 'DELETE')
   await picker.click()
-  await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await expect(antigravity).toHaveAttribute('aria-checked', 'true')
   await expect(menu.getByText('The next turn will wait for a connection.')).toBeVisible()
   await expect(menu.getByRole('radiogroup', { name: 'Model', exact: true })).toHaveCount(0)
   await menu.getByRole('link', { name: 'Open Connections →' }).click()
   await expect(page).toHaveURL(/\/connections$/)
+
+  // In agent settings, returning to the disconnected engine restores its explicit model and effort.
+  await page.goto(workspacePath(`/agents/${agentId}`))
+  await openAgentSection(page, 'Coding agent & model')
+  await picker.click()
+  await menu.getByRole('radio', { name: 'Codex', exact: true }).click()
+  await antigravity.click()
+  await expect(menu.getByText('gemini-4-neon', { exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(picker).toHaveAccessibleName(/Antigravity · gemini-4-neon · High reasoning$/)
 })

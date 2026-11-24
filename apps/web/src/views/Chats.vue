@@ -2214,7 +2214,7 @@ function key(event: KeyboardEvent) {
                       :default-speed="inheritedAssistant?.speed || ''"
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
-                      :saved-provider="currentProvider"
+                      :saved-assistant="{ provider: currentProvider }"
                       :disabled="busy || readOnly || noAgent"
                       @reasoning-choice="setResumeReasoningIntent"
                     />
