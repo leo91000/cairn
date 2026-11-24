@@ -29,7 +29,13 @@ import zipfile
 
 ROOT = Path('/var/lib/cairn-native')
 INSTALL = Path('/opt/cairn-native')
+if os.environ.get('CAIRN_NATIVE_DISPOSABLE_HOST') == '1':
+    # Disposable qualification hosts run the pool migration on a private fixture.
+    ROOT = Path(os.environ.get('CAIRN_NATIVE_ROOT', ROOT))
+    INSTALL = Path(os.environ.get('CAIRN_NATIVE_INSTALL', INSTALL))
 SERVICE = 'cairn-native-node.service'
+UNIT_DIRECTORY = Path('/etc/systemd/system')
+LOOP_SERVICE = 'cairn-native-data-loop.service'
 CGROUP_ROOT = Path('/sys/fs/cgroup')
 STOP = False
 
@@ -48,7 +54,7 @@ PREREQUISITES = {
     'apparmor': 'Restricted user namespaces require AppArmor tooling and a writable root-managed profile for the managed RootlessKit binary.',
     'e2fsprogs': 'Native storage migration requires e2fsprogs (mkfs.ext4/e2fsck/resize2fs).',
     'rsync': 'Native directory seeding and verified migration require rsync.',
-    'quota': 'Mount a dedicated ext4 filesystem with prjquota at /var/lib/cairn-native/state/native-data, on a different filesystem from controller state. See docs/NATIVE-NODES.md.',
+    'quota': 'Mount a dedicated XFS (reflink=1) or ext4 filesystem with prjquota at /var/lib/cairn-native/state/native-data, on a different filesystem from controller state. See docs/NATIVE-NODES.md.',
     'ublk': 'Native storage requires the ublk_drv kernel module and /dev/ublk-control character device; install the matching kernel modules before enrolling.',
     'cgroup': 'Native execution requires cgroup v2 with CPU, memory, PID and IO controllers.',
 }
@@ -602,7 +608,9 @@ def require_data_pool():
         result = subprocess.run(['findmnt', '--json', '--target', str(pool), '--output', 'TARGET,FSTYPE,OPTIONS'],
                                 check=True, capture_output=True, text=True, timeout=10)
         mounts = json.loads(result.stdout).get('filesystems', [])
-        supported = len(mounts) == 1 and mounts[0].get('target') == str(pool) and mounts[0].get('fstype') == 'ext4' \
+        # XFS and ext4 both list prjquota only while project quotas are
+        # enforced; an accounting-only XFS mount shows pqnoenforce instead.
+        supported = len(mounts) == 1 and mounts[0].get('target') == str(pool) and mounts[0].get('fstype') in ('ext4', 'xfs') \
             and 'prjquota' in mounts[0].get('options', '').split(',')
         if not supported or not stat.S_ISDIR(metadata.st_mode) or metadata.st_dev == controller.st_dev \
                 or metadata.st_uid != 0 or metadata.st_mode & 0o022 or pool.resolve() != pool:
@@ -826,6 +834,520 @@ def run():
             terminate(child)
 
 
+# Offline data-pool migration. The node is stopped: no controller or workload
+# can write the old pool, which stays untouched as the rollback source.
+XFS_ACL_MIRRORS = ['--filter=-x trusted.SGI_ACL_FILE', '--filter=-x trusted.SGI_ACL_DEFAULT']
+SAFE_PATH = re.compile(r'/[A-Za-z0-9._/-]+')
+PHASES = ('planned', 'formatted', 'copied', 'switched', 'complete')
+
+
+class MigrationError(ValueError):
+    """An operator-facing refusal; messages never contain credentials."""
+
+
+def migration_directory():
+    return ROOT / 'native-pool-migration'
+
+
+def pool_path():
+    return ROOT / 'state/native-data'
+
+
+def checked(*args, timeout=120):
+    try:
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout).stdout
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or '').strip().splitlines()
+        raise MigrationError(f'{args[0]} failed: ' + (detail[-1][:300] if detail else f'exit status {error.returncode}')) from None
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise MigrationError(f'{args[0]} failed: {type(error).__name__}') from None
+
+
+def parse_size(value):
+    match = re.fullmatch(r'([0-9]+)([KMGT]?)i?B?', value.strip(), re.IGNORECASE)
+    if not match:
+        raise MigrationError('Use a size such as 500G or a byte count.')
+    size = int(match.group(1)) * 1024 ** ' KMGT'.index(match.group(2).upper() or ' ')
+    if size < 1024 ** 3:
+        raise MigrationError('The new data pool must hold at least 1 GiB.')
+    return size
+
+
+def safe_path(value):
+    path = Path(value)
+    if not SAFE_PATH.fullmatch(str(path)) or '..' in path.parts or not path.is_absolute():
+        raise MigrationError(f'Use an absolute path of letters, digits, ".", "_", "-" and "/": {value}')
+    return path
+
+
+def mount_of(target):
+    result = subprocess.run(['findmnt', '--json', '--mountpoint', str(target), '--output', 'TARGET,SOURCE,FSTYPE,OPTIONS'],
+                            capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        return None
+    filesystems = json.loads(result.stdout).get('filesystems', [])
+    return filesystems[0] if len(filesystems) == 1 else None
+
+
+def filesystem_uuid(device):
+    return checked('blkid', '-p', '-s', 'UUID', '-o', 'value', str(device)).strip()
+
+
+def mount_unit_name(path):
+    return checked('systemd-escape', '--path', '--suffix=mount', str(path)).strip()
+
+
+def active_units():
+    output = checked('systemctl', 'list-units', '--plain', '--no-legend', '--no-pager',
+                     '--state=active,activating,deactivating,reloading,refreshing', 'cairn-native-*')
+    # Slices only group workloads and may stay active while empty.
+    return [unit for unit in (line.split()[0] for line in output.splitlines() if line.split())
+            if unit != LOOP_SERVICE and not unit.endswith('.slice')]
+
+
+def controller_running():
+    import fcntl
+    try:
+        descriptor = os.open(ROOT / 'state/controller.lock', os.O_RDONLY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(descriptor)
+
+
+def require_stopped(stop_services):
+    units = active_units()
+    if units and stop_services:
+        ordered = [SERVICE] + [unit for unit in units if unit != SERVICE] if SERVICE in units else units
+        for unit in ordered:
+            checked('systemctl', 'stop', unit, timeout=600)
+        deadline = time.monotonic() + 300
+        while (units := active_units()) and time.monotonic() < deadline:
+            time.sleep(1)
+    if units:
+        raise MigrationError('Stop the native node first (or pass --stop); still active: ' + ', '.join(sorted(units)))
+    if controller_running():
+        raise MigrationError('A native controller still holds state/controller.lock; stop it before migrating.')
+
+
+def load_migration():
+    try:
+        return json.loads((migration_directory() / 'state.json').read_text())
+    except FileNotFoundError:
+        return None
+
+
+def save_migration(record):
+    atomic_json(migration_directory() / 'state.json', record)
+
+
+def cairn_binary():
+    override = os.environ.get('CAIRN_NATIVE_BINARY') if os.environ.get('CAIRN_NATIVE_DISPOSABLE_HOST') == '1' else None
+    return Path(override) if override else (INSTALL / 'current').resolve(strict=True) / 'cairn'
+
+
+def pool_tool(*args):
+    """Project IDs, limits and ownership records use the controller's own code."""
+    result = subprocess.run([str(cairn_binary()), 'native-pool-migrate', *[str(arg) for arg in args]], capture_output=True, text=True,
+                            env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'RUNNER_STATE_DIR': str(ROOT / 'state')})
+    if result.returncode != 0:
+        detail = (result.stderr.strip().splitlines() or ['no diagnostic'])[-1]
+        if 'cairn --help' in result.stderr:
+            detail = 'the installed native release predates pool migration; update the node first'
+        raise MigrationError(f'native-pool-migrate {args[0]} failed: {detail}')
+    return json.loads(result.stdout)
+
+
+def old_pool(pool):
+    mounted = mount_of(pool)
+    if not mounted or mounted.get('fstype') != 'ext4' or 'prjquota' not in mounted.get('options', '').split(','):
+        raise MigrationError(f'{pool} must be the mounted ext4 project-quota pool to migrate.')
+    unit = mount_unit_name(pool)
+    properties = dict(line.split('=', 1) for line in checked('systemctl', 'show', unit, '--property=FragmentPath,SourcePath').splitlines() if '=' in line)
+    if properties.get('SourcePath') == '/etc/fstab':
+        raise MigrationError(f'{pool} is mounted from /etc/fstab; replace that entry with a {unit} unit before migrating.')
+    fragment = properties.get('FragmentPath') or ''
+    source = mounted.get('source', '')
+    what, options = source, ['prjquota']
+    if fragment and Path(fragment).is_file():
+        for line in Path(fragment).read_text().splitlines():
+            key, _, value = line.partition('=')
+            if key.strip() == 'What':
+                what = value.strip()
+            elif key.strip() == 'Options':
+                options = value.strip().split(',')
+    elif source.startswith('/dev/loop'):
+        what, options = checked('losetup', '--noheadings', '--output', 'BACK-FILE', source).strip(), ['loop', 'prjquota']
+    return {'unit': unit, 'fragment': fragment if fragment and Path(fragment).is_file() else None,
+            'what': what, 'type': 'ext4', 'options': ','.join(options)}
+
+
+def check_device(device, force, uuid=None):
+    try:
+        metadata = device.stat()
+    except OSError as error:
+        raise MigrationError(f'{device} is not available.') from error
+    if not stat.S_ISBLK(metadata.st_mode):
+        raise MigrationError(f'{device} is not a block device.')
+    if subprocess.run(['findmnt', '--source', str(device)], capture_output=True, timeout=10).returncode == 0:
+        raise MigrationError(f'{device} is mounted; choose an unused partition or logical volume.')
+    holders = Path('/sys/dev/block') / f'{os.major(metadata.st_rdev)}:{os.minor(metadata.st_rdev)}' / 'holders'
+    if holders.is_dir() and any(holders.iterdir()):
+        raise MigrationError(f'{device} is in use by another device (LVM, RAID or dm).')
+    # blkid exits 2 when it finds no signature at all.
+    probe = subprocess.run(['blkid', '-p', '-o', 'export', str(device)], capture_output=True, text=True, timeout=30)
+    if probe.returncode not in (0, 2):
+        raise MigrationError(f'blkid could not probe {device}.')
+    fields = dict(line.split('=', 1) for line in probe.stdout.splitlines() if '=' in line)
+    ours = uuid is not None and fields.get('TYPE') == 'xfs' and fields.get('UUID') == uuid
+    if fields and not ours and not force:
+        raise MigrationError(f'{device} already contains {fields.get("TYPE", "data")}; pass --force to overwrite it.')
+    return ours
+
+
+def attached_loop(image):
+    devices = checked('losetup', '--noheadings', '--output', 'NAME', '--associated', str(image)).split()
+    if len(devices) > 1:
+        raise MigrationError(f'{image} is attached to several loop devices: ' + ', '.join(devices))
+    return Path(devices[0]) if devices else None
+
+
+def loop_unit(image, mount_unit):
+    image_text = str(image)
+    return f'''[Unit]
+Description=Cairn native data pool loop device (direct I/O)
+DefaultDependencies=no
+RequiresMountsFor={image.parent}
+Before={mount_unit} umount.target
+Conflicts=umount.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'test -n "$$(losetup --noheadings --output NAME --associated {image_text})" || losetup --direct-io=on --find --show {image_text}'
+ExecStop=/bin/sh -c 'for device in $$(losetup --noheadings --output NAME --associated {image_text}); do losetup --detach "$$device"; done'
+[Install]
+WantedBy=local-fs.target
+'''
+
+
+NEW_POOL_UNIT = 'Description=Cairn native data pool (XFS, reflink, project quotas)'
+
+
+def pool_unit(pool, uuid, image):
+    loop = f'Requires={LOOP_SERVICE}\nAfter={LOOP_SERVICE}\n' if image else ''
+    return f'''[Unit]
+{NEW_POOL_UNIT}
+{loop}Before={SERVICE}
+[Mount]
+What=/dev/disk/by-uuid/{uuid}
+Where={pool}
+Type=xfs
+Options=prjquota
+[Install]
+WantedBy=local-fs.target
+'''
+
+
+def plan_steps(record, old, plan, pool):
+    target = record['target']
+    image = target.get('image')
+    device = target.get('device') or f'a new loop device for {image}'
+    steps = []
+    if image:
+        steps.append(f'Create sparse image {image} of {target["size"]} bytes and attach it with losetup --direct-io=on.')
+    steps.append(f'Format {device} with mkfs.xfs -m crc=1,reflink=1 -i projid32bit=1 and mount it with prjquota at {migration_directory() / "target"}.')
+    for environment in plan['environments']:
+        if environment['project']:
+            quota = (f'project {environment["project"]}, {environment["usedBytes"]} bytes and {environment["inodes"]} inodes used, '
+                     f'limit {environment["blockHardBytes"]} bytes / {environment["inodeHard"]} inodes')
+        else:
+            quota = 'no project quota assigned yet'
+        steps.append(f'Copy environment {environment["run"]} ({quota}) with rsync -aHAX --numeric-ids --sparse, verify it with a '
+                     'checksum pass, then apply the same project ID and limits and stage its rewritten ownership records.')
+    if plan['skipped']:
+        steps.append('Skip rebuildable or filesystem-owned entries: ' + ', '.join(plan['skipped']) + '.')
+    unit = UNIT_DIRECTORY / old['unit']
+    steps.append(f'Unmount the ext4 pool ({old["what"]}) and keep it unchanged as the rollback source.')
+    if image:
+        steps.append(f'Write {UNIT_DIRECTORY / LOOP_SERVICE} to attach {image} with direct I/O at boot.')
+    steps.append(f'Write {unit} (backing up the current unit) to mount the XFS pool by UUID at {pool}, before {SERVICE}.')
+    steps.append('Switch the controller ownership records to the new pool and run the controller pool check.')
+    return steps
+
+
+def back_up_unit(old):
+    backup = migration_directory() / 'units' / old['unit']
+    if old['fragment'] and not backup.exists():
+        backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        shutil.copy2(old['fragment'], backup.with_name(backup.name + '.partial'))
+        os.replace(backup.with_name(backup.name + '.partial'), backup)
+
+
+def remount_old_pool(old, pool):
+    if mount_of(pool) is not None:
+        return
+    if old['fragment']:
+        checked('systemctl', 'start', old['unit'], timeout=300)
+    else:
+        checked('mount', '-t', old['type'], '-o', old['options'], old['what'], str(pool), timeout=300)
+
+
+def mount_new_pool(record, old, pool):
+    image = record['target'].get('image')
+    unit = UNIT_DIRECTORY / old['unit']
+    back_up_unit(old)
+    if image:
+        (UNIT_DIRECTORY / LOOP_SERVICE).write_text(loop_unit(Path(image), old['unit']))
+    unit.write_text(pool_unit(pool, record['uuid'], image))
+    checked('systemctl', 'daemon-reload')
+    units = ([LOOP_SERVICE] if image else []) + [old['unit']]
+    checked('systemctl', 'enable', *units)
+    for name in units:
+        checked('systemctl', 'start', name, timeout=300)
+    mounted = mount_of(pool)
+    if not mounted or mounted.get('fstype') != 'xfs' or filesystem_uuid(mounted['source']) != record['uuid']:
+        raise MigrationError(f'{pool} did not mount the new XFS pool; inspect systemctl status {old["unit"]}.')
+
+
+def unmount_old_pool(old, pool):
+    if mount_of(pool) is None:
+        return
+    if old['fragment']:
+        checked('systemctl', 'stop', old['unit'], timeout=300)
+    else:
+        checked('umount', str(pool), timeout=300)
+    if mount_of(pool) is not None:
+        raise MigrationError(f'{pool} is still mounted; nothing was switched.')
+
+
+def copy_environment(run, source, target):
+    source_path, target_path = f'{source}/{run}/', f'{target}/{run}/'
+    checked('rsync', '-aHAX', '--numeric-ids', '--sparse', '--delete', *XFS_ACL_MIRRORS, '--', source_path, target_path, timeout=None)
+    differences = checked('rsync', '-aHAXnc', '--numeric-ids', '--delete', '--itemize-changes', *XFS_ACL_MIRRORS, '--',
+                          source_path, target_path, timeout=None)
+    if differences.strip():
+        raise MigrationError(f'Verification of environment {run} found differences; rerun the migration:\n' + differences[:2000])
+
+
+def prepare_target(record, force):
+    target = record['target']
+    work = migration_directory()
+    if 'image' in target:
+        image = Path(target['image'])
+        if record['phase'] == 'planned' and not image.exists():
+            descriptor = os.open(image, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+            try:
+                os.ftruncate(descriptor, target['size'])
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            record['createdImage'] = True
+            save_migration(record)
+        elif record['phase'] == 'planned' and not force and not record.get('createdImage'):
+            raise MigrationError(f'{image} already exists; pass --force to reuse and overwrite it.')
+        device = attached_loop(image)
+        if device is None:
+            device = Path(checked('losetup', '--direct-io=on', '--find', '--show', str(image)).strip())
+        if checked('losetup', '--noheadings', '--output', 'DIO', str(device)).strip() != '1':
+            print(f'Warning: {device} could not enable direct I/O; the host page cache will double-cache pool data.', file=sys.stderr)
+    else:
+        device = Path(target['device'])
+    ours = record.get('uuid') is not None and record['phase'] != 'planned'
+    if not ours:
+        check_device(device, force or 'image' in target)
+        checked('mkfs.xfs', '-f', '-q', '-L', 'cairn-native', '-m', 'crc=1,reflink=1', '-i', 'projid32bit=1', str(device), timeout=1800)
+        record['uuid'] = filesystem_uuid(device)
+        record['phase'] = 'formatted'
+        save_migration(record)
+    elif filesystem_uuid(device) != record['uuid']:
+        raise MigrationError(f'{device} no longer holds the XFS filesystem this migration formatted.')
+    mountpoint = work / 'target'
+    mountpoint.mkdir(mode=0o700, exist_ok=True)
+    mounted = mount_of(mountpoint)
+    if mounted is None:
+        checked('mount', '-t', 'xfs', '-o', 'prjquota', str(device), str(mountpoint), timeout=300)
+    elif filesystem_uuid(mounted['source']) != record['uuid']:
+        raise MigrationError(f'{mountpoint} holds another filesystem; unmount it first.')
+    # The new pool root becomes the pool path: root-owned, as the old one.
+    os.chown(mountpoint, 0, 0)
+    os.chmod(mountpoint, pool_path().stat().st_mode & 0o755)
+    return mountpoint
+
+
+def device_path(value):
+    path = Path(value)
+    if not path.is_absolute() or '\n' in value:
+        raise MigrationError(f'Use the absolute path of a block device: {value}')
+    return path
+
+
+def new_pool_mounted(record, pool):
+    mounted = mount_of(pool)
+    return bool(mounted and mounted.get('fstype') == 'xfs' and record.get('uuid')
+                and filesystem_uuid(mounted['source']) == record['uuid'])
+
+
+def migrate_pool(arguments):
+    pool = pool_path()
+    state = ROOT / 'state'
+    record = load_migration()
+    if arguments.device:
+        target = {'device': str(device_path(arguments.device))}
+    elif arguments.image:
+        image = safe_path(arguments.image)
+        if image.is_relative_to(pool) or image.is_relative_to(state):
+            raise MigrationError('Keep the new pool image outside the data pool and controller state directories.')
+        target = {'image': str(image), 'size': parse_size(arguments.size or '')}
+    elif record:
+        target = record['target']
+    else:
+        raise MigrationError('Choose a target with --device <block device> or --image <path> --size <size>.')
+    if record and record['target'] != target:
+        raise MigrationError('Another pool migration is in progress (' + json.dumps(record['target']) + '); finish it or run rollback-pool.')
+    if record and (record['phase'] in ('switched', 'complete') or record['phase'] == 'copied' and new_pool_mounted(record, pool)):
+        return finish_migration(record, arguments, pool, state)
+    safe_path(str(pool))
+    if record and not arguments.dry_run:
+        # Resuming after a crash between unmounting the old pool and mounting
+        # the new one: the copy is verified again against the original.
+        require_stopped(arguments.stop)
+        remount_old_pool(record['old'], pool)
+    old = old_pool(pool)
+    if record and record['old']['unit'] != old['unit']:
+        raise MigrationError('The pool mount changed since the migration started; run rollback-pool.')
+    old = record['old'] if record else old
+    plan = pool_tool('plan', state)
+    if plan['blockers']:
+        raise MigrationError('Resolve these before migrating:\n- ' + '\n- '.join(plan['blockers']))
+    if 'image' in target:
+        free = os.statvfs(Path(target['image']).parent)
+        needed = plan['usedBytes'] + plan['usedBytes'] // 10 + 1024 ** 3
+        if target['size'] < needed or (free.f_bavail * free.f_frsize < needed and not Path(target['image']).exists()):
+            raise MigrationError(f'The new pool needs at least {needed} bytes, both as --size and free space next to the image.')
+    record = record or {'version': 1, 'target': target, 'phase': 'planned', 'old': old}
+    if arguments.dry_run:
+        units = active_units()
+        print('Native data pool migration plan (dry run, nothing changed):')
+        for number, step in enumerate(plan_steps(record, old, plan, pool), 1):
+            print(f'{number}. {step}')
+        if units:
+            print('The node is running; stop it or pass --stop: ' + ', '.join(units))
+        return
+    require_stopped(arguments.stop)
+    migration_directory().mkdir(mode=0o700, exist_ok=True)
+    save_migration(record)
+    back_up_unit(old)
+    mountpoint = prepare_target(record, arguments.force)
+    runs = [environment['run'] for environment in plan['environments']]
+    for entry in mountpoint.iterdir():
+        if entry.name not in runs:
+            # Only this migration writes the new pool; an old attempt's copy
+            # of an environment that no longer exists is discarded.
+            shutil.rmtree(entry)
+    for run in runs:
+        pool_tool('prepare', state, migration_directory(), mountpoint, run)
+        copy_environment(run, pool, mountpoint)
+        pool_tool('commit', state, migration_directory(), mountpoint, run)
+        print(f'Copied and verified environment {run}.')
+    checked('umount', str(mountpoint), timeout=300)
+    record['phase'] = 'copied'
+    save_migration(record)
+    unmount_old_pool(old, pool)
+    mount_new_pool(record, old, pool)
+    record['phase'] = 'switched'
+    save_migration(record)
+    finish_migration(record, arguments, pool, state)
+
+
+def finish_migration(record, arguments, pool, state):
+    if arguments.dry_run:
+        print(f'The pool migration reached phase {record["phase"]}; a rerun only completes it.')
+        return
+    require_stopped(arguments.stop)
+    if not new_pool_mounted(record, pool):
+        if mount_of(pool) is not None:
+            raise MigrationError(f'{pool} holds another filesystem than the migrated pool; unmount it or run rollback-pool.')
+        mount_new_pool(record, record['old'], pool)
+    pool_tool('switch', state, migration_directory())
+    result = pool_tool('check', state)
+    record['phase'] = 'complete'
+    save_migration(record)
+    print(f'Native data pool migrated to XFS (reflink: {str(result["reflink"]).lower()}), {result["environments"]} environments checked.')
+    print(f'Start the node with: systemctl start {SERVICE}')
+    print(f'The ext4 pool {record["old"]["what"]} was not modified. Until the node writes new work, roll back with '
+          f'"python3 {INSTALL}/host.py rollback-pool" while the node is stopped; delete the ext4 pool only once rollback is no longer needed.')
+
+
+def rollback_pool(arguments):
+    pool = pool_path()
+    state = ROOT / 'state'
+    record = load_migration()
+    if record is None:
+        raise MigrationError('No pool migration to roll back.')
+    if arguments.dry_run:
+        print(f'Rollback would unmount the XFS pool (phase {record["phase"]}), restore {record["old"]["unit"]} and the original ownership records.')
+        return
+    require_stopped(arguments.stop)
+    old = record['old']
+    image = record['target'].get('image')
+    mountpoint = migration_directory() / 'target'
+    if mount_of(mountpoint):
+        checked('umount', str(mountpoint), timeout=300)
+    mounted = mount_of(pool)
+    if mounted and mounted.get('fstype') == 'xfs':
+        checked('systemctl', 'stop', old['unit'], timeout=300)
+    if image:
+        if (UNIT_DIRECTORY / LOOP_SERVICE).exists():
+            checked('systemctl', 'disable', '--now', LOOP_SERVICE, timeout=300)
+        (UNIT_DIRECTORY / LOOP_SERVICE).unlink(missing_ok=True)
+        loop = attached_loop(Path(image))
+        if loop:
+            checked('losetup', '--detach', str(loop))
+    backup = migration_directory() / 'units' / old['unit']
+    unit = UNIT_DIRECTORY / old['unit']
+    if backup.exists():
+        shutil.copy2(backup, unit)
+    elif old['fragment'] is None and unit.exists() and NEW_POOL_UNIT in unit.read_text():
+        # The original pool was mounted by hand: remove only the unit we wrote.
+        unit.unlink()
+    checked('systemctl', 'daemon-reload')
+    mounted = mount_of(pool)
+    if mounted is None:
+        if backup.exists():
+            checked('systemctl', 'start', old['unit'], timeout=300)
+        else:
+            checked('mount', '-t', old['type'], '-o', old['options'], old['what'], str(pool), timeout=300)
+    mounted = mount_of(pool)
+    if not mounted or mounted.get('fstype') != 'ext4':
+        raise MigrationError(f'{pool} did not mount the original ext4 pool; the XFS copy was kept.')
+    pool_tool('rollback', state, migration_directory())
+    pool_tool('check', state)
+    migration_directory().rename(migration_directory().with_name(f'native-pool-migration.rolled-back-{int(time.time())}'))
+    print(f'Rolled back to the ext4 pool {old["what"]}. The XFS target {image or record["target"]["device"]} was kept; remove it when no longer needed.')
+
+
+def pool_arguments(argv):
+    import argparse
+    parser = argparse.ArgumentParser(prog='native-host.py ' + argv[0])
+    if argv[0] == 'migrate-pool':
+        target = parser.add_mutually_exclusive_group()
+        target.add_argument('--device', help='unused partition or logical volume for the new XFS pool')
+        target.add_argument('--image', help='sparse image file attached with losetup --direct-io=on')
+        parser.add_argument('--size', help='image size, such as 500G')
+        parser.add_argument('--force', action='store_true', help='overwrite an existing filesystem signature or image')
+    parser.add_argument('--stop', action='store_true', help='stop cairn-native-node.service and cairn-native-* units first')
+    parser.add_argument('--dry-run', action='store_true', help='print the plan without changing anything')
+    arguments = parser.parse_args(argv[1:])
+    if argv[0] == 'migrate-pool' and bool(arguments.image) != bool(arguments.size):
+        parser.error('--image and --size are used together')
+    return arguments
+
+
 def stop(_signal, _frame):
     global STOP
     STOP = True
@@ -841,10 +1363,17 @@ if __name__ == '__main__':
             install(sys.argv[2])
         elif len(sys.argv) == 2 and sys.argv[1] == 'run':
             run()
+        elif len(sys.argv) >= 2 and sys.argv[1] == 'migrate-pool':
+            migrate_pool(pool_arguments(sys.argv[1:]))
+        elif len(sys.argv) >= 2 and sys.argv[1] == 'rollback-pool':
+            rollback_pool(pool_arguments(sys.argv[1:]))
         else:
-            raise ValueError('Use install <manager HTTPS origin> or run.')
+            raise ValueError('Use install <manager HTTPS origin>, run, migrate-pool or rollback-pool.')
     except PrerequisiteError as error:
         print('Native node prerequisites unavailable: ' + error.diagnostic, file=sys.stderr)
+        sys.exit(1)
+    except MigrationError as error:
+        print('Native pool migration stopped: ' + str(error), file=sys.stderr)
         sys.exit(1)
     except Exception as error:
         print('Native node failed: ' + type(error).__name__, file=sys.stderr)

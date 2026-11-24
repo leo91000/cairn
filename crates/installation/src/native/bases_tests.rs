@@ -532,8 +532,9 @@ async fn measure_prepared_native_bases() {
             "basePreparation": warm, "samples": samples,
             "hostLoad": std::fs::read_to_string("/proc/loadavg").unwrap(),
             "kernel": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap().trim(),
+            "dataPool": super::quota::describe(&state).unwrap(),
             "cpuScope": "test process plus reaped child CPU, including rsync/checksum children",
-            "conditions": "4096x4KiB text + seeded random42 8MiB; cached ZIP reference and prepared-directory admission on same dedicated ext4 project-quota pool; 256MiB per project; no ublk or WAN. Native admission includes verified private copy, durable format and initialization. Syncfs can include other pool writeback. File reads use advisory DONTNEED, not guaranteed hardware-cold storage; writes fsync a new 4KiB file. Development profile with debug=0/incremental=0 in CI."
+            "conditions": "4096x4KiB text + seeded random42 8MiB; cached ZIP reference and prepared-directory admission on same dedicated project-quota pool (see dataPool); 256MiB per project; no ublk or WAN. Native admission includes verified private copy, durable format and initialization. Syncfs can include other pool writeback. File reads use advisory DONTNEED, not guaranteed hardware-cold storage; writes fsync a new 4KiB file. Development profile with debug=0/incremental=0 in CI."
         })
     );
     bases.trim(0, u64::MAX, None).await.unwrap();

@@ -10,6 +10,8 @@ use std::{
     path::Path,
 };
 
+pub(super) mod migration;
+
 #[repr(C)]
 #[derive(Default)]
 struct Attributes {
@@ -57,6 +59,155 @@ fn filesystem_identity(file: &File) -> Result<Vec<u8>> {
     crate::storage::policy::filesystem_id(file).map_err(Into::into)
 }
 
+const EXT4_MAGIC: i64 = 0xef53;
+const XFS_MAGIC: i64 = 0x5846_5342;
+// XFS_IOC_FSGEOMETRY_V1 and Q_XGETQSTATV.
+const XFS_GEOMETRY: libc::c_ulong = 0x8070_5864;
+const QUOTA_STATE: u32 = 0x5808;
+const XFS_PROJECT_ID_32: u32 = 1 << 11;
+const XFS_REFLINK: u32 = 1 << 20;
+const PROJECT_ACCOUNTING: u16 = 0x10;
+const PROJECT_ENFORCEMENT: u16 = 0x20;
+
+/// The two filesystems whose project quotas the controller enforces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Pool {
+    Ext4,
+    Xfs,
+}
+
+impl Pool {
+    fn of(file: &File) -> Result<Option<Self>> {
+        Ok(match filesystem(file)?.f_type as i64 {
+            EXT4_MAGIC => Some(Self::Ext4),
+            XFS_MAGIC => Some(Self::Xfs),
+            _ => None,
+        })
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Ext4 => "ext4",
+            Self::Xfs => "xfs",
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct XfsGeometry {
+    block_size: u32,
+    realtime_extent_size: u32,
+    group_blocks: u32,
+    group_count: u32,
+    log_blocks: u32,
+    sector_size: u32,
+    inode_size: u32,
+    inode_max_percent: u32,
+    data_blocks: u64,
+    realtime_blocks: u64,
+    realtime_extents: u64,
+    log_start: u64,
+    uuid: [u8; 16],
+    stripe_unit: u32,
+    stripe_width: u32,
+    version: i32,
+    flags: u32,
+    log_sector_size: u32,
+    realtime_sector_size: u32,
+    directory_block_size: u32,
+}
+
+fn xfs_geometry(file: &File) -> Result<XfsGeometry> {
+    let mut geometry = XfsGeometry::default();
+    if unsafe { libc::ioctl(file.as_raw_fd(), XFS_GEOMETRY, &mut geometry) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(geometry)
+}
+
+#[repr(C)]
+struct QuotaState {
+    version: i8,
+    padding: u8,
+    flags: u16,
+    remainder: [u8; 156],
+}
+
+/// Accounting alone is not enough: XFS can account project usage without
+/// enforcing it (`pqnoenforce`), which ext4 mounts never report as enforced.
+fn project_enforced(file: &File) -> bool {
+    let mut state = QuotaState {
+        version: 1,
+        padding: 0,
+        flags: 0,
+        remainder: [0; 156],
+    };
+    let queried = unsafe {
+        libc::syscall(
+            libc::SYS_quotactl_fd,
+            file.as_raw_fd(),
+            (QUOTA_STATE << 8) | 2,
+            0,
+            &mut state,
+        )
+    } == 0;
+    queried
+        && state.flags & (PROJECT_ACCOUNTING | PROJECT_ENFORCEMENT)
+            == PROJECT_ACCOUNTING | PROJECT_ENFORCEMENT
+}
+
+/// XFS reports its block device number as `f_fsid`, which a loop or device
+/// mapper device can change across reboots. Bind its records to the UUID
+/// instead; ext4 derives `f_fsid` from its UUID, so its records are unchanged.
+pub(in crate::native) fn pool_identity(file: &File) -> Result<Vec<u8>> {
+    if Pool::of(file)? != Some(Pool::Xfs) {
+        return filesystem_identity(file);
+    }
+    let uuid = xfs_geometry(file)?.uuid;
+    if uuid == [0; 16] {
+        return Err(Error::unavailable(
+            "Native data pool has no stable filesystem UUID.",
+        ));
+    }
+    Ok(uuid.to_vec())
+}
+
+/// Whether the pool shares blocks between clones. ext4 always copies.
+pub(super) fn reflink(file: &File) -> Result<bool> {
+    Ok(Pool::of(file)? == Some(Pool::Xfs) && xfs_geometry(file)?.flags & XFS_REFLINK != 0)
+}
+
+/// Inodes the pool can hold for workloads. ext4 fixes this at mkfs time. XFS
+/// allocates inodes dynamically and shrinks `f_files` as data fills the pool,
+/// so use its static ceiling: a grant's inode limit must not drop as the pool
+/// fills, or a later resize would reject an environment's existing inodes.
+fn inode_capacity(pool: &File, status: &libc::statfs) -> Result<u64> {
+    if Pool::of(pool)? != Some(Pool::Xfs) {
+        return Ok(status.f_files);
+    }
+    let geometry = xfs_geometry(pool)?;
+    let ceiling = u128::from(geometry.data_blocks)
+        * u128::from(geometry.block_size)
+        * u128::from(geometry.inode_max_percent)
+        / 100
+        / u128::from(geometry.inode_size.max(1));
+    Ok(u64::try_from(ceiling)
+        .unwrap_or(u64::MAX)
+        .max(status.f_files))
+}
+
+pub(super) fn describe(state: &Path) -> Result<serde_json::Value> {
+    let pool = open(&super::workspace::data_root(state))?;
+    let kind = Pool::of(&pool)?
+        .ok_or_else(|| Error::unavailable("Unsupported native data pool filesystem."))?;
+    Ok(serde_json::json!({
+        "filesystem": kind.name(),
+        "reflink": reflink(&pool)?,
+        "projectQuotaEnforced": project_enforced(&pool),
+    }))
+}
+
 /// This node owns project IDs on its dedicated state filesystem. No automatic
 /// remount, quota activation or filesystem conversion is performed here.
 pub(super) fn require(state: &Path) -> Result<()> {
@@ -73,11 +224,18 @@ pub(super) fn require(state: &Path) -> Result<()> {
             "Native data and controller state require separate filesystems so exhausted data inodes cannot block recovery.",
         ));
     }
-    if filesystem(&file)?.f_type != libc::EXT4_SUPER_MAGIC {
+    let Some(kind) = Pool::of(&file)? else {
         return Err(Error::unavailable(
-            "Native directories require a dedicated ext4 native-data filesystem with enforced project quotas.",
+            "Native directories require a dedicated XFS or ext4 native-data filesystem with enforced project quotas.",
+        ));
+    };
+    if kind == Pool::Xfs && xfs_geometry(&file)?.flags & XFS_PROJECT_ID_32 == 0 {
+        return Err(Error::unavailable(
+            "The XFS native-data filesystem must support 32-bit project IDs (mkfs.xfs -i projid32bit=1).",
         ));
     }
+    // Both filesystems list `prjquota` among their super options only when
+    // project quotas are enforced; XFS shows `pqnoenforce` for accounting only.
     let mounted = std::fs::read_to_string("/proc/self/mountinfo")?
         .lines()
         .any(|line| {
@@ -101,9 +259,9 @@ pub(super) fn require(state: &Path) -> Result<()> {
             &mut information,
         )
     } == 0;
-    if !mounted || !enabled {
+    if !mounted || !enabled || !project_enforced(&file) {
         return Err(Error::unavailable(
-            "Mount the native-data filesystem with enforced ext4 project quotas before starting this node; see docs/NATIVE-NODES.md.",
+            "Mount the native-data filesystem with enforced project quotas (-o prjquota) before starting this node; see docs/NATIVE-NODES.md.",
         ));
     }
     Ok(())
@@ -180,6 +338,21 @@ fn operation(file: &File, command: u32, project: u32, quota: &mut Quota) -> Resu
     })
 }
 
+/// XFS frees a project's quota record once it has no usage and no limits,
+/// where ext4 keeps an empty one. Both mean nothing is charged or limited.
+fn current(file: &File, project: u32) -> Result<Quota> {
+    let mut quota = Quota::default();
+    match control(file, 0x800007, project, &mut quota) {
+        Ok(()) => Ok(quota),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {
+            Ok(Quota::default())
+        }
+        Err(error) => Err(Error::unavailable(format!(
+            "Native project quota operation failed: {error}"
+        ))),
+    }
+}
+
 fn unused_project(file: &File, mut candidate: u32) -> Result<u32> {
     loop {
         if candidate == 0 {
@@ -206,8 +379,9 @@ pub(super) fn limit(root_path: &Path, bytes: u64) -> Result<()> {
     if project == 0 || bytes < 1024 {
         return Err(Error::conflict("Native directory has no project quota."));
     }
-    // ext4 statfs on a project-inheriting directory reports its quota-limited
-    // geometry. Derive new limits from the project-zero pool, never the old grant.
+    // ext4 and XFS statfs on a project-inheriting directory report its
+    // quota-limited geometry. Derive new limits from the project-zero pool,
+    // never the old grant.
     let pool = open(
         root_path
             .parent()
@@ -215,13 +389,11 @@ pub(super) fn limit(root_path: &Path, bytes: u64) -> Result<()> {
     )?;
     let status = filesystem(&pool)?;
     let total_bytes = status.f_blocks.saturating_mul(status.f_bsize as u64).max(1);
-    let data_inodes = status
-        .f_files
-        .saturating_sub((status.f_files / 100).max(64));
+    let inodes = inode_capacity(&pool, &status)?;
+    let data_inodes = inodes.saturating_sub((inodes / 100).max(64));
     let inode_limit =
         ((u128::from(bytes) * u128::from(data_inodes)) / u128::from(total_bytes)).max(1) as u64;
-    let mut current = Quota::default();
-    operation(&root, 0x800007, project, &mut current)?;
+    let current = current(&root, project)?;
     if current.inodes > inode_limit {
         return Err(Error::conflict(
             "Native inode use exceeds the granted quota; retained data must be reconciled.",
@@ -246,9 +418,7 @@ pub(super) fn usage(root_path: &Path) -> Result<u64> {
     if project == 0 {
         return Err(Error::conflict("Native directory has no project quota."));
     }
-    let mut quota = Quota::default();
-    operation(&root, 0x800007, project, &mut quota)?;
-    Ok(quota.space)
+    Ok(current(&root, project)?.space)
 }
 
 async fn allocator_lock(state: &Path) -> Result<crate::file_lock::Guard> {
@@ -277,9 +447,9 @@ pub(super) async fn prepare(state: &Path, root: &Path, bytes: u64) -> Result<()>
     let _allocator = allocator_lock(state).await?;
     // Consumed IDs are never reused, including after interrupted creation.
     let file = open(root)?;
-    if filesystem(&file)?.f_type != libc::EXT4_SUPER_MAGIC {
+    if Pool::of(&file)?.is_none() {
         return Err(Error::unavailable(
-            "Native directories require a dedicated ext4 filesystem with project quota enforcement.",
+            "Native directories require a dedicated XFS or ext4 filesystem with project quota enforcement.",
         ));
     }
     let parent = super::workspace::control_for_workload(root)?;
@@ -327,7 +497,7 @@ pub(super) async fn prepare(state: &Path, root: &Path, bytes: u64) -> Result<()>
             let workload = file.metadata()?;
             let owner = Ownership {
                 project,
-                filesystem: filesystem_identity(&file)?,
+                filesystem: pool_identity(&file)?,
                 control_device: control.dev(),
                 control_inode: control.ino(),
                 control_filesystem: filesystem_identity(&control_file)?,
@@ -376,7 +546,7 @@ impl Ownership {
             || control.ino() != self.control_inode
             || filesystem_identity(&control_file)? != self.control_filesystem
             || metadata.ino() != self.workload_inode
-            || filesystem_identity(workload)? != self.filesystem
+            || pool_identity(workload)? != self.filesystem
         {
             return Err(Error::conflict(
                 "Native quota identity belongs to a replaced environment.",
@@ -456,7 +626,7 @@ pub(super) async fn retire(control_root: &Path) -> Result<()> {
     }
     if metadata.ino() != retirement.control_inode
         || filesystem_identity(&control)? != retirement.control_filesystem
-        || filesystem_identity(&pool)? != retirement.filesystem
+        || pool_identity(&pool)? != retirement.filesystem
     {
         return Err(Error::conflict(
             "Native quota retirement no longer belongs to this environment.",
@@ -486,8 +656,15 @@ pub(super) async fn retire(control_root: &Path) -> Result<()> {
         }
         set_project(&file, 0)?;
     }
-    let mut usage = Quota::default();
-    operation(&pool, 0x800007, retirement.project, &mut usage)?;
+    let mut usage = current(&pool, retirement.project)?;
+    if (usage.space != 0 || usage.inodes != 0) && Pool::of(&pool)? == Some(Pool::Xfs) {
+        // XFS releases unlinked inodes in the background; a filesystem sync
+        // waits for that release. Open-unlinked consumers still hold quota.
+        if unsafe { libc::syncfs(pool.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        usage = current(&pool, retirement.project)?;
+    }
     if usage.space != 0 || usage.inodes != 0 {
         return Err(Error::conflict(
             "Native quota still has open or retained consumers; retirement will retry.",
@@ -551,7 +728,7 @@ mod tests {
         let data = open(&data_path).unwrap();
         let mut owner = Ownership {
             project: 1,
-            filesystem: filesystem_identity(&data).unwrap(),
+            filesystem: pool_identity(&data).unwrap(),
             control_device: u64::MAX,
             control_inode: control.metadata().unwrap().ino(),
             control_filesystem: filesystem_identity(&control).unwrap(),

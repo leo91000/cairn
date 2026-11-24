@@ -8,7 +8,7 @@ use std::path::Path;
 
 mod reconcile;
 
-pub(super) use reconcile::reconcile;
+pub(super) use reconcile::{rebind_pending, reconcile};
 use tokio::process::Command;
 
 const COUNT: u32 = 65536;

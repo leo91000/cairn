@@ -65,6 +65,7 @@ fn command_help_never_starts_services_or_requires_a_control_socket() {
         "native-enclave",
         "native-docker",
         "native-docker-reset",
+        "native-pool-migrate",
         "native-watchdog",
         "toolkit-env",
         "runner-broker",

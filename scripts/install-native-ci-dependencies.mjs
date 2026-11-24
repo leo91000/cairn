@@ -20,7 +20,7 @@ const phases = {
   install: { args: [...aptOptions, 'install', '-y', '--no-install-recommends'] },
 }
 const profiles = {
-  'native': { seconds: { update: 120, install: 360 }, packages: ['libclang-dev', 'age', 'e2fsprogs', 'fakeroot'] },
+  'native': { seconds: { update: 120, install: 360 }, packages: ['libclang-dev', 'age', 'e2fsprogs', 'fakeroot', 'xfsprogs'] },
   'android-network': { seconds: { update: 90, install: 90 }, packages: ['iproute2', 'iptables', 'util-linux'] },
 }
 

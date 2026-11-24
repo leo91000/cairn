@@ -495,7 +495,9 @@ async fn capture_conversion_proof(target: &Path) -> Result<ConversionProof> {
         let metadata = file.metadata()?;
         Ok(ConversionProof {
             version: 1,
-            filesystem: storage::policy::filesystem_id(&file)?,
+            // Same stable identity as the quota owner record, also across reboots of
+            // an XFS pool whose device number can change.
+            filesystem: quota::pool_identity(&file)?,
             inode: metadata.ino(),
             digest,
         })
@@ -722,6 +724,14 @@ async fn check_copy_headroom(
         .map_err(Error::internal)?
 }
 
+/// XFS also exposes POSIX ACLs to root as these trusted attributes. ACLs are
+/// copied and compared as `system.posix_acl_*`; the mirrors would otherwise make
+/// an ext4 source differ from its XFS copy, or be written verbatim onto ext4.
+pub(super) const XFS_ACL_MIRRORS: [&str; 2] = [
+    "--filter=-x trusted.SGI_ACL_FILE",
+    "--filter=-x trusted.SGI_ACL_DEFAULT",
+];
+
 /// `reflink` selects a block-sharing clone; the caller probed that the source
 /// and target pool supports it. Otherwise every byte is copied and checksummed.
 pub(super) async fn copy_verified(
@@ -769,7 +779,9 @@ async fn copy_verified_with_capacity(
         copy
     } else {
         let mut copy = tokio::process::Command::new("rsync");
-        copy.args(["-aHAX", "--numeric-ids", "--sparse", "--"])
+        copy.args(["-aHAX", "--numeric-ids", "--sparse"])
+            .args(XFS_ACL_MIRRORS)
+            .arg("--")
             .arg(format!("{}/", source.display()))
             .arg(target);
         copy
@@ -824,8 +836,9 @@ async fn verify_copy_with_capacity(
             "--numeric-ids",
             "--delete",
             "--itemize-changes",
-            "--",
         ])
+        .args(XFS_ACL_MIRRORS)
+        .arg("--")
         .arg(format!("{}/", source.display()))
         .arg(target);
     copy_status(verify, stop, capacity, check_first).await
@@ -1278,7 +1291,7 @@ fn observe(volume: std::sync::Weak<Volume>) {
                     }
                     Err(error) => return Err(error.into()),
                 };
-                // A project directory's statfs is quota-limited by ext4.
+                // A project directory's statfs is quota-limited by ext4 and XFS.
                 // Node reserve pressure must use the unrestricted data pool;
                 // the independent capacity monitor handles task pressure.
                 let (total, free) = storage::policy::space(&workspace::data_root(&state))?;
