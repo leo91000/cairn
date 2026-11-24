@@ -37,25 +37,8 @@ def seed_frames(root, omit_skills=False):
     return stream.getvalue()
 
 
-def skill_bundle(stage, sample, digest, fingerprint):
+def skill_bundle(stage, sample):
     root = stage / SKILLS
     random_bytes = random.Random(sample)
     for index in range(64):
         (root / 'frozen' / f'asset-{index:02}.bin').write_bytes(random_bytes.randbytes(32 * 1024))
-    with fingerprint.open('wb') as target:
-        # The receiver verifies this negotiated digest against the installed
-        # files. Include the skill root and the same lexical preorder walk.
-        pending = [root]
-        while pending:
-            entry = pending.pop()
-            name = entry.relative_to(root).as_posix().encode() if entry != root else b''
-            target.write(len(name).to_bytes(8, 'little'))
-            target.write(name)
-            target.write((entry.stat().st_mode & 0o777).to_bytes(4, 'little'))
-            if entry.is_dir():
-                pending.extend(sorted(entry.iterdir(), reverse=True))
-            else:
-                payload = entry.read_bytes()
-                target.write(len(payload).to_bytes(8, 'little'))
-                target.write(payload)
-    return digest(fingerprint)

@@ -584,7 +584,7 @@ PLAN = dict(filesystem='ext4', reflink=False, usedBytes=10 * 1024 ** 2, skipped=
                           dict(run='22222222-2222-4222-8222-222222222222', project=0, usedBytes=0, inodes=0,
                                blockHardBytes=0, inodeHard=0)])
 OLD = dict(unit='var-lib-cairn\\x2dnative-state-native\\x2ddata.mount', fragment='/etc/systemd/system/var-lib-cairn\\x2dnative-state-native\\x2ddata.mount',
-           what='/var/lib/cairn-native/native-data.ext4', type='ext4', options='loop,prjquota,nodiscard', uuid='original', bootLink=None)
+           what='/var/lib/cairn-native/native-data.ext4', type='ext4', options='loop,prjquota,nodiscard', uuid='original', bootLink=None, restrictions=[])
 
 
 def pool_arguments(**changes):
@@ -703,6 +703,22 @@ class PoolMigrationTests(unittest.TestCase):
                      'Before=' + host.SERVICE, 'Requires=' + host.LOOP_SERVICE, 'WantedBy=local-fs.target'):
             self.assertIn(line + '\n', unit)
         self.assertNotIn(host.LOOP_SERVICE, host.pool_unit(pool, 'f00d', None))
+        restricted = host.pool_unit(pool, 'f00d', image, ('nosuid', 'nodev', 'noexec', 'ext4-only'))
+        self.assertIn('Options=prjquota,nosuid,nodev,noexec\n', restricted)
+
+    def test_mount_discovery_refuses_failed_and_stacked_observations(self):
+        target = Path('/path with space')
+        first = r'36 35 7:0 / /path\040with\040space rw,nosuid,nodev,noexec - ext4 /dev/loop0 rw,prjquota' + '\n'
+        second = r'37 36 7:1 / /path\040with\040space rw - xfs /dev/loop1 rw,prjquota' + '\n'
+        with patch.object(Path, 'read_text', return_value=first):
+            self.assertEqual(host.mount_of(target)['options'], 'rw,nosuid,nodev,noexec,prjquota')
+            self.assertIsNone(host.mount_of(Path('/unmounted')))
+        with patch.object(Path, 'read_text', return_value=first + second), self.assertRaisesRegex(host.MigrationError, 'stacked mounts'):
+            host.mount_of(target)
+        with patch.object(Path, 'read_text', side_effect=OSError), self.assertRaisesRegex(host.MigrationError, 'Cannot inspect mounts'):
+            host.mount_of(target)
+        with patch.object(Path, 'read_text', return_value=first + 'corrupt\n'), self.assertRaisesRegex(host.MigrationError, 'invalid entry'):
+            host.mount_of(Path('/unmounted'))
 
     def test_pool_mounted_from_fstab_is_not_rewritten(self):
         pool = host.pool_path()
@@ -724,6 +740,13 @@ class PoolMigrationTests(unittest.TestCase):
                 patch.object(host, 'checked', side_effect=lambda *args, **_: responses[args[0]]):
             old = host.old_pool(host.pool_path())
         self.assertEqual(dict(OLD, fragment=str(fragment), unitSha256=host.hashlib.sha256(fragment.read_bytes()).hexdigest()), old)
+
+    def test_restrictions_come_from_the_effective_source_mount(self):
+        effective = dict(source='/dev/sdb1', fstype='ext4', options='rw,prjquota,nosuid,nodev,noexec,nosymfollow')
+        with patch.object(host, 'mount_of', return_value=effective), patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
+                patch.object(host, 'pool_unit_properties', return_value={}), patch.object(host, 'filesystem_uuid', return_value='original'):
+            summary = host.old_pool(host.pool_path())
+        self.assertEqual(summary['restrictions'], ['nosuid', 'nodev', 'noexec', 'nosymfollow'])
 
     def test_cutover_refuses_drop_ins_before_stopping_the_node(self):
         with patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
@@ -933,6 +956,30 @@ class PoolMigrationTests(unittest.TestCase):
         self.assertGreaterEqual(image.stat().st_blocks * 512, size)
         self.assertFalse(staged.exists())
 
+    def test_backing_allocation_keeps_receipt_space_on_fresh_attempt_and_retry(self):
+        image = self.root / 'new.xfs'
+        size = 128 * 1024
+        record = dict(phase='planned', target={'image': str(image), 'size': size})
+        with patch.object(host.os, 'statvfs', return_value=Mock(f_bavail=size, f_frsize=1)), \
+                patch.object(host.os, 'posix_fallocate') as allocate, \
+                self.assertRaisesRegex(host.MigrationError, 'controller recovery receipts'):
+            host.prepare_image(record, image, False)
+        allocate.assert_not_called()
+        self.assertNotIn('createdImage', record)
+
+        staged = self.root / '.cairn-native-xfs-resume'
+        staged.write_bytes(b'x' * 4096)
+        metadata = staged.stat()
+        record['createdImage'] = dict(name=staged.name, device=metadata.st_dev, inode=metadata.st_ino)
+        remaining = size - metadata.st_blocks * 512
+        with patch.object(host.os, 'statvfs', return_value=Mock(f_bavail=remaining, f_frsize=1)), \
+                patch.object(host.os, 'posix_fallocate') as allocate, \
+                self.assertRaisesRegex(host.MigrationError, 'controller recovery receipts'):
+            host.prepare_image(record, image, False)
+        allocate.assert_not_called()
+        self.assertFalse(image.exists())
+        self.assertEqual(staged.read_bytes(), b'x' * 4096)
+
     def test_planned_rollback_does_not_detach_an_unacquired_loop(self):
         image = self.root / 'other.img'
         image.write_bytes(b'other service uses this image')
@@ -1001,7 +1048,7 @@ class PoolMigrationTests(unittest.TestCase):
 
     def test_manual_ext4_mount_keeps_active_flags_and_rejects_special_loop_geometry(self):
         pool = host.pool_path()
-        options = 'ro,nosuid,noexec,relatime,prjquota,errors=remount-ro'
+        options = 'rw,nosuid,noexec,relatime,prjquota,errors=remount-ro'
         def system(*args, **_):
             if args[0] == 'systemd-escape':
                 return OLD['unit']
@@ -1011,6 +1058,9 @@ class PoolMigrationTests(unittest.TestCase):
         with patch.object(host, 'checked', side_effect=system), patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']):
             with patch.object(host, 'mount_of', return_value=dict(source='/dev/sdb1', fstype='ext4', options=options)):
                 self.assertEqual(host.old_pool(pool)['options'], options)
+            with patch.object(host, 'mount_of', return_value=dict(source='/dev/sdb1', fstype='ext4', options=options.replace('rw,', 'ro,'))), \
+                    self.assertRaisesRegex(host.MigrationError, 'read-only'):
+                host.old_pool(pool)
             with patch.object(host, 'mount_of', return_value=dict(source='/dev/loop0', fstype='ext4', options=options)), \
                     self.assertRaisesRegex(host.MigrationError, 'nondefault manual loop'):
                 host.old_pool(pool)

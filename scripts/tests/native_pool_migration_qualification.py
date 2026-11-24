@@ -102,7 +102,7 @@ def main(binary, cairn, fixture):
         original = root / 'native-data.ext4'
         command('truncate', '-s', '1G', original)
         command('mkfs.ext4', '-q', '-F', '-O', 'project,quota', '-E', 'quotatype=prjquota', original)
-        command('mount', '-o', 'loop,prjquota', original, pool)
+        command('mount', '-o', 'loop,prjquota,nosuid,nodev,noexec', original, pool)
         phase(binary, root, 'seed')
 
         image = root / 'native-data.xfs'
@@ -110,6 +110,8 @@ def main(binary, cairn, fixture):
         assert 'nothing changed' in plan and not image.exists(), 'Dry run changed the host.'
         host(root, cairn, 'migrate-pool', '--image', image, '--size', '2G')
         assert mounted(pool) == 'xfs' and direct_io(image), 'Migration did not mount the direct-I/O XFS pool.'
+        options = command('findmnt', '--noheadings', '--mountpoint', pool, '--output', 'OPTIONS').stdout.strip().split(',')
+        assert {'nosuid', 'nodev', 'noexec'}.issubset(options), 'Cutover dropped source mount restrictions.'
         command('fstrim', pool, check=False)
         assert direct_io(image), 'Trimming the pool changed its backing allocation.'
         assert (UNITS / unit).exists() and (UNITS / LOOP_SERVICE).exists(), 'Persistent pool units are missing.'

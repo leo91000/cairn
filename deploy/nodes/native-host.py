@@ -851,6 +851,8 @@ XFS_ACL_MIRRORS = ['--filter=-x trusted.SGI_ACL_FILE', '--filter=-x trusted.SGI_
 SAFE_PATH = re.compile(r'/[A-Za-z0-9._/-]+')
 PHASES = ('planned', 'formatted', 'copied', 'switched', 'complete')
 OFFLINE_LOCK_FDS = ()
+CONTROLLER_RECEIPT_RESERVE = 64 * 1024 ** 2
+MOUNT_RESTRICTIONS = ('nosuid', 'nodev', 'noexec', 'nosymfollow')
 
 
 class MigrationError(ValueError):
@@ -930,13 +932,39 @@ def safe_path(value):
     return path
 
 
+def mountinfo_text(value):
+    return re.sub(r'\\(040|011|012|134)', lambda match: chr(int(match[1], 8)), value)
+
+
 def mount_of(target):
-    result = subprocess.run(['findmnt', '--json', '--mountpoint', str(target), '--output', 'TARGET,SOURCE,FSTYPE,OPTIONS'],
-                            capture_output=True, text=True, timeout=10)
-    if result.returncode != 0:
-        return None
-    filesystems = json.loads(result.stdout).get('filesystems', [])
-    return filesystems[0] if len(filesystems) == 1 else None
+    # An absence is only authoritative after a complete, readable mount table
+    # names no record for this path. Stacked mounts need operator review.
+    try:
+        lines = Path('/proc/self/mountinfo').read_text().splitlines()
+    except OSError as error:
+        raise MigrationError(f'Cannot inspect mounts before operating on {target}.') from error
+    if not lines:
+        raise MigrationError('The kernel mount table is empty.')
+    found = None
+    for line in lines:
+        mount, separator, filesystem = line.partition(' - ')
+        fields, fs = mount.split(), filesystem.split()
+        if not separator or len(fields) < 6 or len(fs) != 3:
+            raise MigrationError('The kernel mount table contains an invalid entry.')
+        if Path(mountinfo_text(fields[4])) != target:
+            continue
+        if found is not None:
+            raise MigrationError(f'{target} has stacked mounts. Resolve them before migrating.')
+        if fields[3] != '/':
+            raise MigrationError(f'{target} does not expose a whole pool filesystem.')
+        effective = fields[5].split(',')
+        super_options = fs[2].split(',')
+        if 'ro' in super_options:
+            effective = ['ro', *(option for option in effective if option not in ('rw', 'ro'))]
+        effective.extend(option for option in super_options if option not in ('rw', 'ro'))
+        found = {'target': str(target), 'source': mountinfo_text(fs[1]), 'fstype': fs[0],
+                 'options': ','.join(dict.fromkeys(effective))}
+    return found
 
 
 def filesystem_uuid(device):
@@ -1102,7 +1130,10 @@ def old_pool(pool):
     properties = pool_unit_properties(unit)
     fragment = properties.get('FragmentPath') or ''
     source = mounted.get('source', '')
-    what, options = source, mounted['options'].split(',')
+    effective_options = mounted['options'].split(',')
+    if 'ro' in effective_options:
+        raise MigrationError('The ext4 source is read-only. Restore a verified writable source before migrating.')
+    what, options = source, list(effective_options)
     fragment_bytes = None
     if fragment and Path(fragment).is_file():
         fragment_bytes = Path(fragment).read_bytes()
@@ -1121,6 +1152,7 @@ def old_pool(pool):
     return {'unit': unit, 'fragment': fragment if fragment_bytes is not None else None,
             'unitSha256': hashlib.sha256(fragment_bytes).hexdigest() if fragment_bytes is not None else None,
             'bootLink': boot_link_target(unit),
+            'restrictions': [option for option in MOUNT_RESTRICTIONS if option in effective_options],
             'what': what, 'type': 'ext4', 'options': ','.join(options),
             'uuid': filesystem_uuid(source)}
 
@@ -1200,8 +1232,9 @@ WantedBy=local-fs.target
 NEW_POOL_UNIT = 'Description=Cairn native data pool (XFS, reflink, project quotas)'
 
 
-def pool_unit(pool, uuid, image):
+def pool_unit(pool, uuid, image, restrictions=()):
     loop = f'Requires={LOOP_SERVICE}\nAfter={LOOP_SERVICE}\n' if image else ''
+    options = ','.join(['prjquota', *(option for option in MOUNT_RESTRICTIONS if option in restrictions)])
     return f'''[Unit]
 {NEW_POOL_UNIT}
 {loop}Before={SERVICE}
@@ -1209,7 +1242,7 @@ def pool_unit(pool, uuid, image):
 What=/dev/disk/by-uuid/{uuid}
 Where={pool}
 Type=xfs
-Options=prjquota
+Options={options}
 [Install]
 WantedBy=local-fs.target
 '''
@@ -1284,7 +1317,7 @@ def mount_new_pool(record, old, pool):
         if loop_path.exists() and loop_path.read_bytes() != expected:
             raise MigrationError(f'{LOOP_SERVICE} belongs to another pool.')
         atomic_bytes(loop_path, expected, 0o644)
-    atomic_bytes(unit, pool_unit(pool, record['uuid'], image).encode(), 0o644)
+    atomic_bytes(unit, pool_unit(pool, record['uuid'], image, old.get('restrictions', ())).encode(), 0o644)
     link = pool_boot_link(old['unit'])
     if boot_link_target(old['unit']) is None:
         link.parent.mkdir(exist_ok=True)
@@ -1338,8 +1371,7 @@ def filesystem_path(path):
         for line in Path('/proc/self/mountinfo').read_text().splitlines():
             fields = line.split()
             if fields[0] == mount_id:
-                decode = lambda value: Path(re.sub(r'\\(040|011|012|134)', lambda match: chr(int(match[1], 8)), value))
-                root, target = decode(fields[3]), decode(fields[4])
+                root, target = (Path(mountinfo_text(value)) for value in fields[3:5])
                 return root / path.relative_to(target)
     finally:
         os.close(descriptor)
@@ -1372,6 +1404,23 @@ def check_image_inode(metadata, receipt):
         raise MigrationError('New pool image does not match the inode created for this migration.')
 
 
+def check_image_headroom(record, image, allocated=0):
+    reserve = record.get('receiptReserveBytes', CONTROLLER_RECEIPT_RESERVE)
+    remaining = max(0, record['target']['size'] - allocated)
+    image_device = image.parent.stat().st_dev
+    receipt_paths = (ROOT, ROOT / 'state')
+    image_reserve = reserve if any(path.stat().st_dev == image_device for path in receipt_paths) else 0
+    def free(path):
+        space = os.statvfs(path)
+        return space.f_bavail * space.f_frsize
+    if free(image.parent) < remaining + image_reserve:
+        raise MigrationError(f'The image needs at least {remaining + image_reserve} free bytes for full backing allocation and controller recovery receipts.')
+    for path in receipt_paths:
+        required = reserve + (remaining if path.stat().st_dev == image_device else 0)
+        if free(path) < required:
+            raise MigrationError(f'Free at least {required} bytes on {path} for allocation and controller recovery receipts.')
+
+
 def prepare_image(record, image, force):
     verify_image_location(image, ROOT / 'state', pool_path())
     created = record.get('createdImage')
@@ -1382,9 +1431,11 @@ def prepare_image(record, image, force):
             metadata = image.stat(follow_symlinks=False)
             if metadata.st_size != record['target']['size'] or metadata.st_blocks * 512 < metadata.st_size:
                 raise MigrationError('An existing target image must be fully allocated at the requested size.')
+            check_image_headroom(record, image, metadata.st_blocks * 512)
             return
         if record['phase'] != 'planned':
             raise MigrationError(f'The image for this migration is missing: {image}.')
+        check_image_headroom(record, image)
         # Commit ownership while the staging file is empty, so an interrupted
         # full allocation can always be resumed or released by rollback.
         with tempfile.NamedTemporaryFile(prefix='.cairn-native-xfs-', dir=image.parent, delete=False) as output:
@@ -1400,12 +1451,15 @@ def prepare_image(record, image, force):
     actual = (image if published else staged).stat(follow_symlinks=False)
     check_image_inode(actual, created)
     size = record['target']['size']
+    check_image_headroom(record, image, actual.st_blocks * 512)
     if actual.st_size != size or actual.st_blocks * 512 < size:
         if published or actual.st_size > size:
             raise MigrationError('The recorded pool image is no longer fully allocated at the requested size.')
         descriptor = os.open(staged, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
-            check_image_inode(os.fstat(descriptor), created)
+            measured = os.fstat(descriptor)
+            check_image_inode(measured, created)
+            check_image_headroom(record, image, measured.st_blocks * 512)
             require_migration_running()
             os.posix_fallocate(descriptor, 0, size)
             os.fsync(descriptor)
@@ -1548,16 +1602,25 @@ def migrate_pool(arguments):
     plan = pool_tool('plan', state)
     if plan['blockers']:
         raise MigrationError('Resolve these before migrating:\n- ' + '\n- '.join(plan['blockers']))
+    record = record or {'version': 1, 'target': target, 'phase': 'planned', 'old': old, 'uuid': str(uuid.uuid4())}
     if 'image' in target:
-        verify_image_location(Path(target['image']), state, pool)
-        free = os.statvfs(Path(target['image']).parent)
+        image = Path(target['image'])
+        verify_image_location(image, state, pool)
         needed = plan['usedBytes'] + plan['usedBytes'] // 10 + 1024 ** 3
         if target['size'] < needed:
             raise MigrationError(f'The new pool needs at least {needed} bytes as --size.')
-        if not Path(target['image']).exists() and not (record and record.get('createdImage')) \
-                and free.f_bavail * free.f_frsize < target['size']:
-            raise MigrationError(f'The image needs at least {target["size"]} free bytes for full backing allocation.')
-    record = record or {'version': 1, 'target': target, 'phase': 'planned', 'old': old, 'uuid': str(uuid.uuid4())}
+        record['receiptReserveBytes'] = max(record.get('receiptReserveBytes', 0),
+                                            CONTROLLER_RECEIPT_RESERVE + len(plan['environments']) * 64 * 1024)
+        allocated = 0
+        candidate = image
+        if not image.exists() and record.get('createdImage'):
+            candidate = staged_image_path(image, record['createdImage'])
+        if candidate.exists():
+            allocation = candidate.stat(follow_symlinks=False)
+            if record.get('createdImage'):
+                check_image_inode(allocation, record['createdImage'])
+            allocated = allocation.st_blocks * 512
+        check_image_headroom(record, image, allocated)
     if arguments.dry_run:
         units = active_units()
         print('Native data pool migration plan (dry run, nothing changed):')

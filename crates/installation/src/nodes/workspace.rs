@@ -194,6 +194,32 @@ async fn renew_lease(s: &Service, attempt: &str) -> Result<u64> {
     Ok(lease_ms)
 }
 
+/// Compute the manager's pre-response skill digest and staging estimate.
+/// The disposable native qualification measures this same work separately.
+#[doc(hidden)]
+pub fn native_seed_offer(
+    source: &Path,
+    skipped_project: Option<&Path>,
+) -> (Option<String>, Option<u64>) {
+    let key = skill_cache::key(&source.join("home"));
+    let allocation = super::files::staging_size(source, |path| {
+        skipped_project != Some(path)
+            && path != Path::new(crate::conversation_deletion::retired::MANAGER_NAMESPACE)
+    })
+    .ok()
+    .map(|bytes| {
+        let margin = if key.is_some() {
+            skill_cache::CACHE_WRITE_MARGIN
+        } else {
+            0
+        };
+        bytes
+            .saturating_add(margin)
+            .saturating_add(crate::native::disk::MIB)
+    });
+    (key, allocation)
+}
+
 /// Streams the selected staging directory of the run to the node.
 async fn seed_source(
     run: &Value,
@@ -244,28 +270,9 @@ async fn seed_source(
         if initial && plan["backend"] == "native" && selection[skill_cache::NEGOTIATE].is_array() {
             let root = source.clone();
             let skipped = project_root.clone();
-            tokio::task::spawn_blocking(move || {
-                let key = skill_cache::key(&root.join("home"));
-                let allocation = super::files::staging_size(&root, |path| {
-                    skipped.as_deref() != Some(path)
-                        && path
-                            != Path::new(crate::conversation_deletion::retired::MANAGER_NAMESPACE)
-                })
-                .ok()
-                .map(|bytes| {
-                    let margin = if key.is_some() {
-                        skill_cache::CACHE_WRITE_MARGIN
-                    } else {
-                        0
-                    };
-                    bytes
-                        .saturating_add(margin)
-                        .saturating_add(crate::native::disk::MIB)
-                });
-                (key, allocation)
-            })
-            .await
-            .map_err(Error::internal)?
+            tokio::task::spawn_blocking(move || native_seed_offer(&root, skipped.as_deref()))
+                .await
+                .map_err(Error::internal)?
         } else {
             (None, None)
         };

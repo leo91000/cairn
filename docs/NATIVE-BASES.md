@@ -132,7 +132,9 @@ reference. It runs three cold and warm skill bundles per runtime, plus a warm
 launch from a prepared base. The XFS fixture verifies the skill cache hit and
 the claimed spare's original inode during that same launch. Each row in
 `connector-startup.json` reports the encoded seed bytes, cache negotiation,
-connector completion and the workload readiness marker. Its scan count is
+connector completion and the workload readiness marker. The response frames
+are prebuilt. The timed request executes the real manager-side skill digest
+and allocation estimate, with that time also reported separately. Its scan count is
 process-wide inside the controller's admission-to-submission interval. It excludes
 the connector's own scans. The fixture holds the seed payload fixed and creates
 fresh conversations. The loopback timings exclude the production manager's

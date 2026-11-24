@@ -286,17 +286,22 @@ class OfflineFixtureMaster(http.server.BaseHTTPRequestHandler):
                 return self.json_response(fixture['descriptor'])
             if fixture and operation == 'lease':
                 return self.json_response({'remainingMs': fixture['lease']})
-            if fixture and operation == 'seed' and json.loads(body).get('kind') == 'initial':
-                offered = json.loads(body).get('nativeSkillCache')
-                hit = isinstance(offered, list) and fixture['key'] in offered
+            selection = json.loads(body) if fixture and operation == 'seed' else {}
+            if selection.get('kind') == 'initial':
+                offered = selection.get('nativeSkillCache')
+                offer = self.server.seed_offer(attempt, selection.get('workspace') is False) if isinstance(offered, list) else {}
+                key = offer.get('key')
+                hit = bool(key and key in offered)
                 payload = fixture['hit' if hit else 'miss']
                 headers = {}
-                if isinstance(offered, list):
-                    headers[SKILL_KEY] = fixture['key']
-                    headers['x-cairn-seed-allocation'] = str(len(fixture['miss']) + 16 * 1024 * 1024)
-                    if hit:
-                        headers[SKILL_HIT] = '1'
-                fixture['observed'] = dict(cacheSupported=isinstance(offered, list), cacheHit=hit, encodedBytes=len(payload))
+                if key:
+                    headers[SKILL_KEY] = key
+                if offer.get('allocation') is not None:
+                    headers['x-cairn-seed-allocation'] = str(offer['allocation'])
+                if hit:
+                    headers[SKILL_HIT] = '1'
+                fixture['observed'] = dict(cacheSupported=isinstance(offered, list), cacheHit=hit,
+                                           encodedBytes=len(payload), managerOfferMs=offer.get('elapsedMs'))
                 return self.respond(200, payload, headers)
         self.respond(503)
 
@@ -469,6 +474,8 @@ def main():
             response = json.loads(helper.stdout.readline())
             assert response['ok'], 'Manager fixture failed: ' + op + ': ' + response.get('error', '')
             return response['value']
+
+        fixture_master.seed_offer = lambda attempt, skip: manager('connector-seed-offer', attempt=attempt, skipWorkspace=skip)
 
         contexts = {}
         started_runs = set()
@@ -737,16 +744,14 @@ def main():
                 manager('checkpoint', run=run, attempt=attempt, vm=run in vm_runs)
                 source = root / ('connector-seed-' + attempt)
                 (data / 'runs' / run).rename(source)
-                key = skill_bundle(source, connector_sample, lambda path: manager('archive-hash', path=str(path))['hash'],
-                                   root / 'connector-fingerprint')
+                skill_bundle(source, connector_sample)
                 descriptor = dict(dataRoot=str(data), plan=plan)
                 if run in base_archives:
                     descriptor['projectArchives'] = base_archives[run]
                 fixture_master.preparations[attempt] = dict(
-                    descriptor=descriptor, lease=lease, key=key,
+                    descriptor=descriptor, lease=lease,
                     miss=seed_frames(source), hit=seed_frames(source, omit_skills=True),
                 )
-                shutil.rmtree(source)
             startup = time.perf_counter()
             progress('run-admission-before')
             if connector_sample is None:
@@ -765,6 +770,7 @@ def main():
             eventually(execution_ready, timeout=600 if docker_script else 60)
             startup_ms = (time.perf_counter() - startup) * 1000
             if connector_sample is not None:
+                shutil.rmtree(source)
                 sample = fixture_master.preparations.pop(attempt)['observed']
                 report = api('/runs/' + attempt + '/bootstrap', method='GET')['bootstrap']
                 sample.update(connectorMs=(prepared_at - startup) * 1000, readinessMs=startup_ms,
@@ -1025,6 +1031,7 @@ def main():
                     binary_sha = hashlib.file_digest(source, 'sha256').hexdigest()
                 report = dict(filesystem='xfs' if xfs_smoke else 'ext4', runtimeSha256=binary_sha,
                               scans='Controller process-wide scans from admission to submission. Connector scans excluded.',
+                              seed='Prebuilt response frames. The real Rust skill digest and allocation estimate run before responding and are reported separately.',
                               samples=metrics['connectorStartup'])
                 evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
                 evidence.mkdir(parents=True, exist_ok=True)
