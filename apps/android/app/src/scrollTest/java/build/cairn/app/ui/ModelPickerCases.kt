@@ -488,6 +488,7 @@ abstract class ModelPickerCases {
                 "antigravity" to ModelCatalog(),
             )
         var provider by mutableStateOf("codex")
+        var saved by mutableStateOf("codex")
         var owner by mutableStateOf(true)
         var connections = 0
         val refreshed = mutableListOf<String>()
@@ -497,11 +498,12 @@ abstract class ModelPickerCases {
                 SurfaceForTest {
                     ModelPicker(
                         catalogs.getValue(provider),
-                        "",
+                        if (provider == "opencode") "saved-model" else "",
                         "",
                         provider = provider,
                         changeProvider = { provider = it },
                         catalogs = catalogs,
+                        savedProvider = saved,
                         refreshCatalog = { refreshed += it },
                         openConnections = if (owner) ({ connections++ }) else null,
                     ) { _, _ ->
@@ -521,14 +523,24 @@ abstract class ModelPickerCases {
         compose.runOnIdle { assertEquals(1, connections) }
         compose.onNodeWithTag("model-settings-sheet").assertDoesNotExist()
 
-        // A member cannot open Connections; a chat already on the agent keeps showing it.
+        // A member cannot open Connections; a chat already on the agent keeps offering it, also
+        // after looking at another agent.
         owner = false
         provider = "opencode"
+        saved = "opencode"
         compose.onNodeWithTag("model-picker").performClick()
         compose.onNode(tile("OpenCode")).assertExists()
+        compose.onNodeWithText("Aucun compte").assertExists()
+        compose.onNodeWithText("Le prochain message attendra une connexion.").assertExists()
+        compose.onNodeWithText("saved-model").assertHasNoClickAction()
         compose.onNodeWithTag("unconnected-agents").assertDoesNotExist()
         compose.onNodeWithText("Connecter").assertDoesNotExist()
-        provider = "codex"
+        compose.onNodeWithText("Ouvrir les connexions").assertDoesNotExist()
+        compose.onNode(tile("Codex")).performClick()
+        compose.runOnIdle { assertEquals("codex", provider) }
+        compose.onNode(tile("OpenCode")).assertExists()
+        saved = "codex"
+        compose.onNode(tile("OpenCode")).assertDoesNotExist()
         compose.onNodeWithText("Non connecté").assertExists()
     }
 }

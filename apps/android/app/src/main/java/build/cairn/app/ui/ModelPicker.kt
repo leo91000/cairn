@@ -180,9 +180,10 @@ private val GeminiMark by lazy {
  * set, the sheet also switches between Codex and Claude Code; the caller supplies that provider's
  * catalog. When [changeSpeed] is set, Codex models listing speeds offer them; the speed is kept
  * across model changes. With [catalogs], agents whose catalog says no account can run are not
- * offered: the sheet names them and, with [openConnections], leads to Connections. Opening the
- * sheet refreshes the other agents' catalogs with [refreshCatalog], so an account connected or
- * removed meanwhile shows.
+ * offered, except the chosen one and [savedProvider], the conversation's or saved agent's: the
+ * sheet names them and, with [openConnections], leads to Connections. Opening the sheet refreshes
+ * the other agents' catalogs with [refreshCatalog], so an account connected or removed meanwhile
+ * shows.
  */
 @Composable
 internal fun ModelPicker(
@@ -205,6 +206,7 @@ internal fun ModelPicker(
     changeSpeed: ((String) -> Unit)? = null,
     onReasoningIntent: (ResumeReasoningIntent) -> Unit = {},
     catalogs: Map<String, ModelCatalog>? = null,
+    savedProvider: String? = null,
     refreshCatalog: (suspend (String) -> Unit)? = null,
     openConnections: (() -> Unit)? = null,
     change: (String, String) -> Unit,
@@ -216,6 +218,7 @@ internal fun ModelPicker(
     val inheritedSpeedValue =
         if (inherit) defaultSpeed else catalog.nativeDefaults?.speed ?: defaultSpeed
     val inheriting = inherit || catalog.nativeDefaults != null
+    val disconnected = catalog.connected == false
     var open by rememberSaveable { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
     var refreshError by remember { mutableStateOf("") }
@@ -239,8 +242,10 @@ internal fun ModelPicker(
     val selected =
         route?.let { chosen.copy(supportedReasoningEfforts = it.supportedReasoningEfforts) }
             ?: chosen
-    LaunchedEffect(provider, catalog.models, model, inheritedModel, inheriting) {
-        if (codingAgent(provider).requiresModel && model.isBlank() && !inheriting) {
+    LaunchedEffect(provider, catalog.models, model, inheritedModel, inheriting, disconnected) {
+        if (
+            !disconnected && codingAgent(provider).requiresModel && model.isBlank() && !inheriting
+        ) {
             onReasoningIntent(ResumeReasoningIntent.Untouched)
             val next =
                 catalog.models.find { it.isDefault && !it.hidden }
@@ -313,6 +318,12 @@ internal fun ModelPicker(
                         .forEach { launch { refreshCatalog(it.provider) } }
                 }
             var query by rememberSaveable { mutableStateOf("") }
+            val connect = openConnections?.let {
+                {
+                    open = false
+                    it()
+                }
+            }
             // Claude lists its own "default" alias. When the default row already resolves to it,
             // show one row instead of two equivalent choices.
             val alias =
@@ -401,10 +412,13 @@ internal fun ModelPicker(
                     FilledTonalButton(onClick = { open = false }) { Text("Terminé") }
                 }
                 if (changeProvider != null) {
-                    // The chosen agent stays, so a chat whose account went away still shows it.
+                    // The chosen and saved agents stay, so a chat whose account went away still
+                    // shows
+                    // where it runs and can return to it after looking at another agent.
                     val (offered, unconnected) =
                         codingAgents.partition {
                             it.provider == provider ||
+                                it.provider == savedProvider ||
                                 catalogs?.get(it.provider)?.connected != false
                         }
                     SectionLabel("Assistant de code")
@@ -412,7 +426,14 @@ internal fun ModelPicker(
                         value,
                         vendor,
                         tileModifier ->
-                        ProviderTile(value, vendor, provider == value, enabled, tileModifier) {
+                        ProviderTile(
+                            value,
+                            vendor,
+                            provider == value,
+                            enabled,
+                            tileModifier,
+                            accountMissing = catalogs?.get(value)?.connected == false,
+                        ) {
                             if (provider != value) {
                                 query = ""
                                 changeProvider(value)
@@ -420,16 +441,8 @@ internal fun ModelPicker(
                         }
                     }
                     if (unconnected.isNotEmpty())
-                        UnconnectedAgents(
-                            unconnected.map { it.provider },
-                            openConnections?.let {
-                                {
-                                    open = false
-                                    it()
-                                }
-                            },
-                        )
-                    AnimatedVisibility(switching) {
+                        UnconnectedAgents(unconnected.map { it.provider }, connect)
+                    AnimatedVisibility(switching && !disconnected) {
                         Row(
                             Modifier.fillMaxWidth()
                                 .background(
@@ -455,6 +468,44 @@ internal fun ModelPicker(
                     Spacer(Modifier.height(4.dp))
                 }
                 SectionLabel("Modèle")
+                if (disconnected) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(
+                            Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                "${providerLabel(provider)} a besoin d’une connexion",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            Text(
+                                if (field) "Les exécutions attendront une connexion."
+                                else "Le prochain message attendra une connexion.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            if (connect != null)
+                                TextButton(onClick = connect) { Text("Ouvrir les connexions") }
+                        }
+                    }
+                    Surface(
+                        shape = ModelCardShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            modelLabel,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    return@Column
+                }
                 if (provider == "opencode" || provider == "antigravity")
                     Surface(
                         shape = RoundedCornerShape(12.dp),
@@ -835,6 +886,7 @@ internal fun ProviderTile(
     selected: Boolean,
     enabled: Boolean,
     modifier: Modifier,
+    accountMissing: Boolean = false,
     choose: () -> Unit,
 ) {
     val accent = if (provider == "claude") ClaudeTint else MaterialTheme.colorScheme.primary
@@ -873,6 +925,13 @@ internal fun ProviderTile(
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center,
             )
+            if (accountMissing)
+                Text(
+                    "Aucun compte",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center,
+                )
         }
     }
 }

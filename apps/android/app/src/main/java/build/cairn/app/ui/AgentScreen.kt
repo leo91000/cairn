@@ -2257,6 +2257,7 @@ private fun EngineSection(
         speed = agent.speed,
         changeSpeed = { speed -> update { it.copy(speed = speed) } },
         catalogs = state.modelCatalogs,
+        savedProvider = state.agents.find { it.id == agent.id }?.provider,
         refreshCatalog = { vm.refreshModels(it) },
         // Leaving with unsaved changes would lose them, as for the native configuration.
         openConnections = openConnections.takeIf { configurationEnabled },

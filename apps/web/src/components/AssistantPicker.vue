@@ -51,6 +51,8 @@ const props = withDefaults(defineProps<{
   defaultReasoning?: string
   defaultSpeed?: string
   defaultSource?: 'agent' | 'conversation'
+  /** The conversation's or saved agent's coding agent, offered even without an account. */
+  savedProvider?: Provider
   disabled?: boolean
   switching?: boolean
   variant?: 'pill' | 'field'
@@ -78,11 +80,13 @@ const open = ref(false)
 const query = ref('')
 const position = ref<CSSProperties>({})
 const catalog = computed(() => modelCatalogs[provider.value].catalog)
+const disconnected = computed(() => catalog.value.connected === false)
 const reload = () => modelCatalogs[provider.value].load()
 const current = computed(() => providers.find(item => item.value === provider.value) ?? providers[0])
 // Agents without an account that can run are pointed to Connections rather than offered. The
-// chosen agent stays, so a chat whose account went away still shows where it runs.
-const offered = computed(() => providers.filter(item => item.value === provider.value || modelCatalogs[item.value].catalog.connected !== false))
+// chosen and saved agents stay, so a chat whose account went away still shows where it runs and
+// can return to it after looking at another agent.
+const offered = computed(() => providers.filter(item => item.value === provider.value || item.value === props.savedProvider || modelCatalogs[item.value].catalog.connected !== false))
 const unconnected = computed(() => providers.filter(item => !offered.value.includes(item)))
 const inheritedModel = computed(() => props.inherit ? props.defaultModel : catalog.value.nativeDefaults?.model || props.defaultModel)
 const inheritedReasoning = computed(() => props.inherit ? props.defaultReasoning : catalog.value.nativeDefaults?.reasoning || props.defaultReasoning)
@@ -170,8 +174,8 @@ const choices = computed(() => [
     : []),
 ])
 
-watch([provider, () => catalog.value.models, () => inheritedModel.value, () => catalog.value.loaded], () => {
-  if (catalog.value.loaded && current.value.requiresModel && !model.value && !inheriting.value) {
+watch([provider, () => catalog.value.models, () => inheritedModel.value, () => catalog.value.loaded, disconnected], () => {
+  if (!disconnected.value && catalog.value.loaded && current.value.requiresModel && !model.value && !inheriting.value) {
     model.value = catalog.value.models.find(item => item.isDefault && !item.hidden)?.model
       || catalog.value.models.find(item => !item.hidden)?.model || ''
   }
@@ -375,6 +379,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
               <span class="flex min-w-0 flex-col">
                 <span class="text-sm leading-tight font-semibold">{{ item.label }}</span>
                 <span class="text-3xs text-muted">{{ item.vendor }}</span>
+                <span v-if="modelCatalogs[item.value].catalog.connected === false" class="mt-1 text-3xs font-medium text-warning">No account</span>
               </span>
             </button>
           </div>
@@ -399,12 +404,36 @@ onBeforeUnmount(() => removeEventListener('resize', place))
             </RouterLink>
             <span v-else class="shrink-0 text-muted">Not connected</span>
           </div>
-          <p v-if="switching" class="flex items-start gap-2 rounded-lg bg-soft px-3 py-2 text-2xs text-ink" role="status">
+          <p v-if="switching && !disconnected" class="flex items-start gap-2 rounded-lg bg-soft px-3 py-2 text-2xs text-ink" role="status">
             <Icon :name="Info" :size="14" class="mt-px text-accent" />The next message starts a new {{ current.label }} session with this chat’s context and existing files.
           </p>
         </section>
 
-        <section class="flex flex-col gap-2" :aria-labelledby="`${id}-model`">
+        <section v-if="disconnected" class="flex flex-col gap-2" :aria-labelledby="`${id}-model`">
+          <h3 :id="`${id}-model`" class="section-label">
+            Model
+          </h3>
+          <div class="flex flex-col gap-1 rounded-xl border border-line bg-surface px-3.5 py-3 text-2xs" role="status">
+            <p class="font-semibold text-warning">
+              {{ current.label }} needs a connection
+            </p>
+            <p class="text-muted">
+              {{ variant === 'pill' ? 'The next message will wait for a connection.' : 'Runs will wait for a connection.' }}
+            </p>
+            <RouterLink
+              v-if="state.installationRole === 'owner'"
+              to="/connections"
+              class="self-start font-semibold text-accent"
+              @click="close"
+            >
+              Open Connections →
+            </RouterLink>
+          </div>
+          <div class="rounded-xl bg-hover/35 px-3.5 py-3 text-sm font-semibold text-muted" aria-disabled="true">
+            {{ modelLabel }}
+          </div>
+        </section>
+        <section v-else class="flex flex-col gap-2" :aria-labelledby="`${id}-model`">
           <h3 :id="`${id}-model`" class="section-label">
             Model
           </h3>

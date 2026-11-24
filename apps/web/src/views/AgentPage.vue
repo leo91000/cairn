@@ -1223,6 +1223,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               v-model:speed="draft.speed"
               variant="field"
               :disabled="busy"
+              :saved-provider="agent?.provider"
               :inherit="!!agent"
               :default-model="agent?.codingAgentDefaults?.[draft.provider]?.model || ''"
               :default-reasoning="agent?.codingAgentDefaults?.[draft.provider]?.reasoning || ''"

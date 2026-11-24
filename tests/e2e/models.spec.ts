@@ -209,7 +209,7 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   await expect(menu).toHaveCount(0)
 
   // An account connected meanwhile is offered when the picker opens again.
-  await workspace.api('/api/accounts', 'POST', {
+  const { account } = await workspace.api('/api/accounts', 'POST', {
     provider: 'antigravity',
     name: 'Picker Gemini key',
     modelProvider: 'gemini',
@@ -220,4 +220,14 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   await menu.getByRole('radio', { name: 'Antigravity', exact: true }).click()
   await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
   await expect(menu.getByText(hidden.filter(label => label !== 'Antigravity').join(', '), { exact: true })).toBeVisible()
+
+  // A disconnected current choice keeps its selection and shows the reconnection action.
+  await page.keyboard.press('Escape')
+  await workspace.api(`/api/accounts/${account.id}`, 'DELETE')
+  await picker.click()
+  await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await expect(menu.getByText('The next message will wait for a connection.')).toBeVisible()
+  await expect(menu.getByRole('radiogroup', { name: 'Model', exact: true })).toHaveCount(0)
+  await menu.getByRole('link', { name: 'Open Connections →' }).click()
+  await expect(page).toHaveURL(/\/connections$/)
 })

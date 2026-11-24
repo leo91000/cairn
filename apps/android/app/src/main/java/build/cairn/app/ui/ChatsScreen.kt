@@ -2268,6 +2268,7 @@ internal fun ChatPage(
                                                 changeSpeed = { speed = it },
                                                 onReasoningIntent = ::setResumeReasoningIntent,
                                                 catalogs = state.modelCatalogs,
+                                                savedProvider = currentProvider,
                                                 refreshCatalog = { vm.refreshModels(it) },
                                                 openConnections =
                                                     openConnections.takeIf { state.isOwner },
