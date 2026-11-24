@@ -379,6 +379,38 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn startup_discards_spare_controls_without_workloads_or_quota_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path();
+        private_dir(&index(state)).await.unwrap();
+        let mut controls = Vec::new();
+
+        for was_ready in [false, true] {
+            let spare = Spare {
+                run: crate::config::id(),
+                key: "a".repeat(64),
+            };
+            let control = workspace::directory(state, &spare.run).unwrap();
+            private_dir(&control).await.unwrap();
+            if was_ready {
+                std::fs::write(control.join("spare-ready"), &spare.key).unwrap();
+            }
+            atomic_write(
+                &index(state).join(&spare.run),
+                &serde_json::to_vec(&spare).unwrap(),
+            )
+            .await
+            .unwrap();
+            controls.push(control);
+        }
+
+        assert!(discard_unclaimed(state, None).await.unwrap());
+        assert!(files(state).unwrap().is_empty());
+        assert!(controls.iter().all(|control| !control.exists()));
+        assert!(!discard_unclaimed(state, None).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn a_new_base_replaces_the_least_recent_unclaimed_spare() {
         use std::time::{Duration, UNIX_EPOCH};
         let root = tempfile::tempdir().unwrap();

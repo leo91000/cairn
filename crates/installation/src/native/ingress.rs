@@ -80,7 +80,7 @@ fn enforce_quota() -> Result<()> {
 pub(crate) struct Admission {
     data: PathBuf,
     state: PathBuf,
-    target: PathBuf,
+    target: AllocationTarget,
     filesystem: PathBuf,
     policy: storage::policy::Policy,
     limit: u64,
@@ -89,6 +89,20 @@ pub(crate) struct Admission {
     reservation: u64,
     submitted: u64,
     observation: Observation,
+}
+
+enum AllocationTarget {
+    Tree(PathBuf),
+    Project(PathBuf),
+}
+
+impl AllocationTarget {
+    fn allocated(&self) -> Result<u64> {
+        match self {
+            Self::Tree(path) => allocated(path),
+            Self::Project(path) => super::quota::usage(path),
+        }
+    }
 }
 
 struct Observation {
@@ -123,13 +137,50 @@ impl Admission {
         limit: u64,
         policy: &storage::policy::Policy,
     ) -> Result<Self> {
-        let initial_target = allocated(target)?;
+        Self::measure_target(
+            data,
+            state,
+            AllocationTarget::Tree(target.to_owned()),
+            filesystem,
+            limit,
+            policy,
+        )
+    }
+
+    /// The prepare worker may update several directories of one quota-owned
+    /// workload. Use the kernel's project counter throughout these writes.
+    pub(super) fn project(
+        data: &Path,
+        state: &Path,
+        workload: PathBuf,
+        limit: u64,
+        policy: &storage::policy::Policy,
+    ) -> Result<Self> {
+        Self::measure_target(
+            data,
+            state,
+            AllocationTarget::Project(workload),
+            &workspace::data_root(state),
+            limit,
+            policy,
+        )
+    }
+
+    fn measure_target(
+        data: &Path,
+        state: &Path,
+        target: AllocationTarget,
+        filesystem: &Path,
+        limit: u64,
+        policy: &storage::policy::Policy,
+    ) -> Result<Self> {
+        let initial_target = target.allocated()?;
         let used = disk::usage_sync(data, state)?;
         let peer_reservations = disk::preparation_bytes(state)?;
         Ok(Self {
             data: data.to_owned(),
             state: state.to_owned(),
-            target: target.to_owned(),
+            target,
             filesystem: filesystem.to_owned(),
             policy: policy.clone(),
             limit,
@@ -178,7 +229,7 @@ impl Admission {
 
     pub(crate) fn retarget_staging(&mut self, target: &Path) -> Result<()> {
         self.initial_target = allocated(target)?;
-        self.target = target.to_owned();
+        self.target = AllocationTarget::Tree(target.to_owned());
         Ok(())
     }
 
@@ -203,7 +254,7 @@ impl Admission {
             let used = disk::usage_sync(&self.data, &self.state)?.saturating_sub(self.reservation);
             let peer_reservations =
                 disk::preparation_bytes(&self.state)?.saturating_sub(self.reservation);
-            let growth = allocated(&self.target)?.saturating_sub(self.initial_target);
+            let growth = self.target.allocated()?.saturating_sub(self.initial_target);
             // Delayed allocation and small-file overhead must not erase a
             // debit merely because a new usage sample does not show it yet.
             let outstanding = self.submitted.saturating_sub(growth);

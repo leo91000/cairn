@@ -17,7 +17,7 @@ const MAX_ENTRIES: usize = 1024;
 const MAX_CACHE_ENTRIES: usize = 8;
 
 pub(super) fn directory() -> PathBuf {
-    crate::native::state_dir().join("native-seed-skills")
+    crate::nodes::node_data_dir().join("native-seed-skills")
 }
 
 pub(super) fn valid(key: &str) -> bool {
@@ -164,6 +164,21 @@ pub(super) async fn remember(
     }
     let mut bytes = Vec::new();
     files::send(&home.join(".agents/skills"), &mut bytes).await?;
+    let staging = cache
+        .parent()
+        .ok_or_else(|| crate::error::Error::bad("Missing seed cache parent."))?;
+    match std::fs::symlink_metadata(cache) {
+        Ok(metadata)
+            if !metadata.is_dir() || metadata.dev() != std::fs::metadata(staging)?.dev() =>
+        {
+            return Err(crate::error::Error::conflict(
+                "Native seed cache must share the staging filesystem.",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     admit((bytes.len() as u64).saturating_add(10_240))?;
     crate::skills::private_dir(cache).await?;
     let mut candidates = std::fs::read_dir(cache)?
@@ -184,9 +199,8 @@ pub(super) async fn remember(
     for (_, path) in candidates.into_iter().take(evict) {
         std::fs::remove_file(path)?;
     }
-    // The enclosing seed barrier covers this private cache on the controller
-    // filesystem when both paths share it. A torn cache is rejected by digest
-    // on reuse and rebuilt from the next base stream.
+    // The enclosing seed barrier covers the staging filesystem. A torn cache
+    // is rejected by digest on reuse and rebuilt from the next base stream.
     let mut file = tempfile::NamedTempFile::new_in(cache)?;
     file.write_all(&bytes)?;
     file.as_file().sync_all()?;

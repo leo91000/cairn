@@ -696,21 +696,8 @@ async fn check_copy_headroom(
     let state = state.to_owned();
     let fallback = fallback.clone();
     let sample = tokio::task::spawn_blocking(move || -> Result<()> {
-        let policy = match std::fs::read(state.join("storage-policy.json")) {
-            Ok(bytes) => storage::policy::from_persisted(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fallback,
-            Err(error) => return Err(error.into()),
-        };
-        let (total, free) = storage::policy::physical_space(&workspace::data_root(&state))?;
         let pending = storage::cache::pending_write_bytes();
-        // Other preparations may allocate before this copy's next sample.
-        // Their reservations count against physical headroom as well as the
-        // logical node budget, even when their bytes are not yet materialized.
-        let others = super::disk::preparation_bytes(&state)?.saturating_sub(reserved);
-        let physical = free
-            .saturating_sub(policy.reserve(total))
-            .saturating_sub(pending)
-            .saturating_sub(others);
+        let physical = super::disk::data_pool_headroom(&state, &fallback, reserved)?;
         let shared = match std::fs::read(state.join(crate::microvm::budget::FILE)) {
             Ok(bytes) => {
                 let budget = super::native_budget(&serde_json::from_slice(&bytes)?)?;

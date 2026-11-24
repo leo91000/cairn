@@ -15,6 +15,27 @@ pub(crate) fn available(limit: u64, used: u64) -> u64 {
     limit.saturating_sub(used).saturating_sub(METADATA_RESERVE)
 }
 
+pub(super) fn data_pool_headroom(
+    state: &Path,
+    fallback: &crate::storage::policy::Policy,
+    own_reservation: u64,
+) -> Result<u64> {
+    let policy = match std::fs::read(state.join("storage-policy.json")) {
+        Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fallback.clone(),
+        Err(error) => return Err(error.into()),
+    };
+    policy.validate().map_err(Error::bad)?;
+    let pool = super::workspace::data_root(state);
+    let (total, free) = crate::storage::policy::physical_space(&pool)?;
+    // Other preparations may allocate before the next physical sample.
+    let peers = preparation_bytes(state)?.saturating_sub(own_reservation);
+    Ok(free
+        .saturating_sub(policy.reserve(total))
+        .saturating_sub(crate::storage::cache::pending_write_bytes())
+        .saturating_sub(peers))
+}
+
 pub(crate) async fn bytes_if_present(path: &Path) -> Result<u64> {
     if !tokio::fs::try_exists(path).await? {
         return Ok(0);

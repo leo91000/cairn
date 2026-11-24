@@ -7,7 +7,9 @@
 //! Rewritten records are staged in a work directory on the controller
 //! filesystem and replace the originals only once the new pool is mounted at
 //! the pool path. The originals are kept there for a rollback.
-use super::{Ownership, Pool, Quota, current, open, operation, pool_identity, set_project};
+use super::{
+    MigratedLimits, Ownership, Pool, Quota, current, open, operation, pool_identity, set_project,
+};
 use crate::{
     error::{Error, Result},
     native::{atomic_write, identity, workspace},
@@ -387,8 +389,8 @@ async fn stage(path: &Path, bytes: &[u8]) -> Result<()> {
     atomic_write(path, bytes).await
 }
 
-/// After a verified copy: confirm the target charges the same inodes to the
-/// same project, apply the original limits and stage rewritten records.
+/// Rebind journals in the verified copy, confirm its inode charges, then
+/// restore the original limits and stage rewritten ownership records.
 async fn commit(state: &Path, work: &Path, target: &Path, run: &str) -> Result<Value> {
     let pool = target_pool(state, target)?;
     let environment = environment(state, run)?;
@@ -399,11 +401,28 @@ async fn commit(state: &Path, work: &Path, target: &Path, run: &str) -> Result<V
             "Migrated environment lost its project ID; rerun the migration.",
         ));
     }
-    let mut charged = Quota::default();
-    if environment.project != 0 {
-        // XFS releases inodes removed by a resumed copy in the background.
+    // Replacing a journal temporarily charges both the old and new inode.
+    // Keep the copy's quota unrestricted until that replacement is durable.
+    let source = environment.workload.join("data");
+    let rebound = if source.is_dir() {
+        identity::rebind_pending(&source, &path.join("data")).await?
+    } else {
+        false
+    };
+    let charged = if environment.project == 0 {
+        Quota::default()
+    } else {
+        // XFS may still account for inodes replaced by rsync or the journal
+        // rebind after syncfs returns. Wait for the project's observed count.
         syncfs(&pool)?;
-        charged = current(&pool, environment.project)?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let charged = loop {
+            let usage = current(&pool, environment.project)?;
+            if usage.inodes <= environment.quota.inodes || tokio::time::Instant::now() >= deadline {
+                break usage;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
         if charged.inodes != environment.quota.inodes {
             return Err(Error::conflict(format!(
                 "Environment {run} has {} inodes in project {} on the new pool but {} on the old pool; rerun the copy.",
@@ -411,12 +430,7 @@ async fn commit(state: &Path, work: &Path, target: &Path, run: &str) -> Result<V
             )));
         }
         set_limits(&pool, environment.project, &environment.quota)?;
-    }
-    let source = environment.workload.join("data");
-    let rebound = if source.is_dir() {
-        identity::rebind_pending(&source, &path.join("data")).await?
-    } else {
-        false
+        charged
     };
     let metadata = copy.metadata()?;
     for (name, record) in [
@@ -446,6 +460,13 @@ async fn commit(state: &Path, work: &Path, target: &Path, run: &str) -> Result<V
             control_filesystem: record.control_filesystem.clone(),
             workload_device: metadata.dev(),
             workload_inode: metadata.ino(),
+            migrated_limits: (environment.quota.block_hard > 0 && environment.quota.inode_hard > 0)
+                .then_some(MigratedLimits {
+                    block_hard: environment.quota.block_hard,
+                    block_soft: environment.quota.block_soft,
+                    inode_hard: environment.quota.inode_hard,
+                    inode_soft: environment.quota.inode_soft,
+                }),
         };
         stage(
             &record_directory(work, run, "migrated").join(name),

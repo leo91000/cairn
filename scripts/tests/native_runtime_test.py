@@ -881,12 +881,24 @@ def main():
         try:
             run = create()
             if xfs_smoke:
+                from native_docker_workload import ALPINE
+
                 active_binary = binary
                 legacy_phase = False
                 start_controller()
                 observed = api('/health', method='GET')
                 assert observed['backend'] == 'native'
-                attempt = start(run, lease=300000, docker_script='docker version >/tmp/docker-version\n')
+                volume = 'cairn-xfs-fixture'
+
+                def write_volume(value, owner):
+                    return (
+                        f'docker pull {ALPINE}\n'
+                        f'docker volume create {volume}\n'
+                        f"docker run --rm -v {volume}:/v {ALPINE} sh -ec "
+                        f"'printf %s {value} >/v/marker; chown {owner}:{owner} /v/marker; chmod 600 /v/marker'\n"
+                    )
+
+                attempt = start(run, lease=300000, docker_script=write_volume('protected', 999))
                 disk = state / 'native-data' / run / 'data'
                 storage_owner = json.loads((disk / '.cairn-identity.json').read_text())
                 assert storage_owner['user'] == 'namespace-storage-v1'
@@ -896,14 +908,30 @@ def main():
                 api('/runs/' + attempt, method='DELETE')
                 fenced(run, attempt)
 
-                resumed = start(run, lease=300000, docker_script='docker version >/tmp/docker-version\n')
-                assert json.loads((disk / '.cairn-identity.json').read_text()) == storage_owner
+                target = dict(mode='administrator', generation=str(uuid.uuid4()))
+                assert api('/native-mode', target)['status'] == 'applied'
+                current_mode.update(target)
+                raw_owner = storage_owner['host_engine'][0]
+                administrator = start(run, lease=300000, docker_script=write_volume('administrator', raw_owner))
+                raw_volume = disk / 'docker-administrator' / 'volumes' / volume / '_data' / 'marker'
+                assert raw_volume.read_text() == 'administrator'
+                assert raw_volume.stat().st_uid == raw_owner
+                api('/runs/' + administrator, method='DELETE')
+                fenced(run, administrator)
+
+                target = dict(mode='protected', generation=str(uuid.uuid4()))
+                assert api('/native-mode', target)['status'] == 'applied'
+                current_mode.update(target)
+                check = f'docker run --rm --user 999:999 -v {volume}:/v {ALPINE} sh -ec \'test "$(cat /v/marker)" = protected\'\n'
+                resumed = start(run, lease=300000, docker_script=check)
+                assert raw_volume.read_text() == 'administrator'
+                assert raw_volume.stat().st_uid == raw_owner
                 api('/runs/' + resumed, method='DELETE')
                 fenced(run, resumed)
                 manager('purge', run=run)
                 api('/disks/' + run + '/delete', {'permanentlyDeleted': True})
                 assert not disk.exists()
-                print('PASS: real protected XFS launch, rootless Docker, retained owners, resume and quota retirement.')
+                print('PASS: XFS launch, protected and administrator Docker volumes, retained owners, resume and quota retirement.')
                 return
             other = create()
             start_controller()

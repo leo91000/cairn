@@ -1428,11 +1428,10 @@ impl Controller {
             let _mounted = mounted.mount.lock().await;
             let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
             let limit = controller.disk_limit().await?;
-            let admission = super::ingress::Admission::new(
+            let admission = super::ingress::Admission::project(
                 &controller.data,
                 &controller.state,
-                &data,
-                &workspace::data_root(&controller.state),
+                workspace::workload(&controller.state, text(&plan, "runId"))?,
                 limit,
                 &policy,
             )?;
@@ -2186,6 +2185,7 @@ impl Controller {
             disk::bytes_if_present(&root.join("data")).await?
         };
         let assigned_base = has_journal && root.join("file-owner.json").exists();
+        let mut base_key = None;
         let mut spare_key = None;
         let mut project_bytes = None;
         let seed = if assigned_base {
@@ -2208,6 +2208,7 @@ impl Controller {
                     .as_u64()
                     .ok_or_else(|| Error::bad("Missing native disk size."))?;
                 if let Some(base) = self.bases().lookup(&descriptors, size).await? {
+                    base_key = Some(base.key.clone());
                     let format = storage::environment::directory(&self.state, run)?;
                     if !has_journal
                         && !workspace::workload(&self.state, run)?.try_exists()?
@@ -2239,15 +2240,62 @@ impl Controller {
         };
         let home = disk::bytes_if_present(&self.data.join("runs").join(run).join("home")).await?;
         let incoming = seed.saturating_add(home);
+        let private_bytes = current
+            .saturating_add(project_bytes.unwrap_or(seed))
+            .saturating_add(home);
+        if private_bytes > self.disk_budget(plan) {
+            return Err(Error::conflict(
+                "Retained native work leaves insufficient disk allowance for this preparation.",
+            ));
+        }
         // Callers hold the storage gate, so no reservation can be published
         // between samples: one full scan suffices unless reclamation changed
         // the pool.
         let limit = self.disk_limit().await?;
         let mut used = disk::used(&self.data, &self.state).await?;
         let growth = disk::available(limit, used);
-        if incoming > growth
+        let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
+        let headroom = || async {
+            let (state, policy) = (self.state.clone(), policy.clone());
+            let sample = tokio::task::spawn_blocking(move || {
+                if workspace::data_root(&state).try_exists()? {
+                    disk::data_pool_headroom(&state, &policy, 0)
+                } else {
+                    Ok(u64::MAX)
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), sample)
+                .await
+                .map_err(|_| Error::unavailable("Native data pool capacity observation is stale."))?
+                .map_err(Error::internal)?
+        };
+        let physical_need = incoming.saturating_add(disk::MIB);
+        let mut physical = headroom().await?;
+        if (incoming > growth || physical_need > physical)
             && super::spares::discard_unclaimed(&self.state, spare_key.as_deref()).await?
         {
+            used = disk::used(&self.data, &self.state).await?;
+            physical = headroom().await?;
+        }
+        if physical_need > physical {
+            // Cache allocation can be shared with retained reflink clones.
+            // Recheck actual free space before relying on an eviction's credit.
+            let bases = self.bases();
+            loop {
+                let credited = bases
+                    .trim(u64::MAX, physical_need - physical, base_key.as_deref())
+                    .await?;
+                physical = headroom().await?;
+                if physical >= physical_need || credited == 0 {
+                    break;
+                }
+            }
+            if physical < physical_need {
+                return Err(Error::new(
+                    507,
+                    "Native data pool lacks preparation headroom.",
+                ));
+            }
             used = disk::used(&self.data, &self.state).await?;
         }
         let growth = disk::available(limit, used);
@@ -2259,13 +2307,7 @@ impl Controller {
                 used = disk::used(&self.data, &self.state).await?;
             }
         }
-        let private_bytes = current
-            .saturating_add(project_bytes.unwrap_or(seed))
-            .saturating_add(home);
-        if private_bytes > self.disk_budget(plan)
-            || incoming > disk::available(limit, used)
-            || used > limit
-        {
+        if incoming > disk::available(limit, used) || used > limit {
             return Err(Error::conflict(
                 "Retained native work leaves insufficient shared disk budget for this preparation.",
             ));
@@ -3824,6 +3866,44 @@ pub(crate) mod tests {
                 .is_err()
         );
         assert!(disk::usage_scans_of(&controller.state) - before <= 2);
+    }
+
+    #[tokio::test]
+    async fn physical_reserve_pressure_reclaims_unpinned_bases_with_logical_budget_to_spare() {
+        let (_fixture, controller) = fixture().await;
+        let state = &controller.state;
+        let pool = workspace::data_root(state).join(super::super::bases::POOL_DIRECTORY);
+        let evictable = "a".repeat(64);
+        let pinned = "b".repeat(64);
+        for key in [&evictable, &pinned] {
+            let contents = pool.join(key);
+            private_dir(&contents).await.unwrap();
+            std::fs::write(contents.join("cached"), b"cached work").unwrap();
+            let control = state.join("native-bases").join(key);
+            private_dir(&control).await.unwrap();
+            std::fs::write(control.join("pin"), b"").unwrap();
+        }
+        std::fs::hard_link(
+            state.join("native-bases").join(&pinned).join("pin"),
+            state.join("pinned-source"),
+        )
+        .unwrap();
+        let run = crate::config::id();
+        let project = controller.data.join("runs").join(&run).join("workspace");
+        private_dir(&project).await.unwrap();
+        std::fs::write(project.join("seed"), b"new work").unwrap();
+        let plan = json!({
+            "runId": run,
+            "projectRoot": project,
+            "resources": { "diskMiB": 128 },
+            "imports": [{ "source": project, "target": project }],
+            "storage": { "policy": { "reserveMiB": 16 * 1024 * 1024 } },
+        });
+        assert!(controller.disk_growth().await.unwrap() > disk::MIB);
+        let error = controller.check_preparation_space(&plan).await.unwrap_err();
+        assert_eq!(error.status, 507);
+        assert!(!pool.join(evictable).exists());
+        assert!(pool.join(pinned).is_dir());
     }
 
     #[tokio::test]

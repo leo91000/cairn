@@ -69,7 +69,9 @@ host-owner path.
 ### Accounting
 
 The dedicated pool's allocated bytes come from `statvfs`. Conversation usage
-comes from project quota counters. Controller-side files still need inventory,
+and preparation writes use project quota counters. When the physical reserve
+limits admission, the controller can retire unused spares and evict unpinned
+bases before checking free space again. Controller-side files still need inventory,
 and one admission decision reuses its sample until reclamation changes usage.
 A bootstrap counter records process-wide usage scans, including concurrent
 activity, so tests and production observations can detect regressions.
@@ -121,6 +123,9 @@ changes or at restart.
 - The data pool must be migrated once, with the node stopped.
 - Reflink clones charge their logical size to the environment quota while sharing
   physical blocks; physical reserve checks use the pool's real free space.
+- Migrated projects keep their original inode allowance at the same byte grant.
+  Grant changes account for the XFS geometry while preserving that allowance
+  and inodes already in use.
 - Idmapped mounts require Linux 5.12 or later on the pool filesystem; the node
   already requires 6.11.
 

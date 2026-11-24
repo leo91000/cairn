@@ -65,6 +65,7 @@ fn ownership(control: &Path, workload: &Path, project: u32) -> Ownership {
         control_filesystem: super::super::filesystem_identity(&control_file).unwrap(),
         workload_device: workload_file.metadata().unwrap().dev(),
         workload_inode: workload_file.metadata().unwrap().ino(),
+        migrated_limits: None,
     }
 }
 
@@ -262,7 +263,15 @@ async fn seed(state: &Path) {
             .unwrap(),
         )
         .unwrap();
-        let quota = current(&open(&pool).unwrap(), project).unwrap();
+        let pool_file = open(&pool).unwrap();
+        let mut quota = current(&pool_file, project).unwrap();
+        if index == 0 {
+            // An atomic rebind needs one extra inode before replacing the
+            // pending journal. The migrated hard cap must still be preserved.
+            quota.inode_hard = quota.inodes;
+            quota.inode_soft = quota.inodes;
+            set_limits(&pool_file, project, &quota).unwrap();
+        }
         environments.push(json!({
             "run": run,
             "project": project,
@@ -358,10 +367,42 @@ async fn exercise(state: &Path) {
         "the rebuildable base cache was copied"
     );
     let environments = expected["environments"].as_array().unwrap();
-    let first = workspace::data_root(state).join(environments[0]["run"].as_str().unwrap());
-    super::super::prepare(state, &first, 12 * 1024 * 1024)
+    let first_run = environments[0]["run"].as_str().unwrap();
+    let first = workspace::data_root(state).join(first_run);
+    let saved = crate::storage::environment::directory(state, first_run).unwrap();
+    crate::skills::private_dir(&saved).await.unwrap();
+    let plan = json!({
+        "resources": { "diskMiB": 8 },
+        "runtimeId": "synthetic",
+        "storage": { "policy": crate::storage::policy::Policy::default() },
+    });
+    atomic_write(
+        &saved.join("directory.json"),
+        &serde_json::to_vec(&crate::native::directory::format(&plan)).unwrap(),
+    )
+    .await
+    .unwrap();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let mounted = crate::native::directory::mount(state, first_run, &plan, &stop)
         .await
         .unwrap();
+    let handle = crate::native::directory::Handle::new(mounted);
+    handle.volume.limit_backing(8 * 1024 * 1024).unwrap();
+    let first_project = environments[0]["project"].as_u64().unwrap() as u32;
+    let limits = current(&open(&first).unwrap(), first_project).unwrap();
+    assert_eq!(
+        limits.inode_hard,
+        environments[0]["inodeHard"].as_u64().unwrap()
+    );
+    handle
+        .mount
+        .lock()
+        .await
+        .grow(12 * 1024 * 1024)
+        .await
+        .unwrap();
+    handle.mount.lock().await.close().await.unwrap();
+    drop(handle);
     let mut file = std::fs::File::create(first.join("growth")).unwrap();
     let failure = loop {
         if let Err(error) = file.write_all(&[42; 65536]) {

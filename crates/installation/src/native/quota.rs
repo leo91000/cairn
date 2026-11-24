@@ -291,6 +291,10 @@ pub(in crate::native) fn project_io(file: &File) -> std::io::Result<u32> {
 }
 
 pub(in crate::native) fn owned_project(root: &Path, file: &File) -> Result<u32> {
+    Ok(quota_owner(root, file)?.project)
+}
+
+fn quota_owner(root: &Path, file: &File) -> Result<Ownership> {
     let parent = super::workspace::control_for_workload(root)?;
     let owner: Ownership =
         serde_json::from_slice(&std::fs::read(parent.join("quota-owner.json"))?)?;
@@ -298,7 +302,7 @@ pub(in crate::native) fn owned_project(root: &Path, file: &File) -> Result<u32> 
     if project_io(file)? != owner.project {
         return Err(Error::conflict("Native workload quota ownership changed."));
     }
-    Ok(owner.project)
+    Ok(owner)
 }
 
 fn set_project(file: &File, project: u32) -> Result<()> {
@@ -375,37 +379,61 @@ fn unused_project(file: &File, mut candidate: u32) -> Result<u32> {
 
 pub(super) fn limit(root_path: &Path, bytes: u64) -> Result<()> {
     let root = open(root_path)?;
-    let project = owned_project(root_path, &root)?;
+    let owner = quota_owner(root_path, &root)?;
+    let project = owner.project;
     if project == 0 || bytes < 1024 {
         return Err(Error::conflict("Native directory has no project quota."));
     }
-    // ext4 and XFS statfs on a project-inheriting directory report its
-    // quota-limited geometry. Derive new limits from the project-zero pool,
-    // never the old grant.
-    let pool = open(
-        root_path
-            .parent()
-            .ok_or_else(|| Error::bad("Missing native data pool."))?,
-    )?;
-    let status = filesystem(&pool)?;
-    let total_bytes = status.f_blocks.saturating_mul(status.f_bsize as u64).max(1);
-    let inodes = inode_capacity(&pool, &status)?;
-    let data_inodes = inodes.saturating_sub((inodes / 100).max(64));
-    let inode_limit =
-        ((u128::from(bytes) * u128::from(data_inodes)) / u128::from(total_bytes)).max(1) as u64;
     let current = current(&root, project)?;
-    if current.inodes > inode_limit {
-        return Err(Error::conflict(
-            "Native inode use exceeds the granted quota; retained data must be reconciled.",
-        ));
+    let blocks = bytes / 1024;
+    let (block_soft, inode_hard, inode_soft) = match owner.migrated_limits {
+        Some(limits) if limits.block_hard == blocks => (
+            limits.block_soft,
+            limits.inode_hard.max(current.inodes),
+            limits.inode_soft,
+        ),
+        migrated => {
+            // Project statfs can report its restricted geometry. Calculate new
+            // allocations from the unrestricted data pool's inode capacity.
+            let pool = open(
+                root_path
+                    .parent()
+                    .ok_or_else(|| Error::bad("Missing native data pool."))?,
+            )?;
+            let status = filesystem(&pool)?;
+            let total_bytes = status.f_blocks.saturating_mul(status.f_bsize as u64).max(1);
+            let inodes = inode_capacity(&pool, &status)?;
+            let data_inodes = inodes.saturating_sub((inodes / 100).max(64));
+            let calculated = ((u128::from(bytes) * u128::from(data_inodes))
+                / u128::from(total_bytes))
+            .max(1) as u64;
+            let inode_limit = migrated.map_or(calculated, |limits| {
+                // A byte grant change can use the new pool's geometry, without
+                // stranding either migrated or subsequently admitted files.
+                calculated.max(limits.inode_hard).max(current.inodes)
+            });
+            if current.inodes > inode_limit {
+                return Err(Error::conflict(
+                    "Native inode use exceeds the granted quota; retained data must be reconciled.",
+                ));
+            }
+            (blocks, inode_limit, inode_limit)
+        }
+    };
+    if (
+        current.block_hard,
+        current.block_soft,
+        current.inode_hard,
+        current.inode_soft,
+    ) == (blocks, block_soft, inode_hard, inode_soft)
+    {
+        return Ok(());
     }
     let mut quota = Quota {
-        block_hard: bytes / 1024,
-        block_soft: bytes / 1024,
-        // Bound zero-length files as well as allocated data. This limit grows
-        // with the same grant and cannot consume the filesystem's inode pool.
-        inode_hard: inode_limit,
-        inode_soft: inode_limit,
+        block_hard: blocks,
+        block_soft,
+        inode_hard,
+        inode_soft,
         valid: 1 | 4,
         ..Default::default()
     };
@@ -522,6 +550,17 @@ struct Ownership {
     control_filesystem: Vec<u8>,
     workload_device: u64,
     workload_inode: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    migrated_limits: Option<MigratedLimits>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct MigratedLimits {
+    block_hard: u64,
+    block_soft: u64,
+    inode_hard: u64,
+    inode_soft: u64,
 }
 
 impl Ownership {
@@ -537,6 +576,7 @@ impl Ownership {
             control_filesystem: filesystem_identity(&control_file)?,
             workload_device: data.dev(),
             workload_inode: data.ino(),
+            migrated_limits: None,
         })
     }
 
@@ -772,6 +812,7 @@ mod tests {
             control_filesystem: filesystem_identity(&control).unwrap(),
             workload_device: u64::MAX,
             workload_inode: data.metadata().unwrap().ino(),
+            migrated_limits: None,
         };
         owner.validate(&control_path, &data).unwrap();
         owner.filesystem[0] ^= 0xff;
