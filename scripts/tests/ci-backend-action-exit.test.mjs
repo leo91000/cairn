@@ -9,6 +9,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import os from 'node:os'
@@ -22,6 +23,12 @@ const durable = fileURLToPath(new URL('../ci-backend-durable.mjs', import.meta.u
 const foreground = fileURLToPath(new URL('../ci-backend-trace.mjs', import.meta.url))
 const admission = fileURLToPath(new URL('./fixtures/admitted-uploader.mjs', import.meta.url))
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
+const fixtureSetupMs = 6500
+// The local guard, trace and publisher retain their shorter per-operation
+// deadlines. Allow headroom for their combined scheduling and process exits.
+const autonomousExitMs = 4000
+const numericControlMs = 4500
+const uploaderAdmissionMs = 2500
 
 function identity(pid) {
   try {
@@ -88,6 +95,7 @@ async function action(t, {
   uploadMs,
   sampleWorkMs = 0,
   helperExitDelayMs = 0,
+  fixtureStartupDelayMs = 0,
   cancel,
 } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-action-exit-'))
@@ -155,12 +163,17 @@ async function action(t, {
       };
       syncBuiltinESMExports();
     }
+    if(${fixtureStartupDelayMs})await new Promise(resolve=>setTimeout(resolve,${fixtureStartupDelayMs}));
     void foregroundAction(async()=>{
       process.on('SIGXFSZ',()=>{});
       const progress=console.log;
+      let sampleStarted=false;
       console.log=(message,...args)=>{
         if(${sampleWorkMs}&&typeof message==='string'&&message.startsWith('CI_DIAGNOSTIC {"reason":"periodic"')){
-          fs.writeFileSync(${JSON.stringify(path.join(root, 'sample-started'))},'ready');
+          if(!sampleStarted){
+            fs.writeFileSync(${JSON.stringify(path.join(root, 'sample-started'))},'ready');
+            sampleStarted=true;
+          }
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${sampleWorkMs});
         }
         progress(message,...args);
@@ -182,7 +195,7 @@ async function action(t, {
       // autonomous-exit assertion still bounds every successful fixture.
       const publishArtifact=artifactPublisher({uploader:${JSON.stringify(uploader)},directory:${JSON.stringify(path.join(root, 'publication'))},env,uploadMs:${uploadMs ?? (['linger', 'periodic-expiry'].includes(sdk) || receiptMode === 'interrupted' ? 300 : 'undefined')},closeMs:50});
       let admissions=0;
-      const admittedPublish=admittedUploader(publishArtifact,{uploader:${JSON.stringify(uploader)},env,deadline:Date.now()+2500,onSpawn:child=>{
+      const admittedPublish=admittedUploader(publishArtifact,{uploader:${JSON.stringify(uploader)},env,admissionMs:${uploaderAdmissionMs},onSpawn:child=>{
         const fields=fs.readFileSync('/proc/'+child.pid+'/stat','utf8').split(') ')[1].split(' ');
         fs.writeFileSync(${JSON.stringify(path.join(root, 'publication'))}+'/admission-'+(++admissions)+'.pid',JSON.stringify({pid:child.pid,start:fields[19]}));
       }});
@@ -214,9 +227,10 @@ async function action(t, {
           else cancel(timer);
         };
       }
+      fs.writeFileSync(${JSON.stringify(path.join(root, 'action-started'))},'ready');
       const result=await runBackendAction({log:${JSON.stringify(log)},output:${JSON.stringify(path.join(root, 'proof'))},command:'python3',args:['-c',${JSON.stringify(workload)}],env,
         receipt:{clock:{jobId:123,startedAt},qualificationClaim:false},publish,firstCheckpointMs:${sampleWorkMs ? 30000 : 30},checkpointMs:40,
-        // Keep both real local-I/O waits inside the unchanged outer exit bound,
+        // Keep both real local-I/O waits inside the outer exit bound,
         // alongside the fixture's shortened guard and publisher waits.
         localCloseMs:${blockedTraceClose ? 100 : 'undefined'},
         // Retain the real one-second close allowance: command completion and
@@ -239,7 +253,9 @@ async function action(t, {
   })
   const pinned = identity(child.pid)
   let exit
+  let exitObservedAt
   const exited = new Promise(resolve => child.once('exit', (code, signal) => {
+    exitObservedAt = Date.now()
     exit = { code, signal }
     resolve(exit)
   }))
@@ -264,16 +280,36 @@ async function action(t, {
   }
 
   try {
-    if (cancel) {
-      const until = Date.now() + 2000
-      while (!existsSync(path.join(root, 'hanging')) && Date.now() < until && child.exitCode === null && child.signalCode === null)
-        await delay(10)
-      assert.ok(existsSync(path.join(root, 'hanging')), 'did not reach the real credentialed publisher cancellation seam')
-      if (identity(child.pid)?.start === pinned?.start)
-        child.kill('SIGTERM')
+    let phase = 'action-started'
+    if (cancel)
+      phase = 'hanging'
+    else if (blockedTraceClose)
+      phase = 'close-go'
+    else if (sampleWorkMs)
+      phase = 'sample-started'
+
+    // Each marker is written once. Anchor the deadline to publication so late
+    // polling cannot give the child extra time to exit.
+    const marker = path.join(root, phase)
+    const setupDeadline = started + fixtureSetupMs
+    let phaseAt = statSync(marker, { throwIfNoEntry: false })?.mtimeMs
+    while (phaseAt === undefined && Date.now() < setupDeadline && child.exitCode === null && child.signalCode === null) {
+      await delay(10)
+      phaseAt = statSync(marker, { throwIfNoEntry: false })?.mtimeMs
     }
 
-    const result = await Promise.race([exited, delay(numericRetirementControl ? 3500 : 2500).then(() => null)])
+    assert.ok(phaseAt !== undefined && phaseAt <= setupDeadline, `fixture did not reach ${phase} within ${fixtureSetupMs} ms`)
+
+    const exitBound = numericRetirementControl ? numericControlMs : autonomousExitMs
+    let exitDeadline = phaseAt + exitBound
+    if (cancel && identity(child.pid)?.start === pinned?.start) {
+      // Cancellation is exercised from delivery of SIGTERM.
+      exitDeadline = Date.now() + exitBound
+      child.kill('SIGTERM')
+    }
+
+    const remaining = Math.max(0, exitDeadline - Date.now())
+    const result = await Promise.race([exited, delay(remaining).then(() => null)])
     if (numericRetirementControl) {
       assert.equal(result, null, 'numeric-exit control unexpectedly completed without retiring blocked local I/O')
       const returned = JSON.parse(readFileSync(path.join(root, 'returned.json'), 'utf8'))
@@ -285,6 +321,7 @@ async function action(t, {
     }
 
     assert.ok(result, 'foreground action did not autonomously exit with public readers stopped')
+    assert.ok(exitObservedAt <= exitDeadline, `foreground exit was observed after the ${exitBound} ms bound`)
     assert.equal(result.signal, blockedTraceClose ? 'SIGKILL' : null)
     const returned = JSON.parse(readFileSync(path.join(root, 'returned.json'), 'utf8'))
     if (receiptMode === 'interrupted')
@@ -373,7 +410,7 @@ it('retains the production upload allowance for successful synthetic publication
 })
 
 // Model an inventory scan slower than its requested cadence while the real
-// workload pipe is ready. Keep the existing outer exit and publication bounds.
+// workload pipe is ready. Bound exit from the start of the first sample.
 // These controls defer artifact checkpoints to isolate inventory sampling; the
 // existing periodic-expiry and cleanup-checkpoint cases exercise that overlap.
 it('drains private output between synchronous inventory samples slower than the sample cadence', async (t) => {
@@ -400,9 +437,8 @@ it('keeps the real guard deadline non-green while synchronous samples exceed the
 })
 
 it('admits a slow-starting synthetic uploader before its unchanged publication clock', async (t) => {
-  // This exceeds the real publisher's 300 ms fixture budget. Startup is not
-  // publication; the protocol still runs with that budget and the same outer
-  // autonomous-exit bound, while the real expiry control below stays non-green.
+  // This exceeds the real publisher's 300 ms fixture budget. The protocol
+  // still runs with that budget, and the real expiry control below stays non-green.
   const result = await action(t, { volume: 1048576, uploaderStartupDelayMs: 350, uploadMs: 300 })
   assert.equal(result.code, 7, JSON.stringify(result.returned))
   assert.equal(result.returned.guardReturn.code, 7)
@@ -447,7 +483,13 @@ it('keeps a real periodic uploader expiry non-green even when the guard closes i
 })
 
 it('bounds a real private-file close blocked behind process-local filesystem workers and exits non-green', async (t) => {
-  const result = await action(t, { code: 0, volume: 1, blockedTraceClose: true })
+  const result = await action(t, {
+    code: 0,
+    volume: 1,
+    blockedTraceClose: true,
+    // Worker startup can exceed the exit bound before the local I/O is blocked.
+    fixtureStartupDelayMs: autonomousExitMs + 250,
+  })
   assert.equal(result.code, null)
   assert.equal(result.signal, 'SIGKILL')
   assert.equal(result.returned.guardReturn.code, 0)

@@ -9,10 +9,11 @@ import process from 'node:process'
 export function admittedUploader(publish, {
   uploader,
   env,
-  deadline,
+  admissionMs,
   onSpawn,
 }) {
   return async (...args) => {
+    const admissionDeadline = Date.now() + admissionMs
     const spawn = childProcess.spawn
     const child = spawn(process.execPath, [uploader], {
       env: { PATH: env.PATH, HOME: env.HOME },
@@ -51,7 +52,7 @@ export function admittedUploader(publish, {
             settle(new Error('Invalid uploader fixture admission'))
         }
 
-        timer = setTimeout(() => settle(new Error('Uploader fixture admission exceeded the outer exit bound')), Math.max(0, deadline - Date.now()))
+        timer = setTimeout(() => settle(new Error('Uploader fixture admission timed out')), Math.max(0, admissionDeadline - Date.now()))
         child.once('error', failed)
         child.once('exit', exited)
         child.stdio[3].on('data', ready)
