@@ -4,6 +4,7 @@
 The manager's HTTPS origin authenticates the release manifest. Exact binary and
 tool digests authenticate its payloads. Credentials never enter command arguments.
 """
+import ctypes
 import getpass
 import fcntl
 import grp
@@ -1361,6 +1362,20 @@ def copy_environment(run, source, target):
         raise MigrationError(f'Verification of environment {run} found differences; rerun the migration:\n' + differences[:2000])
 
 
+def flush_migration_copy(descriptor):
+    # The descriptor predates the first write, so another sync caller cannot
+    # consume a writeback error before this migration sees it.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.syncfs(descriptor) != 0:
+        raise MigrationError(f'The XFS copy could not be written to disk: {os.strerror(ctypes.get_errno())}. The ext4 source was retained.')
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        raise MigrationError('The XFS copy directory could not be synchronized. The ext4 source was retained.') from error
+    if os.fstatvfs(descriptor).f_flag & os.ST_RDONLY:
+        raise MigrationError('The XFS copy became read-only. The ext4 source was retained.')
+
+
 def filesystem_path(path):
     # A pathname can have stacked mounts. The open descriptor identifies
     # the mount whose inode the caller can actually use.
@@ -1634,18 +1649,27 @@ def migrate_pool(arguments):
     back_up_unit(old)
     mountpoint = prepare_target(record, arguments.force)
     runs = [environment['run'] for environment in plan['environments']]
-    for entry in mountpoint.iterdir():
-        if entry.name not in runs:
-            # Only this migration writes the new pool; an old attempt's copy
-            # of an environment that no longer exists is discarded.
-            shutil.rmtree(entry)
-    for run in runs:
-        pool_tool('prepare', state, migration_directory(), mountpoint, run)
-        copy_environment(run, pool, mountpoint)
-        pool_tool('commit', state, migration_directory(), mountpoint, run)
-        print(f'Copied and verified environment {run}.')
+    rewrite = record.get('copyInProgress', False)
+    record['copyInProgress'] = True
+    save_migration(record)
+    descriptor = os.open(mountpoint, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        for entry in mountpoint.iterdir():
+            if rewrite or entry.name not in runs:
+                # A failed writeback can leave bytes visible in page cache.
+                # Recreate the interrupted copy before trusting checksums.
+                shutil.rmtree(entry)
+        for run in runs:
+            pool_tool('prepare', state, migration_directory(), mountpoint, run)
+            copy_environment(run, pool, mountpoint)
+            pool_tool('commit', state, migration_directory(), mountpoint, run)
+            print(f'Copied and verified environment {run}.')
+        flush_migration_copy(descriptor)
+    finally:
+        os.close(descriptor)
     pool_tool('seal', state, migration_directory(), mountpoint)
     checked('umount', str(mountpoint), timeout=300)
+    record.pop('copyInProgress')
     record['phase'] = 'copied'
     save_migration(record)
     finish_migration(record, arguments, pool, state)
@@ -1719,6 +1743,8 @@ def rollback_pool(arguments):
         checked('umount', str(mountpoint), timeout=300)
     if record['phase'] in ('planned', 'formatted'):
         # Switch never touched the original mount or its systemd files.
+        remount_old_pool(old, pool)
+        verify_old_pool(old, mount_of(pool))
         if loop:
             checked('losetup', '--detach', str(loop))
         if image and record.get('createdImage'):

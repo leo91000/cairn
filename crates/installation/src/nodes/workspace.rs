@@ -381,6 +381,7 @@ pub async fn seed(
         selection,
         target,
         &tokio_util::sync::CancellationToken::new(),
+        None,
     )
     .await
 }
@@ -404,6 +405,7 @@ pub(crate) async fn await_preparation<T>(
         .ok_or_else(|| Error::unavailable("Node workspace preparation stopped."))?
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn seed_with_stop(
     client: &reqwest::Client,
     master: &url::Url,
@@ -412,6 +414,7 @@ pub(super) async fn seed_with_stop(
     mut selection: Value,
     target: &Path,
     stop: &tokio_util::sync::CancellationToken,
+    publication: Option<&tokio::sync::Mutex<()>>,
 ) -> Result<()> {
     use futures_util::StreamExt;
     // The manager can authorize and open the source while unrelated local
@@ -514,7 +517,13 @@ pub(super) async fn seed_with_stop(
         admission.admit(entry_overhead)?;
     }
     crate::skills::private_dir(parent).await?;
-    let temp = tempfile::TempDir::new_in(parent)?;
+    let temp = if native_initial {
+        tempfile::Builder::new()
+            .prefix(crate::native::disk::SEED_TEMP_PREFIX)
+            .tempdir_in(parent)?
+    } else {
+        tempfile::TempDir::new_in(parent)?
+    };
     if let Some(admission) = &mut admission {
         admission.retarget_staging(temp.path())?;
     }
@@ -649,7 +658,14 @@ pub(super) async fn seed_with_stop(
             drop(reservation);
             selection[skill_cache::NEGOTIATE] = Value::Null;
             return Box::pin(seed_with_stop(
-                client, master, token, attempt, selection, target, stop,
+                client,
+                master,
+                token,
+                attempt,
+                selection,
+                target,
+                stop,
+                publication,
             ))
             .await;
         }
@@ -674,7 +690,14 @@ pub(super) async fn seed_with_stop(
                     drop(storage_guard);
                     selection[skill_cache::NEGOTIATE] = Value::Null;
                     return Box::pin(seed_with_stop(
-                        client, master, token, attempt, selection, target, stop,
+                        client,
+                        master,
+                        token,
+                        attempt,
+                        selection,
+                        target,
+                        stop,
+                        publication,
                     ))
                     .await;
                 }
@@ -701,6 +724,10 @@ pub(super) async fn seed_with_stop(
         prepare_native_inbox(&temp.path().join("chat-input")).await?;
         crate::native::block::sync_opened(barrier).await?;
     }
+    let _publish = match publication {
+        Some(fence) => Some(fence.lock().await),
+        None => None,
+    };
     check_preparing(stop)?;
     // Preserve the directory inode mounted into a native workload. Replacing a
     // bind-mounted directory would leave it reading the previous inbox forever.

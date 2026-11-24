@@ -855,6 +855,30 @@ class PoolMigrationTests(unittest.TestCase):
         self.assertEqual('complete', host.load_migration()['phase'])
         self.assertIn('rollback-pool', output.getvalue())
 
+    def test_writeback_fault_does_not_seal_or_switch_the_pool(self):
+        mountpoint = self.root / 'target'
+        mountpoint.mkdir()
+        events = []
+
+        def fail_writeback(descriptor):
+            self.assertEqual(os.fstat(descriptor).st_ino, mountpoint.stat().st_ino)
+            self.assertEqual(host.load_migration()['copyInProgress'], True)
+            libc = Mock()
+            libc.syncfs.return_value = -1
+            with patch.object(host.ctypes, 'CDLL', return_value=libc), patch.object(host.ctypes, 'get_errno', return_value=5):
+                flush(descriptor)
+
+        flush = host.flush_migration_copy
+        with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+            for patcher in self.fake_migration(mountpoint, events):
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(host, 'flush_migration_copy', side_effect=fail_writeback))
+            with self.assertRaisesRegex(host.MigrationError, 'ext4 source was retained'):
+                host.migrate_pool(pool_arguments(device='/dev/synthetic'))
+        self.assertTrue(host.load_migration()['copyInProgress'])
+        self.assertNotIn(host.load_migration()['phase'], ('copied', 'switched', 'complete'))
+        self.assertFalse(any(event[0] in ('seal', 'umount', 'unmount-old', 'mount-new', 'switch') for event in events))
+
     def test_rerun_after_the_switch_only_completes_the_records(self):
         host.migration_directory().mkdir()
         host.save_migration(dict(version=1, target=dict(device='/dev/synthetic'), phase='switched', old=OLD, uuid='f00d'))
@@ -984,12 +1008,13 @@ class PoolMigrationTests(unittest.TestCase):
         image = self.root / 'other.img'
         image.write_bytes(b'other service uses this image')
         host.save_migration(dict(phase='planned', old=OLD, target={'image': str(image)}, uuid='f00d'))
-        with patch.object(host, 'mount_of', return_value=None), \
+        with patch.object(host, 'mount_of', side_effect=[None, None, dict(fstype='ext4', source='/dev/original')]), \
                 patch.object(host, 'attached_loop') as associated, patch.object(host, 'checked') as commands, \
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), \
                 contextlib.redirect_stdout(io.StringIO()):
             host.rollback_pool(pool_arguments())
         associated.assert_not_called()
-        commands.assert_not_called()
+        commands.assert_called_once_with('systemctl', 'start', OLD['unit'], timeout=300)
         self.assertTrue(image.is_file())
         self.assertIsNone(host.load_migration())
 
@@ -1007,7 +1032,9 @@ class PoolMigrationTests(unittest.TestCase):
         staged = host.staged_image_path(image, record['createdImage'])
         self.assertTrue(staged.is_file())
         self.assertFalse(image.exists())
-        with patch.object(host, 'mount_of', return_value=None), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(host, 'mount_of', side_effect=[None, dict(fstype='ext4', source='/dev/original'),
+                                                       dict(fstype='ext4', source='/dev/original')]), \
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), contextlib.redirect_stdout(io.StringIO()):
             host.rollback_pool(pool_arguments())
         self.assertFalse(staged.exists())
         self.assertFalse(image.exists())
@@ -1020,6 +1047,16 @@ class PoolMigrationTests(unittest.TestCase):
             host.rollback_pool(pool_arguments())
         commands.assert_not_called()
         self.assertEqual(host.load_migration()['phase'], 'formatted')
+
+    def test_early_rollback_keeps_the_fence_when_original_pool_cannot_be_verified(self):
+        for phase in ('planned', 'formatted'):
+            with self.subTest(phase=phase):
+                host.save_migration(dict(phase=phase, old=dict(OLD, fragment=None), target={'device': '/dev/synthetic'}, uuid='f00d'))
+                with patch.object(host, 'mount_of', return_value=None), patch.object(host, 'checked') as mount, \
+                        self.assertRaisesRegex(host.MigrationError, 'does not match the original pool'):
+                    host.rollback_pool(pool_arguments())
+                mount.assert_called_once_with('mount', '-t', 'ext4', '-o', OLD['options'], OLD['what'], str(host.pool_path()), timeout=300)
+                self.assertEqual(host.load_migration()['phase'], phase)
 
     def test_buffered_image_is_refused_before_formatting(self):
         image = self.root / 'buffered.img'

@@ -10,6 +10,7 @@ use std::{
 };
 
 pub(crate) const MIB: u64 = 1_048_576;
+pub(crate) const SEED_TEMP_PREFIX: &str = ".cairn-seed-";
 
 /// Staging and retirement share the run's lock across the connector and the
 /// controller. Acquisition is nonblocking under the node-wide storage gate.
@@ -165,10 +166,10 @@ fn measure_usage(
     if include_reservations {
         for (path, reservation) in preparations(state)? {
             let materialized = match &reservation.staging {
-                Some(staging) if staging.starts_with(data.join("runs")) => {
-                    size(staging, false, &mut seen)?
+                Some(staging) => {
+                    staging.validate_location(&data.join("runs"))?;
+                    size(&staging.path, false, &mut seen)?
                 }
-                Some(_) => return Err(Error::conflict("Invalid native staging reservation path.")),
                 None => 0,
             };
             // Charge the same observed inode bytes exactly once. The normal
@@ -250,6 +251,7 @@ pub(crate) struct Preparation {
     lease: PathBuf,
     _owner: crate::file_lock::Guard,
     pub bytes: u64,
+    staging: Option<StagingReceipt>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -257,7 +259,51 @@ struct PreparationRecord {
     bytes: u64,
     physical: Option<PhysicalClaim>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    staging: Option<PathBuf>,
+    staging: Option<StagingReceipt>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct StagingReceipt {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl StagingReceipt {
+    fn validate_location(&self, parent: &Path) -> Result<()> {
+        if self.path.parent() != Some(parent)
+            || !self
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(SEED_TEMP_PREFIX))
+        {
+            return Err(Error::conflict("Invalid native staging reservation path."));
+        }
+        Ok(())
+    }
+
+    fn remove(&self, parent: &Path) -> Result<()> {
+        self.validate_location(parent)?;
+        let metadata = match std::fs::symlink_metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_dir()
+            || metadata.dev() != self.device
+            || metadata.ino() != self.inode
+            || std::fs::canonicalize(parent)? != parent
+        {
+            return Err(Error::conflict(
+                "The native staging tree no longer belongs to its reservation.",
+            ));
+        }
+        super::workspace::require_no_mounts(&self.path)?;
+        std::fs::remove_dir_all(&self.path)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -334,10 +380,17 @@ impl Preparation {
         data: &Path,
         staging: &Path,
     ) -> Result<Self> {
-        if !staging.starts_with(data.join("runs")) || !staging.is_dir() {
+        let metadata = std::fs::symlink_metadata(staging)?;
+        if !metadata.is_dir() {
             return Err(Error::bad("Invalid native staging reservation path."));
         }
-        Self::reserve_target(state, attempt, bytes, data, Some(staging.to_owned())).await
+        let receipt = StagingReceipt {
+            path: staging.to_owned(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        receipt.validate_location(&data.join("runs"))?;
+        Self::reserve_target(state, attempt, bytes, data, Some(receipt)).await
     }
 
     async fn reserve_target(
@@ -345,7 +398,7 @@ impl Preparation {
         attempt: &str,
         bytes: u64,
         filesystem: &Path,
-        staging: Option<PathBuf>,
+        staging: Option<StagingReceipt>,
     ) -> Result<Self> {
         let device = std::fs::metadata(filesystem)?.dev();
         Self::publish(
@@ -379,6 +432,7 @@ impl Preparation {
             lease,
             _owner: owner,
             bytes: record.bytes,
+            staging: record.staging,
         })
     }
 
@@ -393,6 +447,12 @@ impl Preparation {
 
 impl Drop for Preparation {
     fn drop(&mut self) {
+        if let Some(staging) = &self.staging
+            && let Err(error) = staging.remove(staging.path.parent().expect("owned staging parent"))
+        {
+            tracing::error!(%error, "Native staging cleanup deferred with its reservation");
+            return;
+        }
         if let Err(error) = std::fs::remove_file(&self.path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -471,6 +531,7 @@ fn preparations(state: &Path) -> Result<Vec<(PathBuf, PreparationRecord)>> {
 }
 
 pub(super) fn recover_preparations(
+    data: &Path,
     state: &Path,
     pending: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
@@ -499,7 +560,23 @@ pub(super) fn recover_preparations(
             Err(error) if error.is_conflict() => continue,
             Err(error) => return Err(error),
         };
-        for path in [root.join(attempt), lease] {
+        let receipt = root.join(attempt);
+        match std::fs::read_to_string(&receipt) {
+            Ok(bytes) => {
+                if let Some(staging) = read_preparation(&bytes)?.staging {
+                    let parent = data.join("runs");
+                    staging.remove(&parent)?;
+                    match std::fs::File::open(&parent) {
+                        Ok(directory) => directory.sync_all()?,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        for path in [receipt, lease] {
             match std::fs::remove_file(path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -507,6 +584,7 @@ pub(super) fn recover_preparations(
             }
         }
     }
+    std::fs::File::open(root)?.sync_all()?;
     Ok(())
 }
 
@@ -632,6 +710,53 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn recovery_removes_only_the_recorded_unpublished_seed_inode() {
+        let data = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let runs = data.path().join("runs");
+        let receipts = state.path().join("native-preparations");
+        std::fs::create_dir(&runs).unwrap();
+        std::fs::create_dir(&receipts).unwrap();
+        let mut published = None;
+        for should_publish in [false, true] {
+            let temp = tempfile::Builder::new()
+                .prefix(SEED_TEMP_PREFIX)
+                .tempdir_in(&runs)
+                .unwrap()
+                .keep();
+            std::fs::write(temp.join("seed"), b"staging data").unwrap();
+            let metadata = temp.metadata().unwrap();
+            let record = PreparationRecord {
+                bytes: MIB,
+                physical: None,
+                staging: Some(StagingReceipt {
+                    path: temp.clone(),
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                }),
+            };
+            std::fs::write(
+                receipts.join(crate::config::id()),
+                serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+            if should_publish {
+                let target = runs.join(crate::config::id());
+                std::fs::rename(&temp, &target).unwrap();
+                published = Some(target);
+            }
+            recover_preparations(data.path(), state.path(), &std::collections::HashMap::new())
+                .unwrap();
+            assert!(!temp.exists());
+            assert_eq!(std::fs::read_dir(&receipts).unwrap().count(), 0);
+        }
+        assert_eq!(
+            std::fs::read(published.unwrap().join("seed")).unwrap(),
+            b"staging data"
+        );
+    }
+
+    #[tokio::test]
     async fn physical_claims_charge_only_unspent_capacity_on_the_same_filesystem() {
         let state = tempfile::tempdir().unwrap();
         let path = state.path();
@@ -682,7 +807,12 @@ mod tests {
         let stale = crate::config::id();
         std::fs::write(state.path().join("native-preparations").join(&stale), b"10").unwrap();
 
-        recover_preparations(state.path(), &std::collections::HashMap::new()).unwrap();
+        recover_preparations(
+            state.path(),
+            state.path(),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(preparation_bytes(state.path()).unwrap(), 42);
         drop(protected);
         assert_eq!(preparation_bytes(state.path()).unwrap(), 0);

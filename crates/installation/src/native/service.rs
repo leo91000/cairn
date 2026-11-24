@@ -3409,7 +3409,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
             entry.insert(attempt);
         }
     }
-    disk::recover_preparations(&state, &pending)?;
+    disk::recover_preparations(&data, &state, &pending)?;
     for (run, attempt) in &pending {
         super::cleanup::quarantine(&state, run, attempt)?;
     }

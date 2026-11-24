@@ -406,8 +406,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path().join("state");
         let data = temp.path().join("data");
-        let first = data.join("runs/first/receive");
-        let second = data.join("runs/second/receive");
+        let first = data.join("runs/.cairn-seed-first");
+        let second = data.join("runs/.cairn-seed-second");
         std::fs::create_dir_all(&first).unwrap();
         std::fs::create_dir_all(&second).unwrap();
         std::fs::create_dir(&state).unwrap();

@@ -285,6 +285,9 @@ contrôleur. L’outil conserve les restrictions de montage `nosuid`, `nodev`,
 `noexec` et `nosymfollow` du pool ext4.
 
 Après interruption, relancez `migrate-pool` avec la même cible pour reprendre.
+Une copie interrompue est recréée sur la cible avant la vérification. Le
+contrôleur refuse la bascule tant que l’écriture de la copie et des quotas sur
+le disque n’a pas été confirmée.
 Le nœud reste arrêté à la fin. `rollback-pool` restaure l’ancien montage et ses
 reçus. Le contrôleur attend l’autorisation explicite `activate-pool`, même après
 un redémarrage de la machine. Après cette autorisation, la première ouverture

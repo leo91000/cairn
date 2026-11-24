@@ -385,7 +385,7 @@ async fn call_controller(
         return Err(Error::bad("Execution payload exceeds limit."));
     }
 
-    executor
+    let _attempt_gate = executor
         .before(
             master.client,
             master.url,
