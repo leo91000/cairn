@@ -6,6 +6,8 @@ code, migrates them with the real host script and systemd units, checks that
 the mount survives a simulated reboot, rolls back, migrates again and exercises
 the migrated pool. Run as root by scripts/qualify-native-quota.mjs only.
 """
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,7 +19,10 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 HOST = REPOSITORY / 'deploy/nodes/native-host.py'
 TEST = 'native::quota::migration::tests::kernel_pool_migration_qualification'
 UNITS = Path('/etc/systemd/system')
-LOOP_SERVICE = 'cairn-native-data-loop.service'
+
+
+def fixture_loop_service(root):
+    return 'cairn-native-migration-fixture-' + hashlib.sha256(os.fsencode(root)).hexdigest()[:16] + '.service'
 
 
 def command(*args, check=True, timeout=600, env=None):
@@ -42,7 +47,8 @@ def phase(binary, root, name):
 
 def host(root, cairn, *args, refusal=None):
     environment = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'CAIRN_NATIVE_DISPOSABLE_HOST': '1',
-                   'CAIRN_NATIVE_ROOT': str(root), 'CAIRN_NATIVE_INSTALL': str(root), 'CAIRN_NATIVE_BINARY': str(cairn)}
+                   'CAIRN_NATIVE_ROOT': str(root), 'CAIRN_NATIVE_INSTALL': str(root), 'CAIRN_NATIVE_BINARY': str(cairn),
+                   'CAIRN_NATIVE_FIXTURE_LOOP_SERVICE': fixture_loop_service(root)}
     result = command(sys.executable, '-B', HOST, *args, env=environment, check=False, timeout=1800)
     print(result.stdout, result.stderr, sep='\n')
     if refusal:
@@ -75,10 +81,26 @@ def eventually(check, timeout=60):
 
 
 def cleanup(root, pool, unit):
-    for name in (unit, LOOP_SERVICE):
-        command('systemctl', 'disable', '--now', name, check=False)
-    for name in (unit, LOOP_SERVICE):
-        (UNITS / name).unlink(missing_ok=True)
+    loop_service = fixture_loop_service(root)
+    files = [path for name in (unit, loop_service) if (path := UNITS / name).exists() or path.is_symlink()]
+    if files:
+        record = json.loads((root / 'native-pool-migration/state.json').read_bytes())
+        image = Path(record['target']['image'])
+        assert image.parent == root, 'Refusing to clean up a loop image outside the fixture.'
+        spec = importlib.util.spec_from_file_location('migration_host', HOST)
+        migration_host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration_host)
+        migration_host.LOOP_SERVICE = loop_service
+        expected = {
+            unit: migration_host.pool_unit(pool, record['uuid'], image, record['old'].get('restrictions', ())),
+            loop_service: migration_host.loop_unit(image, unit, record['uuid']),
+        }
+        for path in files:
+            assert path.is_file() and not path.is_symlink() and path.read_text() == expected[path.name], \
+                'Refusing to clean up a systemd unit outside the fixture ownership record.'
+        for path in files:
+            command('systemctl', 'disable', '--now', path.name)
+            path.unlink()
     command('systemctl', 'daemon-reload', check=False)
     for path in (pool, *root.glob('native-pool-migration*/target')):
         if mounted(path):
@@ -102,6 +124,10 @@ def main(binary, cairn, fixture):
     (root / 'home').mkdir()
     (root / 'host.py').write_bytes(HOST.read_bytes())
     unit = command('systemd-escape', '--path', '--suffix=mount', pool).stdout.strip()
+    loop_service = fixture_loop_service(root)
+    for name in (unit, loop_service):
+        path = UNITS / name
+        assert not path.exists() and not path.is_symlink(), f'Fixture unit name is occupied: {name}.'
     try:
         original = root / 'native-data.ext4'
         command('truncate', '-s', '1G', original)
@@ -118,11 +144,11 @@ def main(binary, cairn, fixture):
         assert {'nosuid', 'nodev', 'noexec'}.issubset(options), 'Cutover dropped source mount restrictions.'
         command('fstrim', pool, check=False)
         assert direct_io(image), 'Trimming the pool changed its backing allocation.'
-        assert (UNITS / unit).exists() and (UNITS / LOOP_SERVICE).exists(), 'Persistent pool units are missing.'
+        assert (UNITS / unit).exists() and (UNITS / loop_service).exists(), 'Persistent pool units are missing.'
 
         # A reboot detaches the loop device; the units must restore both.
         command('systemctl', 'stop', unit)
-        command('systemctl', 'stop', LOOP_SERVICE)
+        command('systemctl', 'stop', loop_service)
         assert not command('losetup', '--noheadings', '--associated', image).stdout.strip(), 'Loop device survived its unit.'
         command('systemctl', 'start', unit, timeout=180)
         eventually(lambda: mounted(pool) == 'xfs')
@@ -132,7 +158,7 @@ def main(binary, cairn, fixture):
 
         host(root, cairn, 'rollback-pool')
         assert mounted(pool) == 'ext4', 'Rollback did not remount the original pool.'
-        assert not (UNITS / LOOP_SERVICE).exists(), 'Rollback kept the loop unit.'
+        assert not (UNITS / loop_service).exists(), 'Rollback kept the loop unit.'
         assert not (UNITS / 'local-fs.target.wants' / unit).is_symlink(), 'Rollback kept the XFS boot link for a manually mounted ext4 pool.'
         phase(binary, root, 'rolled-back')
 

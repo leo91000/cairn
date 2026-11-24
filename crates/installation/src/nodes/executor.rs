@@ -387,7 +387,20 @@ impl Executor {
                     .json::<Value>()
                     .await
                     .map_err(Error::internal)?;
-                refresh_credential_manifest(&home, &descriptor["credentialFiles"]).await?;
+                let credentials = descriptor["credentialFiles"].clone();
+                if self.native {
+                    let data = self.data.clone();
+                    let attempt = (*attempt).to_owned();
+                    tokio::spawn(async move {
+                        let _staging =
+                            super::workspace::lock_live_staging(&data, &home, &attempt).await?;
+                        refresh_credential_manifest(&home, &credentials).await
+                    })
+                    .await
+                    .map_err(Error::internal)??;
+                } else {
+                    refresh_credential_manifest(&home, &credentials).await?;
+                }
             }
         }
         if method == "DELETE"
@@ -835,8 +848,73 @@ mod tests {
                 .unwrap_err()
                 .is_conflict()
         );
+        late_live_seed_cannot_recreate_retired_staging(&data, &state, &client).await;
         manager.abort();
         budget_server.abort();
+    }
+
+    async fn late_live_seed_cannot_recreate_retired_staging(
+        data: &Path,
+        state: &Path,
+        client: &reqwest::Client,
+    ) {
+        let (run, attempt) = (crate::config::id(), crate::config::id());
+        let plans = data.join("runner-plans");
+        crate::skills::private_dir(&plans).await.unwrap();
+        let plan = plan_path(data, &attempt);
+        tokio::fs::write(&plan, json!({ "id": attempt, "runId": run }).to_string())
+            .await
+            .unwrap();
+
+        let requested = Arc::new(tokio::sync::Notify::new());
+        let reply = Arc::new(tokio::sync::Notify::new());
+        let route = {
+            let (requested, reply) = (requested.clone(), reply.clone());
+            Router::new().route(
+                "/internal/node-workspace/{attempt}/seed",
+                post(move || {
+                    let (requested, reply) = (requested.clone(), reply.clone());
+                    async move {
+                        requested.notify_one();
+                        reply.notified().await;
+                        Body::from("{\"complete\":true}\n")
+                    }
+                }),
+            )
+        };
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin: url::Url = format!("http://{}", server.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let server = tokio::spawn(async move { axum::serve(server, route).await.unwrap() });
+        let target = data.join("runs").join(&run).join("chat-input");
+        let seed = seed(
+            client,
+            &origin,
+            "fixture",
+            &attempt,
+            json!({ "kind": "inbox" }),
+            &target,
+        );
+        tokio::pin!(seed);
+        tokio::select! {
+            request = tokio::time::timeout(Duration::from_secs(5), requested.notified()) => { request.unwrap(); },
+            result = &mut seed => panic!("Seed finished before the authorized response: {result:?}"),
+        }
+        {
+            let _retirement = crate::native::disk::lock_staging(state, &run)
+                .await
+                .unwrap();
+            tokio::fs::remove_file(plan).await.unwrap();
+        }
+        reply.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(5), seed)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.is_conflict());
+        assert!(!target.parent().unwrap().exists());
+        server.abort();
     }
 
     #[test]

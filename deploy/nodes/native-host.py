@@ -39,7 +39,13 @@ if os.environ.get('CAIRN_NATIVE_DISPOSABLE_HOST') == '1':
     INSTALL = Path(os.environ.get('CAIRN_NATIVE_INSTALL', INSTALL))
 SERVICE = 'cairn-native-node.service'
 UNIT_DIRECTORY = Path('/etc/systemd/system')
-LOOP_SERVICE = 'cairn-native-data-loop.service'
+NATIVE_LOOP_SERVICE = 'cairn-native-data-loop.service'
+FIXTURE_LOOP_SERVICE = re.compile(r'cairn-native-migration-fixture-[0-9a-f]{16}\.service')
+LOOP_SERVICE = NATIVE_LOOP_SERVICE
+if os.environ.get('CAIRN_NATIVE_DISPOSABLE_HOST') == '1' and os.environ.get('CAIRN_NATIVE_FIXTURE_LOOP_SERVICE'):
+    LOOP_SERVICE = os.environ['CAIRN_NATIVE_FIXTURE_LOOP_SERVICE']
+    if not FIXTURE_LOOP_SERVICE.fullmatch(LOOP_SERVICE):
+        raise ValueError('Invalid disposable fixture loop service name.')
 CGROUP_ROOT = Path('/sys/fs/cgroup')
 STOP = False
 
@@ -985,7 +991,7 @@ def active_units():
                      '--state=active,activating,deactivating,reloading,refreshing', 'cairn-native-*')
     # Slices only group workloads and may stay active while empty.
     return [unit for unit in (line.split()[0] for line in output.splitlines() if line.split())
-            if unit != LOOP_SERVICE and not unit.endswith('.slice')]
+            if unit != NATIVE_LOOP_SERVICE and not FIXTURE_LOOP_SERVICE.fullmatch(unit) and not unit.endswith('.slice')]
 
 
 def controller_running():
@@ -1051,13 +1057,15 @@ def offline_pool_operation(operation, arguments):
             record = load_migration()
             target = migration_target(arguments, record)
             probe_migration_device(target, arguments.force, record)
-            if 'image' in target and (not record or record['phase'] in ('planned', 'formatted')):
+            if not record or record['phase'] in ('planned', 'formatted'):
                 preview = dict(record or {'phase': 'planned', 'target': target})
-                image = Path(target['image'])
-                check_migration_image(preview, image, arguments.force)
+                if 'image' in target:
+                    check_migration_image(preview, Path(target['image']), arguments.force)
+                else:
+                    check_controller_receipt_headroom(preview)
                 original = mount_of(pool_path())
                 if original and original['fstype'] == 'ext4':
-                    check_migration_image(preview, image, arguments.force, migration_plan(ROOT / 'state'))
+                    check_migration_space(preview, arguments.force, migration_plan(ROOT / 'state'))
     if arguments.dry_run:
         return operation(arguments)
     require_stopped(arguments.stop)
@@ -1480,6 +1488,14 @@ def check_image_headroom(record, image, allocated=0):
             raise MigrationError(f'Free at least {required} bytes on {path} for allocation and controller recovery receipts.')
 
 
+def check_controller_receipt_headroom(record):
+    reserve = record.get('receiptReserveBytes', CONTROLLER_RECEIPT_RESERVE)
+    for path in (ROOT, ROOT / 'state'):
+        space = os.statvfs(path)
+        if space.f_bavail * space.f_frsize < reserve:
+            raise MigrationError(f'Free at least {reserve} bytes on {path} for controller recovery receipts.')
+
+
 def check_migration_image(record, image, force, plan=None):
     verify_image_location(image, ROOT / 'state', pool_path())
     size = record['target']['size']
@@ -1487,8 +1503,6 @@ def check_migration_image(record, image, force, plan=None):
         needed = plan['usedBytes'] + plan['usedBytes'] // 10 + 1024 ** 3
         if size < needed:
             raise MigrationError(f'The new pool needs at least {needed} bytes as --size.')
-        record['receiptReserveBytes'] = max(record.get('receiptReserveBytes', 0),
-                                            CONTROLLER_RECEIPT_RESERVE + len(plan['environments']) * 64 * 1024)
     created = record.get('createdImage')
     published = image.exists()
     if published and not created and record['phase'] == 'planned' and not force:
@@ -1684,6 +1698,16 @@ def migration_plan(state):
     return plan
 
 
+def check_migration_space(record, force, plan):
+    record['receiptReserveBytes'] = max(record.get('receiptReserveBytes', 0),
+                                        CONTROLLER_RECEIPT_RESERVE + len(plan['environments']) * 64 * 1024)
+    target = record['target']
+    if 'image' in target:
+        check_migration_image(record, Path(target['image']), force, plan)
+    else:
+        check_controller_receipt_headroom(record)
+
+
 def migrate_pool(arguments):
     pool = pool_path()
     state = ROOT / 'state'
@@ -1703,8 +1727,7 @@ def migrate_pool(arguments):
     old = record['old'] if record else old
     plan = migration_plan(state)
     record = record or {'version': 1, 'target': target, 'phase': 'planned', 'old': old, 'uuid': str(uuid.uuid4())}
-    if 'image' in target:
-        check_migration_image(record, Path(target['image']), arguments.force, plan)
+    check_migration_space(record, arguments.force, plan)
     if arguments.dry_run:
         units = active_units()
         print('Native data pool migration plan (dry run, nothing changed):')

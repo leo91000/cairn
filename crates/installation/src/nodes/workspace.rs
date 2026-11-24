@@ -373,6 +373,25 @@ pub async fn seed(
     selection: Value,
     target: &Path,
 ) -> Result<()> {
+    if crate::native::enabled() {
+        let (client, master, token, attempt, target) = (
+            client.clone(),
+            master.clone(),
+            token.to_owned(),
+            attempt.to_owned(),
+            target.to_owned(),
+        );
+        let stop = tokio_util::sync::CancellationToken::new();
+        let _cancel = stop.clone().drop_guard();
+        return tokio::spawn(async move {
+            seed_with_stop(
+                &client, &master, &token, &attempt, selection, &target, &stop, None,
+            )
+            .await
+        })
+        .await
+        .map_err(Error::internal)?;
+    }
     seed_with_stop(
         client,
         master,
@@ -384,6 +403,46 @@ pub async fn seed(
         None,
     )
     .await
+}
+
+pub(super) async fn lock_live_staging(
+    data: &Path,
+    target: &Path,
+    attempt: &str,
+) -> Result<crate::file_lock::Guard> {
+    crate::validation::uuid(attempt)?;
+    let relative = target
+        .strip_prefix(data.join("runs"))
+        .map_err(|_| Error::bad("Native seed is outside its conversation staging tree."))?;
+    let run = relative
+        .components()
+        .next()
+        .and_then(|part| part.as_os_str().to_str())
+        .ok_or_else(|| Error::bad("Missing native staging conversation."))?;
+    let state = crate::native::state_dir();
+    let owner = crate::native::disk::lock_staging(&state, run).await?;
+    for terminal in ["stopped", "exit"] {
+        if state.join(format!("{attempt}.{terminal}")).try_exists()? {
+            return Err(Error::conflict(
+                "Native attempt stopped before staging publication.",
+            ));
+        }
+    }
+    let plan = data.join("runner-plans").join(format!("{attempt}.json"));
+    let bytes = match tokio::fs::read(plan).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::conflict(
+                "Native attempt no longer owns its staging tree.",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let current: Value = serde_json::from_slice(&bytes)?;
+    if current["runId"] != run || current["id"] != attempt {
+        return Err(Error::conflict("Native staging ownership changed."));
+    }
+    Ok(owner)
 }
 
 pub(crate) fn check_preparing(stop: &tokio_util::sync::CancellationToken) -> Result<()> {
@@ -471,6 +530,19 @@ pub(super) async fn seed_with_stop(
         skill_hit = false;
         skill_key = None;
     }
+    // Initial preparation already owns its conversation fence. Live publishers
+    // must acquire it and validate the attempt after the manager response.
+    let _live_staging = if crate::native::enabled() && !native_initial {
+        Some(
+            await_preparation(
+                stop,
+                lock_live_staging(&super::node_data_dir(), target, attempt),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let mut storage_guard = if crate::native::enabled() {
         Some(await_preparation(stop, crate::native::disk::lock(&crate::native::state_dir())).await?)
     } else {
@@ -527,7 +599,7 @@ pub(super) async fn seed_with_stop(
     if let Some(admission) = &mut admission {
         admission.retarget_staging(temp.path())?;
     }
-    let (mut admission, reservation) = match (admission, allocation) {
+    let (mut admission, reservation, reserved) = match (admission, allocation) {
         (Some(admission), Some(bytes)) if admission.reserve_staging(bytes)? => {
             let reservation = crate::native::disk::Preparation::reserve_staging(
                 &crate::native::state_dir(),
@@ -540,14 +612,28 @@ pub(super) async fn seed_with_stop(
             (
                 Some(admission.with_new_reservation(&reservation)?),
                 Some(reservation),
+                true,
             )
         }
-        (admission, _) => (admission, None),
+        (admission, _) if native_initial => {
+            // Serialized peers still need an ownership receipt for crash
+            // recovery. The gate is held throughout, so no space is promised.
+            let receipt = crate::native::disk::Preparation::reserve_staging(
+                &crate::native::state_dir(),
+                &crate::config::id(),
+                0,
+                &super::node_data_dir(),
+                temp.path(),
+            )
+            .await?;
+            (admission, Some(receipt), false)
+        }
+        (admission, _) => (admission, None, false),
     };
     let mut remaining = reservation
         .as_ref()
+        .filter(|_| reserved)
         .map(|reserved| reserved.bytes.saturating_sub(entry_overhead));
-    let reserved = remaining.is_some();
     if reserved {
         drop(storage_guard.take());
     }

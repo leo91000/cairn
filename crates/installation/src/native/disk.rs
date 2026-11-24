@@ -757,7 +757,7 @@ mod tests {
         std::fs::create_dir(&runs).unwrap();
         std::fs::create_dir(&receipts).unwrap();
         let mut published = None;
-        for should_publish in [false, true] {
+        for (bytes, should_publish) in [(0, false), (0, true), (MIB, false), (MIB, true)] {
             let temp = tempfile::Builder::new()
                 .prefix(SEED_TEMP_PREFIX)
                 .tempdir_in(&runs)
@@ -766,7 +766,7 @@ mod tests {
             std::fs::write(temp.join("seed"), b"staging data").unwrap();
             let metadata = temp.metadata().unwrap();
             let record = PreparationRecord {
-                bytes: MIB,
+                bytes,
                 physical: None,
                 staging: Some(StagingReceipt {
                     path: temp.clone(),

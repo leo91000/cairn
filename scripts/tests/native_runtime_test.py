@@ -289,10 +289,11 @@ class OfflineFixtureMaster(http.server.BaseHTTPRequestHandler):
             selection = json.loads(body) if fixture and operation == 'seed' else {}
             if selection.get('kind') == 'initial':
                 offered = selection.get('nativeSkillCache')
-                offer = self.server.seed_offer(attempt, selection.get('workspace') is False) if isinstance(offered, list) else {}
+                omit_workspace = selection.get('workspace') is False and bool(fixture['descriptor'].get('projectArchives'))
+                offer = self.server.seed_offer(attempt, omit_workspace) if isinstance(offered, list) else {}
                 key = offer.get('key')
                 hit = bool(key and key in offered)
-                payload = fixture['hit' if hit else 'miss']
+                payload = fixture['streams'][(omit_workspace, hit)]
                 headers = {}
                 if key:
                     headers[SKILL_KEY] = key
@@ -301,7 +302,8 @@ class OfflineFixtureMaster(http.server.BaseHTTPRequestHandler):
                 if hit:
                     headers[SKILL_HIT] = '1'
                 fixture['observed'] = dict(cacheSupported=isinstance(offered, list), cacheHit=hit,
-                                           encodedBytes=len(payload), managerOfferMs=offer.get('elapsedMs'))
+                                           workspaceOmitted=omit_workspace, encodedBytes=len(payload),
+                                           managerOfferMs=offer.get('elapsedMs'))
                 return self.respond(200, payload, headers)
         self.respond(503)
 
@@ -748,9 +750,16 @@ def main():
                 descriptor = dict(dataRoot=str(data), plan=plan)
                 if run in base_archives:
                     descriptor['projectArchives'] = base_archives[run]
+                streams = {}
+                for omit_workspace in ((False, True) if run in base_archives else (False,)):
+                    for omit_skills in (False, True):
+                        frames = seed_frames(source, omit_skills=omit_skills, omit_workspace=omit_workspace)
+                        if omit_workspace:
+                            assert not any(Path(json.loads(line).get('path', '')).is_relative_to('workspace')
+                                           for line in frames.splitlines()), 'Prepared seed includes workspace entries.'
+                        streams[(omit_workspace, omit_skills)] = frames
                 fixture_master.preparations[attempt] = dict(
-                    descriptor=descriptor, lease=lease,
-                    miss=seed_frames(source), hit=seed_frames(source, omit_skills=True),
+                    descriptor=descriptor, lease=lease, streams=streams,
                 )
             startup = time.perf_counter()
             progress('run-admission-before')
@@ -1073,6 +1082,7 @@ fi
                 acquired = state / 'native-data' / prepared_run
                 claimed = spare_inode is not None and acquired.stat().st_ino == spare_inode
                 sample = metrics['connectorStartup'][-1]
+                assert sample['workspaceOmitted'], 'Prepared start did not omit the workspace from its initial seed.'
                 if xfs_smoke:
                     assert claimed, 'The connector-driven start did not claim the prepared inode.'
                     assert sample['cacheHit'], 'The prepared start did not reuse its cached skills.'

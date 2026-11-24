@@ -279,9 +279,10 @@ pour préserver l’allocation du fichier. Pour un pool source déclaré dans `/
 d’abord une unité `.mount` persistante équivalente et vérifiez le montage ext4.
 Intégrez les éventuels drop-ins à cette unité avant d’arrêter le nœud. Le retour
 à ext4 rétablit les liens de démarrage présents avant la migration.
-Le fichier image doit laisser au moins 64 Mio, plus 64 Kio par environnement,
-disponibles pour les reçus de récupération sur les systèmes de fichiers du
-contrôleur. L’outil conserve les restrictions de montage `nosuid`, `nodev`,
+La migration réserve au moins 64 Mio, plus 64 Kio par environnement, pour les
+reçus de récupération sur les systèmes de fichiers du contrôleur. Un fichier
+image sur le même système de fichiers doit laisser cette réserve disponible.
+L’outil conserve les restrictions de montage `nosuid`, `nodev`,
 `noexec` et `nosymfollow` du pool ext4.
 Il refuse les attributs inode qu’il ne sait pas préserver, par exemple
 `nodump`, et indique le fichier concerné avant la bascule.

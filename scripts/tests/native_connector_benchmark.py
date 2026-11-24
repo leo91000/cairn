@@ -12,7 +12,7 @@ SKILL_KEY = 'x-cairn-seed-skills-key'
 SKILL_HIT = 'x-cairn-seed-skills-hit'
 
 
-def seed_frames(root, omit_skills=False):
+def seed_frames(root, omit_skills=False, omit_workspace=False):
     stream = io.BytesIO()
 
     def frame(value):
@@ -20,6 +20,8 @@ def seed_frames(root, omit_skills=False):
 
     for entry in sorted(root.rglob('*')):
         relative = entry.relative_to(root)
+        if omit_workspace and relative.is_relative_to('workspace'):
+            continue
         if omit_skills and relative.is_relative_to(SKILLS):
             continue
         if relative.as_posix().endswith('.codex/auth.json'):

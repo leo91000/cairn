@@ -782,6 +782,20 @@ class PoolMigrationTests(unittest.TestCase):
         self.assertEqual(image.read_bytes(), b'previous operator file')
         self.assertIsNone(host.load_migration())
 
+    def test_block_target_requires_receipt_space_before_stop_and_in_preview(self):
+        mounted = dict(source='/dev/loop0', fstype='ext4', options='rw,prjquota')
+        available = Mock(f_bavail=host.CONTROLLER_RECEIPT_RESERVE, f_frsize=1)
+        with patch.object(host, 'pool_unit_properties'), patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
+                patch.object(host, 'check_device'), patch.object(host, 'mount_of', return_value=mounted), \
+                patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', return_value=PLAN), \
+                patch.object(host.os, 'statvfs', return_value=available), patch.object(host, 'require_stopped') as stop:
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run), self.assertRaisesRegex(host.MigrationError, 'controller recovery receipts'):
+                    host.offline_pool_operation(host.migrate_pool, pool_arguments(
+                        device='/dev/synthetic', stop=True, dry_run=dry_run))
+            stop.assert_not_called()
+        self.assertIsNone(host.load_migration())
+
     def test_copy_refuses_inode_flags_that_rsync_cannot_preserve(self):
         source = self.root / 'source'
         run = source / 'sample'
