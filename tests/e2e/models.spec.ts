@@ -199,11 +199,26 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
   const hidden = await unconnected()
   expect(hidden).toEqual(expect.arrayContaining(['OpenCode', 'Antigravity']))
-  await picker.click()
+  const releaseDiscovery = Promise.withResolvers<void>()
+  await page.route('**/api/antigravity/models', async (route) => {
+    await releaseDiscovery.promise
+    await route.continue()
+  }, { times: 1 })
+  await page.setViewportSize({ width: 360, height: 740 })
+  try {
+    await picker.click()
+    await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toBeDisabled()
+  }
+  finally {
+    releaseDiscovery.resolve()
+  }
+
   await expect(menu.getByRole('radio', { name: 'Codex', exact: true })).toHaveAttribute('aria-checked', 'true')
   for (const label of Object.values(labels).filter(label => label !== 'Codex'))
     await expect(menu.getByRole('radio', { name: label, exact: true })).toHaveCount(hidden.includes(label) ? 0 : 1)
-  await expect(menu.getByText(hidden.join(', '), { exact: true })).toBeVisible()
+  const hiddenNames = menu.getByText(hidden.join(', '), { exact: true })
+  await expect(hiddenNames).toBeVisible()
+  expect(await hiddenNames.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
   await menu.getByRole('link', { name: 'Connect more →', exact: true }).click()
   await expect(page).toHaveURL(/\/connections$/)
   await expect(menu).toHaveCount(0)
@@ -226,7 +241,7 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   await workspace.api(`/api/accounts/${account.id}`, 'DELETE')
   await picker.click()
   await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
-  await expect(menu.getByText('The next message will wait for a connection.')).toBeVisible()
+  await expect(menu.getByText('The next turn will wait for a connection.')).toBeVisible()
   await expect(menu.getByRole('radiogroup', { name: 'Model', exact: true })).toHaveCount(0)
   await menu.getByRole('link', { name: 'Open Connections →' }).click()
   await expect(page).toHaveURL(/\/connections$/)

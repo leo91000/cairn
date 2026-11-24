@@ -892,22 +892,21 @@ constructor(
             }
     }
 
-    suspend fun refreshModels(provider: String) {
+    suspend fun refreshModels(provider: String): ModelCatalog? {
         codingAgent(provider)
         val target = api
-        try {
+        return try {
             val catalog = target.listModels(ListModelsInput(provider))
             // A request started before sign-out or a server change must not restore old data.
-            if (connection === target && state.value.session.authenticated)
-                mutable.update {
-                    it.copy(modelCatalogs = it.modelCatalogs + (provider to catalog))
-                }
+            if (connection !== target || !state.value.session.authenticated) return null
+            mutable.update { it.copy(modelCatalogs = it.modelCatalogs + (provider to catalog)) }
+            catalog
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            if (connection !== target || !state.value.session.authenticated) return
+            if (connection !== target || !state.value.session.authenticated) return null
             if (e is ApiException && e.status == 401) {
                 report(e)
-                return
+                return null
             }
             mutable.update {
                 val cached = it.modelCatalog(provider)
@@ -918,6 +917,7 @@ constructor(
                     )
                 it.copy(modelCatalogs = it.modelCatalogs + (provider to unavailable))
             }
+            null
         }
     }
 

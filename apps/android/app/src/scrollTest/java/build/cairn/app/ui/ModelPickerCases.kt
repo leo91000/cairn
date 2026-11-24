@@ -12,6 +12,7 @@ import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.Density
 import build.cairn.app.data.*
+import kotlinx.coroutines.CompletableDeferred
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -490,6 +491,8 @@ abstract class ModelPickerCases {
         var provider by mutableStateOf("codex")
         var saved by mutableStateOf("codex")
         var owner by mutableStateOf(true)
+        var stored by mutableStateOf(catalogs + ("opencode" to ModelCatalog(connected = true)))
+        val openCodeRefresh = CompletableDeferred<Unit>()
         var connections = 0
         val refreshed = mutableListOf<String>()
         val tile = { name: String -> hasText(name) and hasClickAction() }
@@ -497,14 +500,18 @@ abstract class ModelPickerCases {
             CairnTheme {
                 SurfaceForTest {
                     ModelPicker(
-                        catalogs.getValue(provider),
+                        stored.getValue(provider),
                         if (provider == "opencode") "saved-model" else "",
                         "",
                         provider = provider,
                         changeProvider = { provider = it },
-                        catalogs = catalogs,
+                        catalogs = stored,
                         savedProvider = saved,
-                        refreshCatalog = { refreshed += it },
+                        refreshCatalog = { name ->
+                            if (name == "opencode") openCodeRefresh.await()
+                            refreshed += name
+                            catalogs.getValue(name).also { stored = stored + (name to it) }
+                        },
                         openConnections = if (owner) ({ connections++ }) else null,
                     ) { _, _ ->
                     }
@@ -512,9 +519,11 @@ abstract class ModelPickerCases {
             }
         }
         compose.onNodeWithTag("model-picker").performClick()
-        // Opening refreshes the other agents, so an account connected meanwhile shows.
+        // A previously connected agent cannot be chosen before its refresh confirms it.
+        compose.onNodeWithText("OpenCode").assertIsNotEnabled()
+        compose.runOnIdle { openCodeRefresh.complete(Unit) }
         compose.runOnIdle {
-            assertEquals(setOf("claude", "opencode", "antigravity"), refreshed.toSet())
+            assertEquals(setOf("codex", "claude", "opencode", "antigravity"), refreshed.toSet())
         }
         compose.onNode(tile("Antigravity")).assertExists()
         compose.onNode(tile("OpenCode")).assertDoesNotExist()
@@ -530,8 +539,8 @@ abstract class ModelPickerCases {
         saved = "opencode"
         compose.onNodeWithTag("model-picker").performClick()
         compose.onNode(tile("OpenCode")).assertExists()
-        compose.onNodeWithText("Aucun compte").assertExists()
-        compose.onNodeWithText("Le prochain message attendra une connexion.").assertExists()
+        compose.onNodeWithText("Connexion requise").assertExists()
+        compose.onNodeWithText("Le prochain tour attendra une connexion.").assertExists()
         compose.onNodeWithText("saved-model").assertHasNoClickAction()
         compose.onNodeWithTag("unconnected-agents").assertDoesNotExist()
         compose.onNodeWithText("Connecter").assertDoesNotExist()

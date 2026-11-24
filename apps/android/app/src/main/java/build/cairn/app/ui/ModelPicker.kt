@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 internal fun effortLabel(value: String): String =
@@ -182,8 +183,8 @@ private val GeminiMark by lazy {
  * across model changes. With [catalogs], agents whose catalog says no account can run are not
  * offered, except the chosen one and [savedProvider], the conversation's or saved agent's: the
  * sheet names them and, with [openConnections], leads to Connections. Opening the sheet refreshes
- * the other agents' catalogs with [refreshCatalog], so an account connected or removed meanwhile
- * shows.
+ * every agent's catalog with [refreshCatalog]. A new choice waits for a successful catalog read,
+ * which may omit the connection field on older installations.
  */
 @Composable
 internal fun ModelPicker(
@@ -207,7 +208,7 @@ internal fun ModelPicker(
     onReasoningIntent: (ResumeReasoningIntent) -> Unit = {},
     catalogs: Map<String, ModelCatalog>? = null,
     savedProvider: String? = null,
-    refreshCatalog: (suspend (String) -> Unit)? = null,
+    refreshCatalog: (suspend (String) -> ModelCatalog?)? = null,
     openConnections: (() -> Unit)? = null,
     change: (String, String) -> Unit,
 ) {
@@ -310,13 +311,19 @@ internal fun ModelPicker(
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
-            if (refresh != null) Poll(provider, 300_000) { reload() }
-            if (refreshCatalog != null)
-                LaunchedEffect(Unit) {
-                    codingAgents
-                        .filter { it.provider != provider }
-                        .forEach { launch { refreshCatalog(it.provider) } }
+            val discovered = remember { mutableStateMapOf<String, ModelCatalog?>() }
+            var discoveryAttempt by remember { mutableIntStateOf(0) }
+            val checkingConnections = refreshCatalog != null && discovered.size < codingAgents.size
+            if (refreshCatalog != null) {
+                Poll(discoveryAttempt, 300_000) {
+                    discovered.clear()
+                    coroutineScope {
+                        codingAgents.forEach { agent ->
+                            launch { discovered[agent.provider] = refreshCatalog(agent.provider) }
+                        }
+                    }
                 }
+            } else if (refresh != null) Poll(provider, 300_000) { reload() }
             var query by rememberSaveable { mutableStateOf("") }
             val connect = openConnections?.let {
                 {
@@ -394,32 +401,34 @@ internal fun ModelPicker(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                     }
-                    if (refresh != null)
+                    if (refresh != null || refreshCatalog != null)
                         IconButton(
-                            onClick = { scope.launch { reload() } },
-                            enabled = !refreshing,
+                            onClick = {
+                                if (refreshCatalog != null) discoveryAttempt++
+                                else scope.launch { reload() }
+                            },
+                            enabled = !refreshing && !checkingConnections,
                             modifier =
                                 Modifier.testTag("refresh-models").semantics {
                                     contentDescription =
-                                        if (refreshing) "Actualisation des modèles…"
+                                        if (refreshing || checkingConnections)
+                                            "Actualisation des modèles…"
                                         else "Actualiser les modèles"
                                 },
                         ) {
-                            if (refreshing)
+                            if (refreshing || checkingConnections)
                                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                             else Icon(Icons.Default.Refresh, null, Modifier.size(20.dp))
                         }
                     FilledTonalButton(onClick = { open = false }) { Text("Terminé") }
                 }
                 if (changeProvider != null) {
-                    // The chosen and saved agents stay, so a chat whose account went away still
-                    // shows
-                    // where it runs and can return to it after looking at another agent.
+                    // A chat can return to its saved agent even if its account went away.
+                    fun retained(value: String) = value == provider || value == savedProvider
+                    fun catalogFor(value: String) = discovered[value] ?: catalogs?.get(value)
                     val (offered, unconnected) =
                         codingAgents.partition {
-                            it.provider == provider ||
-                                it.provider == savedProvider ||
-                                catalogs?.get(it.provider)?.connected != false
+                            retained(it.provider) || catalogFor(it.provider)?.connected != false
                         }
                     SectionLabel("Assistant de code")
                     ProviderTiles(offered.map { it.provider to it.vendor }) {
@@ -430,9 +439,12 @@ internal fun ModelPicker(
                             value,
                             vendor,
                             provider == value,
-                            enabled,
+                            enabled &&
+                                (retained(value) ||
+                                    refreshCatalog == null ||
+                                    discovered[value] != null),
                             tileModifier,
-                            accountMissing = catalogs?.get(value)?.connected == false,
+                            connectionRequired = catalogFor(value)?.connected == false,
                         ) {
                             if (provider != value) {
                                 query = ""
@@ -442,6 +454,23 @@ internal fun ModelPicker(
                     }
                     if (unconnected.isNotEmpty())
                         UnconnectedAgents(unconnected.map { it.provider }, connect)
+                    val alternateAgents = codingAgents.filterNot { retained(it.provider) }
+                    if (checkingConnections && alternateAgents.any { it.provider !in discovered })
+                        Text(
+                            "Vérification des connexions…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    else if (
+                        alternateAgents.any {
+                            discovered.containsKey(it.provider) && discovered[it.provider] == null
+                        }
+                    )
+                        Text(
+                            "Certaines connexions n’ont pas pu être vérifiées.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     AnimatedVisibility(switching && !disconnected) {
                         Row(
                             Modifier.fillMaxWidth()
@@ -485,7 +514,7 @@ internal fun ModelPicker(
                             )
                             Text(
                                 if (field) "Les exécutions attendront une connexion."
-                                else "Le prochain message attendra une connexion.",
+                                else "Le prochain tour attendra une connexion.",
                                 style = MaterialTheme.typography.bodySmall,
                             )
                             if (connect != null)
@@ -864,8 +893,6 @@ private fun UnconnectedAgents(providers: List<String>, openConnections: (() -> U
             providers.joinToString(", ") { providerLabel(it) },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
         if (openConnections != null) TextButton(onClick = openConnections) { Text("Connecter") }
@@ -886,7 +913,7 @@ internal fun ProviderTile(
     selected: Boolean,
     enabled: Boolean,
     modifier: Modifier,
-    accountMissing: Boolean = false,
+    connectionRequired: Boolean = false,
     choose: () -> Unit,
 ) {
     val accent = if (provider == "claude") ClaudeTint else MaterialTheme.colorScheme.primary
@@ -925,9 +952,9 @@ internal fun ProviderTile(
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center,
             )
-            if (accountMissing)
+            if (connectionRequired)
                 Text(
-                    "Aucun compte",
+                    "Connexion requise",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
                     textAlign = TextAlign.Center,

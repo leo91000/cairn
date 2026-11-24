@@ -38,6 +38,7 @@ function createCatalog(provider: Provider) {
     error: '',
     loading: false,
     loaded: false,
+    requestFailed: false,
     nativeDefaults: undefined as ModelCatalog['nativeDefaults'],
   })
   let pending: Promise<void> | undefined
@@ -53,11 +54,14 @@ function createCatalog(provider: Provider) {
         if (requestRevision !== revision)
           return
         Object.assign(catalog, value, { nativeDefaults: value.nativeDefaults, connected: value.connected })
+        catalog.requestFailed = false
         store(key, value)
       })
       .catch((error: Error) => {
-        if (requestRevision === revision)
+        if (requestRevision === revision) {
           catalog.error = error.message
+          catalog.requestFailed = true
+        }
       })
       .finally(() => {
         if (requestRevision === revision) {

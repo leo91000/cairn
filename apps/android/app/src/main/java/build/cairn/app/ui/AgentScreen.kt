@@ -2259,8 +2259,8 @@ private fun EngineSection(
         catalogs = state.modelCatalogs,
         savedProvider = state.agents.find { it.id == agent.id }?.provider,
         refreshCatalog = { vm.refreshModels(it) },
-        // Leaving with unsaved changes would lose them, as for the native configuration.
-        openConnections = openConnections.takeIf { configurationEnabled },
+        // Connections is pushed on the navigation stack, so Back restores the saved draft.
+        openConnections = openConnections,
     ) { model, reasoning ->
         update { it.copy(model = model, reasoning = reasoning) }
     }
