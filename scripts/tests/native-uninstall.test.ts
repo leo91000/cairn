@@ -21,6 +21,7 @@ const policyHeader = readFileSync(new URL('../../crates/installation/src/native/
 
 function uninstall(scenario: string, policies: Record<string, string> = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'cairn-uninstall-policies-'))
+  writeFileSync(join(directory, 'systemd-escape'), '#!/bin/sh\nprintf "%s\\n" native-data.mount\n', { mode: 0o755 })
   for (const [name, contents] of Object.entries(policies))
     writeFileSync(join(directory, name), contents)
   const nodeUnit = join(directory, 'firecracker-node-root')
@@ -41,7 +42,6 @@ function uninstall(scenario: string, policies: Record<string, string> = {}) {
     .replaceAll('/var/lib/cairn-node', '"$CAIRN_TEST_NODE_UNIT"')
   try {
     return spawnSync('sh', ['-c', `
-systemd-escape() { echo native-data.mount; }
 systemctl() { echo "SYSTEMCTL $*"; [ "$scenario" != reload-failure ]; }
 findmnt() {
   case "$scenario" in
@@ -70,7 +70,7 @@ id() { [ "$scenario" = userdel-failure ]; }
 ${isolatedScript}
 `], {
       env: {
-        PATH: '/usr/bin:/bin',
+        PATH: `${directory}:/usr/bin:/bin`,
         scenario,
         CAIRN_TEST_POLICY_DIR: directory,
         CAIRN_TEST_POOL_UNIT: poolUnit,

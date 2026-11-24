@@ -1590,7 +1590,11 @@ impl Controller {
         }
         let administrator = plan["nativeMode"]["mode"] == "administrator";
         trace.phase(Phase::IdentityProvision);
-        let mut identity = super::identity::provision(&self.state, text(plan, "runId")).await?;
+        let identity = super::identity::provision(&self.state, text(plan, "runId"), &stop).await;
+        if stop.is_cancelled() {
+            return Ok(143);
+        }
+        let mut identity = identity?;
         if administrator {
             identity.host_engine = Some((self.identity.uid, self.identity.gid));
         }
@@ -2536,7 +2540,7 @@ impl Controller {
                             return Err(Error::conflict("Native project import stopped."));
                         }
                         let mut identity =
-                            super::identity::provision(&controller.state, &run).await?;
+                            super::identity::provision(&controller.state, &run, &stop).await?;
                         if plan["nativeMode"]["mode"] == "administrator" {
                             identity.host_engine =
                                 Some((controller.identity.uid, controller.identity.gid));

@@ -172,6 +172,13 @@ fn classify(state: &Path, pool: &std::fs::File, run: &str) -> Result<Environment
     record
         .validate(&control, &file)
         .map_err(|_| Error::conflict("does not match its ownership record"))?;
+    if project == 0 && retirement.is_some() {
+        // Retirement clears the project but keeps inheritance until rmdir.
+        // The copy would reject that flag on an otherwise unassigned tree.
+        return Err(Error::conflict(
+            "has an interrupted quota retirement; start the node and let retirement finish before migrating",
+        ));
+    }
     if project != 0 && project != record.project {
         return Err(Error::conflict(
             "has a project ID other than its recorded one",

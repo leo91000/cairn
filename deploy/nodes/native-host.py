@@ -1224,6 +1224,17 @@ def check_device(device, force, uuid=None, descriptor=None):
     return ours
 
 
+def check_migration_block_device(device, force, record, descriptor=None):
+    retry = record is not None and 'formatDevice' in record
+    expected = record['uuid'] if record else None
+    ours = check_device(device, force or retry, uuid=expected, descriptor=descriptor)
+    # Device numbers may be reassigned during a reboot or a volume change.
+    # Once formatting has been attempted, only its UUID proves this target.
+    if retry and not ours:
+        raise MigrationError(f'{device} no longer proves the planned XFS UUID. '
+                             'Run rollback-pool, verify the intended volume, then start a new migration.')
+
+
 def attached_loop(image):
     devices = checked('losetup', '--noheadings', '--output', 'NAME', '--associated', str(image)).split()
     if len(devices) > 1:
@@ -1750,13 +1761,13 @@ def prepare_target_with_handles(record, force, handles):
     inherited = (descriptor,)
     expected = record['uuid']
     if record['phase'] == 'planned':
-        ours = check_device(device, force or 'image' in target, uuid=expected, descriptor=descriptor)
         if 'device' in target:
-            if not ours and record.get('formatDevice', device_id) != device_id:
-                raise MigrationError(f'{device} no longer identifies the original formatting target.')
+            check_migration_block_device(device, force, record, descriptor)
             if 'formatDevice' not in record:
                 record['formatDevice'] = device_id
                 save_migration(record)
+        else:
+            check_device(device, True, uuid=expected, descriptor=descriptor)
         verify_target_device_path(device, device_id)
         # A partial mkfs can already have written the recorded UUID. The
         # planned phase contains no copied environments and can format again.
@@ -1819,7 +1830,7 @@ def migration_target(arguments, record):
 
 def probe_migration_device(target, force, record):
     if 'device' in target and (not record or record['phase'] == 'planned'):
-        check_device(Path(target['device']), force, uuid=record['uuid'] if record else None)
+        check_migration_block_device(Path(target['device']), force, record)
 
 
 def migration_plan(state):

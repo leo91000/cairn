@@ -297,6 +297,30 @@ async fn seed(state: &Path) {
             "tree": tree(&workload),
         }));
     }
+    // Retirement can stop after clearing the project but before rmdir.
+    let retiring = crate::config::id();
+    let control = state.join("native").join(&retiring);
+    let workload = workspace::workload_for_control(&control).unwrap();
+    crate::skills::private_dir(&control).await.unwrap();
+    crate::skills::private_dir(&workload).await.unwrap();
+    super::super::prepare(state, &workload, 8 * 1024 * 1024)
+        .await
+        .unwrap();
+    std::fs::copy(control.join(OWNER), control.join(RETIREMENT)).unwrap();
+    set_project(&open(&workload).unwrap(), 0).unwrap();
+    let inventory = plan(state).unwrap();
+    let blockers = inventory["blockers"].as_array().unwrap();
+    assert_eq!(blockers.len(), 1);
+    let blocker = blockers[0].as_str().unwrap();
+    assert!(blocker.contains(&retiring) && blocker.contains("interrupted quota retirement"));
+    super::super::retire(&workload).await.unwrap();
+    assert!(
+        plan(state).unwrap()["blockers"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
     // A preparation interrupted before its project allocation.
     let unassigned = crate::config::id();
     crate::skills::private_dir(&pool.join(&unassigned))

@@ -305,6 +305,9 @@ Il refuse les attributs inode qu’il ne sait pas préserver, par exemple
 `nodump`, et indique le fichier concerné avant la bascule.
 
 Après interruption, relancez `migrate-pool` avec la même cible pour reprendre.
+Si le formatage d’une partition ou d’un volume logique a été interrompu avant
+que son UUID XFS puisse être vérifié, lancez `rollback-pool`, vérifiez le volume
+voulu et démarrez une nouvelle migration.
 Une copie interrompue est recréée sur la cible avant la vérification. Le
 contrôleur refuse la bascule tant que l’écriture de la copie et des quotas sur
 le disque n’a pas été confirmée.

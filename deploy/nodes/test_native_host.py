@@ -1237,10 +1237,26 @@ class PoolMigrationTests(unittest.TestCase):
                 patch.object(host.os, 'chown'):
             host.prepare_target(record, False)
         (descriptor,) = commands.call_args_list[0].kwargs['descriptors']
-        check.assert_called_once_with(device, False, uuid=expected, descriptor=descriptor)
+        check.assert_called_once_with(device, True, uuid=expected, descriptor=descriptor)
         self.assertIn(f'crc=1,reflink=1,uuid={expected}', commands.call_args_list[0].args)
         self.assertEqual(commands.call_args_list[0].args[-1], f'/proc/self/fd/{descriptor}')
         self.assertEqual(host.load_migration()['phase'], 'formatted')
+
+    def test_interrupted_block_format_cannot_force_a_reused_device_number(self):
+        device = self.root / 'replacement-device'
+        device.write_bytes(b'data from another volume')
+        record = dict(phase='planned', uuid='f00d', formatDevice=device.stat().st_rdev,
+                      target={'device': str(device)})
+        host.save_migration(record)
+        with patch.object(host, 'check_device', return_value=False), \
+                patch.object(host, 'checked') as commands:
+            with self.assertRaisesRegex(host.MigrationError, 'rollback-pool'):
+                host.probe_migration_device(record['target'], True, record)
+            with self.assertRaisesRegex(host.MigrationError, 'rollback-pool'):
+                host.prepare_target(record, True)
+        commands.assert_not_called()
+        self.assertEqual(host.load_migration(), record)
+        self.assertEqual(device.read_bytes(), b'data from another volume')
 
     def test_formatter_keeps_the_verified_device_when_a_symlink_is_retargeted(self):
         original = self.root / 'original-device'
@@ -1298,7 +1314,10 @@ class PoolMigrationTests(unittest.TestCase):
         damaged.write_bytes(b'damaged')
         metadata = original.stat()
         os.utime(damaged, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
-        host.copy_environment('run', source, target)
+        # Inode flag policy has its own tests. The test temp directory may
+        # inherit a host project ID unrelated to the simulated migration.
+        with patch.object(host, 'verify_portable_inode_flags'):
+            host.copy_environment('run', source, target)
         self.assertEqual(damaged.read_bytes(), original.read_bytes())
 
     def test_terminating_offline_copy_reaps_its_process_before_migration_can_continue(self):
