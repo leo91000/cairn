@@ -11,6 +11,7 @@ import {
   expectSingleScroll,
   headerStatus,
   initializeRepository,
+  isolatedWorkspaceTest,
   openChatDetails,
   test,
   useRelayForHttpMocks,
@@ -2417,7 +2418,8 @@ test('same-provider quota resume submits the changed model default and unchanged
   expect(resetDefaultRequests[0]).not.toHaveProperty('selection')
 })
 
-test('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {
+// Each Chromium and WebKit journey starts with its own account read budget.
+isolatedWorkspaceTest('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {
   initializeRepository(workspace.projectPath)
   await page.goto(workspacePath('/tasks'))
   await authenticateWorkspace(page)
