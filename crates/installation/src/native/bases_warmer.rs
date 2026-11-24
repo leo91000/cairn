@@ -177,7 +177,20 @@ impl Warmer {
                         };
                     worker
                         .warm(&work.archives, work.disk_mib, limit, &policy, &worker_stop)
-                        .await
+                        .await?;
+                    if let Some(ready) = worker.lookup(&work.archives, work.disk_mib).await? {
+                        super::spares::warm(
+                            &worker,
+                            &ready.key,
+                            work.disk_mib,
+                            ready.allocated_for_clone(true),
+                            limit,
+                            &policy,
+                            &worker_stop,
+                        )
+                        .await?;
+                    }
+                    Ok::<(), Error>(())
                 })
             })
             .await;

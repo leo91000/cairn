@@ -25,24 +25,28 @@ pub(super) async fn prepare_for_identity(
     identity: &super::identity::Identity,
     observation: &super::bootstrap::Trace,
 ) -> Result<Vec<Binding>> {
-    prepare_for_identity_admitted(source, data, identity, observation, &mut |_| Ok(())).await
+    prepare_for_identity_admitted(source, data, identity, identity, observation, &mut |_| {
+        Ok(())
+    })
+    .await
 }
 
 pub(super) async fn prepare_for_identity_admitted(
     source: &Path,
     data: &Path,
     identity: &super::identity::Identity,
+    storage: &super::identity::Identity,
     observation: &super::bootstrap::Trace,
     admit: &mut (impl FnMut(u64) -> Result<()> + Send),
 ) -> Result<Vec<Binding>> {
     observation.phase(super::bootstrap::Phase::IdentityReconcile);
-    super::identity::reconcile(data, identity, observation).await?;
+    super::identity::reconcile(data, storage, observation).await?;
     observation.phase(super::bootstrap::Phase::HomeRefresh);
     let bindings = prepare_admitted(
         source,
         &data.join("home"),
-        identity.uid(),
-        identity.gid(),
+        storage.uid(),
+        storage.gid(),
         admit,
     )
     .await?;

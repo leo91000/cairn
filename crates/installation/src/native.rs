@@ -20,12 +20,14 @@ mod protection;
 mod quota;
 pub mod releases;
 mod service;
+mod spares;
 mod suspension;
 mod systemd;
 mod watchdog;
 mod workspace;
 
 pub(crate) use mode::matches as mode_matches;
+pub use quota::migration::command as pool_migration;
 pub(crate) use service::native_budget;
 pub use service::serve;
 #[cfg(test)]

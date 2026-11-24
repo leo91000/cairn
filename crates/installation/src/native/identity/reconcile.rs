@@ -20,6 +20,29 @@ const MARKER: &str = ".cairn-identity.json";
 const TRANSITION: &str = ".cairn-identity.transition.json";
 const PENDING: &str = ".cairn-identity.pending.json";
 
+pub(in crate::native) async fn stored_owner(data: &Path) -> Result<Option<Identity>> {
+    match tokio::fs::read(data.join(MARKER)).await {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A newly published base clone has only template content and all its files
+/// already belong to the supplied engine. Record that ownership before any
+/// workload or live filesystem operation can write to it.
+pub(in crate::native) async fn mark_base_owner(data: &Path, owner: &Identity) -> Result<()> {
+    if stored_owner(data).await?.is_some()
+        || data.join(TRANSITION).exists()
+        || data.join(PENDING).exists()
+    {
+        return Err(Error::conflict(
+            "New native base clone already has an ownership record.",
+        ));
+    }
+    atomic_write(&data.join(MARKER), &serde_json::to_vec(owner)?).await
+}
+
 const ATTRIBUTES: [&str; 3] = [
     "system.posix_acl_access",
     "system.posix_acl_default",
@@ -326,6 +349,40 @@ async fn migrate(data: &Path, transition: &Transition, observation: &Trace) -> R
     remove(data, TRANSITION, observation).await
 }
 
+/// An offline data-pool migration gives every copied entry a new inode. Bind
+/// an interrupted ownership batch to the copy at the same relative paths, after
+/// checking that it described the source tree, so the controller replays it.
+pub(in crate::native) async fn rebind_pending(source: &Path, copy: &Path) -> Result<bool> {
+    let bytes = match tokio::fs::read(source.join(PENDING)).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let mut entries: Vec<Entry> = serde_json::from_slice(&bytes)?;
+    for entry in &mut entries {
+        let relative = PathBuf::from(OsString::from_vec(entry.relative.clone()));
+        if relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(Error::conflict("Invalid ownership journal path."));
+        }
+        let original = std::fs::symlink_metadata(source.join(&relative))?;
+        let copied = std::fs::symlink_metadata(copy.join(&relative))?;
+        if original.ino() != entry.inode
+            || copied.file_type().is_symlink() != entry.symlink
+            || original.file_type().is_symlink() != entry.symlink
+        {
+            return Err(Error::conflict(
+                "Ownership journal does not describe the migrated tree.",
+            ));
+        }
+        entry.inode = copied.ino();
+    }
+    atomic_write(&copy.join(PENDING), &serde_json::to_vec(&entries)?).await?;
+    Ok(true)
+}
+
 /// The transition itself travels with the disk. Complete a partially applied
 /// mapping before starting another, even when recovery happens on a third node.
 pub(in crate::native) async fn reconcile(
@@ -346,11 +403,7 @@ pub(in crate::native) async fn reconcile(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
     }
-    let previous = match tokio::fs::read(data.join(MARKER)).await {
-        Ok(bytes) => Some(serde_json::from_slice::<Identity>(&bytes)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
+    let previous = stored_owner(data).await?;
     if previous.as_ref() == Some(identity) {
         observation.add(Counter::MarkerMatch, 1);
         return Ok(());

@@ -148,6 +148,7 @@ pub(super) struct Snapshot {
     phases: Vec<PhaseCost>,
     counters: Vec<Count>,
     costs: Vec<OperationCost>,
+    usage_scans: u64,
     export_drops: u64,
 }
 
@@ -196,6 +197,10 @@ struct Observation {
     state: Mutex<State>,
     counters: [AtomicU64; Counter::ALL.len()],
     costs: [(AtomicU64, AtomicU64); Cost::ALL.len()],
+    /// Process-wide full usage scans at the start; frozen as a delta at the end.
+    /// Concurrent bootstraps and other controller work can inflate the delta.
+    usage_scans_started: u64,
+    usage_scans: AtomicU64,
     forgotten: Arc<AtomicBool>,
     preparing: AtomicBool,
     export_drops: Arc<AtomicU64>,
@@ -271,8 +276,17 @@ impl Observation {
                     elapsed_micros: self.costs[*operation as usize].1.load(Ordering::Relaxed),
                 })
                 .collect(),
+            usage_scans: if preparing {
+                self.usage_scans_since_start()
+            } else {
+                self.usage_scans.load(Ordering::Relaxed)
+            },
             export_drops: self.export_drops.load(Ordering::Relaxed),
         }
+    }
+
+    fn usage_scans_since_start(&self) -> u64 {
+        super::disk::usage_scans().saturating_sub(self.usage_scans_started)
     }
 
     fn export(&self) {
@@ -413,6 +427,9 @@ impl Scope {
                 state.elapsed = state.started.elapsed();
                 state.observed_at = crate::config::now();
                 state.status = status;
+                observation
+                    .usage_scans
+                    .store(observation.usage_scans_since_start(), Ordering::Relaxed);
                 observation.preparing.store(false, Ordering::Relaxed);
                 true
             }
@@ -572,6 +589,8 @@ impl Registry {
             }),
             counters: std::array::from_fn(|_| AtomicU64::new(0)),
             costs: std::array::from_fn(|_| (AtomicU64::new(0), AtomicU64::new(0))),
+            usage_scans_started: super::disk::usage_scans(),
+            usage_scans: AtomicU64::new(0),
             forgotten: Arc::new(AtomicBool::new(false)),
             preparing: AtomicBool::new(true),
             export_drops: Arc::new(AtomicU64::new(0)),
@@ -727,6 +746,26 @@ mod tests {
         );
         assert_eq!(final_report["status"], "submitted");
         assert!(!final_report.to_string().contains("providerStarted"));
+    }
+
+    #[test]
+    fn usage_scans_count_preparation_and_freeze_at_submission() {
+        let registry = registry();
+        let id = crate::config::id();
+        let scope = registry.begin(&id);
+        let (data, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        super::super::disk::usage_sync(data.path(), state.path()).unwrap();
+        super::super::disk::usage_sync(data.path(), state.path()).unwrap();
+        // Other tests scan concurrently: the process-wide delta is a lower bound.
+        assert!(registry.get(&id).unwrap().usage_scans >= 2);
+
+        scope.submitted();
+        let submitted = registry.get(&id).unwrap().usage_scans;
+        assert!(submitted >= 2);
+        super::super::disk::usage_sync(data.path(), state.path()).unwrap();
+        assert_eq!(registry.get(&id).unwrap().usage_scans, submitted);
+        let report = serde_json::to_value(registry.get(&id).unwrap()).unwrap();
+        assert_eq!(report["usageScans"], submitted);
     }
 
     #[test]

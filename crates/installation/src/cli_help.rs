@@ -137,6 +137,13 @@ const COMMANDS: &[Command] = &[
         internal: true,
     },
     Command {
+        name: "native-pool-migrate",
+        arguments: "<plan|prepare|commit|seal|switch|rollback|check> <state> [...]",
+        description: "Move native environments to another data pool offline.",
+        details: "Used by native-host.py migrate-pool while the node is stopped. Rewrites quota\nrecords; never run it while the native controller is running.",
+        internal: true,
+    },
+    Command {
         name: "native-watchdog",
         arguments: "<lease-file> <attempt>",
         description: "Watch a native execution lease.",

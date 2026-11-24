@@ -33,10 +33,13 @@ impl Controller {
 
     async fn sample_health_once(&self) -> Result<Value> {
         let state = self.state.clone();
-        let capabilities = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let (capabilities, data_pool) = tokio::task::spawn_blocking(move || -> Result<_> {
             let capabilities = crate::nodes::connector::capabilities(&state)?;
             systemd::tools(&crate::nodes::component_runtime())?;
-            Ok(capabilities)
+            // Filesystem, reflink support and quota enforcement of the pool;
+            // an unavailable pool is reported by the storage checks instead.
+            let data_pool = super::super::quota::describe(&state).ok();
+            Ok((capabilities, data_pool))
         })
         .await
         .map_err(Error::internal)??;
@@ -61,7 +64,8 @@ impl Controller {
             "usage": usage,
             "pressure": null,
             "diskGrowth": disk_growth,
-            "storagePolicy": self.storage_policy.current().await
+            "storagePolicy": self.storage_policy.current().await,
+            "dataPool": data_pool
         }))
     }
 

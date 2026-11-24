@@ -297,6 +297,13 @@ struct Attempt {
     live_access: Arc<Mutex<()>>,
 }
 
+#[derive(Debug)]
+struct PreparationSpace {
+    incoming: u64,
+    spare: bool,
+    usage_sample: (u64, std::time::Instant),
+}
+
 #[cfg_attr(test, derive(Default))]
 pub(super) struct StorageClose {
     live_access: Arc<Mutex<()>>,
@@ -809,10 +816,17 @@ impl Controller {
             ));
         }
         trace.phase(Phase::StorageAdmission);
-        let _disk = self.start_storage(id, &plan).await?;
+        let disk = self.start_storage(id, &plan).await?;
         trace.phase(Phase::PoolAccounting);
-        let incoming = self.check_preparation_space(&plan).await?;
-        let preparation = disk::Preparation::reserve(&self.state, id, incoming).await?;
+        let space = self.check_preparation_space(&plan).await?;
+        let pool = workspace::data_root(&self.state);
+        let filesystem = if pool.try_exists()? {
+            &pool
+        } else {
+            &self.state
+        };
+        let preparation =
+            disk::Preparation::reserve_on(&self.state, id, space.incoming, filesystem).await?;
         trace.phase(Phase::WorkspaceOwnership);
         let owner =
             Arc::new(workspace::execution_ownership(&self.state, text(&plan, "runId")).await?);
@@ -838,6 +852,14 @@ impl Controller {
             text(&plan, "runId"),
             resources.disk_mi_b.saturating_mul(disk::MIB),
         );
+        // Keep deletion out until the environment owner and active receipt
+        // are both visible. An admitted spare also keeps the gate until its
+        // claim is recorded so a peer cannot claim or retire it.
+        let spare_guard = space.spare.then_some(disk);
+        let (used, observed) = space.usage_sample;
+        let ready_usage = space
+            .spare
+            .then_some((used.saturating_add(space.incoming), observed));
         let (controller, id) = (self.clone(), id.to_owned());
         let observation = Arc::new(std::mem::take(observation));
         let (lease_controller, lease_id, lease_stop) =
@@ -866,6 +888,8 @@ impl Controller {
                         &execution_observation,
                         execution_workspace,
                         preparation,
+                        spare_guard,
+                        ready_usage,
                         execution_launch,
                     )
                     .await
@@ -1201,7 +1225,8 @@ impl Controller {
             wait,
             &bootstrap::Trace::default(),
             None,
-            0,
+            None,
+            None,
         )
         .await
     }
@@ -1215,9 +1240,11 @@ impl Controller {
         wait: Duration,
         trace: &bootstrap::Trace,
         workspace_owner: Option<Arc<crate::file_lock::Guard>>,
-        reserved: u64,
+        reservation: Option<&disk::Preparation>,
+        mut spare_guard: Option<disk::StorageGuard>,
     ) -> Result<(bool, block::Mounted)> {
         let (deadline, time_limited) = disk_admission_deadline(plan, wait);
+        let require_spare = spare_guard.is_some();
         let mut reported = false;
         loop {
             if stop.is_cancelled() || !self.leased(id).await {
@@ -1231,15 +1258,19 @@ impl Controller {
             }
             // Cancel only lock acquisition, never an in-flight mount or clone.
             trace.phase(Phase::StorageAdmission);
-            let owner = tokio::select! {
-                biased;
-                () = stop.cancelled() => {
-                    return Err(self.preparation_stopped(id, plan).await);
-                }
-                result = tokio::time::timeout_at(deadline, disk::lock(&self.state)) => {
-                    match result {
-                        Ok(result) => result?,
-                        Err(_) => return Err(self.disk_admission_timeout(id, time_limited).await),
+            let owner = if let Some(owner) = spare_guard.take() {
+                owner
+            } else {
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => {
+                        return Err(self.preparation_stopped(id, plan).await);
+                    }
+                    result = tokio::time::timeout_at(deadline, disk::lock(&self.state)) => {
+                        match result {
+                            Ok(result) => result?,
+                            Err(_) => return Err(self.disk_admission_timeout(id, time_limited).await),
+                        }
                     }
                 }
             };
@@ -1263,10 +1294,9 @@ impl Controller {
                 trace.phase(Phase::FilesystemInitialize);
                 let from_base = self
                     .bases()
-                    .initialize_reserved(plan, stop, reserved)
+                    .initialize_reserved(plan, stop, reservation, Some(owner), require_spare)
                     .await?;
                 trace.phase(Phase::Mount);
-                drop(owner);
                 let state = self.state.clone();
                 let owned_plan = plan.clone();
                 let owned_stop = stop.clone();
@@ -1402,28 +1432,37 @@ impl Controller {
         &self,
         plan: Value,
         identity: super::identity::Identity,
+        storage_identity: super::identity::Identity,
+        from_base: bool,
         data: PathBuf,
         mounted: Arc<block::Handle>,
         trace: bootstrap::Trace,
         stop: CancellationToken,
         reservation: disk::Preparation,
+        ready_usage: Option<(u64, std::time::Instant)>,
     ) -> Result<Vec<super::home::Binding>> {
         let controller = self.clone();
         let ingress = mounted.ingress.clone().lock_owned().await;
         let reserved = reservation.bytes;
+        let allocation = Arc::new(reservation);
+        let reservation = allocation.clone();
         super::ingress::write((mounted.clone(), ingress, reservation), async move {
             let _mounted = mounted.mount.lock().await;
             let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
-            let admission = super::ingress::Admission::new(
+            let limit = controller.disk_limit().await?;
+            let admission = super::ingress::Admission::project(
                 &controller.data,
                 &controller.state,
-                &data,
-                &workspace::data_root(&controller.state),
-                controller.disk_limit().await?,
+                workspace::workload(&controller.state, text(&plan, "runId"))?,
+                limit,
                 &policy,
+                ready_usage,
             )?;
-            let check =
-                std::sync::Arc::new(std::sync::Mutex::new(admission.with_reservation(reserved)));
+            // The admission has just taken a full usage sample; reuse it.
+            let growth = disk::available(limit, admission.sampled_usage());
+            let check = std::sync::Arc::new(std::sync::Mutex::new(
+                admission.with_reservation(&allocation, true)?,
+            ));
             let copied = check.clone();
             let admit = std::sync::Arc::new(std::sync::Mutex::new(move |bytes| {
                 if stop.is_cancelled() {
@@ -1438,7 +1477,7 @@ impl Controller {
                 &plan,
                 controller
                     .disk_budget(&plan)
-                    .min(controller.disk_growth().await?.saturating_add(reserved)),
+                    .min(growth.saturating_add(reserved)),
                 admit,
             )
             .await?;
@@ -1451,10 +1490,17 @@ impl Controller {
             private_dir(&temporary).await?;
             workspace::own_tree(&temporary, identity.uid(), identity.gid()).await?;
             let stage = controller.data.join("runs").join(text(&plan, "runId"));
+            if from_base
+                && (storage_identity.uid(), storage_identity.gid())
+                    == (controller.identity.uid, controller.identity.gid)
+            {
+                super::identity::mark_base_owner(&data, &storage_identity).await?;
+            }
             let bindings = super::home::prepare_for_identity_admitted(
                 &stage.join("home"),
                 &data,
                 &identity,
+                &storage_identity,
                 &trace,
                 &mut |bytes| check.lock().map_err(Error::internal)?.admit(bytes),
             )
@@ -1470,8 +1516,16 @@ impl Controller {
             tokio::fs::create_dir_all(&docker_data).await?;
             std::os::unix::fs::lchown(
                 &docker_data,
-                Some(if administrator { 0 } else { identity.root_uid }),
-                Some(if administrator { 0 } else { identity.root_gid }),
+                Some(if administrator {
+                    0
+                } else {
+                    storage_identity.root_uid
+                }),
+                Some(if administrator {
+                    0
+                } else {
+                    storage_identity.root_gid
+                }),
             )?;
             tokio::fs::set_permissions(&docker_data, std::fs::Permissions::from_mode(0o700))
                 .await?;
@@ -1489,6 +1543,8 @@ impl Controller {
         observation: &bootstrap::Scope,
         owner: Arc<crate::file_lock::Guard>,
         preparation: disk::Preparation,
+        spare_guard: Option<disk::StorageGuard>,
+        ready_usage: Option<(u64, std::time::Instant)>,
         launch_guard: Arc<Mutex<()>>,
     ) -> Result<i32> {
         let trace = observation.trace();
@@ -1520,7 +1576,8 @@ impl Controller {
                 DISK_RELEASE_WAIT,
                 &trace,
                 Some(owner),
-                preparation.bytes,
+                Some(&preparation),
+                spare_guard,
             )
             .await?;
         let mounted = Arc::new(block::Handle::new(mounted));
@@ -1533,21 +1590,51 @@ impl Controller {
         }
         let administrator = plan["nativeMode"]["mode"] == "administrator";
         trace.phase(Phase::IdentityProvision);
-        let mut identity = super::identity::provision(&self.state, text(plan, "runId")).await?;
+        let identity = super::identity::provision(&self.state, text(plan, "runId"), &stop).await;
+        if stop.is_cancelled() {
+            return Ok(143);
+        }
+        let mut identity = identity?;
         if administrator {
             identity.host_engine = Some((self.identity.uid, self.identity.gid));
         }
         let view = block::view(&self.state, text(plan, "runId")).await?;
         let data = view.filesystems[0].clone();
+        let pool = workspace::data_root(&self.state);
+        let mapping_supported = !administrator
+            && super::quota::reflink(&std::fs::File::open(&pool)?)?
+            && super::identity::idmapped_mounts_supported(&pool, &identity).await;
+        let previous = if mapping_supported {
+            super::identity::stored_owner(&data).await?
+        } else {
+            None
+        };
+        // Reassigning existing protected files to a different backing range
+        // could map unrelated host IDs. Keep the original map. A previous
+        // administrator owner first follows the journaled protected transition.
+        let idmapped = mapping_supported
+            && previous
+                .as_ref()
+                .is_none_or(|owner| owner.host_engine.is_none() || owner.is_storage());
+        let storage_identity = if idmapped {
+            previous.unwrap_or_else(|| {
+                super::identity::Identity::storage((self.identity.uid, self.identity.gid))
+            })
+        } else {
+            identity.clone()
+        };
         let bindings = self
             .prepare_files(
                 plan.clone(),
                 identity.clone(),
+                storage_identity.clone(),
+                from_base,
                 data.clone(),
                 mounted,
                 trace.clone(),
                 stop.clone(),
                 preparation,
+                ready_usage,
             )
             .await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
@@ -1598,12 +1685,6 @@ impl Controller {
             let wrapper = runtime.join("docker");
             atomic_write(&wrapper, super::docker::administrator::WRAPPER.as_bytes()).await?;
             tokio::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755)).await?;
-        }
-        trace.phase(Phase::PoolAccounting);
-        if disk::actual_used(&self.data, &self.state).await? > self.disk_limit().await? {
-            return Err(Error::conflict(
-                "Native preparation exceeds the shared node disk budget; local work is retained.",
-            ));
         }
         {
             let _pool = disk::lock(&self.state).await?;
@@ -1740,24 +1821,49 @@ impl Controller {
         };
         let plan_file = container.with_extension("plan.json");
         let encoded_plan = serde_json::to_vec(&plan)?;
+        trace.phase(Phase::PoolAccounting);
         if encoded_plan.len() as u64 > self.disk_growth().await? {
             return Err(Error::conflict(
-                "Insufficient shared native disk budget for the execution plan.",
+                "Insufficient shared native disk budget for the execution plan; local work is retained.",
             ));
         }
+        trace.phase(Phase::RuntimePrepare);
         atomic_write(&plan_file, &encoded_plan).await?;
         tokio::fs::set_permissions(&plan_file, std::fs::Permissions::from_mode(0o444)).await?;
         // The staging inbox is readonly in the workload's mount namespace.
         private_dir(&stage.join("chat-input")).await?;
         crate::nodes::workspace::prepare_native_inbox(&stage.join("chat-input")).await?;
+        let mapped = if idmapped {
+            Some(
+                super::identity::Mapped::attach(
+                    &self.state,
+                    id,
+                    &data,
+                    &storage_identity,
+                    &identity,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let mapped_view = mapped
+            .as_ref()
+            .map(|mounted| super::block::View::at(mounted.path()));
+        let launch_view = mapped_view.as_ref().unwrap_or(&view);
+        let docker_data = if idmapped {
+            launch_view.docker_data()?
+        } else {
+            docker_data
+        };
         let launch = systemd::Launch {
             id,
             plan: &plan,
             data: &self.data,
             root: &container,
-            home: &view.home,
-            workspace: &view.workspace,
-            output: &view.output,
+            home: &launch_view.home,
+            workspace: &launch_view.workspace,
+            output: &launch_view.output,
             identity: &self.identity,
             conversation: (!administrator).then_some(&identity),
             docker_data: Some(docker_data.as_path()),
@@ -1808,6 +1914,9 @@ impl Controller {
         if stop.is_cancelled() {
             return Ok(143);
         }
+        if let Some(mapped) = mapped {
+            mapped.retain_for_unit();
+        }
         let mut child = systemd::spawn_prepared(arguments)?;
         // Keep launch admission until systemd observed the submitted unit or
         // the submitting process has exited. Cancellation cannot attest an
@@ -1844,6 +1953,20 @@ impl Controller {
         // The submission has settled; coding-engine readiness and first
         // output retain their separate protocol observations.
         observation.submitted();
+        if from_base && plan["nativeProjectArchives"].is_array() {
+            let _ = self
+                .base_warmer
+                .enqueue(
+                    self.bases(),
+                    json!({
+                        "archives": plan["nativeProjectArchives"],
+                        "diskMiB": plan["resources"]["diskMiB"],
+                    }),
+                    self.budget.clone(),
+                    self.stop.clone(),
+                )
+                .await;
+        }
         let storage_stop = stop.child_token();
         let _storage_guard = storage_stop.clone().drop_guard();
         let mounted = self
@@ -2085,7 +2208,7 @@ impl Controller {
 
     /// Ceilings are not preallocated reservations. Charge actual retained
     /// payloads, then bound every additional copy by the remaining shared pool.
-    async fn check_preparation_space(&self, plan: &Value) -> Result<u64> {
+    async fn check_preparation_space(&self, plan: &Value) -> Result<PreparationSpace> {
         let run = text(plan, "runId");
         let root = workspace::directory(&self.state, run)?;
         let has_journal = block::exists(&self.state, run).await?;
@@ -2095,6 +2218,9 @@ impl Controller {
             disk::bytes_if_present(&root.join("data")).await?
         };
         let assigned_base = has_journal && root.join("file-owner.json").exists();
+        let mut base_key = None;
+        let mut spare_key = None;
+        let mut project_bytes = None;
         let seed = if assigned_base {
             0
         } else if !root.join("initialized").exists()
@@ -2115,7 +2241,14 @@ impl Controller {
                     .as_u64()
                     .ok_or_else(|| Error::bad("Missing native disk size."))?;
                 if let Some(base) = self.bases().lookup(&descriptors, size).await? {
-                    base.metadata_bytes
+                    base_key = Some(base.key.clone());
+                    if !has_journal && self.bases().claimable_spare(run, &base.key)? {
+                        spare_key = Some(base.key);
+                        0
+                    } else {
+                        project_bytes = Some(base.metadata_bytes);
+                        base.allocated_for_clone(self.bases().reflink_enabled().await?)
+                    }
                 } else {
                     archives.iter().try_fold(0u64, |bytes, archive| {
                         bytes
@@ -2135,20 +2268,84 @@ impl Controller {
         };
         let home = disk::bytes_if_present(&self.data.join("runs").join(run).join("home")).await?;
         let incoming = seed.saturating_add(home);
-        let growth = self.disk_growth().await?;
-        if incoming > growth {
-            crate::project_archives::reclaim_for_foreground(&self.data, incoming - growth, &[])
-                .await?;
+        let private_bytes = current
+            .saturating_add(project_bytes.unwrap_or(seed))
+            .saturating_add(home);
+        if private_bytes > self.disk_budget(plan) {
+            return Err(Error::conflict(
+                "Retained native work leaves insufficient disk allowance for this preparation.",
+            ));
         }
-        if current.saturating_add(incoming) > self.disk_budget(plan)
-            || incoming > self.disk_growth().await?
-            || disk::used(&self.data, &self.state).await? > self.disk_limit().await?
+        // Callers hold the storage gate, so no reservation can be published
+        // between samples: one full scan suffices unless reclamation changed
+        // the pool.
+        let limit = self.disk_limit().await?;
+        let observed = std::time::Instant::now();
+        let mut used = disk::used(&self.data, &self.state).await?;
+        let growth = disk::available(limit, used);
+        let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
+        let headroom = || async {
+            let (state, policy) = (self.state.clone(), policy.clone());
+            let sample = tokio::task::spawn_blocking(move || {
+                if workspace::data_root(&state).try_exists()? {
+                    disk::data_pool_headroom(&state, &policy, None)
+                } else {
+                    Ok(u64::MAX)
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), sample)
+                .await
+                .map_err(|_| Error::unavailable("Native data pool capacity observation is stale."))?
+                .map_err(Error::internal)?
+        };
+        let physical_need = incoming.saturating_add(disk::MIB);
+        let mut physical = headroom().await?;
+        if (incoming > growth || physical_need > physical)
+            && super::spares::discard_unclaimed(&self.state, spare_key.as_deref()).await?
         {
+            used = disk::used(&self.data, &self.state).await?;
+            physical = headroom().await?;
+        }
+        if physical_need > physical {
+            // Cache allocation can be shared with retained reflink clones.
+            // Recheck actual free space before relying on an eviction's credit.
+            let bases = self.bases();
+            loop {
+                let credited = bases
+                    .trim(u64::MAX, physical_need - physical, base_key.as_deref())
+                    .await?;
+                physical = headroom().await?;
+                if physical >= physical_need || credited == 0 {
+                    break;
+                }
+            }
+            if physical < physical_need {
+                return Err(Error::new(
+                    507,
+                    "Native data pool lacks preparation headroom.",
+                ));
+            }
+            used = disk::used(&self.data, &self.state).await?;
+        }
+        let growth = disk::available(limit, used);
+        if incoming > growth {
+            let reclaimed =
+                crate::project_archives::reclaim_for_foreground(&self.data, incoming - growth, &[])
+                    .await?;
+            if reclaimed > 0 {
+                used = disk::used(&self.data, &self.state).await?;
+            }
+        }
+        if incoming > disk::available(limit, used) || used > limit {
             return Err(Error::conflict(
                 "Retained native work leaves insufficient shared disk budget for this preparation.",
             ));
         }
-        Ok(incoming)
+        Ok(PreparationSpace {
+            incoming,
+            spare: spare_key.is_some(),
+            usage_sample: (used, observed),
+        })
     }
 
     /// Admission is global before it is attempt-scoped: a queued pool waiter
@@ -2173,6 +2370,11 @@ impl Controller {
             let attempt = active
                 .get(id)
                 .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
+            if !attempt.started {
+                return Err(Error::conflict(
+                    "Native attempt is still preparing its filesystem.",
+                ));
+            }
             if requested_run != attempt.run {
                 return Err(Error::forbidden(forbidden));
             }
@@ -2196,11 +2398,20 @@ impl Controller {
         operation(self.clone(), run, stop, admitted).await
     }
 
-    async fn reserve_copy(&self, maximum: u64) -> Result<(disk::Preparation, u64)> {
+    async fn reserve_copy(
+        &self,
+        maximum: u64,
+        filesystem: &Path,
+        policy: &storage::policy::Policy,
+    ) -> Result<(disk::Preparation, u64)> {
         let _pool = disk::lock(&self.state).await?;
-        let budget = maximum.min(self.disk_growth().await?);
+        let physical = disk::physical_headroom(&self.state, filesystem, policy, None)?;
+        let budget = maximum
+            .min(self.disk_growth().await?)
+            .min(physical.saturating_sub(disk::MIB));
         let reservation =
-            disk::Preparation::reserve(&self.state, &crate::config::id(), budget).await?;
+            disk::Preparation::reserve_on(&self.state, &crate::config::id(), budget, filesystem)
+                .await?;
         Ok((reservation, budget))
     }
 
@@ -2242,8 +2453,8 @@ impl Controller {
                 let mut admission = super::ingress::Admission::new(&controller.data, &controller.state, &exports, &controller.state, limit, &policy)?;
                 admission.admit(5120)?;
                 private_dir(&exports).await?;
-                let (reservation, budget) = controller.reserve_copy(crate::artifacts::file::MAX_FILE).await?;
-                let mut admission = super::ingress::Admission::new(&controller.data, &controller.state, &exports, &controller.state, limit, &policy)?.with_reservation(reservation.bytes);
+                let (reservation, budget) = controller.reserve_copy(crate::artifacts::file::MAX_FILE, &exports, &policy).await?;
+                let mut admission = super::ingress::Admission::new(&controller.data, &controller.state, &exports, &exports, limit, &policy)?.with_reservation(&reservation, false)?;
                 let copying_stop = stop.clone();
                 let (snapshot, size) = super::ingress::write((reservation, admitted), async move {
                     crate::artifacts::file::snapshot_in(&source, &allowed, &exports, budget, |bytes| {
@@ -2300,8 +2511,10 @@ impl Controller {
                         let staged = tempfile::tempdir_in(data)?;
                         let received = staged.path().join("project");
                         let remaining = block::free_bytes(data)?;
-                        let (reservation, budget) = controller.reserve_copy(remaining).await?;
+                        let pool = workspace::data_root(&controller.state);
                         let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
+                        let (reservation, budget) =
+                            controller.reserve_copy(remaining, &pool, &policy).await?;
                         let mut admission = super::ingress::Admission::new(
                             &controller.data,
                             &controller.state,
@@ -2310,7 +2523,7 @@ impl Controller {
                             controller.disk_limit().await?,
                             &policy,
                         )?
-                        .with_reservation(reservation.bytes);
+                        .with_reservation(&reservation, true)?;
                         workspace::copy_admitted(&source, &received, budget, &mut |bytes| {
                             if stop.is_cancelled() {
                                 return Err(Error::conflict("Native project import stopped."));
@@ -2322,12 +2535,15 @@ impl Controller {
                             return Err(Error::conflict("Native project import stopped."));
                         }
                         let mut identity =
-                            super::identity::provision(&controller.state, &run).await?;
+                            super::identity::provision(&controller.state, &run, &stop).await?;
                         if plan["nativeMode"]["mode"] == "administrator" {
                             identity.host_engine =
                                 Some((controller.identity.uid, controller.identity.gid));
                         }
-                        workspace::own_tree(&received, identity.uid(), identity.gid()).await?;
+                        let stored = super::identity::stored_owner(data)
+                            .await?
+                            .unwrap_or(identity);
+                        workspace::own_tree(&received, stored.uid(), stored.gid()).await?;
                         if stop.is_cancelled() {
                             return Err(Error::conflict("Native project import stopped."));
                         }
@@ -2650,18 +2866,26 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     // taking that same lock here would deadlock the caller.
     if path == "/staging-budget" && method == "GET" {
         let started = std::time::Instant::now();
-        let available = controller.disk_growth().await;
+        let sample = async {
+            let limit = controller.disk_limit().await?;
+            let used = disk::used(&controller.data, &controller.state).await?;
+            Ok::<_, Error>(disk::StagingSample {
+                available_bytes: disk::available(limit, used),
+                used_bytes: Some(used),
+            })
+        }
+        .await;
         let elapsed = started.elapsed();
-        if elapsed >= Duration::from_secs(1) || available.is_err() {
+        if elapsed >= Duration::from_secs(1) || sample.is_err() {
             tracing::info!(
                 target: "cairn_performance",
                 operation = "native_staging_budget",
                 elapsed_ms = elapsed.as_millis() as u64,
-                status = available.as_ref().map_or_else(|error| error.status, |_| 200),
+                status = sample.as_ref().map_or_else(|error| error.status, |_| 200),
                 "Authoritative native staging budget observation finished"
             );
         }
-        return Ok(Json(json!({"availableBytes": available?})).into_response());
+        return Ok(Json(sample?).into_response());
     }
 
     let secret = tokio::fs::read_to_string(controller.data.join("runner-secret")).await?;
@@ -2712,6 +2936,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 // Do not hold the budget mutex while waiting for storage:
                 // foreground transfers query health with their disk lease held.
                 let _disk = disk::lock(&controller.state).await?;
+                super::spares::discard_unclaimed(&controller.state, None).await?;
                 let limit = budget.limits.disk_mi_b.saturating_mul(disk::MIB);
                 let used = disk::used(&controller.data, &controller.state).await?;
                 if let Err(error) = controller
@@ -2912,6 +3137,11 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
             let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
+            let _staging = if *action == "delete" {
+                Some(disk::lock_staging(&controller.state, run).await?)
+            } else {
+                None
+            };
             super::cleanup::check(&controller.state, run)?;
             let value = input(request, 4096).await?;
             let retirement = if *action == "delete" {
@@ -3095,9 +3325,11 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
 
 // Called only after old workloads and block devices are fenced. Temporary
 // anonymous bases/clones have no authority; conventional committed disks remain.
+// Base cache cleanup follows pin recovery so link counts show only durable intents.
 async fn recover_preparations(data: &Path, state: &Path) -> Result<()> {
     storage::environment::recover(state).await?;
-    super::bases::recover_pins(data).await
+    super::bases::recover_pins(data).await?;
+    super::bases::recover_cache(state).await
 }
 
 async fn bind_controller(path: &Path) -> Result<tokio::net::UnixListener> {
@@ -3134,13 +3366,15 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         &state.join("controller.lock"),
         "Another native controller owns this storage.",
     )?;
+    super::quota::require(&state)?;
+    super::quota::migration::require_settled(&state).await?;
     disk::recover_exports(&state).await?;
     atomic_write(
         &state.join("native-accounting.json"),
         &serde_json::to_vec(&json!({ "data": data }))?,
     )
     .await?;
-    super::quota::require(&state)?;
+    super::spares::discard_unclaimed(&state, None).await?;
     let identity = Arc::new(systemd::identity().await?);
     private_dir(&state.join("roots")).await?;
     let mut interrupted = Vec::new();
@@ -3181,7 +3415,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
             entry.insert(attempt);
         }
     }
-    disk::recover_preparations(&state, &pending)?;
+    disk::recover_preparations(&data, &state, &pending)?;
     for (run, attempt) in &pending {
         super::cleanup::quarantine(&state, run, attempt)?;
     }
@@ -3350,8 +3584,18 @@ pub(crate) mod tests {
         let (_root, controller) = fixture().await;
         let budget = controller.disk_growth().await.unwrap();
         let requested = budget.saturating_mul(2) / 3;
-        let (first, first_bytes) = controller.reserve_copy(requested).await.unwrap();
-        let (second, second_bytes) = controller.reserve_copy(requested).await.unwrap();
+        let policy = storage::policy::Policy {
+            reserve_mi_b: 64,
+            ..Default::default()
+        };
+        let (first, first_bytes) = controller
+            .reserve_copy(requested, &controller.state, &policy)
+            .await
+            .unwrap();
+        let (second, second_bytes) = controller
+            .reserve_copy(requested, &controller.state, &policy)
+            .await
+            .unwrap();
         assert_eq!(first_bytes, requested);
         assert!(first_bytes + second_bytes <= budget);
         assert!(second_bytes < requested);
@@ -3650,6 +3894,83 @@ pub(crate) mod tests {
                     .unwrap()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn preparation_space_check_scans_usage_once_unless_it_reclaims() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let project_root = controller.data.join("runs").join(&run).join("workspace");
+        let plan = |logical_bytes: u64| {
+            json!({
+                "id": crate::config::id(),
+                "runId": run,
+                "projectRoot": project_root,
+                "resources": { "cpu": 1, "memoryMiB": 512, "diskMiB": 128 },
+                "imports": [{ "source": project_root, "target": project_root }],
+                "nativeProjectArchives": [{
+                    "projectId": crate::config::id(),
+                    "revision": "a".repeat(40),
+                    "key": "b".repeat(64),
+                    "hash": "c".repeat(64),
+                    "bytes": 100,
+                    "logicalBytes": logical_bytes
+                }]
+            })
+        };
+
+        let before = disk::usage_scans_of(&controller.state);
+        controller.check_preparation_space(&plan(15)).await.unwrap();
+        assert_eq!(disk::usage_scans_of(&controller.state) - before, 1);
+
+        // Reclamation changes the pool, so exactly one more sample follows it.
+        let before = disk::usage_scans_of(&controller.state);
+        let huge = controller.disk_limit().await.unwrap() * 2;
+        assert!(
+            controller
+                .check_preparation_space(&plan(huge))
+                .await
+                .is_err()
+        );
+        assert!(disk::usage_scans_of(&controller.state) - before <= 2);
+    }
+
+    #[tokio::test]
+    async fn physical_reserve_pressure_reclaims_unpinned_bases_with_logical_budget_to_spare() {
+        let (_fixture, controller) = fixture().await;
+        let state = &controller.state;
+        let pool = workspace::data_root(state).join(super::super::bases::POOL_DIRECTORY);
+        let evictable = "a".repeat(64);
+        let pinned = "b".repeat(64);
+        for key in [&evictable, &pinned] {
+            let contents = pool.join(key);
+            private_dir(&contents).await.unwrap();
+            std::fs::write(contents.join("cached"), b"cached work").unwrap();
+            let control = state.join("native-bases").join(key);
+            private_dir(&control).await.unwrap();
+            std::fs::write(control.join("pin"), b"").unwrap();
+        }
+        std::fs::hard_link(
+            state.join("native-bases").join(&pinned).join("pin"),
+            state.join("pinned-source"),
+        )
+        .unwrap();
+        let run = crate::config::id();
+        let project = controller.data.join("runs").join(&run).join("workspace");
+        private_dir(&project).await.unwrap();
+        std::fs::write(project.join("seed"), b"new work").unwrap();
+        let plan = json!({
+            "runId": run,
+            "projectRoot": project,
+            "resources": { "diskMiB": 128 },
+            "imports": [{ "source": project, "target": project }],
+            "storage": { "policy": { "reserveMiB": 16 * 1024 * 1024 } },
+        });
+        assert!(controller.disk_growth().await.unwrap() > disk::MIB);
+        let error = controller.check_preparation_space(&plan).await.unwrap_err();
+        assert_eq!(error.status, 507);
+        assert!(!pool.join(evictable).exists());
+        assert!(pool.join(pinned).is_dir());
     }
 
     #[tokio::test]
@@ -4120,6 +4441,62 @@ pub(crate) mod tests {
             .await
             .insert(id.clone(), crate::nodes::boot_ms() + 60_000);
         (run, id, plan)
+    }
+
+    #[tokio::test]
+    async fn activation_fences_retirement_until_the_attempt_is_registered() {
+        let (_fixture, controller) = fixture().await;
+        let (run, id, _) = busy_disk_fixture(&controller).await;
+        let stage = controller.data.join("runs").join(&run);
+        let workspace = stage.join("workspace");
+        let home = stage.join("home");
+        let plans = controller.data.join("runner-plans");
+        for directory in [&workspace, &home, &plans] {
+            private_dir(directory).await.unwrap();
+        }
+        let plan = json!({
+            "id": id, "runId": run, "backend": "native", "nodeLeaseRequired": true,
+            "cwd": workspace, "projectRoot": workspace, "sandbox": "workspace-write",
+            "args": [], "prompt": "fixture", "expires": null,
+            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+            "imports": [
+                { "source": workspace, "target": workspace },
+                { "source": home, "target": "/home/node" },
+            ],
+        });
+        atomic_write(
+            &plans.join(format!("{id}.json")),
+            &serde_json::to_vec(&plan).unwrap(),
+        )
+        .await
+        .unwrap();
+        let capacity = controller.capacity.lock().await;
+        let mut starting = {
+            let controller = controller.clone();
+            let id = id.clone();
+            tokio::spawn(async move { controller.start(&id).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut starting => panic!("Start exited before activation: {result:?}"),
+                () = async {
+                    while !controller.active.lock().await.contains_key(&id) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } => {},
+            }
+        })
+        .await
+        .unwrap();
+
+        let gate = crate::file_lock::exclusive(
+            &controller.state.join("storage.lock"),
+            "activation owns storage",
+        );
+        assert!(gate.err().unwrap().is_conflict());
+        starting.abort();
+        assert!(starting.await.unwrap_err().is_cancelled());
+        drop(capacity);
     }
 
     #[tokio::test]
@@ -6337,6 +6714,32 @@ pub(crate) mod tests {
             std::fs::read(root.join("data/new")).unwrap(),
             b"next environment"
         );
+    }
+
+    #[tokio::test]
+    async fn retirement_waits_for_the_conversations_staging_writer() {
+        let (_root, controller) = fixture().await;
+        let run = crate::config::id();
+        let stage = controller.data.join("runs").join(&run);
+        private_dir(&stage).await.unwrap();
+        tokio::fs::write(stage.join("seed"), b"pending staging")
+            .await
+            .unwrap();
+        let writer = disk::lock_staging(&controller.state, &run).await.unwrap();
+        let deletion = || {
+            request(
+                &format!("/disks/{run}/delete"),
+                &json!({ "permanentlyDeleted": true }),
+            )
+        };
+
+        let error = route(controller.clone(), deletion()).await.unwrap_err();
+        assert!(error.is_conflict());
+        assert!(stage.join("seed").is_file());
+
+        drop(writer);
+        route(controller, deletion()).await.unwrap();
+        assert!(!stage.exists());
     }
 
     #[tokio::test]

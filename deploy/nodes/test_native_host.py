@@ -361,7 +361,10 @@ class NativeHostTests(unittest.TestCase):
                     patch.object(host.subprocess, 'run', return_value=mounted()) as probe:
                 host.require_data_pool()
                 self.assertEqual(probe.call_args.args[0][0], 'findmnt')
-                for change in [dict(target=str(root)), dict(fstype='btrfs'), dict(options='rw')]:
+                probe.return_value = mounted(fstype='xfs', options='rw,relatime,inode64,logbufs=8,logbsize=32k,prjquota')
+                host.require_data_pool()
+                for change in [dict(target=str(root)), dict(fstype='btrfs'), dict(options='rw'),
+                               dict(fstype='xfs', options='rw,inode64,pqnoenforce'), dict(fstype='btrfs', options='rw,prjquota')]:
                     probe.return_value = mounted(**change)
                     with self.assertRaisesRegex(ValueError, 'prjquota'):
                         host.require_data_pool()
@@ -573,6 +576,948 @@ class NativeHostTests(unittest.TestCase):
                     self.assertFalse((root / 'update-pending.json').exists())
                     self.assertEqual(len(completions), 2 if lost_reply else 1)
                     apparmor.assert_called_with(install / 'docker-tools')
+
+
+PLAN = dict(filesystem='ext4', reflink=False, usedBytes=10 * 1024 ** 2, skipped=['.cairn-bases', 'lost+found'], blockers=[],
+            environments=[dict(run='11111111-1111-4111-8111-111111111111', project=3, usedBytes=4096, inodes=7,
+                               blockHardBytes=8 << 20, inodeHard=500),
+                          dict(run='22222222-2222-4222-8222-222222222222', project=0, usedBytes=0, inodes=0,
+                               blockHardBytes=0, inodeHard=0)])
+OLD = dict(unit='var-lib-cairn\\x2dnative-state-native\\x2ddata.mount', fragment='/etc/systemd/system/var-lib-cairn\\x2dnative-state-native\\x2ddata.mount',
+           what='/var/lib/cairn-native/native-data.ext4', type='ext4', options='loop,prjquota,nodiscard', uuid='original', bootLink=None, restrictions=[])
+
+
+def pool_arguments(**changes):
+    from types import SimpleNamespace
+    value = dict(device=None, image=None, size=None, force=False, stop=False, dry_run=False)
+    value.update(changes)
+    return SimpleNamespace(**value)
+
+
+class PoolMigrationTests(unittest.TestCase):
+    """Planning and ordering of migrate-pool with fake system commands."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        (self.root / 'state/native-data').mkdir(parents=True)
+        self.units = self.root / 'units'
+        self.units.mkdir()
+        self.require_root_path = host.require_root_path
+        for patcher in (patch.object(host, 'ROOT', self.root), patch.object(host, 'UNIT_DIRECTORY', self.units),
+                        patch.object(host, 'require_root_path')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_sizes_and_paths_are_validated_before_any_change(self):
+        self.assertEqual(500 * 1024 ** 3, host.parse_size('500G'))
+        self.assertEqual(2 * 1024 ** 4, host.parse_size('2T'))
+        self.assertEqual(4 * 1024 ** 3, host.parse_size(str(4 * 1024 ** 3)))
+        for value in ('', 'big', '-1G', '512M'):
+            with self.subTest(value=value), self.assertRaises(host.MigrationError):
+                host.parse_size(value)
+        self.assertEqual(Path('/var/lib/cairn-native/native-data.xfs'), host.safe_path('/var/lib/cairn-native/native-data.xfs'))
+        for value in ('relative.xfs', '/var/lib/with space.xfs', '/var/lib/../etc/x', '/var/%n.xfs'):
+            with self.subTest(value=value), self.assertRaises(host.MigrationError):
+                host.safe_path(value)
+        with self.assertRaisesRegex(host.MigrationError, 'outside the data pool'):
+            host.migrate_pool(pool_arguments(image=str(self.root / 'state/native-data/pool.xfs'), size='10G'))
+        self.assertFalse(host.migration_directory().exists())
+
+    def test_running_node_is_refused_unless_stop_is_explicit(self):
+        with patch.object(host, 'active_units', return_value=['cairn-native-node.service']), \
+                patch.object(host, 'controller_running', return_value=False), \
+                patch.object(host, 'checked') as checked, \
+                self.assertRaisesRegex(host.MigrationError, '--stop'):
+            host.require_stopped(False)
+        checked.assert_not_called()
+        states = iter([['cairn-native-guardian-a.service', host.SERVICE], []])
+        with patch.object(host, 'active_units', side_effect=lambda: next(states)), \
+                patch.object(host, 'controller_running', return_value=False), \
+                patch.object(host, 'checked') as checked:
+            host.require_stopped(True)
+        self.assertEqual([call.args[:3] for call in checked.call_args_list],
+                         [('systemctl', 'stop', host.SERVICE), ('systemctl', 'stop', 'cairn-native-guardian-a.service')])
+        with patch.object(host, 'active_units', return_value=[]), \
+                patch.object(host, 'controller_running', return_value=True), \
+                self.assertRaisesRegex(host.MigrationError, 'controller.lock'):
+            host.require_stopped(True)
+
+    def test_active_unit_listing_ignores_the_pool_loop_and_slices(self):
+        listing = '\n'.join([host.LOOP_SERVICE + ' loaded active exited loop', 'cairn-native-node.slice loaded active active x',
+                             'cairn-native-abc.service loaded active running workload', ''])
+        with patch.object(host, 'checked', return_value=listing):
+            self.assertEqual(['cairn-native-abc.service'], host.active_units())
+
+    def test_device_targets_must_be_unused_unless_forced(self):
+        from types import SimpleNamespace
+        device = Path('/dev/synthetic-volume')
+        metadata = SimpleNamespace(st_mode=host.stat.S_IFBLK | 0o600, st_rdev=os.makedev(253, 7))
+
+        def system(mounted=False, signature=''):
+            def run(args, **_options):
+                if args[0] == 'findmnt':
+                    return Mock(returncode=0 if mounted else 1, stdout='')
+                return Mock(returncode=0 if signature else 2, stdout=signature)
+            return run
+        with patch.object(host.Path, 'stat', return_value=metadata):
+            with patch.object(host.subprocess, 'run', side_effect=system()):
+                self.assertFalse(host.check_device(device, False))
+            with patch.object(host.subprocess, 'run', side_effect=system(mounted=True)), \
+                    self.assertRaisesRegex(host.MigrationError, 'mounted'):
+                host.check_device(device, True)
+            with patch.object(host.subprocess, 'run', side_effect=system(signature='TYPE=ext4\nUUID=old\n')):
+                with self.assertRaisesRegex(host.MigrationError, 'already contains ext4'):
+                    host.check_device(device, False)
+                self.assertFalse(host.check_device(device, True))
+            with patch.object(host.subprocess, 'run', side_effect=system(signature='TYPE=xfs\nUUID=ours\n')):
+                self.assertTrue(host.check_device(device, False, uuid='ours'))
+            with patch.object(host, 'has_partitions', return_value=True), \
+                    self.assertRaisesRegex(host.MigrationError, 'contains partitions'):
+                host.check_device(device, True)
+        with patch.object(host.Path, 'stat', return_value=SimpleNamespace(st_mode=host.stat.S_IFREG | 0o600, st_rdev=0)), \
+                self.assertRaisesRegex(host.MigrationError, 'not a block device'):
+            host.check_device(device, True)
+
+    def test_block_topology_identifies_a_parent_with_partitions(self):
+        sysfs = self.root / 'synthetic-sys-device'
+        sysfs.mkdir()
+        (sysfs / 'holders').mkdir()
+        self.assertFalse(host.has_partitions(sysfs))
+        partition = sysfs / 'disk1'
+        partition.mkdir()
+        (partition / 'partition').write_text('1\n')
+        self.assertTrue(host.has_partitions(sysfs))
+
+    def test_units_attach_the_image_with_direct_io_and_mount_by_uuid(self):
+        pool = Path('/var/lib/cairn-native/state/native-data')
+        image = Path('/var/lib/cairn-native/native-data.xfs')
+        loop = host.loop_unit(image, OLD['unit'], 'f00d')
+        receipt = host.migration_directory() / 'state.json'
+        self.assertIn(f'pool-loop attach {image} f00d {receipt}\n', loop)
+        self.assertIn(f'pool-loop detach {image} f00d {receipt}\n', loop)
+        self.assertIn('RuntimeDirectory=cairn-native-pool-f00d\n', loop)
+        self.assertIn('RequiresMountsFor=/var/lib/cairn-native', loop)
+        self.assertIn('Before=' + OLD['unit'], loop)
+        self.assertNotRegex(loop.replace('$$', ''), r'\$')
+        unit = host.pool_unit(pool, 'f00d', image)
+        for line in ('What=/run/cairn-native-pool-f00d/device', 'Where=' + str(pool), 'Type=xfs', 'Options=prjquota',
+                     'Before=' + host.SERVICE, 'Requires=' + host.LOOP_SERVICE, 'WantedBy=local-fs.target'):
+            self.assertIn(line + '\n', unit)
+        device_unit = host.pool_unit(pool, 'f00d', None)
+        self.assertNotIn(host.LOOP_SERVICE, device_unit)
+        self.assertIn('What=/dev/disk/by-uuid/f00d\n', device_unit)
+        restricted = host.pool_unit(pool, 'f00d', image, ('nosuid', 'nodev', 'noexec', 'ext4-only'))
+        self.assertIn('Options=prjquota,nosuid,nodev,noexec\n', restricted)
+
+    def test_mount_discovery_refuses_failed_and_stacked_observations(self):
+        target = Path('/path with space')
+        first = r'36 35 7:0 / /path\040with\040space rw,nosuid,nodev,noexec - ext4 /dev/loop0 rw,prjquota' + '\n'
+        second = r'37 36 7:1 / /path\040with\040space rw - xfs /dev/loop1 rw,prjquota' + '\n'
+        with patch.object(Path, 'read_text', return_value=first):
+            self.assertEqual(host.mount_of(target)['options'], 'rw,nosuid,nodev,noexec,prjquota')
+            self.assertIsNone(host.mount_of(Path('/unmounted')))
+        with patch.object(Path, 'read_text', return_value=first + second), self.assertRaisesRegex(host.MigrationError, 'stacked mounts'):
+            host.mount_of(target)
+        with patch.object(Path, 'read_text', side_effect=OSError), self.assertRaisesRegex(host.MigrationError, 'Cannot inspect mounts'):
+            host.mount_of(target)
+        with patch.object(Path, 'read_text', return_value=first + 'corrupt\n'), self.assertRaisesRegex(host.MigrationError, 'invalid entry'):
+            host.mount_of(Path('/unmounted'))
+
+    def test_pool_mounted_from_fstab_is_not_rewritten(self):
+        pool = host.pool_path()
+        responses = {'systemd-escape': OLD['unit'] + '\n', 'systemctl': 'FragmentPath=/run/systemd/generator/x.mount\nSourcePath=/etc/fstab\n'}
+        with patch.object(host, 'mount_of', return_value=dict(source='/dev/loop0', fstype='ext4', options='rw,prjquota')), \
+                patch.object(host, 'checked', side_effect=lambda *args, **_: responses[args[0]]), \
+                self.assertRaisesRegex(host.MigrationError, 'fstab'):
+            host.old_pool(pool)
+        with patch.object(host, 'mount_of', return_value=dict(source='/dev/sdb1', fstype='xfs', options='rw,prjquota')), \
+                self.assertRaisesRegex(host.MigrationError, 'ext4 project-quota pool'):
+            host.old_pool(pool)
+
+    def test_existing_unit_settings_are_preserved_for_rollback(self):
+        fragment = self.units / OLD['unit']
+        fragment.write_text('[Mount]\nWhat=/var/lib/cairn-native/native-data.ext4\nWhere=/x\nType=ext4\nOptions=loop,prjquota,nodiscard\n')
+        responses = {'systemd-escape': OLD['unit'] + '\n', 'systemctl': f'FragmentPath={fragment}\nSourcePath=\n'}
+        with patch.object(host, 'mount_of', return_value=dict(source='/dev/loop0', fstype='ext4', options='rw,relatime,prjquota')), \
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), \
+                patch.object(host, 'checked', side_effect=lambda *args, **_: responses[args[0]]):
+            old = host.old_pool(host.pool_path())
+        self.assertEqual(dict(OLD, fragment=str(fragment), unitSha256=host.hashlib.sha256(fragment.read_bytes()).hexdigest()), old)
+
+    def test_restrictions_come_from_the_effective_source_mount(self):
+        effective = dict(source='/dev/sdb1', fstype='ext4', options='rw,prjquota,nosuid,nodev,noexec,nosymfollow')
+        with patch.object(host, 'mount_of', return_value=effective), patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
+                patch.object(host, 'pool_unit_properties', return_value={}), patch.object(host, 'filesystem_uuid', return_value='original'):
+            summary = host.old_pool(host.pool_path())
+        self.assertEqual(summary['restrictions'], ['nosuid', 'nodev', 'noexec', 'nosymfollow'])
+
+    def test_cutover_refuses_drop_ins_before_stopping_the_node(self):
+        with patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
+                patch.object(host, 'checked', return_value='DropInPaths=/etc/systemd/system/override.conf\n'), \
+                patch.object(host, 'require_stopped') as stop, self.assertRaisesRegex(host.MigrationError, 'drop-ins'):
+            host.offline_pool_operation(host.migrate_pool, pool_arguments(stop=True))
+        stop.assert_not_called()
+
+    def test_bad_block_target_is_rejected_before_stopping_or_publishing_state(self):
+        with patch.object(host, 'pool_unit_properties'), patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
+                patch.object(host, 'check_device', side_effect=host.MigrationError('target is mounted')) as probe, \
+                patch.object(host, 'require_stopped') as stop:
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run), self.assertRaisesRegex(host.MigrationError, 'target is mounted'):
+                    host.offline_pool_operation(host.migrate_pool, pool_arguments(device='/dev/synthetic', dry_run=dry_run, stop=True))
+        self.assertEqual(probe.call_count, 2)
+        stop.assert_not_called()
+        self.assertIsNone(host.load_migration())
+
+    def test_invalid_image_is_rejected_in_preview_and_before_stop(self):
+        image = self.root / 'existing.xfs'
+        image.write_bytes(b'previous operator file')
+        mounted = dict(source='/dev/loop0', fstype='ext4', options='rw,prjquota')
+        with patch.object(host, 'pool_unit_properties'), patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
+                patch.object(host, 'mount_of', return_value=mounted), patch.object(host, 'old_pool', return_value=OLD), \
+                patch.object(host, 'pool_tool', return_value=PLAN), patch.object(host, 'require_stopped') as stop:
+            for dry_run in (True, False):
+                for force, diagnostic in ((False, 'already exists'), (True, 'fully allocated')):
+                    with self.subTest(dry_run=dry_run, force=force), self.assertRaisesRegex(host.MigrationError, diagnostic):
+                        host.offline_pool_operation(host.migrate_pool, pool_arguments(
+                            image=str(image), size='2G', force=force, stop=True, dry_run=dry_run))
+            stop.assert_not_called()
+        self.assertEqual(image.read_bytes(), b'previous operator file')
+        self.assertIsNone(host.load_migration())
+
+    def test_block_target_requires_receipt_space_before_stop_and_in_preview(self):
+        mounted = dict(source='/dev/loop0', fstype='ext4', options='rw,prjquota')
+        available = Mock(f_bavail=host.CONTROLLER_RECEIPT_RESERVE, f_frsize=1)
+        with patch.object(host, 'pool_unit_properties'), patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
+                patch.object(host, 'check_device'), patch.object(host, 'mount_of', return_value=mounted), \
+                patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', return_value=PLAN), \
+                patch.object(host.os, 'statvfs', return_value=available), patch.object(host, 'require_stopped') as stop:
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run), self.assertRaisesRegex(host.MigrationError, 'controller recovery receipts'):
+                    host.offline_pool_operation(host.migrate_pool, pool_arguments(
+                        device='/dev/synthetic', stop=True, dry_run=dry_run))
+            stop.assert_not_called()
+        self.assertIsNone(host.load_migration())
+
+    def test_copy_refuses_inode_flags_that_rsync_cannot_preserve(self):
+        source = self.root / 'source'
+        run = source / 'sample'
+        run.mkdir(parents=True)
+        (run / 'keep').write_bytes(b'payload')
+
+        def inode_flags(descriptor, request, buffer):
+            self.assertEqual(request, host.GET_INODE_FLAGS)
+            metadata = os.fstat(descriptor)
+            flags = 0x00080000 if host.stat.S_ISDIR(metadata.st_mode) else 0x00080040
+            host.struct.pack_into('=I', buffer, 0, flags)
+
+        with patch.object(host.fcntl, 'ioctl', side_effect=inode_flags), patch.object(host, 'checked') as rsync, \
+                self.assertRaisesRegex(host.MigrationError, 'keep has inode flags 0x40'):
+            host.copy_environment('sample', source, self.root / 'target')
+        rsync.assert_not_called()
+
+    def test_cutover_preserves_an_existing_mount_dependency(self):
+        unit = self.units / OLD['unit']
+        link = host.pool_boot_link(OLD['unit'])
+        link.parent.mkdir()
+        original_target = '../' + OLD['unit']
+        link.symlink_to(original_target)
+        old = dict(OLD, bootLink=original_target)
+        record = dict(target=dict(device='/dev/synthetic'), uuid='f00d')
+        with patch.object(host, 'back_up_unit'), patch.object(host, 'checked'), \
+                patch.object(host, 'mount_of', return_value=dict(fstype='xfs', source='/dev/synthetic')), \
+                patch.object(host, 'filesystem_uuid', return_value='f00d'):
+            host.mount_new_pool(record, old, host.pool_path())
+        self.assertEqual(os.readlink(link), original_target)
+        self.assertIn('Type=xfs', unit.read_text())
+
+    def test_dry_run_prints_the_plan_without_changing_anything(self):
+        tool = Mock(return_value=PLAN)
+        output = io.StringIO()
+        image = self.root / 'native-data.xfs'
+        with patch.object(host, 'mount_of', return_value=dict(source='/dev/loop0', fstype='ext4', options='rw,prjquota')), \
+                patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', tool), \
+                patch.object(host, 'active_units', return_value=[host.SERVICE]), \
+                patch.object(host.os, 'statvfs', return_value=Mock(f_bavail=1 << 40, f_frsize=1)), \
+                patch.object(host, 'checked') as checked, contextlib.redirect_stdout(output):
+            host.migrate_pool(pool_arguments(image=str(image), size='100G', dry_run=True))
+        checked.assert_not_called()
+        self.assertFalse(image.exists())
+        self.assertEqual([call.args[0] for call in tool.call_args_list], ['plan'])
+        self.assertFalse(host.migration_directory().exists())
+        text = output.getvalue()
+        for expected in ('mkfs.xfs -m crc=1,reflink=1', 'project 3', 'no project quota assigned', '.cairn-bases',
+                         'keep it unchanged', host.LOOP_SERVICE, 'The node is running'):
+            self.assertIn(expected, text)
+
+    def test_blockers_and_insufficient_space_stop_before_any_change(self):
+        blocked = dict(PLAN, blockers=['Environment x has an unfinished legacy journal conversion.'])
+        with patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', return_value=blocked), \
+                self.assertRaisesRegex(host.MigrationError, 'legacy journal conversion'):
+            host.migrate_pool(pool_arguments(device='/dev/synthetic'))
+        with patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', return_value=PLAN), \
+                patch.object(host.os, 'statvfs', return_value=Mock(f_bavail=1, f_frsize=1)), \
+                self.assertRaisesRegex(host.MigrationError, 'needs at least'):
+            host.migrate_pool(pool_arguments(image=str(self.root / 'native-data.xfs'), size='100G'))
+        self.assertFalse(host.migration_directory().exists())
+
+    def test_copy_verification_must_report_no_difference(self):
+        outputs = iter(['', '>f.st...... data/home/file\n'])
+        with patch.object(host, 'verify_portable_inode_flags'), \
+                patch.object(host, 'checked', side_effect=lambda *args, **_: next(outputs)) as checked, \
+                self.assertRaisesRegex(host.MigrationError, 'found differences'):
+            host.copy_environment('run', Path('/old'), Path('/new'))
+        copy, verify = (call.args for call in checked.call_args_list)
+        self.assertEqual(copy[:5], ('rsync', '-aHAXc', '--numeric-ids', '--sparse', '--delete'))
+        self.assertEqual(verify[:5], ('rsync', '-aHAXnc', '--numeric-ids', '--delete', '--itemize-changes'))
+        for command in (copy, verify):
+            self.assertIn('--filter=-x trusted.SGI_ACL_FILE', command)
+            self.assertEqual(command[-2:], ('/old/run/', '/new/run/'))
+
+    def fake_migration(self, mountpoint, events):
+        def tool(action, *args):
+            events.append((action, *[str(arg) for arg in args[-1:]]))
+            if action == 'plan':
+                return PLAN
+            if action == 'check':
+                return dict(filesystem='xfs', reflink=True, environments=2)
+            return {}
+
+        def new_pool(record, old, pool):
+            events.append(('mount-new', record['phase']))
+        return [patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', side_effect=tool),
+                patch.object(host, 'check_device'),
+                patch.object(host, 'pool_unit_properties'),
+                patch.object(host, 'back_up_unit'),
+                patch.object(host, 'require_stopped'), patch.object(host, 'prepare_target', return_value=mountpoint),
+                patch.object(host, 'copy_environment', side_effect=lambda run, *_: events.append(('copy', run))),
+                patch.object(host, 'checked', side_effect=lambda *args, **_: events.append(args[:1]) or ''),
+                patch.object(host, 'unmount_old_pool', side_effect=lambda *_: events.append(('unmount-old',))),
+                patch.object(host, 'mount_new_pool', side_effect=new_pool),
+                patch.object(host, 'new_pool_mounted', side_effect=lambda *_: any(event[0] == 'mount-new' for event in events)),
+                patch.object(host, 'mount_of', return_value=dict(source='/dev/loop0', fstype='ext4')),
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid'])]
+
+    def test_migration_copies_every_environment_before_switching_records(self):
+        mountpoint = self.root / 'target'
+        (mountpoint / 'stale-attempt').mkdir(parents=True)
+        events = []
+        with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()) as output:
+            for patcher in self.fake_migration(mountpoint, events):
+                stack.enter_context(patcher)
+            (self.units / OLD['unit']).write_text('[Mount]\nWhat=old\n')
+            host.migrate_pool(pool_arguments(device='/dev/synthetic'))
+        first, second = PLAN['environments'][0]['run'], PLAN['environments'][1]['run']
+        self.assertEqual(events, [('plan', str(self.root / 'state')),
+                                  ('prepare', first), ('copy', first), ('commit', first),
+                                  ('prepare', second), ('copy', second), ('commit', second),
+                                  ('seal', str(mountpoint)),
+                                  ('umount',), ('unmount-old',), ('mount-new', 'copied'),
+                                  ('switch', str(host.migration_directory())), ('check', str(self.root / 'state'))])
+        self.assertFalse((mountpoint / 'stale-attempt').exists())
+        self.assertEqual('complete', host.load_migration()['phase'])
+        self.assertIn('rollback-pool', output.getvalue())
+
+    def test_writeback_fault_does_not_seal_or_switch_the_pool(self):
+        mountpoint = self.root / 'target'
+        mountpoint.mkdir()
+        events = []
+
+        def fail_writeback(descriptor):
+            self.assertEqual(os.fstat(descriptor).st_ino, mountpoint.stat().st_ino)
+            self.assertEqual(host.load_migration()['copyInProgress'], True)
+            libc = Mock()
+            libc.syncfs.return_value = -1
+            with patch.object(host.ctypes, 'CDLL', return_value=libc), patch.object(host.ctypes, 'get_errno', return_value=5):
+                flush(descriptor)
+
+        flush = host.flush_migration_copy
+        with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+            for patcher in self.fake_migration(mountpoint, events):
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(host, 'flush_migration_copy', side_effect=fail_writeback))
+            with self.assertRaisesRegex(host.MigrationError, 'ext4 source was retained'):
+                host.migrate_pool(pool_arguments(device='/dev/synthetic'))
+        self.assertTrue(host.load_migration()['copyInProgress'])
+        self.assertNotIn(host.load_migration()['phase'], ('copied', 'switched', 'complete'))
+        self.assertFalse(any(event[0] in ('seal', 'umount', 'unmount-old', 'mount-new', 'switch') for event in events))
+
+    def test_rerun_after_the_switch_only_completes_the_records(self):
+        host.migration_directory().mkdir()
+        host.save_migration(dict(version=1, target=dict(device='/dev/synthetic'), phase='switched', old=OLD, uuid='f00d'))
+        events = []
+        with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+            for patcher in self.fake_migration(self.root / 'target', events):
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(host, 'new_pool_mounted', return_value=True))
+            host.migrate_pool(pool_arguments())
+        self.assertEqual([event[0] for event in events], ['switch', 'check'])
+        with self.assertRaisesRegex(host.MigrationError, 'in progress'):
+            host.migrate_pool(pool_arguments(device='/dev/another'))
+
+    def test_resume_after_a_crash_between_mounts_uses_the_verified_copy(self):
+        host.migration_directory().mkdir()
+        (self.root / 'target').mkdir()
+        host.save_migration(dict(version=1, target=dict(device='/dev/synthetic'), phase='copied', old=OLD, uuid='f00d'))
+        events = []
+        with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+            for patcher in self.fake_migration(self.root / 'target', events):
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(host, 'mount_of', return_value=None))
+            host.migrate_pool(pool_arguments())
+        self.assertEqual([event[0] for event in events], ['mount-new', 'switch', 'check'])
+
+    def test_rollback_restores_the_original_unit_and_records(self):
+        host.migration_directory().mkdir()
+        image = '/var/lib/cairn-native/native-data.xfs'
+        original = b'original ext4 unit\n'
+        old = dict(OLD, unitSha256=host.hashlib.sha256(original).hexdigest())
+        host.save_migration(dict(version=1, target=dict(image=image, size=1 << 30),
+                                 phase='complete', old=old, uuid='f00d', imageLoop={'loop': '/dev/loop1'}))
+        backup = host.migration_directory() / 'units' / OLD['unit']
+        backup.parent.mkdir()
+        backup.write_bytes(original)
+        (self.units / OLD['unit']).write_text(host.pool_unit(host.pool_path(), 'f00d', 'image'))
+        link = host.pool_boot_link(OLD['unit'])
+        link.parent.mkdir()
+        link.symlink_to(self.units / OLD['unit'])
+        (self.units / host.LOOP_SERVICE).write_text(host.loop_unit(Path(image), OLD['unit'], 'f00d'))
+        mounts = iter([None, dict(fstype='xfs', source='/dev/loop1'), None, dict(fstype='ext4', source='/dev/loop0', options='rw,prjquota')])
+        commands = []
+        with patch.object(host, 'require_stopped'), patch.object(host, 'mount_of', side_effect=lambda *_: next(mounts)), \
+                patch.object(host, 'new_pool_mounted', return_value=True), \
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), \
+                patch.object(host, 'checked', side_effect=lambda *args, **_: commands.append(args) or ''), \
+                patch.object(host, 'owned_loop', return_value=Path('/dev/loop1')), \
+                patch.object(host, 'pool_tool', side_effect=lambda action, *_: commands.append(('pool', action)) or {}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            host.rollback_pool(pool_arguments())
+        self.assertEqual('original ext4 unit\n', (self.units / OLD['unit']).read_text())
+        self.assertFalse(link.is_symlink(), 'Rollback must not enable an originally disabled ext4 mount')
+        self.assertFalse((self.units / host.LOOP_SERVICE).exists())
+        self.assertEqual(commands, [('systemctl', 'stop', OLD['unit']), ('systemctl', 'disable', '--now', host.LOOP_SERVICE),
+                                    ('losetup', '--detach', '/dev/loop1'), ('systemctl', 'daemon-reload'),
+                                    ('systemctl', 'start', OLD['unit']), ('pool', 'rollback'), ('pool', 'check')])
+        self.assertFalse(host.migration_directory().exists())
+        self.assertTrue(any(path.name.startswith('native-pool-migration.rolled-back-') for path in self.root.iterdir()))
+
+    def test_original_mount_unit_backup_cannot_be_reconstructed_from_replacement(self):
+        original = b'ext4 original\n'
+        fragment = self.units / OLD['unit']
+        fragment.write_bytes(original)
+        old = dict(OLD, fragment=str(fragment), unitSha256=host.hashlib.sha256(original).hexdigest())
+        self.assertEqual(original, host.back_up_unit(old))
+        fragment.write_text(host.pool_unit(host.pool_path(), 'f00d', None))
+        self.assertEqual(original, host.back_up_unit(old))
+        (host.migration_directory() / 'units' / OLD['unit']).unlink()
+        with self.assertRaisesRegex(host.MigrationError, 'changed'):
+            host.back_up_unit(old)
+
+    def test_image_cannot_use_an_alias_of_the_pool_or_controller_state(self):
+        pool = host.pool_path()
+        state = self.root / 'state'
+        link = self.root / 'alias'
+        link.symlink_to(pool, target_is_directory=True)
+        with self.assertRaisesRegex(host.MigrationError, 'real directory'):
+            host.verify_image_location(link / 'new.xfs', state, pool)
+        link.unlink()
+        link.mkdir()
+        with patch.object(host, 'filesystem_path', side_effect=[Path('/origin/state/alias'), Path('/origin/state')]), \
+                self.assertRaisesRegex(host.MigrationError, 'aliases'):
+            host.verify_image_location(link / 'new.xfs', state, pool)
+
+    def test_pool_image_ancestry_and_file_require_safe_ownership(self):
+        image = Path('/var/lib/cairn/data.xfs')
+
+        def metadata(path):
+            return Mock(st_uid=0, st_mode=(host.stat.S_IFREG | 0o600) if path == image else (host.stat.S_IFDIR | 0o755))
+
+        with patch.object(Path, 'lstat', autospec=True, side_effect=metadata):
+            self.require_root_path(image)
+        for path, mode, uid in ((image.parent, host.stat.S_IFDIR | 0o775, 0),
+                                (image.parent, host.stat.S_IFDIR | 0o700, 1000),
+                                (image, host.stat.S_IFREG | 0o620, 0),
+                                (image.parent, host.stat.S_IFLNK | 0o777, 0)):
+            with self.subTest(path=path, mode=mode, uid=uid), \
+                    patch.object(Path, 'lstat', autospec=True, side_effect=lambda current: (
+                        Mock(st_uid=uid, st_mode=mode) if current == path else metadata(current))), \
+                    self.assertRaisesRegex(host.MigrationError, 'root-owned'):
+                self.require_root_path(image)
+
+    def test_boot_rejects_a_replaced_image_before_looking_for_any_loop(self):
+        image = self.root / 'data.xfs'
+        image.touch()
+        with image.open('rb') as initial:
+            identity = host.image_identity(initial.fileno())
+            host.save_migration(dict(phase='complete', target={'image': str(image)}, uuid='f00d', imageLoop=identity))
+            image.unlink()
+            image.touch()
+            with patch.object(host, 'attached_loop') as loops, self.assertRaisesRegex(host.MigrationError, 'does not match'):
+                host.boot_image_loop('attach', str(image), 'f00d', str(host.migration_directory() / 'state.json'))
+        loops.assert_not_called()
+
+    def test_image_activation_refuses_a_duplicate_uuid_on_another_device(self):
+        record = dict(phase='complete', uuid='f00d', target={'image': '/var/lib/cairn/data.xfs'})
+        host.save_migration(record)
+        mounted = dict(fstype='xfs', source='/dev/synthetic', options='rw,prjquota')
+        link = Mock()
+        pool = Mock()
+        link.stat.return_value = Mock(st_mode=host.stat.S_IFBLK | 0o600, st_rdev=100)
+        pool.stat.return_value = Mock(st_dev=101)
+        with patch.object(host, 'filesystem_uuid', return_value=record['uuid']), \
+                patch.object(host, 'mount_of', return_value=mounted), patch.object(host, 'pool_path', return_value=pool), \
+                patch.object(host, 'image_device_link', return_value=link), patch.object(host, 'pool_tool') as controller, \
+                self.assertRaisesRegex(host.MigrationError, 'does not match'):
+            host.activate_pool(pool_arguments())
+        controller.assert_not_called()
+        self.assertEqual(host.load_migration(), record)
+
+    def test_new_image_can_resume_after_its_receipt_preceded_the_link(self):
+        image = self.root / 'new.xfs'
+        size = 64 * 1024
+        record = dict(phase='planned', target={'image': str(image), 'size': size})
+        def allocated(descriptor, length):
+            return min(os.fstat(descriptor).st_blocks * 512, length)
+        with patch.object(host, 'image_allocation', side_effect=allocated), \
+                patch.object(host.os, 'link', side_effect=host.MigrationError('interrupted before publication')), \
+                self.assertRaisesRegex(host.MigrationError, 'before publication'):
+            host.prepare_image(record, image, False)
+        self.assertFalse(image.exists())
+        saved = host.load_migration()
+        staged = image.with_name(saved['createdImage']['name'])
+        self.assertTrue(staged.is_file())
+        with patch.object(host, 'image_allocation', side_effect=allocated):
+            host.prepare_image(saved, image, False)
+        self.assertEqual(image.stat().st_ino, saved['createdImage']['inode'])
+        self.assertEqual(image.stat().st_size, size)
+        self.assertGreaterEqual(image.stat().st_blocks * 512, size)
+        self.assertFalse(staged.exists())
+
+    def test_backing_allocation_keeps_receipt_space_on_fresh_attempt_and_retry(self):
+        image = self.root / 'new.xfs'
+        size = 128 * 1024
+        record = dict(phase='planned', target={'image': str(image), 'size': size})
+        with patch.object(host.os, 'statvfs', return_value=Mock(f_bavail=size, f_frsize=1)), \
+                patch.object(host.os, 'posix_fallocate') as allocate, \
+                self.assertRaisesRegex(host.MigrationError, 'controller recovery receipts'):
+            host.prepare_image(record, image, False)
+        allocate.assert_not_called()
+        self.assertNotIn('createdImage', record)
+
+        staged = self.root / '.cairn-native-xfs-resume'
+        staged.write_bytes(b'x' * 4096)
+        metadata = staged.stat()
+        with staged.open('rb') as backing:
+            record['createdImage'] = dict(name=staged.name, **host.image_identity(backing.fileno()))
+        remaining = size - metadata.st_blocks * 512
+        with patch.object(host, 'image_allocation', return_value=metadata.st_blocks * 512), \
+                patch.object(host.os, 'statvfs', return_value=Mock(f_bavail=remaining, f_frsize=1)), \
+                patch.object(host.os, 'posix_fallocate') as allocate, \
+                self.assertRaisesRegex(host.MigrationError, 'controller recovery receipts'):
+            host.prepare_image(record, image, False)
+        allocate.assert_not_called()
+        self.assertFalse(image.exists())
+        self.assertEqual(staged.read_bytes(), b'x' * 4096)
+
+    def test_planned_rollback_does_not_detach_an_unacquired_loop(self):
+        image = self.root / 'other.img'
+        image.write_bytes(b'other service uses this image')
+        host.save_migration(dict(phase='planned', old=OLD, target={'image': str(image)}, uuid='f00d'))
+        with patch.object(host, 'mount_of', side_effect=[None, None, dict(fstype='ext4', source='/dev/original', options='rw,prjquota')]), \
+                patch.object(host, 'attached_loop') as associated, patch.object(host, 'checked') as commands, \
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), \
+                contextlib.redirect_stdout(io.StringIO()):
+            host.rollback_pool(pool_arguments())
+        associated.assert_not_called()
+        commands.assert_called_once_with('systemctl', 'start', OLD['unit'], timeout=300)
+        self.assertTrue(image.is_file())
+        self.assertIsNone(host.load_migration())
+
+    def test_interrupted_allocation_remains_owned_for_rollback(self):
+        image = self.root / 'pending.img'
+        record = dict(phase='planned', old=OLD, target={'image': str(image), 'size': 65536}, uuid='f00d')
+
+        def interrupted(_descriptor, _offset, _size):
+            self.assertEqual(host.load_migration()['createdImage'], record['createdImage'])
+            raise OSError('interrupted allocation')
+
+        with patch.object(host, 'image_allocation', return_value=0), \
+                patch.object(host.os, 'posix_fallocate', side_effect=interrupted), self.assertRaisesRegex(OSError, 'interrupted allocation'):
+            host.prepare_image(record, image, False)
+
+        staged = host.staged_image_path(image, record['createdImage'])
+        self.assertTrue(staged.is_file())
+        self.assertFalse(image.exists())
+        with patch.object(host, 'mount_of', side_effect=[None, dict(fstype='ext4', source='/dev/original', options='rw,prjquota'),
+                                                       dict(fstype='ext4', source='/dev/original', options='rw,prjquota')]), \
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), contextlib.redirect_stdout(io.StringIO()):
+            host.rollback_pool(pool_arguments())
+        self.assertFalse(staged.exists())
+        self.assertFalse(image.exists())
+
+    def test_rollback_never_unmounts_a_foreign_staging_filesystem(self):
+        host.save_migration(dict(phase='formatted', old=OLD, target={'device': '/dev/synthetic'}, uuid='f00d'))
+        with patch.object(host, 'mount_of', return_value={'fstype': 'xfs', 'source': '/dev/foreign'}), \
+                patch.object(host, 'filesystem_uuid', return_value='0000'), \
+                patch.object(host, 'checked') as commands, self.assertRaisesRegex(host.MigrationError, 'outside the migration'):
+            host.rollback_pool(pool_arguments())
+        commands.assert_not_called()
+        self.assertEqual(host.load_migration()['phase'], 'formatted')
+
+    def test_early_rollback_keeps_the_fence_when_original_pool_cannot_be_verified(self):
+        for phase in ('planned', 'formatted'):
+            with self.subTest(phase=phase):
+                host.save_migration(dict(phase=phase, old=dict(OLD, fragment=None), target={'device': '/dev/synthetic'}, uuid='f00d'))
+                with patch.object(host, 'mount_of', return_value=None), patch.object(host, 'checked') as mount, \
+                        self.assertRaisesRegex(host.MigrationError, 'does not match the original pool'):
+                    host.rollback_pool(pool_arguments())
+                mount.assert_called_once_with('mount', '-t', 'ext4', '-o', OLD['options'], OLD['what'], str(host.pool_path()), timeout=300)
+                self.assertEqual(host.load_migration()['phase'], phase)
+
+    def test_early_rollback_keeps_its_receipt_until_the_original_pool_is_usable(self):
+        old = dict(OLD, restrictions=['nosuid'])
+        host.save_migration(dict(phase='planned', old=old, target={'device': '/dev/synthetic'}, uuid='f00d'))
+        mounted = dict(fstype='ext4', source='/dev/original')
+        for options, complaint in (('ro,prjquota,nosuid', 'writable'),
+                                   ('rw,nosuid', 'project quotas'),
+                                   ('rw,prjquota', 'mount restrictions')):
+            with self.subTest(options=options), \
+                    patch.object(host, 'mount_of', side_effect=[None, mounted, dict(mounted, options=options)]), \
+                    patch.object(host, 'filesystem_uuid', return_value=old['uuid']), \
+                    self.assertRaisesRegex(host.MigrationError, complaint):
+                host.rollback_pool(pool_arguments())
+            self.assertEqual(host.load_migration()['phase'], 'planned')
+        restored = dict(mounted, options='rw,prjquota,nosuid')
+        with patch.object(host, 'mount_of', side_effect=[None, restored, restored]), \
+                patch.object(host, 'filesystem_uuid', return_value=old['uuid']), contextlib.redirect_stdout(io.StringIO()):
+            host.rollback_pool(pool_arguments())
+        self.assertIsNone(host.load_migration())
+
+    def test_xfs_image_receipt_uses_uuid_instead_of_the_current_device_number(self):
+        image = self.root / 'new.xfs'
+        received = host.uuid.uuid4()
+
+        def geometry(_descriptor, request, buffer):
+            self.assertEqual(request, host.XFS_GEOMETRY)
+            host.XFS_GEOMETRY_V1.pack_into(buffer, 0, received.bytes)
+
+        with image.open('w+b') as output, patch.object(host.fcntl, 'ioctl', side_effect=geometry), \
+                patch.object(host.os, 'fstatvfs', side_effect=AssertionError('XFS f_fsid is volatile')):
+            receipt = host.image_identity(output.fileno())
+            self.assertEqual(receipt['filesystem'], str(received))
+            host.check_image_inode(output.fileno(), receipt)
+            received = host.uuid.uuid4()
+            with self.assertRaisesRegex(host.MigrationError, 'does not match'):
+                host.check_image_inode(output.fileno(), receipt)
+
+    def test_buffered_image_is_refused_before_formatting(self):
+        image = self.root / 'buffered.img'
+        image.touch()
+        device = self.root / 'synthetic-loop'
+        device.touch()
+        with image.open('rb') as file:
+            identity = host.image_identity(file.fileno())
+        record = dict(phase='planned', old=OLD, target={'image': str(image)}, uuid='f00d')
+        metadata = image.stat()
+        backing = f'{os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)}'
+        with patch.object(host, 'prepare_image', return_value=identity), patch.object(host, 'owned_loop', return_value=device), \
+                patch.object(host, 'checked', return_value=f'{metadata.st_ino} {backing} 0') as commands, \
+                self.assertRaisesRegex(host.MigrationError, 'does not support direct I/O'):
+            host.prepare_target(record, False)
+        commands.assert_called_once_with('losetup', '--noheadings', '--output', 'BACK-INO,BACK-MAJ:MIN,DIO', str(device))
+
+    def test_replaced_loop_backing_is_rejected_before_formatting(self):
+        image = self.root / 'image.xfs'
+        image.touch()
+        device = self.root / 'synthetic-loop'
+        device.touch()
+        with image.open('rb') as file:
+            identity = host.image_identity(file.fileno())
+        record = dict(phase='planned', target={'image': str(image)})
+        with patch.object(host, 'prepare_image', return_value=identity), patch.object(host, 'owned_loop', return_value=device), \
+                patch.object(host, 'checked', return_value='0 1:1 1') as commands, \
+                self.assertRaisesRegex(host.MigrationError, 'does not bind the verified pool inode'):
+            host.prepare_target(record, False)
+        self.assertEqual(commands.call_count, 1)
+        self.assertEqual(commands.call_args.args[0], 'losetup')
+
+    def test_image_allocation_counts_only_private_extents_in_the_loop_range(self):
+        size = 8192
+
+        def allocation(logical, flags):
+            def reply(_descriptor, request, buffer):
+                self.assertEqual(request, host.GET_FILE_EXTENTS)
+                host.EXTENT_HEADER.pack_into(buffer, 0, 0, size, 1, 1, 64, 0)
+                host.FILE_EXTENT.pack_into(buffer, host.EXTENT_HEADER.size, logical, 4096, size, 0, 0, flags, 0, 0, 0)
+            return reply
+
+        with patch.object(host.fcntl, 'ioctl', side_effect=allocation(size, 0x0801)):
+            self.assertEqual(host.image_allocation(3, size), 0)
+        with patch.object(host.fcntl, 'ioctl', side_effect=allocation(4096, 0x0801)):
+            self.assertEqual(host.image_allocation(3, size), 4096)
+        with patch.object(host.fcntl, 'ioctl', side_effect=allocation(0, 0x2001)), \
+                self.assertRaisesRegex(host.MigrationError, 'shared or unverified'):
+            host.image_allocation(3, size)
+
+    def test_failed_target_image_may_disappear_before_early_rollback(self):
+        image = self.root / 'missing.xfs'
+        host.save_migration(dict(phase='formatted', old=OLD, target={'image': str(image)}, uuid='f00d',
+                                 imageLoop={'loop': '/dev/loop1', 'filesystem': 42, 'inode': 43}))
+        mounted = dict(fstype='ext4', source='/dev/original', options='rw,prjquota')
+        with patch.object(host, 'mount_of', side_effect=[None, mounted, mounted]), \
+                patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), \
+                patch.object(host, 'checked') as commands, contextlib.redirect_stdout(io.StringIO()):
+            host.rollback_pool(pool_arguments())
+        commands.assert_not_called()
+        self.assertIsNone(host.load_migration())
+
+    def test_planned_device_can_repeat_mkfs_using_only_its_recorded_signature(self):
+        device = self.root / 'synthetic-device'
+        device.touch()
+        expected = str(host.uuid.uuid4())
+        record = dict(phase='planned', uuid=expected, formatDevice=device.stat().st_rdev,
+                      target={'device': str(device)})
+        host.save_migration(record)
+        mounted = dict(fstype='xfs', source=str(device))
+        with patch.object(host, 'check_device', return_value=True) as check, \
+                patch.object(host, 'verify_target_device_path'), \
+                patch.object(host, 'filesystem_uuid', return_value=expected), \
+                patch.object(host, 'checked') as commands, patch.object(host, 'mount_of', side_effect=[None, mounted]), \
+                patch.object(host.os, 'chown'):
+            host.prepare_target(record, False)
+        (descriptor,) = commands.call_args_list[0].kwargs['descriptors']
+        check.assert_called_once_with(device, True, uuid=expected, descriptor=descriptor)
+        self.assertIn(f'crc=1,reflink=1,uuid={expected}', commands.call_args_list[0].args)
+        self.assertEqual(commands.call_args_list[0].args[-1], f'/proc/self/fd/{descriptor}')
+        self.assertEqual(host.load_migration()['phase'], 'formatted')
+
+    def test_interrupted_block_format_cannot_force_a_reused_device_number(self):
+        device = self.root / 'replacement-device'
+        device.write_bytes(b'data from another volume')
+        record = dict(phase='planned', uuid='f00d', formatDevice=device.stat().st_rdev,
+                      target={'device': str(device)})
+        host.save_migration(record)
+        with patch.object(host, 'check_device', return_value=False), \
+                patch.object(host, 'checked') as commands:
+            with self.assertRaisesRegex(host.MigrationError, 'rollback-pool'):
+                host.probe_migration_device(record['target'], True, record)
+            with self.assertRaisesRegex(host.MigrationError, 'rollback-pool'):
+                host.prepare_target(record, True)
+        commands.assert_not_called()
+        self.assertEqual(host.load_migration(), record)
+        self.assertEqual(device.read_bytes(), b'data from another volume')
+
+    def test_formatter_keeps_the_verified_device_when_a_symlink_is_retargeted(self):
+        original = self.root / 'original-device'
+        replacement = self.root / 'replacement-device'
+        device = self.root / 'device-link'
+        original.write_bytes(b'first device')
+        replacement.write_bytes(b'foreign device')
+        device.symlink_to(original)
+        record = dict(phase='planned', uuid='f00d', target={'device': str(device)})
+
+        def format_device(*args, descriptors, **_):
+            self.assertEqual(args[0], 'mkfs.xfs')
+            device.unlink()
+            device.symlink_to(replacement)
+            (descriptor,) = descriptors
+            self.assertEqual(args[-1], f'/proc/self/fd/{descriptor}')
+            self.assertEqual(Path(args[-1]).read_bytes(), b'first device')
+            self.assertEqual(device.read_bytes(), b'foreign device')
+            raise host.MigrationError('stop before the remapped device is mounted')
+
+        with patch.object(host, 'check_device', return_value=False), \
+                patch.object(host.stat, 'S_ISBLK', return_value=True), \
+                patch.object(host, 'checked', side_effect=format_device), \
+                self.assertRaisesRegex(host.MigrationError, 'stop before the remapped device is mounted'):
+            host.prepare_target(record, True)
+        self.assertEqual(host.load_migration()['phase'], 'planned')
+
+    def test_manual_ext4_mount_keeps_active_flags_and_rejects_special_loop_geometry(self):
+        pool = host.pool_path()
+        options = 'rw,nosuid,noexec,relatime,prjquota,errors=remount-ro'
+        def system(*args, **_):
+            if args[0] == 'systemd-escape':
+                return OLD['unit']
+            if args[0] == 'systemctl':
+                return 'FragmentPath=\nSourcePath=\n'
+            return '0 0 1 4096'
+        with patch.object(host, 'checked', side_effect=system), patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']):
+            with patch.object(host, 'mount_of', return_value=dict(source='/dev/sdb1', fstype='ext4', options=options)):
+                self.assertEqual(host.old_pool(pool)['options'], options)
+            with patch.object(host, 'mount_of', return_value=dict(source='/dev/sdb1', fstype='ext4', options=options.replace('rw,', 'ro,'))), \
+                    self.assertRaisesRegex(host.MigrationError, 'read-only'):
+                host.old_pool(pool)
+            with patch.object(host, 'mount_of', return_value=dict(source='/dev/loop0', fstype='ext4', options=options)), \
+                    self.assertRaisesRegex(host.MigrationError, 'nondefault manual loop'):
+                host.old_pool(pool)
+
+    @unittest.skipUnless(host.shutil.which('rsync'), 'migration requires rsync')
+    def test_copy_repairs_bytes_with_the_same_size_and_mtime(self):
+        source, target = self.root / 'source', self.root / 'target'
+        for root in (source, target):
+            (root / 'run').mkdir(parents=True)
+        original = source / 'run/payload'
+        damaged = target / 'run/payload'
+        original.write_bytes(b'correct')
+        damaged.write_bytes(b'damaged')
+        metadata = original.stat()
+        os.utime(damaged, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        # Inode flag policy has its own tests. The test temp directory may
+        # inherit a host project ID unrelated to the simulated migration.
+        with patch.object(host, 'verify_portable_inode_flags'):
+            host.copy_environment('run', source, target)
+        self.assertEqual(damaged.read_bytes(), original.read_bytes())
+
+    def test_terminating_offline_copy_reaps_its_process_before_migration_can_continue(self):
+        import threading
+        pid_file = self.root / 'copy-process'
+        script = 'import os,sys,time; open(sys.argv[1], "w").write(str(os.getpid())); time.sleep(30)'
+        def cancel():
+            deadline = host.time.monotonic() + 5
+            while host.time.monotonic() < deadline:
+                if pid_file.is_file() and pid_file.read_text():
+                    break
+                host.time.sleep(0.01)
+            host.stop(host.signal.SIGTERM, None)
+        with patch.object(host, 'STOP', False):
+            cancelling = threading.Thread(target=cancel)
+            cancelling.start()
+            try:
+                with self.assertRaisesRegex(host.MigrationError, 'interrupted'):
+                    host.checked(host.sys.executable, '-c', script, str(pid_file), timeout=10)
+            finally:
+                cancelling.join()
+            pid = int(pid_file.read_text())
+            self.assertFalse((Path('/proc') / str(pid)).exists())
+            with self.assertRaisesRegex(host.MigrationError, 'interrupted'):
+                host.save_migration({'phase': 'copied'})
+            self.assertFalse(host.migration_directory().exists())
+
+    def test_migration_refusals_are_printed_for_the_operator(self):
+        source = Path(SPEC.origin).read_text()
+        entrypoint = ast.parse(source).body[-1]
+        code = compile(ast.Module(body=[entrypoint], type_ignores=[]), SPEC.origin, 'exec')
+        scope = dict(vars(host), __name__='__main__', require_installed_supervisor=Mock(),
+                     settle_pool_jobs=Mock(), migrate_pool=Mock(side_effect=host.MigrationError('Stop the native node first')))
+        output = io.StringIO()
+        with patch.object(host.os, 'geteuid', return_value=0), patch.object(host.signal, 'signal'), \
+                patch.object(host, 'require_stopped'), \
+                patch.object(host.sys, 'argv', ['native-host.py', 'migrate-pool', '--device', '/dev/x']), \
+                contextlib.redirect_stderr(output), self.assertRaises(SystemExit):
+            exec(code, scope)
+        self.assertIn('Native pool migration stopped: Stop the native node first', output.getvalue())
+
+    def test_offline_operation_fences_controller_starts_during_mutations(self):
+        with patch.object(host, 'require_stopped'), patch.object(host, 'settle_pool_jobs'):
+            host.offline_pool_operation(lambda _: self.assertTrue(host.controller_running()), pool_arguments())
+        self.assertFalse(host.controller_running())
+
+    def test_offline_writer_keeps_controller_lock_after_supervisor_death(self):
+        ready = self.root / 'writer-ready'
+        release = self.root / 'writer-release'
+        writer = '''
+from pathlib import Path
+import sys, time
+Path(sys.argv[1]).touch()
+deadline = time.monotonic() + 10
+while not Path(sys.argv[2]).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+'''
+        supervisor = '''
+from pathlib import Path
+from types import SimpleNamespace
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('native_host', sys.argv[1])
+host = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(host)
+host.ROOT = Path(sys.argv[2])
+host.require_stopped = lambda _: None
+host.settle_pool_jobs = lambda: None
+host.offline_pool_operation(lambda _: host.checked(sys.executable, '-c', *sys.argv[3:], timeout=15),
+                            SimpleNamespace(stop=False, dry_run=False))
+'''
+        with host.subprocess.Popen([host.sys.executable, '-B', '-c', supervisor, str(SPEC.origin),
+                                    str(self.root), writer, str(ready), str(release)],
+                                   env={'PATH': '/usr/bin:/bin'}) as process:
+            try:
+                deadline = host.time.monotonic() + 5
+                while not ready.exists() and process.poll() is None and host.time.monotonic() < deadline:
+                    host.time.sleep(0.01)
+                self.assertTrue(ready.exists(), 'the offline writer did not start')
+                process.kill()
+                process.wait(timeout=5)
+                self.assertTrue(host.controller_running(), 'the live writer lost the migration fence')
+            finally:
+                release.touch()
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+        deadline = host.time.monotonic() + 5
+        while host.controller_running() and host.time.monotonic() < deadline:
+            host.time.sleep(0.01)
+        self.assertFalse(host.controller_running(), 'the finished writer retained the migration fence')
+
+    def test_activation_is_explicit_and_checks_the_mounted_pool(self):
+        host.migration_directory().mkdir()
+        host.save_migration(dict(phase='complete', uuid='f00d'))
+        with patch.object(host, 'mount_of', return_value=None):
+            with self.assertRaisesRegex(host.MigrationError, 'mounted pool'):
+                host.activate_pool(pool_arguments())
+        mounted = dict(fstype='xfs', source='/dev/loop1', options='rw,prjquota')
+        with patch.object(host, 'mount_of', return_value=mounted), patch.object(host, 'filesystem_uuid', return_value='f00d'), \
+                patch.object(host, 'pool_tool') as check, \
+                contextlib.redirect_stdout(io.StringIO()):
+            host.activate_pool(pool_arguments(dry_run=True))
+            self.assertNotIn('activationRequested', host.load_migration())
+            host.activate_pool(pool_arguments())
+        check.assert_called_once_with('check', self.root / 'state')
+        self.assertTrue(host.load_migration()['activationRequested'])
+        self.assertNotIn('activated', host.load_migration())
+
+    def test_read_only_pool_preserves_rollback_authority(self):
+        host.migration_directory().mkdir()
+        host.save_migration(dict(phase='complete', uuid='f00d'))
+        mounted = dict(fstype='xfs', source='/dev/loop1', options='ro,prjquota')
+        with patch.object(host, 'mount_of', return_value=mounted), patch.object(host, 'filesystem_uuid', return_value='f00d'), \
+                patch.object(host, 'pool_tool') as check, self.assertRaisesRegex(host.MigrationError, 'read-only'):
+            host.activate_pool(pool_arguments())
+        check.assert_not_called()
+        self.assertNotIn('activationRequested', host.load_migration())
+
+    def test_offline_recovery_waits_for_a_manager_owned_pool_job(self):
+        calls = []
+        mount = 'fixture.mount'
+        def list_jobs(*arguments, **_):
+            self.assertTrue(host.controller_running(), 'pool observations need the recovery fence')
+            self.assertEqual(arguments[-2:], (mount, host.LOOP_SERVICE))
+            calls.append('inspect')
+            return f'19 {mount} stop running\n' if len(calls) == 1 else ''
+        with patch.object(host, 'require_stopped'), patch.object(host, 'mount_unit_name', return_value=mount), \
+                patch.object(host, 'checked', side_effect=list_jobs), patch.object(host.time, 'sleep'):
+            host.offline_pool_operation(lambda _: calls.append('recover'), pool_arguments())
+        self.assertEqual(calls, ['inspect', 'inspect', 'recover'])
+
+    def test_offline_migration_requires_the_matching_installed_supervisor(self):
+        installed = self.root / 'host.py'
+        with patch.object(host, 'INSTALL', self.root):
+            for content in (None, b'old supervisor'):
+                if content is not None:
+                    installed.write_bytes(content)
+                with self.assertRaisesRegex(host.MigrationError, 'Refresh the native supervisor'):
+                    host.require_installed_supervisor()
+            installed.write_bytes(Path(SPEC.origin).read_bytes())
+            host.require_installed_supervisor()
+
+    def test_rollback_refuses_to_reopen_the_old_pool_after_activation(self):
+        host.migration_directory().mkdir()
+        host.save_migration(dict(phase='complete', activated=True))
+        with self.assertRaisesRegex(host.MigrationError, 'opened the XFS pool'):
+            host.rollback_pool(pool_arguments())
 
 
 if __name__ == '__main__':

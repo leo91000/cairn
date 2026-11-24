@@ -262,6 +262,7 @@ where
         }
         "native-docker" => cairn_installation::native::docker::ensure().await?,
         "native-docker-reset" => cairn_installation::native::docker::reset().await?,
+        "native-pool-migrate" => cairn_installation::native::pool_migration(&args[1..]).await?,
         "native-watchdog" => {
             cairn_installation::native::watchdog(
                 Path::new(arg(&args, 1, "Missing native lease file.")?),

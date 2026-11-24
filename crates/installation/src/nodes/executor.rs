@@ -1,5 +1,5 @@
 //! Node-side attempt staging and scoped refresh/inbox lifetimes.
-use super::workspace::{fetch, seed};
+use super::workspace::{await_preparation, check_preparing, fetch, seed, seed_with_stop};
 use crate::{
     error::{Error, Result},
     performance::Operation,
@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 use tokio::sync::Mutex;
@@ -51,6 +51,26 @@ impl Session {
         )
         .await
     }
+
+    async fn seed_preparation(
+        &self,
+        selection: Value,
+        target: &Path,
+        stop: &CancellationToken,
+        publication: Option<&Mutex<()>>,
+    ) -> Result<()> {
+        seed_with_stop(
+            &self.client,
+            &self.master,
+            &self.token,
+            &self.attempt,
+            selection,
+            target,
+            stop,
+            publication,
+        )
+        .await
+    }
 }
 
 fn plan_path(data: &Path, attempt: &str) -> PathBuf {
@@ -62,6 +82,26 @@ pub struct Executor {
     data: PathBuf,
     attempts: Mutex<HashMap<String, CancellationToken>>,
     preparation: super::coordination::Coordination,
+    pending: Mutex<HashMap<String, Arc<PendingPreparation>>>,
+    attempt_gate: super::coordination::Coordination,
+}
+
+#[derive(Default)]
+struct PendingPreparation {
+    stop: CancellationToken,
+    done: CancellationToken,
+    publication: Mutex<()>,
+    result: OnceLock<Result<()>>,
+}
+
+impl PendingPreparation {
+    async fn cancel_and_drain(&self) {
+        {
+            let _publish = self.publication.lock().await;
+            self.stop.cancel();
+        }
+        self.done.cancelled().await;
+    }
 }
 
 impl Default for Executor {
@@ -71,6 +111,8 @@ impl Default for Executor {
             data: super::node_data_dir(),
             attempts: Mutex::default(),
             preparation: super::coordination::Coordination::default(),
+            pending: Mutex::default(),
+            attempt_gate: super::coordination::Coordination::default(),
         }
     }
 }
@@ -96,60 +138,156 @@ impl Executor {
         token: &str,
         attempt: &str,
     ) -> Result<()> {
-        let mut timing = Operation::new("node_prepare", attempt, "plan");
         let session = Session {
             client: client.clone(),
             master: master.clone(),
             token: token.into(),
             attempt: attempt.into(),
         };
+        if self.native {
+            return self.prepare_native(session).await;
+        }
+        self.prepare_attempt(session, CancellationToken::new(), None)
+            .await
+    }
+
+    async fn prepare_native(self: &Arc<Self>, session: Session) -> Result<()> {
+        let attempt = session.attempt.clone();
+        crate::validation::uuid(&attempt)?;
+        let (worker, first) = {
+            let _gate = self.attempt_gate.lock(&attempt).await;
+            let state = crate::native::state_dir();
+            if state.join(format!("{attempt}.stopped")).try_exists()? {
+                return Err(Error::conflict("Native attempt has already stopped."));
+            }
+            if self.attempts.lock().await.contains_key(&attempt) {
+                return Ok(());
+            }
+            let mut pending = self.pending.lock().await;
+            if let Some(worker) = pending
+                .get(&attempt)
+                .filter(|worker| !worker.done.is_cancelled())
+            {
+                (worker.clone(), false)
+            } else {
+                let worker = Arc::new(PendingPreparation::default());
+                pending.insert(attempt.clone(), worker.clone());
+                (worker, true)
+            }
+        };
+        if !first {
+            worker.done.cancelled().await;
+            return worker.result.get().cloned().unwrap_or_else(|| {
+                Err(Error::unavailable(
+                    "Native preparation worker did not publish a result.",
+                ))
+            });
+        }
+
+        let executor = self.clone();
+        // A dropped relay waiter requests cancellation. Only the worker
+        // releases staging ownership after its accepted I/O has drained.
+        let _cancel = worker.stop.clone().drop_guard();
+        tokio::spawn(async move {
+            let _complete = worker.done.clone().drop_guard();
+            let result = executor
+                .prepare_attempt(session, worker.stop.clone(), Some(&worker.publication))
+                .await;
+            let _ = worker.result.set(result.clone());
+            executor.pending.lock().await.remove(&attempt);
+            result
+        })
+        .await
+        .map_err(Error::internal)?
+    }
+
+    async fn prepare_attempt(
+        &self,
+        session: Session,
+        stop: CancellationToken,
+        publication: Option<&Mutex<()>>,
+    ) -> Result<()> {
+        let attempt = session.attempt.as_str();
+        crate::validation::uuid(attempt)?;
+        let mut timing = Operation::new("node_prepare", attempt, "plan");
         let data = self.data.clone();
-        let descriptor = session.json("plan", &json!({})).await?;
+        let descriptor = await_preparation(&stop, session.json("plan", &json!({}))).await?;
         let run = text(&descriptor["plan"], "runId");
         crate::validation::uuid(run)?;
         timing.next("queue");
-        let _guard = self.preparation.lock(run).await;
+        let _guard =
+            await_preparation(&stop, async { Ok(self.preparation.lock(run).await) }).await?;
         if self.attempts.lock().await.contains_key(attempt) {
             timing.finish();
             return Ok(());
         }
+        let _staging = if self.native {
+            let state = crate::native::state_dir();
+            let guard = crate::native::disk::lock_staging_after_release(&state, run, &stop).await?;
+            for terminal in ["stopped", "exit"] {
+                if state.join(format!("{attempt}.{terminal}")).try_exists()? {
+                    return Err(Error::conflict("Native attempt has already stopped."));
+                }
+            }
+            Some(guard)
+        } else {
+            None
+        };
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Node workspace preparation stopped."));
+        }
         timing.next("seed");
         let mut pin = crate::native::bases::PendingPin::new(&data.join("runs").join(run), attempt)?;
-        let plan = stage_plan(&session, &data, descriptor).await?;
+        let plan = stage_plan(&session, &data, descriptor, &stop, publication).await?;
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Node workspace preparation stopped."));
+        }
         let root = data.join("runs").join(text(&plan, "runId"));
         timing.next("lease");
-        grant_lease(&session, &data).await?;
-        let stop = CancellationToken::new();
-        self.attempts
-            .lock()
-            .await
-            .insert(attempt.into(), stop.clone());
+        grant_lease(&session, &data, &stop).await?;
         let home = root
             .join("home")
             .join(super::workspace::provider_home(&plan));
         crate::skills::private_dir(&home).await?;
+        let active = CancellationToken::new();
+        {
+            let mut attempts = self.attempts.lock().await;
+            check_preparing(&stop)?;
+            attempts.insert(attempt.into(), active.clone());
+        }
         let auth = super::workspace::auth_listener(
             home.join("cairn-auth.sock"),
-            client.clone(),
-            master.clone(),
-            token.into(),
+            session.client.clone(),
+            session.master.clone(),
+            session.token.clone(),
             attempt.into(),
-            stop.clone(),
+            active.clone(),
         );
         tokio::spawn(auth);
         let mcp = crate::mcps::channel::forward(
             root.join("home").join(crate::microvm::mcp::SOCKET),
             session.clone(),
-            stop.clone(),
+            active.clone(),
         );
         tokio::spawn(mcp);
-        tokio::spawn(refresh_inbox(session, root, stop));
+        tokio::spawn(refresh_inbox(session, root, active));
         pin.keep();
         timing.finish();
         Ok(())
     }
 
-    pub async fn stop(&self, attempt: &str) {
+    async fn stop(&self, attempt: &str) -> Option<super::coordination::Operation> {
+        let gate = if self.native {
+            let gate = self.attempt_gate.lock(attempt).await;
+            let worker = self.pending.lock().await.get(attempt).cloned();
+            if let Some(worker) = worker {
+                worker.cancel_and_drain().await;
+                self.pending.lock().await.remove(attempt);
+            }
+            Some(gate)
+        } else {
+            None
+        };
         if let Some(stop) = self.attempts.lock().await.remove(attempt) {
             stop.cancel();
         }
@@ -162,9 +300,14 @@ impl Executor {
                 );
             }
         });
+        gate
     }
 
     pub async fn close(&self) -> Vec<String> {
+        let pending: Vec<_> = self.pending.lock().await.values().cloned().collect();
+        for worker in pending {
+            worker.cancel_and_drain().await;
+        }
         let mut attempts = self.attempts.lock().await;
         let ids = attempts.keys().cloned().collect();
         for (_, stop) in attempts.drain() {
@@ -181,7 +324,7 @@ impl Executor {
         method: &str,
         path: &str,
         body: &[u8],
-    ) -> Result<()> {
+    ) -> Result<Option<super::coordination::Operation>> {
         let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
         if let ["runs", attempt, "projects", project] = parts.as_slice() {
             let value: Value = serde_json::from_slice(body)?;
@@ -246,15 +389,34 @@ impl Executor {
                     .json::<Value>()
                     .await
                     .map_err(Error::internal)?;
-                refresh_credential_manifest(&home, &descriptor["credentialFiles"]).await?;
+                let credentials = descriptor["credentialFiles"].clone();
+                if self.native {
+                    let data = self.data.clone();
+                    let attempt = (*attempt).to_owned();
+                    let stop = CancellationToken::new();
+                    let _cancel = stop.clone().drop_guard();
+                    tokio::spawn(async move {
+                        let _staging = await_preparation(
+                            &stop,
+                            super::workspace::lock_live_staging(&data, &home, &attempt, &stop),
+                        )
+                        .await?;
+                        check_preparing(&stop)?;
+                        refresh_credential_manifest(&home, &credentials).await
+                    })
+                    .await
+                    .map_err(Error::internal)??;
+                } else {
+                    refresh_credential_manifest(&home, &credentials).await?;
+                }
             }
         }
         if method == "DELETE"
             && let ["runs", attempt] = parts.as_slice()
         {
-            self.stop(attempt).await;
+            return Ok(self.stop(attempt).await);
         }
-        Ok(())
+        Ok(None)
     }
 
     pub async fn result(
@@ -328,7 +490,13 @@ mod runtime_manifest_tests {
 }
 
 /// Fetches the attempt's plan and initial files, and stores the plan for the local runner.
-async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result<Value> {
+async fn stage_plan(
+    session: &Session,
+    data: &Path,
+    descriptor: Value,
+    stop: &CancellationToken,
+    publication: Option<&Mutex<()>>,
+) -> Result<Value> {
     let mut plan = descriptor["plan"].clone();
     if !crate::native::enabled() && descriptor["dataRoot"] != data.to_string_lossy().as_ref() {
         return Err(Error::conflict(
@@ -371,16 +539,18 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
     let mut seed_workspace =
         (crate::native::enabled() || plan["resumeWorkspace"] != true) && archives.is_none();
     session
-        .seed(
+        .seed_preparation(
             json!({ "kind": "initial", "workspace": seed_workspace, "projectArchives": archives.is_some(),
                 "keepArchives": archives.as_ref().map(|archives| archives.iter().map(|archive| &archive.hash).collect::<Vec<_>>()) }),
             &root,
+            stop,
+            publication,
         )
         .await?;
     plan["workspaceSeeded"] = seed_workspace.into();
     if let Some(archives) = archives {
         let base_size = plan["resources"]["diskMiB"].as_u64();
-        match crate::project_archives::stage(session, &root, &archives, base_size).await {
+        match crate::project_archives::stage(session, &root, &archives, base_size, stop).await {
             Ok(base) => {
                 if let Some(key) = base {
                     plan["nativeProjectBase"] = key.into();
@@ -388,12 +558,17 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
                 plan["nativeProjectArchives"] = serde_json::to_value(archives)?;
             }
             Err(error) => {
-                fallback_seed(session, &root, error).await?;
+                fallback_seed(session, &root, error, stop, publication).await?;
                 seed_workspace = true;
                 plan["workspaceSeeded"] = true.into();
             }
         }
     }
+    let _publish = match publication {
+        Some(fence) => Some(fence.lock().await),
+        None => None,
+    };
+    check_preparing(stop)?;
     if !seed_workspace {
         resume_import_directories(&plan, &root).await?;
     }
@@ -401,6 +576,7 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
     // A disconnected connector cannot leave a newly prepared VM runnable forever.
     plan["nodeLeaseRequired"] = true.into();
 
+    check_preparing(stop)?;
     crate::skills::atomic_write(
         &plan_path(data, &session.attempt),
         &serde_json::to_vec(&plan)?,
@@ -409,7 +585,14 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
     Ok(plan)
 }
 
-async fn fallback_seed(session: &Session, root: &Path, error: Error) -> Result<()> {
+async fn fallback_seed(
+    session: &Session,
+    root: &Path,
+    error: Error,
+    stop: &CancellationToken,
+    publication: Option<&Mutex<()>>,
+) -> Result<()> {
+    check_preparing(stop)?;
     if matches!(error.status, 401 | 403) {
         return Err(error);
     }
@@ -419,7 +602,12 @@ async fn fallback_seed(session: &Session, root: &Path, error: Error) -> Result<(
     );
     crate::project_archives::abandon_stage(root, error.status == 507, &session.attempt).await?;
     session
-        .seed(json!({ "kind": "initial", "workspace": true }), root)
+        .seed_preparation(
+            json!({ "kind": "initial", "workspace": true }),
+            root,
+            stop,
+            publication,
+        )
         .await
 }
 
@@ -458,9 +646,9 @@ async fn resume_import_directories(plan: &Value, root: &Path) -> Result<()> {
 }
 
 /// Hands the master's first lease to the local controller, minus the time already spent.
-async fn grant_lease(session: &Session, data: &Path) -> Result<()> {
+async fn grant_lease(session: &Session, data: &Path, stop: &CancellationToken) -> Result<()> {
     let started = super::boot_ms();
-    let grant = session.json("lease", &json!({})).await?;
+    let grant = await_preparation(stop, session.json("lease", &json!({}))).await?;
     let remaining = grant["remainingMs"]
         .as_u64()
         .unwrap_or(0)
@@ -468,6 +656,7 @@ async fn grant_lease(session: &Session, data: &Path) -> Result<()> {
     let controller =
         std::env::var("RUNNER_URL").map_err(|_| Error::bad("Missing local runner."))?;
     let credential = crate::execution::secret(data, "runner-secret").await?;
+    check_preparing(stop)?;
     let lease = super::local_client()?
         .post(format!(
             "{}/runs/{}/lease",
@@ -517,6 +706,246 @@ async fn refresh_inbox(session: Session, root: PathBuf, stop: CancellationToken)
 mod tests {
     use super::*;
     use axum::{Json, Router, body::Body, routing::post};
+
+    #[test]
+    fn native_relay_stop_drains_a_pending_seed() {
+        let fixture = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "nodes::executor::tests::native_relay_stop_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CAIRN_NODE_BACKEND", "native")
+            .env("DATA_DIR", fixture.path().join("data"))
+            .env("RUNNER_STATE_DIR", fixture.path().join("state"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated native node environment; run by its parent"]
+    async fn native_relay_stop_child() {
+        use futures_util::StreamExt;
+
+        let data = crate::nodes::node_data_dir();
+        let state = crate::native::state_dir();
+        crate::skills::private_dir(&data).await.unwrap();
+        crate::skills::private_dir(&state).await.unwrap();
+        std::fs::write(
+            state.join("storage-policy.json"),
+            br#"{"reserveMiB":64,"reservePercent":1}"#,
+        )
+        .unwrap();
+        std::fs::write(state.join(crate::microvm::budget::FILE), br#"{"nativeModeProtocol":1,"slots":1,"limits":{"cpu":1,"memoryMiB":1024,"diskMiB":1024}}"#).unwrap();
+        let budget = Router::new().route(
+            "/staging-budget",
+            axum::routing::get(|| async {
+                Json(json!({ "availableBytes": 16 * 1024 * 1024, "usedBytes": 0 }))
+            }),
+        );
+        let socket = tokio::net::UnixListener::bind(state.join("controller.sock")).unwrap();
+        let budget_server = tokio::spawn(async move { axum::serve(socket, budget).await.unwrap() });
+
+        let (run, attempt) = (crate::config::id(), crate::config::id());
+        let descriptor = json!({ "dataRoot": "/guest", "plan": { "id": attempt, "runId": run, "backend": "native", "imports": [] } });
+        let plan_requested = Arc::new(tokio::sync::Notify::new());
+        let observed_plan = plan_requested.clone();
+        let seed = Router::new()
+            .route("/internal/node-workspace/{attempt}/plan", post(move || {
+                let descriptor = descriptor.clone();
+                observed_plan.notify_one();
+                async move { Json(descriptor) }
+            }))
+            .route("/internal/node-workspace/{attempt}/seed", post(|| async {
+                let first = axum::body::Bytes::from_static(b"{\"kind\":\"file\",\"path\":\"partial\",\"size\":3,\"mode\":384}\n{\"data\":\"YWJj\"}\n");
+                let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(first) })
+                    .chain(futures_util::stream::pending());
+                let mut response = axum::response::Response::new(Body::from_stream(stream));
+                response.headers_mut().insert("x-cairn-seed-allocation", axum::http::HeaderValue::from_static("1048576"));
+                response
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master: url::Url = format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let manager = tokio::spawn(async move { axum::serve(listener, seed).await.unwrap() });
+        let executor = Arc::new(Executor::default());
+        let client = reqwest::Client::new();
+        let finishing_writer = crate::native::disk::lock_staging(&state, &run)
+            .await
+            .unwrap();
+        let mut preparing = {
+            let (executor, client, master, attempt) = (
+                executor.clone(),
+                client.clone(),
+                master.clone(),
+                attempt.clone(),
+            );
+            tokio::spawn(async move {
+                executor
+                    .prepare(&client, &master, "fixture", &attempt)
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), plan_requested.notified())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut preparing)
+                .await
+                .is_err(),
+            "the new attempt must wait while the old writer owns staging"
+        );
+        drop(finishing_writer);
+        let staged = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(entries) = std::fs::read_dir(data.join("runs")) {
+                    for entry in entries.flatten() {
+                        let partial = entry.path().join("partial");
+                        if std::fs::read(&partial).is_ok_and(|bytes| bytes == b"abc") {
+                            return entry.path();
+                        }
+                    }
+                }
+                assert!(
+                    !preparing.is_finished(),
+                    "seed returned before the held-open transfer"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_dir(state.join("native-preparations"))
+                .unwrap()
+                .count(),
+            2
+        );
+        let delete = format!("/runs/{attempt}");
+        let fence = tokio::time::timeout(
+            Duration::from_secs(5),
+            executor.before(&client, &master, "fixture", "DELETE", &delete, b"{}"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(fence.is_some());
+        assert!(preparing.await.unwrap().is_err());
+        assert!(!staged.exists());
+        assert!(!data.join("runs").join(&run).exists());
+        assert!(!plan_path(&data, &attempt).exists());
+        assert_eq!(
+            std::fs::read_dir(state.join("native-preparations"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let released = crate::native::disk::lock_staging(&state, &run)
+            .await
+            .unwrap();
+
+        // A racing prepare cannot enter before the forwarded DELETE leaves
+        // the local controller stopped receipt.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(30),
+                executor.prepare(&client, &master, "fixture", &attempt)
+            )
+            .await
+            .is_err()
+        );
+        std::fs::write(state.join(format!("{attempt}.stopped")), b"1").unwrap();
+        drop(released);
+        drop(fence);
+        assert!(
+            executor
+                .prepare(&client, &master, "fixture", &attempt)
+                .await
+                .unwrap_err()
+                .is_conflict()
+        );
+        late_live_seed_cannot_recreate_retired_staging(&data, &state, &client).await;
+        manager.abort();
+        budget_server.abort();
+    }
+
+    async fn late_live_seed_cannot_recreate_retired_staging(
+        data: &Path,
+        state: &Path,
+        client: &reqwest::Client,
+    ) {
+        let (run, attempt) = (crate::config::id(), crate::config::id());
+        let plans = data.join("runner-plans");
+        crate::skills::private_dir(&plans).await.unwrap();
+        let plan = plan_path(data, &attempt);
+        tokio::fs::write(&plan, json!({ "id": attempt, "runId": run }).to_string())
+            .await
+            .unwrap();
+
+        let requested = Arc::new(tokio::sync::Notify::new());
+        let reply = Arc::new(tokio::sync::Notify::new());
+        let route = {
+            let (requested, reply) = (requested.clone(), reply.clone());
+            Router::new().route(
+                "/internal/node-workspace/{attempt}/seed",
+                post(move || {
+                    let (requested, reply) = (requested.clone(), reply.clone());
+                    async move {
+                        requested.notify_one();
+                        reply.notified().await;
+                        Body::from("{\"complete\":true}\n")
+                    }
+                }),
+            )
+        };
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin: url::Url = format!("http://{}", server.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let server = tokio::spawn(async move { axum::serve(server, route).await.unwrap() });
+        let target = data.join("runs").join(&run).join("chat-input");
+        let seed = seed(
+            client,
+            &origin,
+            "fixture",
+            &attempt,
+            json!({ "kind": "inbox" }),
+            &target,
+        );
+        tokio::pin!(seed);
+        tokio::select! {
+            request = tokio::time::timeout(Duration::from_secs(5), requested.notified()) => { request.unwrap(); },
+            result = &mut seed => panic!("Seed finished before the authorized response: {result:?}"),
+        }
+        {
+            let _retirement = crate::native::disk::lock_staging(state, &run)
+                .await
+                .unwrap();
+            reply.notify_one();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut seed)
+                    .await
+                    .is_err()
+            );
+            tokio::fs::remove_file(plan).await.unwrap();
+        }
+        let error = tokio::time::timeout(Duration::from_secs(5), seed)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.is_conflict());
+        assert!(!target.parent().unwrap().exists());
+        server.abort();
+    }
 
     #[test]
     fn native_archive_resume_stages_generated_imports_for_controller_validation() {
@@ -647,7 +1076,9 @@ mod tests {
                 token: "fixture".into(),
                 attempt: attempt.clone(),
             };
-            let staged = stage_plan(&session, &data, descriptor).await.unwrap();
+            let staged = stage_plan(&session, &data, descriptor, &CancellationToken::new(), None)
+                .await
+                .unwrap();
             assert_eq!(staged["workspaceSeeded"], false);
             assert!(staged["nativeProjectArchives"].is_array());
             crate::native::validate_staged_plan(&data, &attempt)
@@ -723,14 +1154,26 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            fallback_seed(&session, &target, Error::forbidden("revoked"))
-                .await
-                .is_err()
+            fallback_seed(
+                &session,
+                &target,
+                Error::forbidden("revoked"),
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .is_err()
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        fallback_seed(&session, &target, Error::bad("archive checksum mismatch"))
-            .await
-            .unwrap();
+        fallback_seed(
+            &session,
+            &target,
+            Error::bad("archive checksum mismatch"),
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             tokio::fs::read_to_string(target.join("workspace/project/file"))

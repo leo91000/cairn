@@ -279,7 +279,7 @@ describe('native CI dependency setup', () => {
     expect(result.harnessKilled).toBe(false)
     const apt = result.calls.filter(call => ['update', 'install'].includes(call.phase))
     expect(apt.map(call => call.phase)).toEqual(['update', 'install'])
-    expect(apt[1].args.slice(-4)).toEqual(['libclang-dev', 'age', 'e2fsprogs', 'fakeroot'])
+    expect(apt[1].args.slice(-5)).toEqual(['libclang-dev', 'age', 'e2fsprogs', 'fakeroot', 'xfsprogs'])
     expect(result.output).toContain('phase=update event=apt-start')
     expect(result.output).toContain('phase=install event=end code=0')
   })

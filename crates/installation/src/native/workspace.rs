@@ -165,6 +165,7 @@ pub(super) async fn copy_admitted(
         budget,
         budget,
         |_| std::future::ready(Ok(0)),
+        files::Durability::PerFile,
         admit,
     )
     .await;
@@ -302,7 +303,7 @@ fn measure_with_seen(
     let directory = match directory {
         Ok(directory) => directory,
         Err(error)
-            if matches!(basis, Measurement::ExclusiveCredit)
+            if (seen.is_some() || matches!(basis, Measurement::ExclusiveCredit))
                 && error.kind() == std::io::ErrorKind::NotFound =>
         {
             return Ok(0);

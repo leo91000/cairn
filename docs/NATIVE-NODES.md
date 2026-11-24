@@ -9,7 +9,9 @@ never crash a driver. Review code before testing on a personal workstation.
 ## Requirements and enrollment
 
 Use Linux x86-64 with systemd 255+, cgroup v2, Python 3, curl, useradd/usermod,
-e2fsprogs, rsync and a dedicated ext4 project-quota data pool (see below).
+e2fsprogs, rsync and a dedicated XFS or ext4 project-quota data pool. Protected
+XFS launch uses idmapped mounts with a compatible kernel and util-linux 2.39
+or later. A missing mount capability uses journaled host ownership.
 Legacy journal conversion also needs io_uring and a working `ublk_drv` driver.
 Host libraries must be
 compatible with the published coding engines. The installed GPU
@@ -156,7 +158,7 @@ explicitly declare permanent conversation deletion. A manager-owned run namespac
 is never erased as native node staging, and its marker is excluded from remote
 seeds.
 
-Native environments keep ordinary retained directories on the dedicated ext4
+Native environments keep ordinary retained directories on the dedicated XFS or ext4
 project-quota pool at `state/native-data/<run>/`. Controller receipts and locks are
 on the separate host filesystem at `state/native/<run>/`. Stopping execution fences
 its consumers, flushes work and removes managed temporary files; retained workspace,
@@ -190,6 +192,21 @@ container stores are not converted or transferred.
 Revoke the node in Cairn first, then stop/disable `cairn-native-node.service` on its
 host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries and
 all retained local work; push commits and export files to keep before confirming revocation.
+After confirmed consumer shutdown, retire any persistent units installed by
+`migrate-pool` before running the Revoke command again. Use the migration
+receipt at `/var/lib/cairn-native/native-pool-migration/state.json` to identify the
+XFS UUID and, for image targets, the backing file. Inspect the pool unit with
+`systemctl cat "$(systemd-escape --path --suffix=mount /var/lib/cairn-native/state/native-data)"`
+and confirm that its `What=` references that UUID. For an image target, also
+inspect `systemctl cat cairn-native-data-loop.service` and confirm that it
+references the recorded image and UUID. Disable and stop the verified mount
+unit first, then disable and stop the verified loop service if present. Check
+with `findmnt` that the pool was unmounted and with `losetup --associated` and
+the recorded image path that no loop still holds it. Remove those verified
+unit files, then run `systemctl daemon-reload`. Keep any storage volume or
+backing file you need to retain outside the directories slated for removal.
+Operator-provisioned mount units are managed by the operator.
+
 After confirmed consumer shutdown, unmount the operator-provisioned native-data
 pool before removing its mountpoint. First confirm with `findmnt` that no other
 conversation disk is still mounted below
@@ -229,11 +246,11 @@ live memory reclamation preserve the running VMM; memory snapshots and the paire
 filesystem layout are no longer supported.
 
 
-## Pool de répertoires locaux (ADR-0088)
+## Pool de répertoires locaux
 
 Les nouveaux environnements utilisent des répertoires ordinaires dans
 `/var/lib/cairn-native/state/native-data/<conversation UUID>/`. Ce pool doit être
-un système de fichiers ext4 dédié, monté avec `prjquota`, appartenant à root sans
+un système de fichiers XFS ou ext4 dédié, monté avec `prjquota`, appartenant à root sans
 écriture pour les autres comptes. Son périphérique doit différer de celui du
 répertoire `state` : les quotas de données ne réservent pas les inodes du système
 de fichiers, et un pool plein doit encore pouvoir écrire ses reçus de nettoyage.
@@ -241,19 +258,81 @@ Les historiques et artefacts conservés par le manager ne sont pas déplacés da
 ce pool. Les cgroups bornent CPU/RAM/processus et les débits IO, pas les octets
 occupés. Le contrôleur vérifie aussi que les quotas sont effectivement actifs.
 
-Le propriétaire prépare et monte ce volume avant l’enrôlement ou la mise à jour
-du superviseur. Cairn ne reformate, ne repartitionne et ne remonte pas un système
-de fichiers de production. Pour un volume **vide et jetable**, la qualification
-utilise `mkfs.ext4 -O project,quota -E quotatype=prjquota`, puis un montage avec
-`-o prjquota`. Ces commandes détruisent le contenu de leur cible ; elles ne sont
-pas une procédure de conversion d’un disque existant. L’exploitant choisit la
-capacité et la persistance du montage. Les fichiers locaux retenus et leurs
-métadonnées restent à leur emplacement jusqu’à leur conversion vérifiée.
+Pour une nouvelle installation, préparez un volume XFS dédié avec
+`mkfs.xfs -m crc=1,reflink=1 -i projid32bit=1` sur une cible vide, puis montez-le
+de façon persistante avec `prjquota` avant l’enrôlement. Un pool ext4 existant
+reste utilisable avec une copie des bases projet. XFS avec reflink partage les
+blocs de chaque base entre les environnements privés.
 
-Le protocole de distribution `nativeHostProtocol: 2` exige un rafraîchissement
-explicite du superviseur après préparation du pool. Un ancien superviseur refuse
-la distribution avant de sélectionner le candidat ; le protocole d’exécution
-reste 2. Aucun déploiement de cette migration n’est réalisé par la PR.
+### Migrer un nœud ext4 vers XFS hors ligne
+
+Sur le pool ext4, mettez à jour le nœud vers une version comprenant la commande
+`cairn native-pool-migrate`. Relancez la commande d’installation native fournie
+par le manager de cette release pour rafraîchir `/opt/cairn-native/host.py` sans
+réenrôler le nœud. Redémarrez le superviseur lorsque le nœud est inactif et
+vérifiez qu’il est opérationnel sur ext4 avant de préparer la migration.
+Installez `xfsprogs` et `rsync` sur le nœud, et vérifiez votre sauvegarde des
+données du pool et du répertoire `/var/lib/cairn-native/state`.
+
+Choisissez une partition ou un volume logique inutilisé sur le nœud. Remplacez
+`/dev/mapper/cairn-native-xfs` dans l’exemple par cette cible. Le premier appel
+affiche le plan. Le second formate la cible, arrête le service s’il tourne, copie
+et vérifie les environnements, puis configure le montage de façon persistante.
+Exécutez-le depuis une session d’administration qui survit à l’arrêt du nœud.
+
+```sh
+sudo python3 /opt/cairn-native/host.py migrate-pool --device /dev/mapper/cairn-native-xfs --dry-run
+sudo python3 /opt/cairn-native/host.py migrate-pool --device /dev/mapper/cairn-native-xfs --stop
+```
+
+Si vous utilisez un fichier image, remplacez `--device …` par
+`--image /var/lib/cairn-native/native-data.xfs --size 200G`, avec une capacité
+adaptée aux données et à l’espace physique libre. L’outil alloue toute la taille
+demandée sur le système de fichiers hôte et vérifie que le loop accepte le
+direct I/O avant de formater le pool. Il désactive le discard sur ce loop
+pour préserver l’allocation du fichier. Pour un pool source déclaré dans `/etc/fstab`, installez
+d’abord une unité `.mount` persistante équivalente et vérifiez le montage ext4.
+L’image doit être allouée sur toute sa plage avec des blocs privés. L’outil
+vérifie cette allocation et l’association de l’inode au loop avant le formatage.
+Le fichier et tous ses répertoires parents doivent appartenir à root, sans
+lien symbolique ni écriture pour les groupes et autres comptes. Au démarrage,
+le service loop vérifie le fichier ouvert contre le reçu de migration avant de
+l’attacher et contrôle l’UUID XFS avant de rendre le pool disponible. L’unité de
+montage utilise le périphérique loop vérifié via un lien privé dans `/run`.
+Intégrez les éventuels drop-ins à cette unité avant d’arrêter le nœud. Le retour
+à ext4 rétablit les liens de démarrage présents avant la migration.
+La migration réserve au moins 64 Mio, plus 64 Kio par environnement, pour les
+reçus de récupération sur les systèmes de fichiers du contrôleur. Un fichier
+image sur le même système de fichiers doit laisser cette réserve disponible.
+L’outil conserve les restrictions de montage `nosuid`, `nodev`,
+`noexec` et `nosymfollow` du pool ext4.
+Il refuse les attributs inode qu’il ne sait pas préserver, par exemple
+`nodump`, et indique le fichier concerné avant la bascule.
+
+Après interruption, relancez `migrate-pool` avec la même cible pour reprendre.
+Si le formatage d’une partition ou d’un volume logique a été interrompu avant
+que son UUID XFS puisse être vérifié, lancez `rollback-pool`, vérifiez le volume
+voulu et démarrez une nouvelle migration.
+Une copie interrompue est recréée sur la cible avant la vérification. Le
+contrôleur refuse la bascule tant que l’écriture de la copie et des quotas sur
+le disque n’a pas été confirmée.
+Le nœud reste arrêté à la fin. `rollback-pool` restaure l’ancien montage et ses
+reçus. Le contrôleur attend l’autorisation explicite `activate-pool`, même après
+un redémarrage de la machine. Après cette autorisation, la première ouverture
+du pool XFS en écriture ferme la possibilité de basculer vers ext4, afin de préserver les
+nouvelles écritures. Conservez le pool ext4 et la sauvegarde pendant la
+vérification.
+
+```sh
+sudo python3 /opt/cairn-native/host.py activate-pool
+sudo systemctl start cairn-native-node.service
+findmnt --mountpoint /var/lib/cairn-native/state/native-data
+```
+
+Le runtime peut être distribué sur ext4 par un superviseur utilisant le
+protocole de distribution 2. Avant le formatage et avant l’autorisation
+d’activation, l’outil vérifie que `/opt/cairn-native/host.py` correspond à la
+version de l’outil exécuté.
 
 Une reprise rouvre l’arbre existant. Une source manquante ou inconnue est refusée,
 sans recréation silencieuse. La compatibilité ublk n’est chargée que pour des

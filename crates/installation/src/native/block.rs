@@ -40,12 +40,15 @@ pub(crate) struct View {
 
 impl View {
     fn native(root: &Path) -> Self {
-        let data = root.join("data");
+        Self::at(&root.join("data"))
+    }
+
+    pub(super) fn at(data: &Path) -> Self {
         Self {
             home: data.join("home"),
             workspace: data.join("workspaces"),
             output: data.join("output"),
-            filesystems: vec![data],
+            filesystems: vec![data.to_owned()],
         }
     }
 
@@ -990,7 +993,7 @@ pub(super) async fn sync_io(path: &Path) -> std::io::Result<()> {
 /// last check, but a descriptor opened late starts past any error another
 /// syncfs caller has already seen. Open the directory before writing a tree so
 /// concurrent syncfs callers on the same filesystem cannot hide its errors.
-pub(super) async fn sync_opened(directory: std::fs::File) -> std::io::Result<()> {
+pub(crate) async fn sync_opened(directory: std::fs::File) -> std::io::Result<()> {
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
         require_writable(&directory)?;
@@ -1008,7 +1011,7 @@ pub(super) async fn sync_opened(directory: std::fs::File) -> std::io::Result<()>
     .map_err(std::io::Error::other)?
 }
 
-fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
+pub(super) fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
     // Native workspaces are mounted writable. ext4 can return success from

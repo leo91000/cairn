@@ -173,6 +173,28 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             "Conversation disks are local; remote restore is no longer supported.",
         )),
         "metrics" => Ok(json!({ "remoteRequests": requests.load(Ordering::SeqCst) })),
+        "connector-seed-offer" => {
+            let attempt = command["attempt"]
+                .as_str()
+                .ok_or_else(|| Error::bad("Missing seed attempt."))?;
+            cairn_installation::validation::uuid(attempt)?;
+            let root = s.config.data_dir.parent().unwrap();
+            let source = root.join(format!("connector-seed-{attempt}"));
+            let skip_workspace = command["skipWorkspace"] == true;
+            tokio::task::spawn_blocking(move || {
+                let started = std::time::Instant::now();
+                let skipped = skip_workspace.then_some(std::path::Path::new("workspace"));
+                let (key, allocation) = nodes::workspace::native_seed_offer(&source, skipped);
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                json!({
+                    "key": key,
+                    "allocation": allocation,
+                    "elapsedMs": elapsed_ms,
+                })
+            })
+            .await
+            .map_err(Error::internal)
+        }
         "archive-hash" => {
             let path = PathBuf::from(
                 command["path"]

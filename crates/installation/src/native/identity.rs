@@ -4,16 +4,20 @@
 use super::atomic_write;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{path::Path, time::Duration};
+use tokio_util::sync::CancellationToken;
 
+mod mounts;
 mod reconcile;
 
-pub(super) use reconcile::reconcile;
+pub(super) use mounts::{Mapped, supported as idmapped_mounts_supported};
+pub(super) use reconcile::{mark_base_owner, rebind_pending, reconcile, stored_owner};
 use tokio::process::Command;
 
 const COUNT: u32 = 65536;
 const ROOT_FIRST: u32 = 500_000_000;
 const ROOT_END: u32 = ROOT_FIRST + 1_048_576;
+const STORAGE_OWNER: &str = "namespace-storage-v1";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(super) struct Identity {
@@ -30,6 +34,32 @@ pub(super) struct Identity {
 }
 
 impl Identity {
+    /// Keep the template engine owner on disk, and set aside a disjoint range
+    /// for rootless Docker's other IDs. The retained marker records the actual
+    /// range, including when this environment travels to another node.
+    pub(super) fn storage(engine: (u32, u32)) -> Self {
+        let range = |id| {
+            if (1..=COUNT).contains(&id) {
+                COUNT + 1
+            } else {
+                1
+            }
+        };
+        Self {
+            user: STORAGE_OWNER.into(),
+            root_uid: 0,
+            root_gid: 0,
+            subuid: range(engine.0),
+            subgid: range(engine.1),
+            host_engine: Some(engine),
+        }
+    }
+
+    pub(super) fn is_storage(&self) -> bool {
+        self.host_engine
+            .is_some_and(|(uid, gid)| uid != 0 && gid != 0 && self == &Self::storage((uid, gid)))
+    }
+
     pub fn uid(&self) -> u32 {
         self.host_engine.map_or(self.subuid + 999, |ids| ids.0)
     }
@@ -239,10 +269,13 @@ async fn reserve_root(
     Ok(id)
 }
 
-/// Called under the controller's disk lock, before exposing any files. Accounts
-/// are retained with their environments; they are never recycled into another
-/// conversation, including after a crash halfway through provisioning.
-pub(super) async fn provision(state: &Path, run_id: &str) -> Result<Identity> {
+/// Before exposing files, serialize host account allocation across conversations.
+/// Accounts stay with their environments, including after an interrupted allocation.
+pub(super) async fn provision(
+    state: &Path,
+    run_id: &str,
+    stop: &CancellationToken,
+) -> Result<Identity> {
     crate::validation::uuid(run_id)?;
     let user = format!("cairn-c-{}", run_id.replace('-', ""));
     // Linux account names are bounded to 32 characters. Keep 96 UUID bits and
@@ -250,10 +283,13 @@ pub(super) async fn provision(state: &Path, run_id: &str) -> Result<Identity> {
     let user = user[..32].to_owned();
     let registry = state.join("identities");
     crate::skills::private_dir(&registry).await?;
-    let _lock = crate::file_lock::exclusive(
+    let _lock = crate::file_lock::exclusive_after_release(
         &registry.join("lock"),
         "Native identity provisioning is busy.",
-    )?;
+        stop,
+        Duration::from_secs(120),
+    )
+    .await?;
     let record = registry.join(format!("{user}.json"));
     let mut saved = match tokio::fs::read(&record).await {
         Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)?,
@@ -413,6 +449,27 @@ fn translate(id: u32, old_root: u32, old_start: u32, root: u32, start: u32) -> u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn contended_identity_provisioning_waits_and_can_be_cancelled() {
+        let state = tempfile::tempdir().unwrap();
+        let registry = state.path().join("identities");
+        crate::skills::private_dir(&registry).await.unwrap();
+        let _owner = crate::file_lock::exclusive(&registry.join("lock"), "busy").unwrap();
+        let run = crate::config::id();
+        let stop = CancellationToken::new();
+        let provision = provision(state.path(), &run, &stop);
+        tokio::pin!(provision);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut provision)
+                .await
+                .is_err()
+        );
+        stop.cancel();
+        let error = provision.await.unwrap_err();
+        assert_eq!(error.status, 503);
+        assert_eq!(std::fs::read_dir(registry).unwrap().count(), 1);
+    }
 
     #[test]
     fn namespace_maps_must_match_the_reserved_identity_exactly() {
