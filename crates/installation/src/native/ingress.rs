@@ -96,6 +96,7 @@ struct Observation {
     used: u64,
     submitted: u64,
     outstanding: u64,
+    peer_reservations: u64,
 }
 
 impl Admission {
@@ -124,6 +125,7 @@ impl Admission {
     ) -> Result<Self> {
         let initial_target = allocated(target)?;
         let used = disk::usage_sync(data, state)?;
+        let peer_reservations = disk::preparation_bytes(state)?;
         Ok(Self {
             data: data.to_owned(),
             state: state.to_owned(),
@@ -140,6 +142,7 @@ impl Admission {
                 used,
                 submitted: 0,
                 outstanding: 0,
+                peer_reservations,
             },
         })
     }
@@ -161,6 +164,8 @@ impl Admission {
     pub fn with_reservation(mut self, bytes: u64) -> Self {
         self.reservation = bytes;
         self.observation.used = self.observation.used.saturating_sub(bytes);
+        self.observation.peer_reservations =
+            self.observation.peer_reservations.saturating_sub(bytes);
         self
     }
 
@@ -196,6 +201,8 @@ impl Admission {
         if self.observation.at.elapsed() >= Duration::from_millis(250) {
             let started = Instant::now();
             let used = disk::usage_sync(&self.data, &self.state)?.saturating_sub(self.reservation);
+            let peer_reservations =
+                disk::preparation_bytes(&self.state)?.saturating_sub(self.reservation);
             let growth = allocated(&self.target)?.saturating_sub(self.initial_target);
             // Delayed allocation and small-file overhead must not erase a
             // debit merely because a new usage sample does not show it yet.
@@ -210,6 +217,7 @@ impl Admission {
                 used: used.saturating_add(outstanding),
                 submitted: self.submitted,
                 outstanding,
+                peer_reservations,
             };
         }
         let since = self.submitted.saturating_sub(self.observation.submitted);
@@ -223,6 +231,9 @@ impl Admission {
         let physical = free
             .saturating_sub(policy.reserve(total))
             .saturating_sub(pending)
+            // Even a serialized fallback can overlap peers that released
+            // storage.lock after reserving a bounded transfer.
+            .saturating_sub(self.observation.peer_reservations)
             .saturating_sub(self.observation.outstanding)
             .saturating_sub(since);
         if allocation.saturating_add(disk::MIB) > physical
@@ -256,6 +267,25 @@ fn allocated(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fallback_staging_cannot_consume_a_reserved_peer_streams_physical_headroom() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let data = temp.path().join("data");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::create_dir(&data).unwrap();
+        let policy = storage::policy::Policy::default();
+        let (_, free) = storage::policy::physical_space(&data).unwrap();
+        let peer = disk::Preparation::reserve(&state, &crate::config::id(), free)
+            .await
+            .unwrap();
+        let mut fallback = Admission::new(&data, &state, &data, &data, u64::MAX, &policy).unwrap();
+        assert_eq!(fallback.admit(4096).unwrap_err().status, 507);
+        drop(peer);
+        let mut available = Admission::new(&data, &state, &data, &data, u64::MAX, &policy).unwrap();
+        available.admit(4096).unwrap();
+    }
 
     #[tokio::test]
     #[ignore = "requires the disposable ext4 quota pool with a privileged parent"]

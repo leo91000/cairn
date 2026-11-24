@@ -886,6 +886,53 @@ class PoolMigrationTests(unittest.TestCase):
                 self.assertRaisesRegex(host.MigrationError, 'aliases'):
             host.verify_image_location(link / 'new.xfs', state, pool)
 
+    def test_new_image_can_resume_after_its_receipt_preceded_the_link(self):
+        image = self.root / 'new.xfs'
+        record = dict(phase='planned', target={'image': str(image), 'size': 1 << 30})
+        with patch.object(host.os, 'link', side_effect=host.MigrationError('interrupted before publication')), \
+                self.assertRaisesRegex(host.MigrationError, 'before publication'):
+            host.prepare_image(record, image, False)
+        self.assertFalse(image.exists())
+        saved = host.load_migration()
+        staged = image.with_name(saved['createdImage']['name'])
+        self.assertTrue(staged.is_file())
+        host.prepare_image(saved, image, False)
+        self.assertEqual(image.stat().st_ino, saved['createdImage']['inode'])
+        self.assertEqual(image.stat().st_size, 1 << 30)
+        self.assertFalse(staged.exists())
+
+    def test_planned_device_can_repeat_mkfs_using_only_its_recorded_signature(self):
+        device = self.root / 'synthetic-device'
+        device.touch()
+        expected = str(host.uuid.uuid4())
+        record = dict(phase='planned', uuid=expected, formatDevice=device.stat().st_rdev,
+                      target={'device': str(device)})
+        host.save_migration(record)
+        with patch.object(host, 'check_device', return_value=True) as check, \
+                patch.object(host, 'filesystem_uuid', return_value=expected), \
+                patch.object(host, 'checked') as commands, patch.object(host, 'mount_of', return_value=None), \
+                patch.object(host.os, 'chown'):
+            host.prepare_target(record, False)
+        check.assert_called_once_with(device, False, uuid=expected)
+        self.assertIn(f'crc=1,reflink=1,uuid={expected}', commands.call_args_list[0].args)
+        self.assertEqual(host.load_migration()['phase'], 'formatted')
+
+    def test_manual_ext4_mount_keeps_active_flags_and_rejects_special_loop_geometry(self):
+        pool = host.pool_path()
+        options = 'ro,nosuid,noexec,relatime,prjquota,errors=remount-ro'
+        def system(*args, **_):
+            if args[0] == 'systemd-escape':
+                return OLD['unit']
+            if args[0] == 'systemctl':
+                return 'FragmentPath=\nSourcePath=\n'
+            return '0 0 1 4096'
+        with patch.object(host, 'checked', side_effect=system), patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']):
+            with patch.object(host, 'mount_of', return_value=dict(source='/dev/sdb1', fstype='ext4', options=options)):
+                self.assertEqual(host.old_pool(pool)['options'], options)
+            with patch.object(host, 'mount_of', return_value=dict(source='/dev/loop0', fstype='ext4', options=options)), \
+                    self.assertRaisesRegex(host.MigrationError, 'nondefault manual loop'):
+                host.old_pool(pool)
+
     @unittest.skipUnless(host.shutil.which('rsync'), 'migration requires rsync')
     def test_copy_repairs_bytes_with_the_same_size_and_mtime(self):
         source, target = self.root / 'source', self.root / 'target'

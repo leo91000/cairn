@@ -368,9 +368,7 @@ async fn migrate(
             )
             .await?;
             private_dir(&staging).await?;
-            let capacity = CopyCapacity {
-                state: state.to_owned(), workload: workload.clone(), required, fallback, reserved: 0,
-            };
+            let capacity = CopyCapacity::new(state, &workload, required, fallback);
             // A different filesystem: copy and checksum every byte.
             copy_verified_with_capacity(&source, &staging, stop, Some(&capacity), false).await?;
             // Verify the final allocated total as well as the kernel-enforced
@@ -667,6 +665,10 @@ impl CopyCapacity {
     }
 
     pub(super) async fn check(&self) -> Result<()> {
+        self.check_pressure(true).await
+    }
+
+    async fn check_pressure(&self, before_copy: bool) -> Result<()> {
         let workload = self.workload.clone();
         let allocated = tokio::task::spawn_blocking(move || quota::usage(&workload))
             .await
@@ -674,7 +676,10 @@ impl CopyCapacity {
         let remaining = if self.shared_blocks {
             // XFS charges shared data to the project, so a gain in that
             // counter does not prove this copy used its physical reservation.
-            self.required
+            // The initial check covers the estimate. Once writes begin, space
+            // already spent is visible in statvfs. Adding the whole estimate
+            // to that sample would require headroom for the same work twice.
+            if before_copy { self.required } else { 0 }
         } else {
             self.required.saturating_sub(allocated)
         };
@@ -908,7 +913,7 @@ async fn copy_status(
             },
             _ = interval.tick(), if capacity.is_some() => {
                 if let Some(capacity) = capacity
-                    && let Err(error) = capacity.check().await
+                    && let Err(error) = capacity.check_pressure(false).await
                 {
                     break Err(error);
                 }
@@ -972,7 +977,7 @@ async fn copy_status(
         )));
     }
     if let Some(capacity) = capacity {
-        capacity.check().await?;
+        capacity.check_pressure(false).await?;
     }
     Ok(())
 }
@@ -1696,13 +1701,7 @@ mod tests {
         quota::prepare(&state, &workload, 128 * super::super::disk::MIB)
             .await
             .unwrap();
-        let capacity = CopyCapacity {
-            state: state.clone(),
-            workload: workload.clone(),
-            required: 96 * super::super::disk::MIB,
-            fallback: policy,
-            reserved: 0,
-        };
+        let capacity = CopyCapacity::new(&state, &workload, 96 * super::super::disk::MIB, policy);
         capacity.check().await.unwrap();
         let marker = data.path().join("copy-processes");
         let operation = tokio::spawn({

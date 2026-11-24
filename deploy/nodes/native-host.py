@@ -26,6 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 
 ROOT = Path('/var/lib/cairn-native')
@@ -890,7 +891,9 @@ def offline_command(args, timeout, env=None):
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                child.wait()
+                # Wait for the inherited pipes too, so a killed rsync helper
+                # cannot outlive its leader while the pool lock is released.
+                child.communicate()
             raise
 
 
@@ -1033,7 +1036,7 @@ def old_pool(pool):
         raise MigrationError(f'{pool} is mounted from /etc/fstab; replace that entry with a {unit} unit before migrating.')
     fragment = properties.get('FragmentPath') or ''
     source = mounted.get('source', '')
-    what, options = source, ['prjquota']
+    what, options = source, mounted['options'].split(',')
     fragment_bytes = None
     if fragment and Path(fragment).is_file():
         fragment_bytes = Path(fragment).read_bytes()
@@ -1044,7 +1047,11 @@ def old_pool(pool):
             elif key.strip() == 'Options':
                 options = value.strip().split(',')
     elif source.startswith('/dev/loop'):
-        what, options = checked('losetup', '--noheadings', '--output', 'BACK-FILE', source).strip(), ['loop', 'prjquota']
+        geometry = checked('losetup', '--noheadings', '--output', 'OFFSET,SIZELIMIT,DIO,LOG-SEC', source).split()
+        if geometry != ['0', '0', '0', '512']:
+            raise MigrationError('The ext4 pool uses nondefault manual loop settings. Preserve them in a persistent mount unit before migrating.')
+        what = checked('losetup', '--noheadings', '--output', 'BACK-FILE', source).strip()
+        options.insert(0, 'loop')
     return {'unit': unit, 'fragment': fragment if fragment_bytes is not None else None,
             'unitSha256': hashlib.sha256(fragment_bytes).hexdigest() if fragment_bytes is not None else None,
             'what': what, 'type': 'ext4', 'options': ','.join(options),
@@ -1234,11 +1241,21 @@ def copy_environment(run, source, target):
 
 
 def filesystem_path(path):
-    mounts = json.loads(checked('findmnt', '--json', '--target', str(path), '--output', 'TARGET,FSROOT'))['filesystems']
-    if len(mounts) != 1:
-        raise MigrationError(f'Cannot identify the underlying filesystem of {path}.')
-    mount = mounts[0]
-    return Path(mount['fsroot']) / path.relative_to(Path(mount['target']))
+    # A pathname can have stacked mounts. The open descriptor identifies
+    # the mount whose inode the caller can actually use.
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        fdinfo = Path(f'/proc/self/fdinfo/{descriptor}').read_text()
+        mount_id = next((line.split()[1] for line in fdinfo.splitlines() if line.startswith('mnt_id:')), None)
+        for line in Path('/proc/self/mountinfo').read_text().splitlines():
+            fields = line.split()
+            if fields[0] == mount_id:
+                decode = lambda value: Path(re.sub(r'\\(040|011|012|134)', lambda match: chr(int(match[1], 8)), value))
+                root, target = decode(fields[3]), decode(fields[4])
+                return root / path.relative_to(target)
+    finally:
+        os.close(descriptor)
+    raise MigrationError(f'Cannot identify the underlying filesystem of {path}.')
 
 
 def verify_image_location(image, state, pool):
@@ -1255,23 +1272,52 @@ def verify_image_location(image, state, pool):
         raise MigrationError('Keep the new image outside aliases of the old pool or controller state.')
 
 
+def prepare_image(record, image, force):
+    verify_image_location(image, ROOT / 'state', pool_path())
+    created = record.get('createdImage')
+    if not created:
+        if image.exists():
+            if record['phase'] == 'planned' and not force:
+                raise MigrationError(f'{image} already exists; pass --force to reuse and overwrite it.')
+            return
+        if record['phase'] != 'planned':
+            raise MigrationError(f'The image for this migration is missing: {image}.')
+        # Keep the new inode private until its identity is committed. A crash
+        # after the link can recognize the final name without requiring force.
+        with tempfile.NamedTemporaryFile(prefix='.cairn-native-xfs-', dir=image.parent, delete=False) as output:
+            os.ftruncate(output.fileno(), record['target']['size'])
+            os.fsync(output.fileno())
+            metadata = os.fstat(output.fileno())
+            created = {'name': Path(output.name).name, 'device': metadata.st_dev, 'inode': metadata.st_ino}
+        sync_directory(image.parent)
+        record['createdImage'] = created
+        save_migration(record)
+
+    name = created['name']
+    if Path(name).name != name or not name.startswith('.cairn-native-xfs-'):
+        raise MigrationError('Invalid staged XFS image name.')
+    staged = image.with_name(name)
+    published = image.exists()
+    expected = (created['device'], created['inode'])
+    actual = (image if published else staged).stat(follow_symlinks=False)
+    if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != expected:
+        raise MigrationError('New pool image does not match the inode created for this migration.')
+    if not published:
+        os.link(staged, image, follow_symlinks=False)
+        sync_directory(image.parent)
+    if staged.exists():
+        metadata = staged.stat(follow_symlinks=False)
+        if (metadata.st_dev, metadata.st_ino) == expected:
+            staged.unlink()
+            sync_directory(image.parent)
+
+
 def prepare_target(record, force):
     target = record['target']
     work = migration_directory()
     if 'image' in target:
         image = Path(target['image'])
-        verify_image_location(image, ROOT / 'state', pool_path())
-        if record['phase'] == 'planned' and not image.exists():
-            descriptor = os.open(image, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-            try:
-                os.ftruncate(descriptor, target['size'])
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            record['createdImage'] = True
-            save_migration(record)
-        elif record['phase'] == 'planned' and not force and not record.get('createdImage'):
-            raise MigrationError(f'{image} already exists; pass --force to reuse and overwrite it.')
+        prepare_image(record, image, force)
         device = attached_loop(image)
         if device is None:
             device = Path(checked('losetup', '--direct-io=on', '--find', '--show', str(image)).strip())
@@ -1279,14 +1325,24 @@ def prepare_target(record, force):
             print(f'Warning: {device} could not enable direct I/O; the host page cache will double-cache pool data.', file=sys.stderr)
     else:
         device = Path(target['device'])
-    ours = record.get('uuid') is not None and record['phase'] != 'planned'
-    if not ours:
-        check_device(device, force or 'image' in target)
-        checked('mkfs.xfs', '-f', '-q', '-L', 'cairn-native', '-m', 'crc=1,reflink=1', '-i', 'projid32bit=1', str(device), timeout=1800)
-        record['uuid'] = filesystem_uuid(device)
+    expected = record['uuid']
+    if record['phase'] == 'planned':
+        ours = check_device(device, force or 'image' in target, uuid=expected)
+        if 'device' in target:
+            device_id = device.stat().st_rdev
+            if not ours and record.get('formatDevice', device_id) != device_id:
+                raise MigrationError(f'{device} no longer identifies the original formatting target.')
+            if 'formatDevice' not in record:
+                record['formatDevice'] = device_id
+                save_migration(record)
+        # A partial mkfs can already have written the recorded UUID. The
+        # planned phase contains no copied environments and can format again.
+        checked('mkfs.xfs', '-f', '-q', '-L', 'cairn-native', '-m', f'crc=1,reflink=1,uuid={expected}', '-i', 'projid32bit=1', str(device), timeout=1800)
+        if filesystem_uuid(device) != expected:
+            raise MigrationError(f'{device} did not retain the migration XFS UUID.')
         record['phase'] = 'formatted'
         save_migration(record)
-    elif filesystem_uuid(device) != record['uuid']:
+    elif filesystem_uuid(device) != expected:
         raise MigrationError(f'{device} no longer holds the XFS filesystem this migration formatted.')
     mountpoint = work / 'target'
     mountpoint.mkdir(mode=0o700, exist_ok=True)
@@ -1350,7 +1406,7 @@ def migrate_pool(arguments):
         needed = plan['usedBytes'] + plan['usedBytes'] // 10 + 1024 ** 3
         if target['size'] < needed or (free.f_bavail * free.f_frsize < needed and not Path(target['image']).exists()):
             raise MigrationError(f'The new pool needs at least {needed} bytes, both as --size and free space next to the image.')
-    record = record or {'version': 1, 'target': target, 'phase': 'planned', 'old': old}
+    record = record or {'version': 1, 'target': target, 'phase': 'planned', 'old': old, 'uuid': str(uuid.uuid4())}
     if arguments.dry_run:
         units = active_units()
         print('Native data pool migration plan (dry run, nothing changed):')
