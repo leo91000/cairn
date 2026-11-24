@@ -363,8 +363,48 @@ pub async fn seed(
     master: &url::Url,
     token: &str,
     attempt: &str,
+    selection: Value,
+    target: &Path,
+) -> Result<()> {
+    seed_with_stop(
+        client,
+        master,
+        token,
+        attempt,
+        selection,
+        target,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
+pub(crate) fn check_preparing(stop: &tokio_util::sync::CancellationToken) -> Result<()> {
+    if stop.is_cancelled() {
+        return Err(Error::unavailable("Node workspace preparation stopped."));
+    }
+    Ok(())
+}
+
+/// Cancel waits that have no owned writes. Writers observe the same token
+/// between reads and drain accepted I/O before releasing their leases.
+pub(crate) async fn await_preparation<T>(
+    stop: &tokio_util::sync::CancellationToken,
+    operation: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    check_preparing(stop)?;
+    stop.run_until_cancelled(operation)
+        .await
+        .ok_or_else(|| Error::unavailable("Node workspace preparation stopped."))?
+}
+
+pub(super) async fn seed_with_stop(
+    client: &reqwest::Client,
+    master: &url::Url,
+    token: &str,
+    attempt: &str,
     mut selection: Value,
     target: &Path,
+    stop: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     use futures_util::StreamExt;
     // The manager can authorize and open the source while unrelated local
@@ -374,9 +414,13 @@ pub async fn seed(
     if native_initial && selection.get(skill_cache::NEGOTIATE).is_none() {
         selection[skill_cache::NEGOTIATE] = json!(skill_cache::offered(&cache));
     }
-    let mut response = fetch(client, master, token, attempt, "seed", &selection).await?;
+    let mut response = await_preparation(
+        stop,
+        fetch(client, master, token, attempt, "seed", &selection),
+    )
+    .await?;
     let mut storage_guard = if crate::native::enabled() {
-        Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
+        Some(await_preparation(stop, crate::native::disk::lock(&crate::native::state_dir())).await?)
     } else {
         None
     };
@@ -409,7 +453,11 @@ pub async fn seed(
     {
         // An offered entry can be evicted while the manager prepares the reply.
         selection[skill_cache::NEGOTIATE] = Value::Null;
-        response = fetch(client, master, token, attempt, "seed", &selection).await?;
+        response = await_preparation(
+            stop,
+            fetch(client, master, token, attempt, "seed", &selection),
+        )
+        .await?;
         if response.headers().contains_key(skill_cache::HIT) {
             return Err(Error::bad(
                 "Manager omitted native skills after a cache miss.",
@@ -419,7 +467,7 @@ pub async fn seed(
         skill_key = None;
     }
     let budget = if crate::native::enabled() {
-        let available = crate::native::disk::staging_budget().await?;
+        let available = await_preparation(stop, crate::native::disk::staging_budget()).await?;
         // Inbox refresh copies into an inode already mounted by the workload;
         // its received temporary tree and the replacement can coexist briefly.
         let available = if selection["kind"] == "inbox" {
@@ -499,7 +547,8 @@ pub async fn seed(
     };
     let mut transport_interrupted = false;
     let mut received_bytes = 0u64;
-    let stream = response.bytes_stream().map(|result| match result {
+    let stream = Box::pin(response.bytes_stream().take_until(stop.cancelled()));
+    let stream = stream.map(|result| match result {
         Ok(bytes) => {
             received_bytes = received_bytes.saturating_add(bytes.len() as u64);
             Ok(bytes)
@@ -573,6 +622,7 @@ pub async fn seed(
     }
     .await;
     drop(reader);
+    check_preparing(stop)?;
     if transport_interrupted {
         return Err(Error::bad_gateway(
             "Workspace transfer was interrupted; source files are preserved.",
@@ -583,7 +633,10 @@ pub async fn seed(
             drop(temp);
             drop(reservation);
             selection[skill_cache::NEGOTIATE] = Value::Null;
-            return Box::pin(seed(client, master, token, attempt, selection, target)).await;
+            return Box::pin(seed_with_stop(
+                client, master, token, attempt, selection, target, stop,
+            ))
+            .await;
         }
         return Err(error);
     }
@@ -605,11 +658,20 @@ pub async fn seed(
                     drop(reservation);
                     drop(storage_guard);
                     selection[skill_cache::NEGOTIATE] = Value::Null;
-                    return Box::pin(seed(client, master, token, attempt, selection, target)).await;
+                    return Box::pin(seed_with_stop(
+                        client, master, token, attempt, selection, target, stop,
+                    ))
+                    .await;
                 }
             } else {
                 let _cache_write = if storage_guard.is_none() {
-                    Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
+                    Some(
+                        await_preparation(
+                            stop,
+                            crate::native::disk::lock(&crate::native::state_dir()),
+                        )
+                        .await?,
+                    )
                 } else {
                     None
                 };
@@ -624,6 +686,7 @@ pub async fn seed(
         prepare_native_inbox(&temp.path().join("chat-input")).await?;
         crate::native::block::sync_opened(barrier).await?;
     }
+    check_preparing(stop)?;
     // Preserve the directory inode mounted into a native workload. Replacing a
     // bind-mounted directory would leave it reading the previous inbox forever.
     if crate::native::enabled() && selection["kind"] == "inbox" {

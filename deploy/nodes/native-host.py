@@ -1272,6 +1272,18 @@ def verify_image_location(image, state, pool):
         raise MigrationError('Keep the new image outside aliases of the old pool or controller state.')
 
 
+def staged_image_path(image, receipt):
+    name = receipt['name']
+    if Path(name).name != name or not name.startswith('.cairn-native-xfs-'):
+        raise MigrationError('Invalid staged XFS image name.')
+    return image.with_name(name)
+
+
+def check_image_inode(metadata, receipt):
+    if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (receipt['device'], receipt['inode']):
+        raise MigrationError('New pool image does not match the inode created for this migration.')
+
+
 def prepare_image(record, image, force):
     verify_image_location(image, ROOT / 'state', pool_path())
     created = record.get('createdImage')
@@ -1285,40 +1297,41 @@ def prepare_image(record, image, force):
             return
         if record['phase'] != 'planned':
             raise MigrationError(f'The image for this migration is missing: {image}.')
-        # Keep the new inode private until its identity is committed. A crash
-        # after the link can recognize the final name without requiring force.
+        # Commit ownership while the staging file is empty, so an interrupted
+        # full allocation can always be resumed or released by rollback.
         with tempfile.NamedTemporaryFile(prefix='.cairn-native-xfs-', dir=image.parent, delete=False) as output:
-            try:
-                os.posix_fallocate(output.fileno(), 0, record['target']['size'])
-                os.fsync(output.fileno())
-            except OSError:
-                Path(output.name).unlink()
-                raise
+            os.fsync(output.fileno())
             metadata = os.fstat(output.fileno())
             created = {'name': Path(output.name).name, 'device': metadata.st_dev, 'inode': metadata.st_ino}
         sync_directory(image.parent)
         record['createdImage'] = created
         save_migration(record)
 
-    name = created['name']
-    if Path(name).name != name or not name.startswith('.cairn-native-xfs-'):
-        raise MigrationError('Invalid staged XFS image name.')
-    staged = image.with_name(name)
+    staged = staged_image_path(image, created)
     published = image.exists()
-    expected = (created['device'], created['inode'])
     actual = (image if published else staged).stat(follow_symlinks=False)
-    if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != expected:
-        raise MigrationError('New pool image does not match the inode created for this migration.')
-    if actual.st_size != record['target']['size'] or actual.st_blocks * 512 < actual.st_size:
-        raise MigrationError('The recorded pool image is no longer fully allocated at the requested size.')
+    check_image_inode(actual, created)
+    size = record['target']['size']
+    if actual.st_size != size or actual.st_blocks * 512 < size:
+        if published or actual.st_size > size:
+            raise MigrationError('The recorded pool image is no longer fully allocated at the requested size.')
+        descriptor = os.open(staged, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            check_image_inode(os.fstat(descriptor), created)
+            require_migration_running()
+            os.posix_fallocate(descriptor, 0, size)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    require_migration_running()
     if not published:
         os.link(staged, image, follow_symlinks=False)
         sync_directory(image.parent)
     if staged.exists():
         metadata = staged.stat(follow_symlinks=False)
-        if (metadata.st_dev, metadata.st_ino) == expected:
-            staged.unlink()
-            sync_directory(image.parent)
+        check_image_inode(metadata, created)
+        staged.unlink()
+        sync_directory(image.parent)
 
 
 def owned_loop(record, image):
@@ -1524,6 +1537,13 @@ def rollback_pool(arguments):
         # Switch never touched the original mount or its systemd files.
         if loop:
             checked('losetup', '--detach', str(loop))
+        if image and record.get('createdImage'):
+            image_path = Path(image)
+            staged = staged_image_path(image_path, record['createdImage'])
+            if staged.exists():
+                check_image_inode(staged.stat(follow_symlinks=False), record['createdImage'])
+                staged.unlink()
+                sync_directory(image_path.parent)
         finish_rollback(record)
         return
     original_unit = back_up_unit(old)

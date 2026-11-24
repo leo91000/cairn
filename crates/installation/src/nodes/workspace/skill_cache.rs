@@ -3,10 +3,10 @@
 use crate::{error::Result, nodes::files};
 use std::{
     io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
-use tokio::io::BufReader;
+use tokio::io::{AsyncReadExt, BufReader};
 
 pub(super) const KEY: &str = "x-cairn-seed-skills-key";
 pub(super) const HIT: &str = "x-cairn-seed-skills-hit";
@@ -68,11 +68,7 @@ pub(super) fn key(home: &Path) -> Option<String> {
         let metadata = std::fs::symlink_metadata(&path).ok()?;
         hash.update(&(name.len() as u64).to_le_bytes());
         hash.update(name);
-        let mode = if name.is_empty() {
-            0o700
-        } else {
-            metadata.mode() & 0o777
-        };
+        let mode = metadata.mode() & 0o777;
         hash.update(&mode.to_le_bytes());
         if metadata.is_dir() {
             let mut children = Vec::new();
@@ -134,8 +130,15 @@ pub(super) async fn install(
             "Native skill seed was sent twice.",
         ));
     }
+    let mut stream = BufReader::new(file);
+    let mode = stream.read_u32_le().await?;
+    if mode > 0o777 {
+        return Err(crate::error::Error::bad(
+            "Invalid cached native skill root mode.",
+        ));
+    }
     files::receive_admitted(
-        &mut BufReader::new(file),
+        &mut stream,
         &target,
         MAX_BYTES,
         MAX_BYTES,
@@ -144,6 +147,7 @@ pub(super) async fn install(
         admit,
     )
     .await?;
+    tokio::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode)).await?;
     if key(home).as_deref() != Some(digest) {
         return Err(crate::error::Error::conflict(
             "Cached native skills do not match the authorized seed.",
@@ -162,8 +166,10 @@ pub(super) async fn remember(
     if cache.join(digest).is_file() || key(home).as_deref() != Some(digest) {
         return Ok(());
     }
-    let mut bytes = Vec::new();
-    files::send(&home.join(".agents/skills"), &mut bytes).await?;
+    let skills = home.join(".agents/skills");
+    let mode = std::fs::symlink_metadata(&skills)?.mode() & 0o777;
+    let mut bytes = mode.to_le_bytes().to_vec();
+    files::send(&skills, &mut bytes).await?;
     let staging = cache
         .parent()
         .ok_or_else(|| crate::error::Error::bad("Missing seed cache parent."))?;
@@ -212,7 +218,6 @@ pub(super) async fn remember(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
     async fn only_the_authorized_skill_tree_is_reused() {
@@ -222,6 +227,7 @@ mod tests {
         let cache = fixture.path().join("cache");
         let skills = source.join(".agents/skills");
         std::fs::create_dir_all(skills.join("sample")).unwrap();
+        std::fs::set_permissions(&skills, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::create_dir_all(target.join(".agents")).unwrap();
         std::fs::write(
             source.join("generated-config"),
@@ -240,12 +246,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(key(&target).as_deref(), Some(digest.as_str()));
+        assert_eq!(
+            std::fs::metadata(target.join(".agents/skills"))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o755
+        );
         assert!(!target.join("generated-config").exists());
 
         std::fs::write(&file, b"new skill version").unwrap();
         assert_ne!(key(&source).as_deref(), Some(digest.as_str()));
         std::fs::remove_dir_all(target.join(".agents/skills")).unwrap();
-        let mut wrong_tree = Vec::new();
+        let mut wrong_tree = 0o755u32.to_le_bytes().to_vec();
         files::send(&skills, &mut wrong_tree).await.unwrap();
         std::fs::write(cache.join(&digest), wrong_tree).unwrap();
         assert!(

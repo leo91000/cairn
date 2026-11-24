@@ -820,10 +820,6 @@ impl Controller {
         };
         let preparation =
             disk::Preparation::reserve_on(&self.state, id, incoming, filesystem).await?;
-        // Capacity admission credited an existing tree. Keep the same gate
-        // until its claim is recorded so another attempt cannot take it, and
-        // budget/pressure handling cannot retire it in between.
-        let spare_guard = spare.then_some(disk);
         trace.phase(Phase::WorkspaceOwnership);
         let owner =
             Arc::new(workspace::execution_ownership(&self.state, text(&plan, "runId")).await?);
@@ -849,6 +845,10 @@ impl Controller {
             text(&plan, "runId"),
             resources.disk_mi_b.saturating_mul(disk::MIB),
         );
+        // Keep deletion out until the environment owner and active receipt
+        // are both visible. An admitted spare also keeps the gate until its
+        // claim is recorded so a peer cannot claim or retire it.
+        let spare_guard = spare.then_some(disk);
         let (controller, id) = (self.clone(), id.to_owned());
         let observation = Arc::new(std::mem::take(observation));
         let (lease_controller, lease_id, lease_stop) =
@@ -4410,6 +4410,52 @@ pub(crate) mod tests {
             .await
             .insert(id.clone(), crate::nodes::boot_ms() + 60_000);
         (run, id, plan)
+    }
+
+    #[tokio::test]
+    async fn activation_fences_retirement_until_the_attempt_is_registered() {
+        let (_fixture, controller) = fixture().await;
+        let (run, id, _) = busy_disk_fixture(&controller).await;
+        let workspace = controller.data.join("runs").join(&run).join("workspace");
+        let plans = controller.data.join("runner-plans");
+        private_dir(&workspace).await.unwrap();
+        private_dir(&plans).await.unwrap();
+        let plan = json!({
+            "id": id, "runId": run, "backend": "native", "nodeLeaseRequired": true,
+            "cwd": workspace, "projectRoot": workspace, "sandbox": "workspace-write",
+            "args": [], "prompt": "fixture",
+            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+            "imports": [{ "source": workspace, "target": workspace }],
+        });
+        atomic_write(
+            &plans.join(format!("{id}.json")),
+            &serde_json::to_vec(&plan).unwrap(),
+        )
+        .await
+        .unwrap();
+        let capacity = controller.capacity.lock().await;
+        let starting = {
+            let controller = controller.clone();
+            let id = id.clone();
+            tokio::spawn(async move { controller.start(&id).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !controller.active.lock().await.contains_key(&id) {
+                assert!(!starting.is_finished(), "preparation must reach activation");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let gate = crate::file_lock::exclusive(
+            &controller.state.join("storage.lock"),
+            "activation owns storage",
+        );
+        assert!(gate.err().unwrap().is_conflict());
+        starting.abort();
+        assert!(starting.await.unwrap_err().is_cancelled());
+        drop(capacity);
     }
 
     #[tokio::test]

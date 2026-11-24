@@ -1,4 +1,5 @@
 use super::*;
+use crate::nodes::workspace::{await_preparation, check_preparing};
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
@@ -8,23 +9,31 @@ async fn download(
     descriptor: &Archive,
     response: reqwest::Response,
     budget: u64,
+    stop: &CancellationToken,
 ) -> Result<std::fs::File> {
     let mut admission = None;
-    download_admitted(root, descriptor, response, budget, &mut |target, bytes| {
-        if !crate::native::enabled() {
-            return Ok(());
-        }
-        // Capture accounting only after cleanup/pruning, against this download's
-        // inode. Old cache removals cannot hide newly allocated payload bytes.
-        if admission.is_none() {
-            admission = Some(crate::native::ingress::Admission::staging(
-                root,
-                &crate::native::state_dir(),
-                target,
-            )?);
-        }
-        admission.as_mut().unwrap().admit(bytes)
-    })
+    download_admitted(
+        root,
+        descriptor,
+        response,
+        budget,
+        stop,
+        &mut |target, bytes| {
+            if !crate::native::enabled() {
+                return Ok(());
+            }
+            // Capture accounting only after cleanup/pruning, against this download's
+            // inode. Old cache removals cannot hide newly allocated payload bytes.
+            if admission.is_none() {
+                admission = Some(crate::native::ingress::Admission::staging(
+                    root,
+                    &crate::native::state_dir(),
+                    target,
+                )?);
+            }
+            admission.as_mut().unwrap().admit(bytes)
+        },
+    )
     .await
 }
 
@@ -33,8 +42,10 @@ async fn download_admitted(
     descriptor: &Archive,
     response: reqwest::Response,
     budget: u64,
+    stop: &CancellationToken,
     admit: &mut (impl FnMut(&Path, u64) -> Result<()> + Send),
 ) -> Result<std::fs::File> {
+    check_preparing(stop)?;
     descriptor.validate()?;
     if !response.status().is_success() {
         return Err(Error::unavailable("Project archive download rejected."));
@@ -57,10 +68,12 @@ async fn download_admitted(
         let mut stream = response.bytes_stream();
         let mut bytes = 0u64;
         let mut hash = blake3::Hasher::new();
-        while let Some(chunk) =
+        while let Some(chunk) = await_preparation(stop, async {
             tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
                 .await
-                .map_err(|_| Error::timeout("Project archive download stalled."))?
+                .map_err(|_| Error::timeout("Project archive download stalled."))
+        })
+        .await?
         {
             let chunk =
                 chunk.map_err(|_| Error::unavailable("Project archive download interrupted."))?;
@@ -69,6 +82,7 @@ async fn download_admitted(
                 return Err(Error::too_large("Project archive length changed."));
             }
             for bytes in chunk.chunks(65536) {
+                check_preparing(stop)?;
                 admit(temporary.path(), bytes.len() as u64)?;
                 hash.update(bytes);
                 output.write_all(bytes).await?;
@@ -84,7 +98,9 @@ async fn download_admitted(
     let drained = output.flush().await;
     received?;
     drained?;
+    check_preparing(stop)?;
     output.sync_all().await?;
+    check_preparing(stop)?;
     drop(output);
     tokio::fs::rename(temporary.path(), descriptor.path(root)).await?;
     tokio::fs::File::open(&directory).await?.sync_all().await?;
@@ -110,7 +126,9 @@ pub(crate) async fn stage(
     root: &Path,
     descriptors: &[Archive],
     base_disk_mib: Option<u64>,
+    stop: &CancellationToken,
 ) -> Result<Option<String>> {
+    check_preparing(stop)?;
     let run = root
         .file_name()
         .and_then(|value| value.to_str())
@@ -123,13 +141,15 @@ pub(crate) async fn stage(
         .exists();
     if retained {
         for descriptor in descriptors {
+            check_preparing(stop)?;
             descriptor.validate()?;
             crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id))
                 .await?;
         }
         return Ok(None);
     }
-    let _disk = crate::native::disk::lock(&crate::native::state_dir()).await?;
+    let _disk =
+        await_preparation(stop, crate::native::disk::lock(&crate::native::state_dir())).await?;
     if let Some(disk_mib) = base_disk_mib {
         let lookup = crate::native::bases::request(
             "lookup",
@@ -154,6 +174,7 @@ pub(crate) async fn stage(
                 &session.attempt,
             )?);
             for descriptor in descriptors {
+                check_preparing(stop)?;
                 descriptor.validate()?;
                 crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id))
                     .await?;
@@ -161,13 +182,14 @@ pub(crate) async fn stage(
             return Ok(Some(key.to_owned()));
         }
     }
-    let _guard = lock().lock().await;
+    let _guard = await_preparation(stop, async { Ok(lock().lock().await) }).await?;
     let data = crate::nodes::node_data_dir();
     clean_interrupted_downloads(&data).await?;
     let pins = root.join("project-archives");
     crate::skills::private_dir(&pins).await?;
     let mut required = 0u64;
     for descriptor in descriptors {
+        check_preparing(stop)?;
         descriptor.validate()?;
         let cached_file = cached(&data, descriptor).await?;
         let verified = if let Some(file) = cached_file {
@@ -199,7 +221,7 @@ pub(crate) async fn stage(
     }
     // Current inputs are pinned before reclamation. Reserve the final filesystem
     // plus missing encoded objects; warm objects are already charged to the pool.
-    let available = budget().await?;
+    let available = await_preparation(stop, budget()).await?;
     let reclaimed = reclaim(&data, required.saturating_sub(available)).await?;
     if required > available.saturating_add(reclaimed) {
         return Err(Error::new(
@@ -208,24 +230,31 @@ pub(crate) async fn stage(
         ));
     }
     for descriptor in descriptors {
+        check_preparing(stop)?;
         let target = pins.join(format!("{}.zip", descriptor.project_id));
         if !target.exists() {
             let selection =
                 serde_json::json!({ "projectId": descriptor.project_id, "hash": descriptor.hash });
-            let response = crate::nodes::workspace::fetch(
-                &session.client,
-                &session.master,
-                &session.token,
-                &session.attempt,
-                "archive",
-                &selection,
+            let response = await_preparation(
+                stop,
+                crate::nodes::workspace::fetch(
+                    &session.client,
+                    &session.master,
+                    &session.token,
+                    &session.attempt,
+                    "archive",
+                    &selection,
+                ),
             )
             .await?;
-            download(&data, descriptor, response, budget().await?).await?;
+            let available = await_preparation(stop, budget()).await?;
+            download(&data, descriptor, response, available, stop).await?;
+            check_preparing(stop)?;
             tokio::fs::hard_link(descriptor.path(&data), target).await?;
         }
         crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id)).await?;
     }
+    check_preparing(stop)?;
     if let Some(disk_mib) = base_disk_mib {
         let _ = crate::native::bases::request(
             "warm",
@@ -321,7 +350,7 @@ async fn prefetch_into(
                 .send()
                 .await
                 .map_err(|_| Error::unavailable("Project archive preload interrupted."))?;
-            download(&root, &descriptor, response, budget().await?).await?;
+            download(&root, &descriptor, response, budget().await?, &stop).await?;
             Ok::<_, Error>(())
         };
         tokio::select! {
@@ -499,29 +528,120 @@ mod tests {
         .unwrap();
         let mut admission = None;
         let mut target_path = None;
-        let result = download_admitted(&data, &archive, response, 0, &mut |target, bytes| {
-            if admission.is_none() {
-                assert!(!old.exists(), "accounting sampled before reclaim");
-                assert!(
-                    target.is_file(),
-                    "accounting must target the private download inode"
-                );
-                target_path = Some(target.to_owned());
-                admission = Some(crate::native::ingress::Admission::new(
-                    &data,
-                    &state,
-                    target,
-                    &data,
-                    3 * 1024 * 1024,
-                    &policy,
-                )?);
-            }
-            assert_eq!(target_path.as_deref(), Some(target));
-            admission.as_mut().unwrap().admit(bytes)
-        })
+        let result = download_admitted(
+            &data,
+            &archive,
+            response,
+            0,
+            &CancellationToken::new(),
+            &mut |target, bytes| {
+                if admission.is_none() {
+                    assert!(!old.exists(), "accounting sampled before reclaim");
+                    assert!(
+                        target.is_file(),
+                        "accounting must target the private download inode"
+                    );
+                    target_path = Some(target.to_owned());
+                    admission = Some(crate::native::ingress::Admission::new(
+                        &data,
+                        &state,
+                        target,
+                        &data,
+                        3 * 1024 * 1024,
+                        &policy,
+                    )?);
+                }
+                assert_eq!(target_path.as_deref(), Some(target));
+                admission.as_mut().unwrap().admit(bytes)
+            },
+        )
         .await;
         assert!(result.is_ok(), "{result:?}");
         assert!(archive.path(&data).is_file());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelled_stalled_archive_drains_its_partial_and_releases_storage() {
+        use axum::{
+            Router,
+            body::{Body, Bytes},
+            routing::post,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let archive = Archive {
+            project_id: crate::config::id(),
+            key: "b".repeat(64),
+            revision: "a".repeat(40),
+            origin_hash: None,
+            hash: blake3::hash(b"partrest").to_hex().to_string(),
+            bytes: 8,
+            logical_bytes: 8,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/",
+            post(|| async {
+                let first = futures_util::stream::once(async {
+                    Ok::<_, std::io::Error>(Bytes::from_static(b"part"))
+                });
+                Body::from_stream(first.chain(futures_util::stream::pending()))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::new().post(&url).send().await.unwrap();
+        let stop = CancellationToken::new();
+        let state = root.path().to_owned();
+        let streamed_archive = archive.clone();
+        let worker_stop = stop.clone();
+        let (writing, wrote) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _lease = crate::native::disk::lock(&state).await.unwrap();
+            let mut writing = Some(writing);
+            download_admitted(
+                &state,
+                &streamed_archive,
+                response,
+                CACHE_BYTES,
+                &worker_stop,
+                &mut |_, bytes| {
+                    if bytes == 4
+                        && let Some(writing) = writing.take()
+                    {
+                        let _ = writing.send(());
+                    }
+                    Ok(())
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), wrote)
+            .await
+            .unwrap()
+            .unwrap();
+        stop.cancel();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.message, "Node workspace preparation stopped.");
+        assert_eq!(
+            std::fs::read_dir(root.path().join("project-archives"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(!archive.path(root.path()).exists());
+        let _new_owner = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            crate::native::disk::lock(root.path()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         server.abort();
     }
 
@@ -550,6 +670,7 @@ mod tests {
             &archive,
             response,
             CACHE_BYTES,
+            &CancellationToken::new(),
             &mut |_, bytes| {
                 if bytes != 2 * 5120 {
                     payload += bytes;
@@ -602,7 +723,14 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            let result = download(root.path(), &archive, response, CACHE_BYTES).await;
+            let result = download(
+                root.path(),
+                &archive,
+                response,
+                CACHE_BYTES,
+                &CancellationToken::new(),
+            )
+            .await;
             assert_eq!(result.is_ok(), path == "valid");
             assert_eq!(archive.path(root.path()).exists(), path == "valid");
         }

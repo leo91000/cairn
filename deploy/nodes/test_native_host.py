@@ -918,6 +918,25 @@ class PoolMigrationTests(unittest.TestCase):
         self.assertTrue(image.is_file())
         self.assertIsNone(host.load_migration())
 
+    def test_interrupted_allocation_remains_owned_for_rollback(self):
+        image = self.root / 'pending.img'
+        record = dict(phase='planned', old=OLD, target={'image': str(image), 'size': 65536}, uuid='f00d')
+
+        def interrupted(_descriptor, _offset, _size):
+            self.assertEqual(host.load_migration()['createdImage'], record['createdImage'])
+            raise OSError('interrupted allocation')
+
+        with patch.object(host.os, 'posix_fallocate', side_effect=interrupted), self.assertRaisesRegex(OSError, 'interrupted allocation'):
+            host.prepare_image(record, image, False)
+
+        staged = host.staged_image_path(image, record['createdImage'])
+        self.assertTrue(staged.is_file())
+        self.assertFalse(image.exists())
+        with patch.object(host, 'mount_of', return_value=None), contextlib.redirect_stdout(io.StringIO()):
+            host.rollback_pool(pool_arguments())
+        self.assertFalse(staged.exists())
+        self.assertFalse(image.exists())
+
     def test_rollback_never_unmounts_a_foreign_staging_filesystem(self):
         host.save_migration(dict(phase='formatted', old=OLD, target={'device': '/dev/synthetic'}, uuid='f00d'))
         with patch.object(host, 'mount_of', return_value={'fstype': 'xfs', 'source': '/dev/foreign'}), \
