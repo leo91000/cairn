@@ -703,7 +703,7 @@ abstract class AgentPageCases {
                             path == "/plugins" -> wireJson.encodeToString(pluginCatalog.get())
                             path == "/api/installations" -> beaconInstallationsFixture()
                             path == "/api/account/session" -> beaconAccountFixture("fixture")
-                            path.endsWith("/models") -> {
+                            path.endsWith("/models") || path.endsWith("/model-availability") -> {
                                 val provider = path.substringBeforeLast('/').substringAfterLast('/')
                                 val connected = modelConnections[provider]
                                 if (connected == null) """{"models":[]}"""

@@ -482,7 +482,8 @@ abstract class ModelPickerCases {
     fun switchingProvidersLoadsModelsWhileThePreviousRefreshWaits() {
         var provider by mutableStateOf("codex")
         var inventories by mutableStateOf(mapOf("codex" to catalog.copy(connected = true)))
-        val requests = mutableStateListOf<String>()
+        var holdCodex by mutableStateOf(false)
+        val codexWaiting = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
         compose.setContent {
             CairnTheme {
@@ -496,9 +497,10 @@ abstract class ModelPickerCases {
                         refreshCatalog = { ModelCatalog(connected = true) },
                         refresh = {
                             val requested = provider
-                            requests += requested
-                            if (requested == "codex" && requests.count { it == "codex" } > 1)
+                            if (requested == "codex" && holdCodex) {
+                                codexWaiting.complete(Unit)
                                 release.await()
+                            }
                             val found =
                                 if (requested == "antigravity")
                                     ModelCatalog(
@@ -524,11 +526,11 @@ abstract class ModelPickerCases {
             compose.onNodeWithTag("model-picker").performClick()
             val button = hasTestTag("refresh-models") and isEnabled()
             compose.waitUntil(10000) {
-                requests.contains("codex") &&
-                    compose.onAllNodes(button).fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodes(button).fetchSemanticsNodes().isNotEmpty()
             }
+            compose.runOnIdle { holdCodex = true }
             compose.onNode(button).performClick()
-            compose.waitUntil(10000) { requests.count { it == "codex" } == 2 }
+            compose.waitUntil(10000) { codexWaiting.isCompleted }
 
             val tile = hasText("Antigravity") and hasClickAction() and isEnabled()
             compose.waitUntil(10000) { compose.onAllNodes(tile).fetchSemanticsNodes().isNotEmpty() }

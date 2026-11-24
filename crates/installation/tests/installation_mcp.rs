@@ -6356,6 +6356,16 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     assert_eq!(available["connected"], true, "{available}");
     assert_eq!(available["models"], json!([]), "{available}");
     assert_eq!(available["error"], "", "{available}");
+    let (status, availability_route) = account_http(
+        &app,
+        &member,
+        "GET",
+        "/api/opencode/model-availability",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{availability_route}");
+    assert_eq!(availability_route, available);
 
     let mut google = cairn_installation::accounts::Account::new(
         cairn_installation::provider::Provider::Antigravity,
@@ -6531,6 +6541,22 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     let (_, after_poll) =
         account_http(&app, &member, "GET", "/api/antigravity/models", Value::Null).await;
     assert_eq!(after_poll, failed_renewal);
+
+    let temporary_accounts = s.config.data_dir.join("antigravity-accounts");
+    std::fs::create_dir_all(&temporary_accounts).unwrap();
+    std::fs::write(
+        temporary_accounts.join(&google.id),
+        b"fixture blocking staging",
+    )
+    .unwrap();
+    s.accounts.refresh(&s, &google.id).await.unwrap();
+    assert!(
+        s.accounts
+            .account(&s, &google.id)
+            .await
+            .unwrap()
+            .is_active()
+    );
 }
 
 #[tokio::test]

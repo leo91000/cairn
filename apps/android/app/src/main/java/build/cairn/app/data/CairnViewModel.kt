@@ -20,6 +20,7 @@ import build.cairn.contracts.listAccountMethods
 import build.cairn.contracts.listAgents
 import build.cairn.contracts.listMcps
 import build.cairn.contracts.listMissions
+import build.cairn.contracts.listModelAvailability
 import build.cairn.contracts.listModels
 import build.cairn.contracts.listProjects
 import build.cairn.contracts.listSkills
@@ -901,13 +902,10 @@ constructor(
         codingAgent(provider)
         val target = api
         return try {
+            val input = ListModelsInput(provider = provider)
             val fresh =
-                target.listModels(
-                    ListModelsInput(
-                        provider = provider,
-                        availabilityOnly = true.takeIf { availabilityOnly },
-                    )
-                )
+                if (availabilityOnly) target.listModelAvailability(input)
+                else target.listModels(input)
             // A request started before sign-out or a server change must not restore old data.
             if (connection !== target || !state.value.session.authenticated) return null
             if (availabilityOnly) return fresh
@@ -921,7 +919,10 @@ constructor(
                 report(e)
                 return null
             }
-            if (availabilityOnly) return null
+            if (availabilityOnly)
+                return if (e is ApiException && e.status == 404 && e.message == "Not found")
+                    ModelCatalog()
+                else null
             mutable.update {
                 val cached = it.modelCatalog(provider)
                 val unavailable =

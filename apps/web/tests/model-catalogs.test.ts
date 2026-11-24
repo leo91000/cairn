@@ -8,7 +8,12 @@ import {
 } from 'vitest'
 
 const request = vi.hoisted(() => vi.fn())
-vi.mock('../src/api', () => ({ api: request, state: { installationId: 'fixture-installation' } }))
+const FixtureApiError = vi.hoisted(() => class extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+  }
+})
+vi.mock('../src/api', () => ({ api: request, ApiError: FixtureApiError, state: { installationId: 'fixture-installation' } }))
 
 beforeEach(() => {
   vi.resetModules()
@@ -23,6 +28,20 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('coding-agent model catalogs', () => {
+  it('preserves legacy picker behavior when the availability route is absent', async () => {
+    const { modelCatalogs } = await import('../src/models')
+    const models = modelCatalogs.opencode
+    request.mockRejectedValueOnce(new FixtureApiError('Not found', 404))
+    await models.checkConnection()
+    expect(request.mock.calls[0][0]).toBe('/opencode/model-availability')
+    expect(models.connection).toMatchObject({ loaded: true, failed: false })
+    expect(models.catalog.connected).toBeUndefined()
+
+    request.mockRejectedValueOnce(new FixtureApiError('Installation not found.', 404))
+    await models.checkConnection()
+    expect(models.connection.failed).toBe(true)
+  })
+
   it('refreshes saved preferences after an already pending catalog request finishes', async () => {
     let resolvePrevious!: (value: unknown) => void
     request.mockReturnValueOnce(new Promise(resolve => resolvePrevious = resolve))

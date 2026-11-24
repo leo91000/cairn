@@ -2,8 +2,9 @@ import type { Provider } from '../../../packages/contracts/accounts'
 import type { ModelCatalog } from '../../../packages/contracts/models'
 import { reactive } from 'vue'
 import { providers } from '../../../packages/contracts/accounts'
+import { listModelAvailability } from '../../../packages/contracts/generated/listModelAvailability'
 import { listModels } from '../../../packages/contracts/generated/listModels'
-import { api, state } from './api'
+import { api, ApiError, state } from './api'
 
 // The last catalog is kept locally so pickers can label saved models without
 // fetching on every page load; opening a picker refreshes it.
@@ -50,13 +51,23 @@ function createCatalog(provider: Provider) {
       return pendingConnection
     const signal = AbortSignal.timeout(30000)
     connection.loading = true
-    pendingConnection = listModels((path, options) => api(path, { ...options, signal }), { provider, availabilityOnly: true })
+    pendingConnection = listModelAvailability((path, options) => api(path, { ...options, signal }), { provider })
       .then((value) => {
         catalog.connected = value.connected
         connection.failed = false
         store(key, catalog)
       })
-      .catch(() => { connection.failed = true })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 404 && error.message === 'Not found') {
+          // Older servers have no lightweight route. Keep their picker behavior.
+          catalog.connected = undefined
+          connection.failed = false
+          store(key, catalog)
+        }
+        else {
+          connection.failed = true
+        }
+      })
       .finally(() => {
         connection.loading = false
         connection.loaded = true

@@ -213,7 +213,7 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   const hidden = await unconnected()
   expect(hidden).toEqual(expect.arrayContaining(['OpenCode', 'Antigravity']))
   const releaseDiscovery = Promise.withResolvers<void>()
-  await page.route(/\/api\/antigravity\/models\?availabilityOnly=true$/, async (route) => {
+  await page.route(/\/api\/antigravity\/model-availability$/, async (route) => {
     await releaseDiscovery.promise
     await route.continue()
   }, { times: 1 })
@@ -280,7 +280,7 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
       return route.fulfill({ status: 503, json: { error: 'Creation response lost before the write' } })
     await route.continue()
   })
-  await page.route(/\/api\/codex\/models\?availabilityOnly=true$/, route => route.fulfill({ status: 503, json: { error: 'Discovery unavailable' } }), { times: 1 })
+  await page.route(/\/api\/codex\/model-availability$/, route => route.fulfill({ status: 503, json: { error: 'Discovery unavailable' } }), { times: 1 })
   await create.click()
   await expect(page.getByRole('alert').filter({ hasText: 'Couldn’t check the Codex connection.' })).toBeVisible()
   expect(createAttempts).toHaveLength(0)

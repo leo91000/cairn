@@ -13,6 +13,13 @@
     ]
   },
   {
+    "input": "ListModelsInput",
+    "method": "GET",
+    "name": "listModelAvailability",
+    "output": "ModelCatalog",
+    "path": "/{provider}/model-availability"
+  },
+  {
     "input": "AccountProviderInput",
     "method": "GET",
     "name": "listCodingAgentAccountProviders",

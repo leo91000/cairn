@@ -85,10 +85,16 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
     let home = token_home(s, id);
     let mut file = saved["token"].clone();
     file["token"]["expiry"] = "2000-01-01T00:00:00Z".into();
-    crate::antigravity::prepare_native_home(&s.config, &home, None).await?;
-    crate::antigravity::write_token(&home, &file).await?;
-    let env = crate::antigravity::environment(&s.config, &home, None);
     let renewed = async {
+        let staging_error =
+            || Error::unavailable("Antigravity could not prepare temporary credentials.");
+        crate::antigravity::prepare_native_home(&s.config, &home, None)
+            .await
+            .map_err(|_| staging_error())?;
+        crate::antigravity::write_token(&home, &file)
+            .await
+            .map_err(|_| staging_error())?;
+        let env = crate::antigravity::environment(&s.config, &home, None);
         let output = crate::process::bounded_output(
             crate::process::command(
                 &s.config.antigravity_bin,
@@ -99,7 +105,14 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
             Duration::from_secs(60),
             1_000_000,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            if error.is_internal() {
+                Error::bad_gateway("Antigravity could not read the token helper output.")
+            } else {
+                error
+            }
+        })?;
         if !output.success
             && (output.stdout.contains("invalid_grant") || output.stderr.contains("invalid_grant"))
         {

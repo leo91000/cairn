@@ -859,7 +859,12 @@ abstract class PlanTurnCases {
                             "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                             "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                             "/api/installations/fixture/api/overview" -> "{}"
-                            else -> if (path.endsWith("/models")) """{"models":[]}""" else "[]"
+                            else ->
+                                if (
+                                    path.endsWith("/models") || path.endsWith("/model-availability")
+                                )
+                                    """{"models":[]}"""
+                                else "[]"
                         }
                     return MockResponse()
                         .setHeader("Content-Type", "application/json")
