@@ -1028,6 +1028,21 @@ pub(crate) fn edit_as(
         return Err(Error::conflict("This message is already being sent."));
     }
     crate::conversation_writers::record_message_before_change(db, &current)?;
+    if let Some(run_id) = chat.run_id.as_deref()
+        && let Some(run) = db.run(run_id)?
+        && run["chatExecution"]["messageId"] == current.id
+        && Provider::of_run(&run).ok() == Some(Provider::Antigravity)
+    {
+        // Reusing an ID or reverting an edit does not restore the execution
+        // that froze the earlier input and its writer.
+        db.change_run(
+            run_id,
+            crate::runs::RunChanges {
+                boundary: Some(json!({ "chatMessageChanged": true })),
+                ..Default::default()
+            },
+        )?;
+    }
     let Some(mut values) = values else {
         // Withdrawing a queued message is an entry of whoever withdraws it.
         crate::conversation_writers::record_entry(
@@ -1546,6 +1561,7 @@ fn continue_run(
     checkpoint.completed = Some(false);
     checkpoint.output_interrupted = None;
     checkpoint.provider_failed = None;
+    checkpoint.antigravity_probe_retry = None;
     checkpoint.turn_pending = Some(true);
     checkpoint.recovery_deadline_ms = None;
     checkpoint.terminal_code = Some(None);
@@ -1587,6 +1603,8 @@ fn continue_run(
         recovery_pending: Some(checkpoint.held_environment.is_none()),
         boundary: Some(json!({
             "chatExecution": serde_json::to_value(execution)?,
+            "chatMessageDigest": null,
+            "chatMessageChanged": null,
             "environmentState": if expired { json!("expired") } else { run["environmentState"].clone() },
             // The next turn's adapter announces again whether it can answer side questions.
             "sideQuestions": null,
@@ -1670,7 +1688,8 @@ fn launch_turn(
         return Ok(());
     }
     crate::coding_agent_configuration::freeze_message(db, &mut snapshot, run.as_ref(), &message)?;
-    Provider::of_run(&snapshot)?
+    let provider = Provider::of_run(&snapshot)?;
+    provider
         .adapter()
         .validate_agent(&snapshot["snapshot"]["agent"])?;
     let execution = ChatExecution {
@@ -1705,7 +1724,20 @@ fn launch_turn(
     db.delete(&format!("turn-returned:{run_id}"))?;
     db.delete(&format!("turn-settled:{run_id}"))?;
     match &launched_by {
-        Some(message) => crate::conversation_writers::record_turn(db, &run_id, message)?,
+        Some(message) => {
+            crate::conversation_writers::record_turn(db, &run_id, message)?;
+            if provider == Provider::Antigravity {
+                let input = required(find_message(db, chat_id, message)?, "Message not found")?;
+                let digest = crate::conversation_writers::entry_digest(&input)?;
+                db.change_run(
+                    &run_id,
+                    crate::runs::RunChanges {
+                        boundary: Some(json!({ "chatMessageDigest": digest })),
+                        ..Default::default()
+                    },
+                )?;
+            }
+        }
         None => crate::conversation_writers::record_relaunch(db, &run_id, &chat.id)?,
     }
     crate::rules::engine::conversations::begin_chat_turn(

@@ -8,7 +8,7 @@ use crate::{
     store::Db,
     validation::text,
 };
-use cairn_contracts::{EventKind, ResumeExecutionSelection};
+use cairn_contracts::{ChatExecution, EventKind, MessageStatus, ResumeExecutionSelection};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -399,10 +399,42 @@ pub(crate) fn requeue(
     }
     let checkpoint = RunCheckpoint::load_in(db, id)?;
     let status = state.status;
-    // A chat that failed before its process launched simply starts again.
+    // The wrapper can start and record a launch before Antigravity's first CLI
+    // probe fails. Require evidence from that same attempt before retrying it.
+    let antigravity_retry = if status == RunStatus::Failed
+        && state.session_id.is_none()
+        && state.workspace_cleaned_at.is_none()
+        && crate::provider::Provider::of_run(&run).ok()
+            == Some(crate::provider::Provider::Antigravity)
+        && let Some(progress) = checkpoint.as_ref().and_then(|saved| {
+            saved.progress.as_ref().filter(|progress| {
+                saved.launched()
+                    && saved.provider_failed()
+                    && (saved.antigravity_probe_failed == Some(true)
+                        || saved.last_error() == crate::antigravity::CLI_UNAVAILABLE)
+                    && state.error.as_deref() == Some(saved.last_error())
+                    && saved.launched_turn_before.is_none()
+                    && saved.prepared().is_some()
+                    && saved.output_interrupted != Some(true)
+                    && saved.finalization_error().is_none()
+                    && progress.complete
+                    && progress.advanced_at.is_none()
+                    && progress.runner_id.is_some()
+                    && progress.runner_id.as_deref() == saved.runner_id()
+                    && progress.turn_id.is_some()
+                    && progress.turn_id.as_deref() == saved.launched_turn.as_deref()
+                    && progress.turn_id.as_deref() == run["chatExecution"]["messageId"].as_str()
+            })
+        }) {
+        Some(antigravity_retry_input(db, &run, progress.started_at)?)
+    } else {
+        None
+    };
+    let antigravity_probe_failed = antigravity_retry.is_some();
+    // A chat that failed before its agent launched simply starts again.
     let before_launch = run["chatExecution"].is_object()
         && matches!(status, RunStatus::Failed | RunStatus::Cancelled)
-        && checkpoint.as_ref().is_none_or(|c| !c.launched());
+        && (checkpoint.as_ref().is_none_or(|c| !c.launched()) || antigravity_probe_failed);
     let resumable = status.is_resumable()
         && state.resume_available
         && checkpoint.as_ref().is_some_and(|c| c.prepared().is_some())
@@ -496,6 +528,15 @@ pub(crate) fn requeue(
         checkpoint.recovery_deadline_ms = None;
         checkpoint.output_interrupted = None;
         checkpoint.provider_failed = None;
+        if let Some((_, execution)) = &antigravity_retry {
+            // Keep the wrapper launch recorded so a different failure before
+            // the next launch cannot use the generic before-launch replay.
+            checkpoint.antigravity_probe_retry = Some(super::checkpoint::AntigravityProbeRetry {
+                message_id: execution.message_id.clone(),
+                started: false,
+            });
+            checkpoint.workspace_initialized = Some(true);
+        }
         if !before_launch {
             checkpoint.completed = Some(false);
             checkpoint.terminal_code = Some(None);
@@ -527,6 +568,15 @@ pub(crate) fn requeue(
         boundary: Some(serde_json::json!({"outcome": null})),
         ..Default::default()
     };
+    if let Some((mut message, mut execution)) = antigravity_retry {
+        // Fence edits and withdrawals while the scheduler stops the old attempt.
+        if message.status == MessageStatus::Queued {
+            message.status = MessageStatus::Sending;
+            db.save_message(&message)?;
+        }
+        execution.recovery = false;
+        patch.boundary.as_mut().unwrap()["chatExecution"] = serde_json::to_value(execution)?;
+    }
     if completed_mission {
         patch.boundary.as_mut().unwrap()["missionTurnId"] = crate::config::id().into();
         patch.boundary.as_mut().unwrap()["waitContinuation"] = Value::Null;
@@ -540,6 +590,63 @@ pub(crate) fn requeue(
     let context = crate::rules::engine::conversations::resume_context(db, id, &previous_turn)?;
     db.event(id, &EventKind::Status, "Resume requested", context.as_ref())?;
     Ok(result)
+}
+
+fn antigravity_retry_input(
+    db: &Db<'_>,
+    run: &Value,
+    launched_at: i64,
+) -> Result<(crate::chats::Message, ChatExecution)> {
+    let changed = || {
+        Error::conflict(
+            "The failed Antigravity turn's message is no longer pending or has changed.",
+        )
+    };
+    if run["chatMessageChanged"] == true {
+        return Err(changed());
+    }
+    let execution: ChatExecution = serde_json::from_value(run["chatExecution"].clone())?;
+    let chat = db
+        .conversation_for_run(text(run, "id"))?
+        .ok_or_else(changed)?;
+    let message = db
+        .conversation_message(&chat.id, &execution.message_id)?
+        .ok_or_else(changed)?;
+    if !matches!(
+        message.status,
+        MessageStatus::Queued | MessageStatus::Sending
+    ) || message.created_at > launched_at
+    {
+        return Err(changed());
+    }
+    if let Some(digest) = run["chatMessageDigest"].as_str() {
+        if crate::conversation_writers::entry_digest(&message)? != digest {
+            return Err(changed());
+        }
+        return Ok((message, execution));
+    }
+    // Older turns did not record a digest. Check their frozen execution inputs
+    // and refuse known edits after the original launch.
+    let agent = &run["snapshot"]["agent"];
+    let choices = [
+        ("provider", message.provider.as_str()),
+        ("model", message.model.as_str()),
+        ("reasoning", message.reasoning.as_str()),
+        ("speed", message.speed.as_str()),
+    ];
+    let same_input = message.question_id.is_none()
+        && message.plan == execution.plan
+        && message.attachments == execution.attachments
+        && crate::chats::with_invoked_skills(&message.text, &run["snapshot"]["skills"])
+            == execution.text
+        && choices
+            .iter()
+            .all(|(field, value)| value.is_empty() || text(agent, field) == *value);
+    if !same_input || crate::conversation_writers::message_written_after(db, &message, launched_at)?
+    {
+        return Err(changed());
+    }
+    Ok((message, execution))
 }
 
 /// Worktrees and clones the run created; direct workspaces belong to the user.
@@ -718,6 +825,306 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn manual_resume_retries_only_a_confirmed_antigravity_cli_start_failure() {
+        let unavailable = crate::antigravity::CLI_UNAVAILABLE;
+        let redacted_probe = "The Antigravity CLI is not [redacted].";
+        let original = "Use this workspace";
+        let queued = Some(("queued", original, false, "queue"));
+        for (error, final_error, provider_started, pending, should_retry) in [
+            (unavailable, unavailable, false, queued, true),
+            (redacted_probe, redacted_probe, false, queued, true),
+            (
+                unavailable,
+                unavailable,
+                false,
+                Some(("queued", original, false, "steer")),
+                true,
+            ),
+            (unavailable, unavailable, true, queued, false),
+            (
+                "Antigravity stopped unexpectedly.",
+                "Antigravity stopped unexpectedly.",
+                false,
+                queued,
+                false,
+            ),
+            (
+                unavailable,
+                "Run exceeded its time limit.",
+                false,
+                queued,
+                false,
+            ),
+            (
+                unavailable,
+                unavailable,
+                false,
+                Some(("delivered", original, false, "queue")),
+                false,
+            ),
+            (
+                unavailable,
+                unavailable,
+                false,
+                Some(("queued", "Edited", false, "queue")),
+                false,
+            ),
+            (
+                unavailable,
+                unavailable,
+                false,
+                Some(("queued", original, true, "queue")),
+                false,
+            ),
+            (unavailable, unavailable, false, None, false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            store
+                .transaction(move |db| {
+                    db.add_run_fixture(
+                        &json!({
+                            "id": "run",
+                            "taskId": "chat",
+                            "status": "failed",
+                            "error": final_error,
+                            "trigger": "chat",
+                            "createdAt": 0,
+                            "workspace": "/workspace",
+                            "chatExecution": {
+                                "messageId": "queued-message",
+                                "text": original,
+                                "attachments": [],
+                                "recovery": true,
+                            },
+                            "snapshot": {
+                                "agent": {
+                                    "id": crate::config::MAIN_AGENT_ID,
+                                    "provider": "antigravity",
+                                    "model": "gemini-4-neon",
+                                    "reasoning": "high",
+                                },
+                            },
+                        }),
+                        None,
+                    )?;
+                    db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
+                    if let Some((status, text, changed_after_launch, mode)) = pending {
+                        db.put_message(&json!({
+                            "id": "queued-message",
+                            "chatId": "chat",
+                            "text": text,
+                            "mode": mode,
+                            "status": status,
+                            "createdAt": 0,
+                        }))?;
+                        if changed_after_launch {
+                            crate::conversation_writers::record_message(
+                                db,
+                                "chat",
+                                "queued-message",
+                                &crate::conversation_writers::EntryWriter::Agent,
+                            )?;
+                        }
+                    }
+                    let mut progress = super::super::progress::Progress::launched(
+                        "execution".into(),
+                        Some("runner".into()),
+                        None,
+                        Some("queued-message".into()),
+                        0,
+                    );
+                    if provider_started {
+                        progress.observe(&json!({ "type": "turn.started" }), 1);
+                    }
+                    progress.observe(&json!({ "type": "turn.failed" }), 2);
+                    let checkpoint = RunCheckpoint {
+                        launched: Some(true),
+                        launched_turn: Some("queued-message".into()),
+                        provider_failed: Some(true),
+                        antigravity_probe_failed: (error == redacted_probe).then_some(true),
+                        last_error: Some(Some(error.into())),
+                        runner_id: Some(Some("runner".into())),
+                        prepared: Some(Some(json!({ "cwd": "/workspace" }))),
+                        progress: Some(progress),
+                        ..Default::default()
+                    };
+                    checkpoint.store_in(db, "run")?;
+
+                    let result = requeue(db, "run", Some("queued-message"), None, None, None);
+                    if should_retry {
+                        let run = result?;
+                        assert_eq!(run["status"], "queued");
+                        assert_eq!(run["workspace"], "/workspace");
+                        assert_eq!(run["chatExecution"]["messageId"], "queued-message");
+                        assert_eq!(run["chatExecution"]["text"], original);
+                        assert_eq!(run["chatExecution"]["recovery"], false);
+                        assert_eq!(run["snapshot"]["agent"]["model"], "gemini-4-neon");
+                        let mut message =
+                            db.conversation_message("chat", "queued-message")?.unwrap();
+                        assert_eq!(message.status, MessageStatus::Sending);
+                        assert!(
+                            crate::chats::edit(db, "chat", "queued-message", None)
+                                .unwrap_err()
+                                .is_conflict()
+                        );
+                        let mut saved = RunCheckpoint::load_in(db, "run")?.unwrap();
+                        assert!(saved.launched());
+                        assert!(saved.retries_antigravity_without_session(Some("queued-message")));
+                        assert_eq!(saved.workspace_initialized, Some(true));
+                        assert_eq!(saved.runner_id(), Some("runner"));
+
+                        // A second attempt can hit the same probe failure while
+                        // the executable is still unavailable.
+                        saved.record_launch(Some("queued-message".into()));
+                        saved.provider_failed = Some(true);
+                        saved.start_rejected = Some(false);
+                        saved.last_error = Some(Some(unavailable.into()));
+                        saved.runner_id = Some(Some("retry-runner".into()));
+                        let mut progress = super::super::progress::Progress::launched(
+                            "retry-execution".into(),
+                            Some("retry-runner".into()),
+                            None,
+                            Some("queued-message".into()),
+                            3,
+                        );
+                        progress.observe(&json!({ "type": "turn.failed" }), 4);
+                        saved.progress = Some(progress);
+                        saved.store_in(db, "run")?;
+                        message.status = MessageStatus::Queued;
+                        db.save_message(&message)?;
+                        db.change_run(
+                            "run",
+                            crate::runs::RunChanges {
+                                status: Some(RunStatus::Failed),
+                                error: Some(Some(unavailable.into())),
+                                recovery_pending: Some(false),
+                                ..Default::default()
+                            },
+                        )?;
+                        let retry = requeue(db, "run", Some("queued-message"), None, None, None)?;
+                        assert_eq!(retry["status"], "queued");
+                        assert_eq!(retry["chatExecution"]["messageId"], "queued-message");
+                        assert_eq!(
+                            db.conversation_message("chat", "queued-message")?
+                                .unwrap()
+                                .status,
+                            MessageStatus::Sending
+                        );
+
+                        // A different failure before the next launch must not
+                        // enter the generic replay path for a never-launched run.
+                        message.status = MessageStatus::Queued;
+                        db.save_message(&message)?;
+                        db.change_run(
+                            "run",
+                            crate::runs::RunChanges {
+                                status: Some(RunStatus::Failed),
+                                error: Some(Some("Native cleanup is incomplete.".into())),
+                                recovery_pending: Some(false),
+                                ..Default::default()
+                            },
+                        )?;
+                        crate::chats::edit(db, "chat", "queued-message", None)?;
+                        assert!(
+                            requeue(db, "run", Some("queued-message"), None, None, None)
+                                .unwrap_err()
+                                .is_conflict()
+                        );
+                        assert_eq!(db.run("run")?.unwrap()["status"], "failed");
+                    } else {
+                        assert!(result.unwrap_err().is_conflict());
+                        assert_eq!(db.run("run")?.unwrap()["status"], "failed");
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn antigravity_probe_retry_rejects_edits_and_withdrawn_message_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = json!({
+                    "id": "run",
+                    "taskId": "chat",
+                    "trigger": "chat",
+                    "status": "failed",
+                    "createdAt": 0,
+                    "chatExecution": { "messageId": "message" },
+                    "snapshot": {
+                        "agent": {
+                            "id": crate::config::MAIN_AGENT_ID,
+                            "provider": "antigravity",
+                        },
+                    },
+                });
+                db.add_run_fixture(&run, None)?;
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                    "nativeProvenanceUnknown": true,
+                }))?;
+                db.put_message(&json!({
+                    "id": "message",
+                    "chatId": "chat",
+                    "text": "Original input",
+                    "mode": "queue",
+                    "status": "queued",
+                }))?;
+                let mut message = db.conversation_message("chat", "message")?.unwrap();
+                let digest = crate::conversation_writers::entry_digest(&message)?;
+                db.change_run(
+                    "run",
+                    crate::runs::RunChanges {
+                        boundary: Some(json!({ "chatMessageDigest": digest })),
+                        ..Default::default()
+                    },
+                )?;
+                let run = db.run("run")?.unwrap();
+                antigravity_retry_input(db, &run, 0)?;
+                message.mode = cairn_contracts::MessageMode::Steer;
+                db.save_message(&message)?;
+                assert!(
+                    antigravity_retry_input(db, &run, 0)
+                        .unwrap_err()
+                        .is_conflict()
+                );
+
+                message.mode = cairn_contracts::MessageMode::Queue;
+                db.save_message(&message)?;
+                let values = serde_json::to_value(&message)?;
+                crate::chats::edit(db, "chat", "message", Some(values))?;
+                let edited_run = db.run("run")?.unwrap();
+                assert!(
+                    antigravity_retry_input(db, &edited_run, 0)
+                        .unwrap_err()
+                        .is_conflict()
+                );
+
+                // Exercise withdrawal independently of the preceding same-content edit.
+                db.update_run_boundary("run", &json!({ "chatMessageChanged": null }))?;
+                crate::chats::edit(db, "chat", "message", None)?;
+                assert!(db.conversation_message("chat", "message")?.is_none());
+                db.save_message(&message)?;
+                let run = db.run("run")?.unwrap();
+                assert!(
+                    antigravity_retry_input(db, &run, 0)
+                        .unwrap_err()
+                        .is_conflict()
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     async fn chat_resume_store() -> (tempfile::TempDir, crate::store::Store) {
         let root = tempfile::tempdir().unwrap();

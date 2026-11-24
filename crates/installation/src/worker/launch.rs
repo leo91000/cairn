@@ -147,11 +147,13 @@ async fn saved_session(
     run: &Value,
     home: &Path,
     cwd: &Path,
+    allow_fresh_native_session: bool,
 ) -> Result<Option<String>> {
     match recovery::session(s, run, home, cwd).await {
         Ok(session) => Ok(Some(session)),
         Err(error)
             if error.status == 409
+                && allow_fresh_native_session
                 && crate::native::policy::native(&run["snapshot"]["agent"])
                 && run["nativeModeInterruption"].is_string()
                 && text(run, "sessionId").is_empty() =>
@@ -683,22 +685,32 @@ impl Execution<'_> {
         if !self.checkpoint.read(RunCheckpoint::launched).await {
             return Ok(None);
         }
-        let pending_startup = self
+        let (pending_startup, unconfirmed_antigravity_start) = self
             .checkpoint
             .read(|saved| {
-                saved
+                let pending_startup = saved.retries_antigravity_without_session(
+                    self.run["chatExecution"]["messageId"].as_str(),
+                ) || saved
                     .retry_cause
                     .as_ref()
                     .and_then(Option::as_ref)
-                    .is_some_and(|cause| cause.startup)
+                    .is_some_and(|cause| cause.startup);
+                (pending_startup, saved.antigravity_start_unconfirmed())
             })
             .await;
-        if !self.run["sessionId"].is_string() && pending_startup {
+        if !self.run["sessionId"].is_string() && pending_startup && !unconfirmed_antigravity_start {
             // The adapter confirmed no new turn was submitted; preserve the same
-            // prepared workspace and retry its initial authentication safely.
+            // prepared workspace and start the same turn without a session.
             return Ok(None);
         }
-        let session = match saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await
+        let session = match saved_session(
+            s,
+            self.run,
+            &workspace.state_home,
+            workspace.cwd(),
+            !unconfirmed_antigravity_start,
+        )
+        .await
         {
             Ok(session) => session,
             Err(error) => {
@@ -1699,7 +1711,6 @@ impl Execution<'_> {
         launch: Launch,
         log_total: &mut usize,
     ) -> Result<Exit> {
-        let s = self.s;
         let previously_launched = self.checkpoint.read(RunCheckpoint::launched).await;
         workspace.authorization.recheck().await?;
         let mut child = Supervised::spawn(
@@ -1711,37 +1722,43 @@ impl Execution<'_> {
         .await?;
         let identity = recovery::process_identity(child.child.id().unwrap()).await?;
         let launched_turn = launched_turn(self.run);
-        if self.run["chatExecution"].is_object() {
+        let execution_patch = self.run["chatExecution"].is_object().then(|| {
             self.run["chatExecution"]["recovery"] = true.into();
-            let patch = json!({ "chatExecution": self.run["chatExecution"] });
-            s.store.update_run_boundary(&self.id, patch).await?;
-        }
+            json!({ "chatExecution": self.run["chatExecution"] })
+        });
+        let run_id = self.id.clone();
         self.checkpoint
-            .update(|c| {
-                c.progress = Some(super::progress::Progress::launched(
-                    self.attempt_id.clone(),
-                    c.runner_id().map(str::to_owned),
-                    identity.clone(),
-                    crate::waits::execution_id(self.run)
-                        .as_str()
-                        .map(str::to_owned),
-                    now(),
-                ));
-                c.process = Some(identity);
-                c.turn_pending = None;
-                c.recovery_deadline_ms = None;
-                c.launched = Some(true);
-                c.launched_turn_before = c.launched_turn.take();
-                c.launched_turn = launched_turn.clone();
-                c.start_rejected = Some(false);
-                c.output_interrupted = None;
-                c.provider_failure_attempt = None;
-                c.reset_finalization_observation();
-                c.retry_cause = Some(None);
-                c.completed = Some(false);
-                c.terminal_code = None;
-                c.last_error = Some(None);
-            })
+            .update_and_publish(
+                |c| {
+                    c.progress = Some(super::progress::Progress::launched(
+                        self.attempt_id.clone(),
+                        c.runner_id().map(str::to_owned),
+                        identity.clone(),
+                        crate::waits::execution_id(self.run)
+                            .as_str()
+                            .map(str::to_owned),
+                        now(),
+                    ));
+                    c.process = Some(identity);
+                    c.turn_pending = None;
+                    c.recovery_deadline_ms = None;
+                    c.record_launch(launched_turn.clone());
+                    c.start_rejected = Some(false);
+                    c.output_interrupted = None;
+                    c.provider_failure_attempt = None;
+                    c.reset_finalization_observation();
+                    c.retry_cause = Some(None);
+                    c.completed = Some(false);
+                    c.terminal_code = None;
+                    c.last_error = Some(None);
+                },
+                move |db| {
+                    if let Some(patch) = execution_patch {
+                        db.update_run_boundary(&run_id, &patch)?;
+                    }
+                    Ok(())
+                },
+            )
             .await?;
         if self.stopping() {
             child.stop().await;
@@ -3189,7 +3206,7 @@ mod tests {
                 "snapshot": { "agent": { "provider": provider, "access": { "backend": "native" } } },
             });
             assert!(
-                saved_session(&s, &run, root.path(), root.path())
+                saved_session(&s, &run, root.path(), root.path(), true)
                     .await
                     .unwrap()
                     .is_none(),
@@ -3202,7 +3219,7 @@ mod tests {
             }
             .into();
             assert_eq!(
-                saved_session(&s, &run, root.path(), root.path())
+                saved_session(&s, &run, root.path(), root.path(), true)
                     .await
                     .unwrap()
                     .as_deref(),
@@ -3212,7 +3229,7 @@ mod tests {
             run["sessionId"] = Value::Null;
             run["nativeModeInterruption"] = Value::Null;
             assert!(
-                saved_session(&s, &run, root.path(), root.path())
+                saved_session(&s, &run, root.path(), root.path(), true)
                     .await
                     .is_err(),
                 "{provider}"
@@ -3220,11 +3237,20 @@ mod tests {
             run["nativeModeInterruption"] = crate::config::id().into();
             run["snapshot"]["agent"]["access"]["backend"] = "firecracker".into();
             assert!(
-                saved_session(&s, &run, root.path(), root.path())
+                saved_session(&s, &run, root.path(), root.path(), true)
                     .await
                     .is_err(),
                 "{provider}"
             );
         }
+        let run = json!({
+            "isolated": true, "nativeModeInterruption": crate::config::id(),
+            "snapshot": { "agent": { "provider": "antigravity", "access": { "backend": "native" } } },
+        });
+        assert!(
+            saved_session(&s, &run, root.path(), root.path(), false)
+                .await
+                .is_err()
+        );
     }
 }

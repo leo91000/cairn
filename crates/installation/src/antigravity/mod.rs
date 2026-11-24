@@ -206,6 +206,10 @@ pub(crate) fn supported_version(version: &str) -> bool {
         .is_some_and(|version| release(MINIMUM).is_some_and(|minimum| version >= minimum))
 }
 
+pub(crate) const CLI_UNAVAILABLE: &str = "The Antigravity CLI is not installed on this execution node. On a native node, rerun the native installer to update its supervisor, then restart cairn-native-node.";
+/// Identifies a version probe failure before the adapter can submit input.
+pub const CLI_UNAVAILABLE_CODE: &str = "cairn_antigravity_cli_unavailable";
+
 pub(crate) async fn check_version(config: &Config, env: &Environment) -> Result<()> {
     let output = bounded_output(
         command(&config.antigravity_bin, &["--version".into()], env, None),
@@ -213,11 +217,7 @@ pub(crate) async fn check_version(config: &Config, env: &Environment) -> Result<
         4096,
     )
     .await
-    .map_err(|_| {
-        Error::unavailable(
-            "The Antigravity CLI is not installed on this execution node. On a native node, rerun the native installer to update its supervisor, then restart cairn-native-node.",
-        )
-    })?;
+    .map_err(|_| Error::coded(503, CLI_UNAVAILABLE_CODE, CLI_UNAVAILABLE))?;
     if !output.success || !supported_version(&output.stdout) {
         return Err(Error::unavailable(format!(
             "This Antigravity CLI release is not supported. Install {MINIMUM} or later."

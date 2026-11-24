@@ -434,7 +434,9 @@ async fn provider_launch(
     }
 
     adapter.configure_environment(&mut env, &state_home);
-    let args = vec!["chat".to_owned(), provider.as_str().to_owned()];
+    // The chat plan carries the provider. Leave the optional executable override
+    // unset so the runner uses its configured CLI (for example, Antigravity uses agy).
+    let args = vec!["chat".to_owned()];
     let binary = binary
         .to_str()
         .ok_or_else(|| Error::bad("Invalid executable path."))?;
@@ -627,12 +629,15 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
     if let Err(error) = &result
         && !stop.is_cancelled()
     {
-        let failure = json!({
+        let mut failure = json!({
             "type": "turn.failed",
             "error": {
                 "message": error.message
             }
         });
+        if error.code.as_deref() == Some(cairn_installation::antigravity::CLI_UNAVAILABLE_CODE) {
+            failure["error"]["code"] = json!(error.code);
+        }
         // The output task only stops when stdout is gone; nobody would read the event.
         let _ = tx.send(failure).await;
     }
@@ -677,4 +682,25 @@ async fn agent_command(
     };
     signal_group(pid, libc::SIGKILL);
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn isolated_antigravity_launch_uses_the_runner_executable_configuration() {
+        let launch = provider_launch(&json!({
+            "cwd": "/workspace",
+            "chat": { "provider": "antigravity" },
+        }))
+        .await
+        .unwrap();
+
+        // A second argument to `chat` overrides the configured executable.
+        // Antigravity's provider ID differs from its executable name (`agy`).
+        assert_eq!(launch.args, ["chat"]);
+        let plan: Value = serde_json::from_str(&launch.prompt).unwrap();
+        assert_eq!(plan["provider"], "antigravity");
+    }
 }

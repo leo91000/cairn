@@ -1,4 +1,4 @@
-use super::checkpoint::{Checkpoint, EventChanges, RunCheckpoint};
+use super::checkpoint::{Checkpoint, EventChanges};
 use crate::{config::now, error::Result, run_output, service::Service, validation::text};
 use cairn_contracts::EventKind;
 use serde_json::{Value, json};
@@ -333,33 +333,62 @@ pub(super) async fn record(
     }
     if event["type"] == "runner.start_rejected" {
         let run = s.store.run(id).await?;
-        let first_rejected = !previously_launched
-            && run["sessionId"].is_null()
-            && checkpoint.read(RunCheckpoint::managed).await;
-        if first_rejected && run["chatExecution"].is_object() {
-            let mut execution = run["chatExecution"].clone();
-            execution["recovery"] = false.into();
-            s.store
-                .update_run_boundary(id, serde_json::json!({ "chatExecution": execution }))
-                .await?;
-        }
+        let (first_rejected, probe_retry_rejected) = checkpoint
+            .read(|saved| {
+                let without_session = run["sessionId"].is_null() && saved.managed();
+                // A relay can synthesize an HTTP failure after losing the
+                // controller's response. Only canonical capacity refusals
+                // positively prove this startup did not reach the provider.
+                let probe_retry = event["capacityRejection"] == true
+                    && saved.antigravity_probe_retry.as_ref().is_some_and(|retry| {
+                        retry.started
+                            && saved.launched_turn.as_deref() == Some(retry.message_id.as_str())
+                            && run["chatExecution"]["messageId"].as_str()
+                                == Some(retry.message_id.as_str())
+                    });
+                (
+                    !previously_launched && without_session,
+                    probe_retry && without_session,
+                )
+            })
+            .await;
+        let execution =
+            if (first_rejected || probe_retry_rejected) && run["chatExecution"].is_object() {
+                let mut execution = run["chatExecution"].clone();
+                execution["recovery"] = false.into();
+                Some(execution)
+            } else {
+                None
+            };
 
         let message = truncate(
             &run_output::redact(text(&event, "message"), secrets),
             ERROR_LIMIT,
         );
+        let id = id.to_owned();
         checkpoint
-            .update(|c| {
-                c.start_rejected = Some(true);
-                c.last_error = Some(Some(message));
-                if first_rejected {
-                    // Persist retry intent before fencing can fail. Settlement
-                    // and every subsequent launch still require a successful fence.
-                    c.launched = Some(false);
-                    // Only this attempt's launch is undone.
-                    c.launched_turn = c.launched_turn_before.take();
-                }
-            })
+            .update_and_publish(
+                |c| {
+                    c.start_rejected = Some(true);
+                    if probe_retry_rejected && let Some(retry) = &mut c.antigravity_probe_retry {
+                        retry.started = false;
+                    }
+                    c.last_error = Some(Some(message));
+                    if first_rejected {
+                        // Persist retry intent before fencing can fail. Settlement
+                        // and every subsequent launch still require a successful fence.
+                        c.launched = Some(false);
+                        // Only this attempt's launch is undone.
+                        c.launched_turn = c.launched_turn_before.take();
+                    }
+                },
+                move |db| {
+                    if let Some(execution) = execution {
+                        db.update_run_boundary(&id, &json!({ "chatExecution": execution }))?;
+                    }
+                    Ok(())
+                },
+            )
             .await?;
         return Ok(false);
     }
@@ -511,6 +540,8 @@ async fn apply_event(
 ) -> Result<()> {
     let provider_failure = event["type"] == "turn.failed";
     let controller_failure = event["type"] == "runner.failed";
+    let antigravity_probe_failed =
+        provider_failure && event["error"]["code"] == crate::antigravity::CLI_UNAVAILABLE_CODE;
     let failure = text(&event["error"], "message");
     let failure = if provider_failure && failure.is_empty() {
         "Agent turn failed."
@@ -564,6 +595,7 @@ async fn apply_event(
             EventChanges {
                 run: changed.then_some(changes),
                 failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
+                antigravity_probe_failed,
                 completed,
                 progress_complete: super::progress::same_semantics(event, stored),
                 last_message: message,
