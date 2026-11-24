@@ -48,7 +48,10 @@ function deadlineFixture(t) {
   try {
     if (process.platform === 'linux') {
       const filesystem = statfsSync(sharedMemory)
-      if (filesystem.type === tmpfsMagic && filesystem.bavail > 0)
+      // Replacing a receipt requires both the old and new files, alongside
+      // the PID markers. Leave modest headroom before starting the clock.
+      const hasSpace = filesystem.bavail * filesystem.bsize >= 1024 * 1024 && filesystem.ffree >= 16
+      if (filesystem.type === tmpfsMagic && hasSpace)
         return allocate(sharedMemory)
     }
   }
