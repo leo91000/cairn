@@ -357,7 +357,7 @@ async fn migrate(
             let required = tokio::task::spawn_blocking(move || super::bases::clone_footprint(&measured))
                 .await.map_err(Error::internal)??;
             let fallback = storage::policy::for_node(&plan["storage"]["policy"])?;
-            check_copy_headroom(state, required, &fallback, 0).await?;
+            check_copy_headroom(state, required, &fallback, 0, None).await?;
             quota::prepare(
                 state,
                 &workload,
@@ -635,6 +635,7 @@ pub(super) struct CopyCapacity {
     fallback: storage::policy::Policy,
     reserved: u64,
     shared_blocks: bool,
+    progress: Option<(super::disk::PreparationProgress, u64)>,
 }
 
 impl CopyCapacity {
@@ -651,12 +652,20 @@ impl CopyCapacity {
             fallback,
             reserved: 0,
             shared_blocks: false,
+            progress: None,
         }
     }
 
-    pub(super) fn with_reservation(mut self, reserved: u64) -> Self {
-        self.reserved = reserved;
-        self
+    pub(super) fn with_reservation(
+        mut self,
+        reservation: Option<&super::disk::Preparation>,
+    ) -> Result<Self> {
+        if let Some(reservation) = reservation {
+            self.reserved = reservation.bytes;
+            let allocated = quota::usage(&self.workload)?;
+            self.progress = Some((reservation.progress()?, allocated));
+        }
+        Ok(self)
     }
 
     pub(super) fn with_shared_blocks(mut self, shared_blocks: bool) -> Self {
@@ -681,9 +690,23 @@ impl CopyCapacity {
             // to that sample would require headroom for the same work twice.
             if before_copy { self.required } else { 0 }
         } else {
+            if let Some((progress, initial_bytes)) = &self.progress {
+                progress.credit(allocated.saturating_sub(*initial_bytes).min(self.required))?;
+            }
             self.required.saturating_sub(allocated)
         };
-        check_copy_headroom(&self.state, remaining, &self.fallback, self.reserved).await
+        let own = self
+            .progress
+            .as_ref()
+            .map(|(progress, _)| progress.path.as_path());
+        check_copy_headroom(&self.state, remaining, &self.fallback, self.reserved, own).await
+    }
+
+    pub(super) fn finish_copy(&self) -> Result<()> {
+        if let Some((progress, _)) = &self.progress {
+            progress.credit(self.required)?;
+        }
+        Ok(())
     }
 }
 
@@ -692,12 +715,14 @@ async fn check_copy_headroom(
     remaining: u64,
     fallback: &storage::policy::Policy,
     reserved: u64,
+    own: Option<&Path>,
 ) -> Result<()> {
     let state = state.to_owned();
     let fallback = fallback.clone();
+    let own = own.map(Path::to_owned);
     let sample = tokio::task::spawn_blocking(move || -> Result<()> {
         let pending = storage::cache::pending_write_bytes();
-        let physical = super::disk::data_pool_headroom(&state, &fallback, reserved)?;
+        let physical = super::disk::data_pool_headroom(&state, &fallback, own.as_deref())?;
         let shared = match std::fs::read(state.join(crate::microvm::budget::FILE)) {
             Ok(bytes) => {
                 let budget = super::native_budget(&serde_json::from_slice(&bytes)?)?;
@@ -1340,20 +1365,24 @@ mod tests {
         std::fs::create_dir(&pool).unwrap();
         let policy = storage::policy::Policy::default();
         let incoming = 1024 * 1024;
-        check_copy_headroom(state.path(), incoming, &policy, 0)
+        check_copy_headroom(state.path(), incoming, &policy, 0, None)
             .await
             .unwrap();
         let (_, free) = storage::policy::physical_space(&pool).unwrap();
-        let peer =
-            super::super::disk::Preparation::reserve(state.path(), &crate::config::id(), free)
-                .await
-                .unwrap();
-        let error = check_copy_headroom(state.path(), incoming, &policy, 0)
+        let peer = super::super::disk::Preparation::reserve_on(
+            state.path(),
+            &crate::config::id(),
+            free,
+            &pool,
+        )
+        .await
+        .unwrap();
+        let error = check_copy_headroom(state.path(), incoming, &policy, 0, None)
             .await
             .unwrap_err();
         assert_eq!(error.status, 507);
         drop(peer);
-        check_copy_headroom(state.path(), incoming, &policy, 0)
+        check_copy_headroom(state.path(), incoming, &policy, 0, None)
             .await
             .unwrap();
     }
@@ -1421,14 +1450,14 @@ mod tests {
         let required = 96 * super::super::disk::MIB;
         copy_budget(state.path(), 128).await;
         assert_eq!(
-            check_copy_headroom(state.path(), required, &policy, 0)
+            check_copy_headroom(state.path(), required, &policy, 0, None)
                 .await
                 .unwrap_err()
                 .status,
             507
         );
         copy_budget(state.path(), 256).await;
-        check_copy_headroom(state.path(), required, &policy, 0)
+        check_copy_headroom(state.path(), required, &policy, 0, None)
             .await
             .unwrap();
         std::fs::OpenOptions::new()
@@ -1438,7 +1467,7 @@ mod tests {
             .set_len(128 * super::super::disk::MIB)
             .unwrap();
         assert!(
-            check_copy_headroom(state.path(), required, &policy, 0)
+            check_copy_headroom(state.path(), required, &policy, 0, None)
                 .await
                 .is_err()
         );
@@ -1458,7 +1487,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            check_copy_headroom(state.path(), 0, &policy, 0)
+            check_copy_headroom(state.path(), 0, &policy, 0, None)
                 .await
                 .is_err()
         );

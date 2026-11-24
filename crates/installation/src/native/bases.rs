@@ -683,14 +683,15 @@ impl Bases {
 
     #[cfg(test)]
     pub async fn initialize(&self, plan: &Value, stop: &CancellationToken) -> Result<bool> {
-        self.initialize_reserved(plan, stop, 0, None, false).await
+        self.initialize_reserved(plan, stop, None, None, false)
+            .await
     }
 
     pub async fn initialize_reserved(
         &self,
         plan: &Value,
         stop: &CancellationToken,
-        reserved: u64,
+        reservation: Option<&disk::Preparation>,
         pool_owner: Option<disk::StorageGuard>,
         require_spare: bool,
     ) -> Result<bool> {
@@ -865,7 +866,7 @@ impl Bases {
             ready.allocated_for_clone(reflink),
             crate::storage::policy::for_node(&plan["storage"]["policy"])?,
         );
-        let capacity = capacity.with_reservation(reserved);
+        let capacity = capacity.with_reservation(reservation)?;
         let existing_data = match tokio::fs::symlink_metadata(&data).await {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,
             Ok(_) => {
@@ -886,6 +887,7 @@ impl Bases {
             // Rename may have completed before the format marker. Verify only;
             // never overwrite retained files while replaying initialization.
             super::directory::verify_copy(&source, &data, stop, &capacity).await?;
+            capacity.finish_copy()?;
         } else {
             if staging.exists() {
                 tokio::fs::remove_dir_all(&staging).await?;
@@ -903,6 +905,7 @@ impl Bases {
                 return Err(error);
             }
             tokio::fs::rename(&staging, &data).await?;
+            capacity.finish_copy()?;
         }
         tokio::fs::File::open(&workload).await?.sync_all().await?;
         atomic_write(

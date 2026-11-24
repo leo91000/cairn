@@ -96,13 +96,30 @@ impl Executor {
         token: &str,
         attempt: &str,
     ) -> Result<()> {
-        let mut timing = Operation::new("node_prepare", attempt, "plan");
         let session = Session {
             client: client.clone(),
             master: master.clone(),
             token: token.into(),
             attempt: attempt.into(),
         };
+        if self.native {
+            // The relay timeout may drop its waiter while filesystem work is
+            // still settling. Only the worker releases the staging lock.
+            let executor = self.clone();
+            let stop = CancellationToken::new();
+            let _cancel = stop.clone().drop_guard();
+            return tokio::spawn(async move { executor.prepare_attempt(session, stop).await })
+                .await
+                .map_err(Error::internal)?;
+        }
+        self.prepare_attempt(session, CancellationToken::new())
+            .await
+    }
+
+    async fn prepare_attempt(&self, session: Session, stop: CancellationToken) -> Result<()> {
+        let attempt = session.attempt.as_str();
+        crate::validation::uuid(attempt)?;
+        let mut timing = Operation::new("node_prepare", attempt, "plan");
         let data = self.data.clone();
         let descriptor = session.json("plan", &json!({})).await?;
         let run = text(&descriptor["plan"], "runId");
@@ -113,12 +130,31 @@ impl Executor {
             timing.finish();
             return Ok(());
         }
+        let _staging = if self.native {
+            let state = crate::native::state_dir();
+            let guard = crate::native::disk::lock_staging(&state, run).await?;
+            if state.join(format!("{attempt}.stopped")).try_exists()? {
+                return Err(Error::conflict("Native attempt has already stopped."));
+            }
+            Some(guard)
+        } else {
+            None
+        };
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Node workspace preparation stopped."));
+        }
         timing.next("seed");
         let mut pin = crate::native::bases::PendingPin::new(&data.join("runs").join(run), attempt)?;
         let plan = stage_plan(&session, &data, descriptor).await?;
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Node workspace preparation stopped."));
+        }
         let root = data.join("runs").join(text(&plan, "runId"));
         timing.next("lease");
         grant_lease(&session, &data).await?;
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Node workspace preparation stopped."));
+        }
         let stop = CancellationToken::new();
         self.attempts
             .lock()
@@ -130,9 +166,9 @@ impl Executor {
         crate::skills::private_dir(&home).await?;
         let auth = super::workspace::auth_listener(
             home.join("cairn-auth.sock"),
-            client.clone(),
-            master.clone(),
-            token.into(),
+            session.client.clone(),
+            session.master.clone(),
+            session.token.clone(),
             attempt.into(),
             stop.clone(),
         );

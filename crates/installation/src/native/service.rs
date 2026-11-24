@@ -812,7 +812,14 @@ impl Controller {
         let disk = self.start_storage(id, &plan).await?;
         trace.phase(Phase::PoolAccounting);
         let (incoming, spare) = self.check_preparation_space(&plan).await?;
-        let preparation = disk::Preparation::reserve(&self.state, id, incoming).await?;
+        let pool = workspace::data_root(&self.state);
+        let filesystem = if pool.try_exists()? {
+            &pool
+        } else {
+            &self.state
+        };
+        let preparation =
+            disk::Preparation::reserve_on(&self.state, id, incoming, filesystem).await?;
         // Capacity admission credited an existing tree. Keep the same gate
         // until its claim is recorded so another attempt cannot take it, and
         // budget/pressure handling cannot retire it in between.
@@ -1206,7 +1213,7 @@ impl Controller {
             wait,
             &bootstrap::Trace::default(),
             None,
-            0,
+            None,
             None,
         )
         .await
@@ -1221,7 +1228,7 @@ impl Controller {
         wait: Duration,
         trace: &bootstrap::Trace,
         workspace_owner: Option<Arc<crate::file_lock::Guard>>,
-        reserved: u64,
+        reservation: Option<&disk::Preparation>,
         mut spare_guard: Option<disk::StorageGuard>,
     ) -> Result<(bool, block::Mounted)> {
         let (deadline, time_limited) = disk_admission_deadline(plan, wait);
@@ -1275,7 +1282,7 @@ impl Controller {
                 trace.phase(Phase::FilesystemInitialize);
                 let from_base = self
                     .bases()
-                    .initialize_reserved(plan, stop, reserved, Some(owner), require_spare)
+                    .initialize_reserved(plan, stop, reservation, Some(owner), require_spare)
                     .await?;
                 trace.phase(Phase::Mount);
                 let state = self.state.clone();
@@ -1424,6 +1431,8 @@ impl Controller {
         let controller = self.clone();
         let ingress = mounted.ingress.clone().lock_owned().await;
         let reserved = reservation.bytes;
+        let allocation = Arc::new(reservation);
+        let reservation = allocation.clone();
         super::ingress::write((mounted.clone(), ingress, reservation), async move {
             let _mounted = mounted.mount.lock().await;
             let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
@@ -1437,8 +1446,9 @@ impl Controller {
             )?;
             // The admission has just taken a full usage sample; reuse it.
             let growth = disk::available(limit, admission.sampled_usage());
-            let check =
-                std::sync::Arc::new(std::sync::Mutex::new(admission.with_reservation(reserved)));
+            let check = std::sync::Arc::new(std::sync::Mutex::new(
+                admission.with_reservation(&allocation, true)?,
+            ));
             let copied = check.clone();
             let admit = std::sync::Arc::new(std::sync::Mutex::new(move |bytes| {
                 if stop.is_cancelled() {
@@ -1551,7 +1561,7 @@ impl Controller {
                 DISK_RELEASE_WAIT,
                 &trace,
                 Some(owner),
-                preparation.bytes,
+                Some(&preparation),
                 spare_guard,
             )
             .await?;
@@ -2259,7 +2269,7 @@ impl Controller {
             let (state, policy) = (self.state.clone(), policy.clone());
             let sample = tokio::task::spawn_blocking(move || {
                 if workspace::data_root(&state).try_exists()? {
-                    disk::data_pool_headroom(&state, &policy, 0)
+                    disk::data_pool_headroom(&state, &policy, None)
                 } else {
                     Ok(u64::MAX)
                 }
@@ -2365,11 +2375,20 @@ impl Controller {
         operation(self.clone(), run, stop, admitted).await
     }
 
-    async fn reserve_copy(&self, maximum: u64) -> Result<(disk::Preparation, u64)> {
+    async fn reserve_copy(
+        &self,
+        maximum: u64,
+        filesystem: &Path,
+        policy: &storage::policy::Policy,
+    ) -> Result<(disk::Preparation, u64)> {
         let _pool = disk::lock(&self.state).await?;
-        let budget = maximum.min(self.disk_growth().await?);
+        let physical = disk::physical_headroom(&self.state, filesystem, policy, None)?;
+        let budget = maximum
+            .min(self.disk_growth().await?)
+            .min(physical.saturating_sub(disk::MIB));
         let reservation =
-            disk::Preparation::reserve(&self.state, &crate::config::id(), budget).await?;
+            disk::Preparation::reserve_on(&self.state, &crate::config::id(), budget, filesystem)
+                .await?;
         Ok((reservation, budget))
     }
 
@@ -2411,8 +2430,8 @@ impl Controller {
                 let mut admission = super::ingress::Admission::new(&controller.data, &controller.state, &exports, &controller.state, limit, &policy)?;
                 admission.admit(5120)?;
                 private_dir(&exports).await?;
-                let (reservation, budget) = controller.reserve_copy(crate::artifacts::file::MAX_FILE).await?;
-                let mut admission = super::ingress::Admission::new(&controller.data, &controller.state, &exports, &controller.state, limit, &policy)?.with_reservation(reservation.bytes);
+                let (reservation, budget) = controller.reserve_copy(crate::artifacts::file::MAX_FILE, &exports, &policy).await?;
+                let mut admission = super::ingress::Admission::new(&controller.data, &controller.state, &exports, &exports, limit, &policy)?.with_reservation(&reservation, false)?;
                 let copying_stop = stop.clone();
                 let (snapshot, size) = super::ingress::write((reservation, admitted), async move {
                     crate::artifacts::file::snapshot_in(&source, &allowed, &exports, budget, |bytes| {
@@ -2469,8 +2488,10 @@ impl Controller {
                         let staged = tempfile::tempdir_in(data)?;
                         let received = staged.path().join("project");
                         let remaining = block::free_bytes(data)?;
-                        let (reservation, budget) = controller.reserve_copy(remaining).await?;
+                        let pool = workspace::data_root(&controller.state);
                         let policy = storage::policy::for_node(&plan["storage"]["policy"])?;
+                        let (reservation, budget) =
+                            controller.reserve_copy(remaining, &pool, &policy).await?;
                         let mut admission = super::ingress::Admission::new(
                             &controller.data,
                             &controller.state,
@@ -2479,7 +2500,7 @@ impl Controller {
                             controller.disk_limit().await?,
                             &policy,
                         )?
-                        .with_reservation(reservation.bytes);
+                        .with_reservation(&reservation, true)?;
                         workspace::copy_admitted(&source, &received, budget, &mut |bytes| {
                             if stop.is_cancelled() {
                                 return Err(Error::conflict("Native project import stopped."));
@@ -3085,6 +3106,11 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
             let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
+            let _staging = if *action == "delete" {
+                Some(disk::lock_staging(&controller.state, run).await?)
+            } else {
+                None
+            };
             super::cleanup::check(&controller.state, run)?;
             let value = input(request, 4096).await?;
             let retirement = if *action == "delete" {
@@ -3527,8 +3553,18 @@ pub(crate) mod tests {
         let (_root, controller) = fixture().await;
         let budget = controller.disk_growth().await.unwrap();
         let requested = budget.saturating_mul(2) / 3;
-        let (first, first_bytes) = controller.reserve_copy(requested).await.unwrap();
-        let (second, second_bytes) = controller.reserve_copy(requested).await.unwrap();
+        let policy = storage::policy::Policy {
+            reserve_mi_b: 64,
+            ..Default::default()
+        };
+        let (first, first_bytes) = controller
+            .reserve_copy(requested, &controller.state, &policy)
+            .await
+            .unwrap();
+        let (second, second_bytes) = controller
+            .reserve_copy(requested, &controller.state, &policy)
+            .await
+            .unwrap();
         assert_eq!(first_bytes, requested);
         assert!(first_bytes + second_bytes <= budget);
         assert!(second_bytes < requested);
@@ -6591,6 +6627,32 @@ pub(crate) mod tests {
             std::fs::read(root.join("data/new")).unwrap(),
             b"next environment"
         );
+    }
+
+    #[tokio::test]
+    async fn retirement_waits_for_the_conversations_staging_writer() {
+        let (_root, controller) = fixture().await;
+        let run = crate::config::id();
+        let stage = controller.data.join("runs").join(&run);
+        private_dir(&stage).await.unwrap();
+        tokio::fs::write(stage.join("seed"), b"pending staging")
+            .await
+            .unwrap();
+        let writer = disk::lock_staging(&controller.state, &run).await.unwrap();
+        let deletion = || {
+            request(
+                &format!("/disks/{run}/delete"),
+                &json!({ "permanentlyDeleted": true }),
+            )
+        };
+
+        let error = route(controller.clone(), deletion()).await.unwrap_err();
+        assert!(error.is_conflict());
+        assert!(stage.join("seed").is_file());
+
+        drop(writer);
+        route(controller, deletion()).await.unwrap();
+        assert!(!stage.exists());
     }
 
     #[tokio::test]

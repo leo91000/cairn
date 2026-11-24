@@ -271,8 +271,9 @@ sudo python3 /opt/cairn-native/host.py migrate-pool --device /dev/mapper/cairn-n
 
 Si vous utilisez un fichier image, remplacez `--device …` par
 `--image /var/lib/cairn-native/native-data.xfs --size 200G`, avec une capacité
-adaptée aux données et à l’espace physique libre. L’outil configure alors un
-loop avec direct I/O. Pour un pool source déclaré dans `/etc/fstab`, installez
+adaptée aux données et à l’espace physique libre. L’outil alloue toute la taille
+demandée sur le système de fichiers hôte et vérifie que le loop accepte le
+direct I/O avant de formater le pool. Pour un pool source déclaré dans `/etc/fstab`, installez
 d’abord une unité `.mount` persistante équivalente et vérifiez le montage ext4.
 
 Après interruption, relancez `migrate-pool` avec la même cible pour reprendre.

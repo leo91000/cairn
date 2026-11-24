@@ -2,12 +2,23 @@
 //! staging. Controller and connector mutations share the same process-safe lock.
 use crate::error::{Error, Result};
 use std::{
-    path::Path,
+    io::Write,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
 pub(crate) const MIB: u64 = 1_048_576;
+
+/// Staging and retirement share the run's lock across the connector and the
+/// controller. Acquisition is nonblocking under the node-wide storage gate.
+pub(crate) async fn lock_staging(state: &Path, run: &str) -> Result<crate::file_lock::Guard> {
+    crate::validation::uuid(run)?;
+    let locks = state.join("native-staging-locks");
+    crate::skills::private_dir(&locks).await?;
+    crate::file_lock::exclusive(&locks.join(run), "Native workspace staging is busy.")
+}
 
 const METADATA_RESERVE: u64 = MIB;
 
@@ -18,7 +29,21 @@ pub(crate) fn available(limit: u64, used: u64) -> u64 {
 pub(super) fn data_pool_headroom(
     state: &Path,
     fallback: &crate::storage::policy::Policy,
-    own_reservation: u64,
+    own_reservation: Option<&Path>,
+) -> Result<u64> {
+    physical_headroom(
+        state,
+        &super::workspace::data_root(state),
+        fallback,
+        own_reservation,
+    )
+}
+
+pub(super) fn physical_headroom(
+    state: &Path,
+    filesystem: &Path,
+    fallback: &crate::storage::policy::Policy,
+    own_reservation: Option<&Path>,
 ) -> Result<u64> {
     let policy = match std::fs::read(state.join("storage-policy.json")) {
         Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
@@ -26,10 +51,9 @@ pub(super) fn data_pool_headroom(
         Err(error) => return Err(error.into()),
     };
     policy.validate().map_err(Error::bad)?;
-    let pool = super::workspace::data_root(state);
-    let (total, free) = crate::storage::policy::physical_space(&pool)?;
     // Other preparations may allocate before the next physical sample.
-    let peers = preparation_bytes(state)?.saturating_sub(own_reservation);
+    let peers = physical_preparations(state, filesystem, own_reservation)?;
+    let (total, free) = crate::storage::policy::physical_space(filesystem)?;
     Ok(free
         .saturating_sub(policy.reserve(total))
         .saturating_sub(crate::storage::cache::pending_write_bytes())
@@ -200,8 +224,7 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error.into()),
                 };
-                let bytes = text.parse::<u64>().map_err(Error::internal)?;
-                used = used.saturating_add(bytes);
+                used = used.saturating_add(read_preparation(&text)?.bytes);
             }
         } else {
             let physical = name == "native-bases"
@@ -217,15 +240,96 @@ fn measure_usage(data: &Path, state: &Path, include_reservations: bool) -> Resul
 
 /// Incoming bytes remain charged while the copy's physical worker is alive.
 pub(crate) struct Preparation {
-    path: std::path::PathBuf,
-    lease: std::path::PathBuf,
+    path: PathBuf,
+    lease: PathBuf,
     _owner: crate::file_lock::Guard,
     pub bytes: u64,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PreparationRecord {
+    bytes: u64,
+    physical: Option<PhysicalClaim>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PhysicalClaim {
+    device: u64,
+    remaining: u64,
+}
+
+fn read_preparation(text: &str) -> Result<PreparationRecord> {
+    if let Ok(bytes) = text.parse::<u64>() {
+        return Ok(PreparationRecord {
+            bytes,
+            physical: None,
+        });
+    }
+    Ok(serde_json::from_str(text)?)
+}
+
+pub(super) struct PreparationProgress {
+    pub(super) path: PathBuf,
+    initial: u64,
+}
+
+impl PreparationProgress {
+    pub(super) fn credit(&self, consumed: u64) -> Result<()> {
+        let mut record = read_preparation(&std::fs::read_to_string(&self.path)?)?;
+        let Some(claim) = &mut record.physical else {
+            return Ok(());
+        };
+        let remaining = self.initial.saturating_sub(consumed);
+        if remaining >= claim.remaining {
+            return Ok(());
+        }
+        claim.remaining = remaining;
+        // Progress is only needed by concurrent writers. A crash reaps the
+        // owner's reservation, so an atomic replacement needs no flush here.
+        let mut file = tempfile::NamedTempFile::new_in(self.path.parent().unwrap())?;
+        file.write_all(&serde_json::to_vec(&record)?)?;
+        file.persist(&self.path).map_err(|error| error.error)?;
+        Ok(())
+    }
+}
+
 impl Preparation {
-    /// Caller serializes this publication with the native storage pool gate.
+    #[cfg(test)]
     pub async fn reserve(state: &Path, attempt: &str, bytes: u64) -> Result<Self> {
+        Self::publish(
+            state,
+            attempt,
+            PreparationRecord {
+                bytes,
+                physical: None,
+            },
+        )
+        .await
+    }
+
+    /// Caller serializes reservation publication with the storage pool gate.
+    pub(crate) async fn reserve_on(
+        state: &Path,
+        attempt: &str,
+        bytes: u64,
+        filesystem: &Path,
+    ) -> Result<Self> {
+        let device = std::fs::metadata(filesystem)?.dev();
+        Self::publish(
+            state,
+            attempt,
+            PreparationRecord {
+                bytes,
+                physical: Some(PhysicalClaim {
+                    device,
+                    remaining: bytes,
+                }),
+            },
+        )
+        .await
+    }
+
+    async fn publish(state: &Path, attempt: &str, record: PreparationRecord) -> Result<Self> {
         crate::validation::uuid(attempt)?;
         let root = state.join("native-preparations");
         crate::skills::private_dir(&root).await?;
@@ -235,12 +339,20 @@ impl Preparation {
         if path.try_exists()? {
             return Err(Error::conflict("Native preparation is already reserved."));
         }
-        super::atomic_write(&path, bytes.to_string().as_bytes()).await?;
+        super::atomic_write(&path, &serde_json::to_vec(&record)?).await?;
         Ok(Self {
             path,
             lease,
             _owner: owner,
-            bytes,
+            bytes: record.bytes,
+        })
+    }
+
+    pub(super) fn progress(&self) -> Result<PreparationProgress> {
+        let record = read_preparation(&std::fs::read_to_string(&self.path)?)?;
+        Ok(PreparationProgress {
+            path: self.path.clone(),
+            initial: record.physical.map_or(0, |claim| claim.remaining),
         })
     }
 }
@@ -260,7 +372,30 @@ impl Drop for Preparation {
     }
 }
 
-pub(crate) fn preparation_bytes(state: &Path) -> Result<u64> {
+pub(super) fn physical_preparations(
+    state: &Path,
+    filesystem: &Path,
+    except: Option<&Path>,
+) -> Result<u64> {
+    let device = std::fs::metadata(filesystem)?.dev();
+    sum_preparations(state, except, |record| {
+        record
+            .physical
+            .filter(|claim| claim.device == device)
+            .map_or(0, |claim| claim.remaining)
+    })
+}
+
+#[cfg(test)]
+fn preparation_bytes(state: &Path) -> Result<u64> {
+    sum_preparations(state, None, |record| record.bytes)
+}
+
+fn sum_preparations(
+    state: &Path,
+    except: Option<&Path>,
+    bytes_for: impl Fn(PreparationRecord) -> u64,
+) -> Result<u64> {
     let entries = match std::fs::read_dir(state.join("native-preparations")) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -276,9 +411,13 @@ pub(crate) fn preparation_bytes(state: &Path) -> Result<u64> {
         {
             continue;
         }
-        match std::fs::read_to_string(entry.path()) {
+        let path = entry.path();
+        if except == Some(path.as_path()) {
+            continue;
+        }
+        match std::fs::read_to_string(path) {
             Ok(amount) => {
-                bytes = bytes.saturating_add(amount.parse::<u64>().map_err(Error::internal)?);
+                bytes = bytes.saturating_add(bytes_for(read_preparation(&amount)?));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -434,6 +573,46 @@ pub(super) async fn staging_budget_from(client: &reqwest::Client, origin: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn physical_claims_charge_only_unspent_capacity_on_the_same_filesystem() {
+        let state = tempfile::tempdir().unwrap();
+        let path = state.path();
+        let first = Preparation::reserve_on(path, &crate::config::id(), 40 * MIB, path)
+            .await
+            .unwrap();
+        let second = Preparation::reserve_on(path, &crate::config::id(), 40 * MIB, path)
+            .await
+            .unwrap();
+        let foreign = Preparation::publish(
+            path,
+            &crate::config::id(),
+            PreparationRecord {
+                bytes: 40 * MIB,
+                physical: Some(PhysicalClaim {
+                    device: std::fs::metadata(path).unwrap().dev().wrapping_add(1),
+                    remaining: 40 * MIB,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let writer = first.progress().unwrap();
+        assert_eq!(
+            physical_preparations(path, path, Some(&writer.path)).unwrap(),
+            40 * MIB
+        );
+        second.progress().unwrap().credit(25 * MIB).unwrap();
+        writer.credit(25 * MIB).unwrap();
+        assert_eq!(
+            physical_preparations(path, path, Some(&writer.path)).unwrap(),
+            15 * MIB
+        );
+        assert_eq!(physical_preparations(path, path, None).unwrap(), 30 * MIB);
+        assert_eq!(preparation_bytes(path).unwrap(), 120 * MIB);
+        drop((first, second, foreign));
+    }
 
     #[tokio::test]
     async fn recovery_keeps_another_process_staging_reservation_until_its_lease_settles() {

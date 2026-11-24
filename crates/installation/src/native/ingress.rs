@@ -87,6 +87,8 @@ pub(crate) struct Admission {
     initial_target: u64,
     sampled: u64,
     reservation: u64,
+    progress: Option<disk::PreparationProgress>,
+    credit_progress: bool,
     submitted: u64,
     observation: Observation,
 }
@@ -176,7 +178,7 @@ impl Admission {
     ) -> Result<Self> {
         let initial_target = target.allocated()?;
         let used = disk::usage_sync(data, state)?;
-        let peer_reservations = disk::preparation_bytes(state)?;
+        let peer_reservations = disk::physical_preparations(state, filesystem, None)?;
         Ok(Self {
             data: data.to_owned(),
             state: state.to_owned(),
@@ -187,6 +189,8 @@ impl Admission {
             initial_target,
             sampled: used,
             reservation: 0,
+            progress: None,
+            credit_progress: false,
             submitted: 0,
             observation: Observation {
                 at: Instant::now(),
@@ -204,27 +208,37 @@ impl Admission {
     }
 
     pub(crate) fn reserve_staging(&self, bytes: u64) -> Result<bool> {
+        let peers = disk::physical_preparations(&self.state, &self.filesystem, None)?;
         let (total, free) = storage::policy::physical_space(&self.filesystem)?;
         let available = free
             .saturating_sub(self.policy.reserve(total))
             .saturating_sub(storage::cache::pending_write_bytes())
-            .saturating_sub(disk::preparation_bytes(&self.state)?);
+            .saturating_sub(peers);
         Ok(bytes.saturating_add(disk::MIB) <= available)
     }
 
-    pub fn with_reservation(mut self, bytes: u64) -> Self {
-        self.reservation = bytes;
-        self.observation.used = self.observation.used.saturating_sub(bytes);
+    pub(super) fn with_reservation(
+        mut self,
+        reservation: &disk::Preparation,
+        credit_progress: bool,
+    ) -> Result<Self> {
+        let progress = reservation.progress()?;
+        self.reservation = reservation.bytes;
+        self.observation.used = self.observation.used.saturating_sub(reservation.bytes);
         self.observation.peer_reservations =
-            self.observation.peer_reservations.saturating_sub(bytes);
-        self
+            disk::physical_preparations(&self.state, &self.filesystem, Some(&progress.path))?;
+        self.progress = Some(progress);
+        self.credit_progress = credit_progress;
+        Ok(self)
     }
 
-    pub(crate) fn with_new_reservation(mut self, bytes: u64) -> Self {
+    pub(crate) fn with_new_reservation(mut self, reservation: &disk::Preparation) -> Result<Self> {
         // This sample was taken under the storage lock before publication.
         // Later samples include the reservation and subtract it in admit.
-        self.reservation = bytes;
-        self
+        self.reservation = reservation.bytes;
+        self.progress = Some(reservation.progress()?);
+        self.credit_progress = true;
+        Ok(self)
     }
 
     pub(crate) fn retarget_staging(&mut self, target: &Path) -> Result<()> {
@@ -252,9 +266,13 @@ impl Admission {
         if self.observation.at.elapsed() >= Duration::from_millis(250) {
             let started = Instant::now();
             let used = disk::usage_sync(&self.data, &self.state)?.saturating_sub(self.reservation);
-            let peer_reservations =
-                disk::preparation_bytes(&self.state)?.saturating_sub(self.reservation);
             let growth = self.target.allocated()?.saturating_sub(self.initial_target);
+            if self.credit_progress
+                && let Some(progress) = &self.progress
+            {
+                progress.credit(growth.min(self.submitted))?;
+            }
+            let peer_reservations = self.peer_reservations()?;
             // Delayed allocation and small-file overhead must not erase a
             // debit merely because a new usage sample does not show it yet.
             let outstanding = self.submitted.saturating_sub(growth);
@@ -298,6 +316,16 @@ impl Admission {
         self.submitted = self.submitted.saturating_add(allocation);
         Ok(())
     }
+
+    fn peer_reservations(&self) -> Result<u64> {
+        disk::physical_preparations(
+            &self.state,
+            &self.filesystem,
+            self.progress
+                .as_ref()
+                .map(|progress| progress.path.as_path()),
+        )
+    }
 }
 
 fn allocated(path: &Path) -> Result<u64> {
@@ -328,7 +356,7 @@ mod tests {
         std::fs::create_dir(&data).unwrap();
         let policy = storage::policy::Policy::default();
         let (_, free) = storage::policy::physical_space(&data).unwrap();
-        let peer = disk::Preparation::reserve(&state, &crate::config::id(), free)
+        let peer = disk::Preparation::reserve_on(&state, &crate::config::id(), free, &data)
             .await
             .unwrap();
         let mut fallback = Admission::new(&data, &state, &data, &data, u64::MAX, &policy).unwrap();
@@ -479,7 +507,8 @@ mod tests {
             &policy,
         )
         .unwrap()
-        .with_reservation(own.bytes);
+        .with_reservation(&own, true)
+        .unwrap();
         admission.admit(own.bytes).unwrap();
         assert_eq!(admission.admit(1).unwrap_err().status, 507);
         drop((own, foreign));

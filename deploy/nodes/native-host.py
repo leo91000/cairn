@@ -1098,7 +1098,7 @@ def attached_loop(image):
     return Path(devices[0]) if devices else None
 
 
-def loop_unit(image, mount_unit):
+def loop_unit(image, mount_unit, filesystem):
     image_text = str(image)
     return f'''[Unit]
 Description=Cairn native data pool loop device (direct I/O)
@@ -1109,8 +1109,8 @@ Conflicts=umount.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'test -n "$$(losetup --noheadings --output NAME --associated {image_text})" || losetup --direct-io=on --find --show {image_text}'
-ExecStop=/bin/sh -c 'for device in $$(losetup --noheadings --output NAME --associated {image_text}); do losetup --detach "$$device"; done'
+ExecStart=/bin/sh -ec 'set -- $$(losetup --noheadings --output NAME --associated {image_text}); test "$$#" -le 1; if test "$$#" = 0; then device=$$(losetup --direct-io=on --find --show {image_text}); if test "$$(blkid -p -s UUID -o value "$$device")" = {filesystem} && test "$$(losetup --noheadings --output DIO "$$device" | tr -d " ")" = 1; then exit 0; fi; losetup --detach "$$device"; exit 1; fi; test "$$(blkid -p -s UUID -o value "$$1")" = {filesystem}; test "$$(losetup --noheadings --output DIO "$$1" | tr -d " ")" = 1'
+ExecStop=/bin/sh -ec 'set -- $$(losetup --noheadings --output NAME --associated {image_text}); if test "$$#" = 0; then exit 0; fi; test "$$#" = 1; test "$$(blkid -p -s UUID -o value "$$1")" = {filesystem}; losetup --detach "$$1"'
 [Install]
 WantedBy=local-fs.target
 '''
@@ -1140,7 +1140,7 @@ def plan_steps(record, old, plan, pool):
     device = target.get('device') or f'a new loop device for {image}'
     steps = []
     if image:
-        steps.append(f'Create sparse image {image} of {target["size"]} bytes and attach it with losetup --direct-io=on.')
+        steps.append(f'Fully allocate image {image} with {target["size"]} bytes and attach it with losetup --direct-io=on.')
     steps.append(f'Format {device} with mkfs.xfs -m crc=1,reflink=1 -i projid32bit=1 and mount it with prjquota at {migration_directory() / "target"}.')
     for environment in plan['environments']:
         if environment['project']:
@@ -1199,7 +1199,7 @@ def mount_new_pool(record, old, pool):
     back_up_unit(old)
     if image:
         loop_path = UNIT_DIRECTORY / LOOP_SERVICE
-        expected = loop_unit(Path(image), old['unit']).encode()
+        expected = loop_unit(Path(image), old['unit'], record['uuid']).encode()
         if loop_path.exists() and loop_path.read_bytes() != expected:
             raise MigrationError(f'{LOOP_SERVICE} belongs to another pool.')
         atomic_bytes(loop_path, expected, 0o644)
@@ -1279,14 +1279,21 @@ def prepare_image(record, image, force):
         if image.exists():
             if record['phase'] == 'planned' and not force:
                 raise MigrationError(f'{image} already exists; pass --force to reuse and overwrite it.')
+            metadata = image.stat(follow_symlinks=False)
+            if metadata.st_size != record['target']['size'] or metadata.st_blocks * 512 < metadata.st_size:
+                raise MigrationError('An existing target image must be fully allocated at the requested size.')
             return
         if record['phase'] != 'planned':
             raise MigrationError(f'The image for this migration is missing: {image}.')
         # Keep the new inode private until its identity is committed. A crash
         # after the link can recognize the final name without requiring force.
         with tempfile.NamedTemporaryFile(prefix='.cairn-native-xfs-', dir=image.parent, delete=False) as output:
-            os.ftruncate(output.fileno(), record['target']['size'])
-            os.fsync(output.fileno())
+            try:
+                os.posix_fallocate(output.fileno(), 0, record['target']['size'])
+                os.fsync(output.fileno())
+            except OSError:
+                Path(output.name).unlink()
+                raise
             metadata = os.fstat(output.fileno())
             created = {'name': Path(output.name).name, 'device': metadata.st_dev, 'inode': metadata.st_ino}
         sync_directory(image.parent)
@@ -1302,6 +1309,8 @@ def prepare_image(record, image, force):
     actual = (image if published else staged).stat(follow_symlinks=False)
     if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != expected:
         raise MigrationError('New pool image does not match the inode created for this migration.')
+    if actual.st_size != record['target']['size'] or actual.st_blocks * 512 < actual.st_size:
+        raise MigrationError('The recorded pool image is no longer fully allocated at the requested size.')
     if not published:
         os.link(staged, image, follow_symlinks=False)
         sync_directory(image.parent)
@@ -1312,17 +1321,41 @@ def prepare_image(record, image, force):
             sync_directory(image.parent)
 
 
+def owned_loop(record, image):
+    receipt = record.get('imageLoop')
+    if receipt is None:
+        return None
+    stat_image = image.stat(follow_symlinks=False)
+    if not stat.S_ISREG(stat_image.st_mode) or (stat_image.st_dev, stat_image.st_ino) != (receipt['dev'], receipt['ino']):
+        raise MigrationError('The loop backing file no longer belongs to this pool migration.')
+    device = attached_loop(image)
+    if device is None:
+        return None
+    if record['phase'] == 'planned':
+        if str(device) != receipt['loop']:
+            raise MigrationError('The image is attached to a different loop than the planned migration.')
+    elif filesystem_uuid(device) != record['uuid']:
+        raise MigrationError('The attached loop does not contain the migration filesystem.')
+    return device
+
+
 def prepare_target(record, force):
     target = record['target']
     work = migration_directory()
     if 'image' in target:
         image = Path(target['image'])
         prepare_image(record, image, force)
-        device = attached_loop(image)
+        device = owned_loop(record, image)
         if device is None:
-            device = Path(checked('losetup', '--direct-io=on', '--find', '--show', str(image)).strip())
+            if attached_loop(image) is not None:
+                raise MigrationError('The new image is already attached outside the migration.')
+            device = Path(checked('losetup', '--find').strip())
+            metadata = image.stat(follow_symlinks=False)
+            record['imageLoop'] = {'dev': metadata.st_dev, 'ino': metadata.st_ino, 'loop': str(device)}
+            save_migration(record)
+            checked('losetup', '--direct-io=on', str(device), str(image))
         if checked('losetup', '--noheadings', '--output', 'DIO', str(device)).strip() != '1':
-            print(f'Warning: {device} could not enable direct I/O; the host page cache will double-cache pool data.', file=sys.stderr)
+            raise MigrationError(f'{device} does not support direct I/O for this image. Choose a partition, logical volume or another image filesystem.')
     else:
         device = Path(target['device'])
     expected = record['uuid']
@@ -1404,8 +1437,11 @@ def migrate_pool(arguments):
         verify_image_location(Path(target['image']), state, pool)
         free = os.statvfs(Path(target['image']).parent)
         needed = plan['usedBytes'] + plan['usedBytes'] // 10 + 1024 ** 3
-        if target['size'] < needed or (free.f_bavail * free.f_frsize < needed and not Path(target['image']).exists()):
-            raise MigrationError(f'The new pool needs at least {needed} bytes, both as --size and free space next to the image.')
+        if target['size'] < needed:
+            raise MigrationError(f'The new pool needs at least {needed} bytes as --size.')
+        if not Path(target['image']).exists() and not (record and record.get('createdImage')) \
+                and free.f_bavail * free.f_frsize < target['size']:
+            raise MigrationError(f'The image needs at least {target["size"]} free bytes for full backing allocation.')
     record = record or {'version': 1, 'target': target, 'phase': 'planned', 'old': old, 'uuid': str(uuid.uuid4())}
     if arguments.dry_run:
         units = active_units()
@@ -1475,11 +1511,22 @@ def rollback_pool(arguments):
         print(f'Rollback would unmount the XFS pool (phase {record["phase"]}), restore {record["old"]["unit"]} and the original ownership records.')
         return
     old = record['old']
-    original_unit = back_up_unit(old)
     image = record['target'].get('image')
     mountpoint = migration_directory() / 'target'
-    if mount_of(mountpoint):
+    staging = mount_of(mountpoint)
+    if staging:
+        if staging.get('fstype') != 'xfs' or not record.get('uuid') or filesystem_uuid(staging['source']) != record['uuid']:
+            raise MigrationError(f'{mountpoint} holds a filesystem outside the migration.')
+    loop = owned_loop(record, Path(image)) if image else None
+    if staging:
         checked('umount', str(mountpoint), timeout=300)
+    if record['phase'] in ('planned', 'formatted'):
+        # Switch never touched the original mount or its systemd files.
+        if loop:
+            checked('losetup', '--detach', str(loop))
+        finish_rollback(record)
+        return
+    original_unit = back_up_unit(old)
     mounted = mount_of(pool)
     if mounted and new_pool_mounted(record, pool):
         checked('systemctl', 'stop', old['unit'], timeout=300)
@@ -1488,11 +1535,13 @@ def rollback_pool(arguments):
     if image:
         loop_path = UNIT_DIRECTORY / LOOP_SERVICE
         if loop_path.exists():
-            if loop_path.read_bytes() != loop_unit(Path(image), old['unit']).encode():
+            if loop_path.read_bytes() != loop_unit(Path(image), old['unit'], record['uuid']).encode():
                 raise MigrationError(f'{LOOP_SERVICE} belongs to another pool.')
+            if not record.get('imageLoop'):
+                raise MigrationError('Cannot prove ownership of the installed loop service.')
             checked('systemctl', 'disable', '--now', LOOP_SERVICE, timeout=300)
         loop_path.unlink(missing_ok=True)
-        loop = attached_loop(Path(image))
+        loop = owned_loop(record, Path(image))
         if loop:
             checked('losetup', '--detach', str(loop))
     unit = UNIT_DIRECTORY / old['unit']
@@ -1513,9 +1562,14 @@ def rollback_pool(arguments):
     verify_old_pool(old, mounted)
     pool_tool('rollback', state, migration_directory())
     pool_tool('check', state)
+    finish_rollback(record)
+
+
+def finish_rollback(record):
     migration_directory().rename(migration_directory().with_name(f'native-pool-migration.rolled-back-{time.time_ns()}'))
     sync_directory(migration_directory().parent)
-    print(f'Rolled back to the ext4 pool {old["what"]}. The XFS target {image or record["target"]["device"]} was kept; remove it when no longer needed.')
+    target = record['target'].get('image') or record['target']['device']
+    print(f'Rolled back to the ext4 pool {record["old"]["what"]}. The target {target} was preserved.')
 
 
 def pool_arguments(argv):
@@ -1524,7 +1578,7 @@ def pool_arguments(argv):
     if argv[0] == 'migrate-pool':
         target = parser.add_mutually_exclusive_group()
         target.add_argument('--device', help='unused partition or logical volume for the new XFS pool')
-        target.add_argument('--image', help='sparse image file attached with losetup --direct-io=on')
+        target.add_argument('--image', help='fully allocated image file with direct I/O')
         parser.add_argument('--size', help='image size, such as 500G')
         parser.add_argument('--force', action='store_true', help='overwrite an existing filesystem signature or image')
     parser.add_argument('--stop', action='store_true', help='stop cairn-native-node.service and cairn-native-* units first')

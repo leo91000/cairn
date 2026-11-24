@@ -193,6 +193,7 @@ pub(super) async fn warm(
     if stop.is_cancelled()
         || !quota::reflink(&std::fs::File::open(&pool)?)?
         || required > disk::available(limit, disk::used(&bases.data, state).await?)
+        || required.saturating_add(disk::MIB) > disk::data_pool_headroom(state, policy, None)?
     {
         return Ok(());
     }
@@ -220,7 +221,8 @@ pub(super) async fn warm(
     private_dir(&state.join("native")).await?;
     tokio::fs::File::open(state).await?.sync_all().await?;
     atomic_write(&index(state).join(&spare.run), &serde_json::to_vec(&spare)?).await?;
-    let reservation = match disk::Preparation::reserve(state, &spare.run, required).await {
+    let reservation = match disk::Preparation::reserve_on(state, &spare.run, required, &pool).await
+    {
         Ok(reservation) => reservation,
         Err(error) => {
             forget(state, &spare).await?;
@@ -238,7 +240,7 @@ pub(super) async fn warm(
         let data = workload.join("data");
         private_dir(&data).await?;
         let capacity = directory::CopyCapacity::new(state, &workload, required, policy.clone())
-            .with_reservation(reservation.bytes)
+            .with_reservation(Some(&reservation))?
             .with_shared_blocks(true);
         directory::copy_verified(&bases.contents(key), &data, stop, &capacity, true).await?;
         atomic_write(&control.join("spare-ready"), key.as_bytes()).await?;

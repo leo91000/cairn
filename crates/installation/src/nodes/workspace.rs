@@ -446,11 +446,15 @@ pub async fn seed(
         if let Some(bytes) = allocation
             && admission.reserve_staging(bytes)?
         {
-            let reservation =
-                crate::native::disk::Preparation::reserve(&state, &crate::config::id(), bytes)
-                    .await?;
+            let reservation = crate::native::disk::Preparation::reserve_on(
+                &state,
+                &crate::config::id(),
+                bytes,
+                &super::node_data_dir(),
+            )
+            .await?;
             (
-                Some(admission.with_new_reservation(bytes)),
+                Some(admission.with_new_reservation(&reservation)?),
                 Some(reservation),
             )
         } else {

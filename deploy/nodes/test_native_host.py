@@ -693,7 +693,7 @@ class PoolMigrationTests(unittest.TestCase):
     def test_units_attach_the_image_with_direct_io_and_mount_by_uuid(self):
         pool = Path('/var/lib/cairn-native/state/native-data')
         image = Path('/var/lib/cairn-native/native-data.xfs')
-        loop = host.loop_unit(image, OLD['unit'])
+        loop = host.loop_unit(image, OLD['unit'], 'f00d')
         self.assertIn('losetup --direct-io=on --find --show /var/lib/cairn-native/native-data.xfs', loop)
         self.assertIn('RequiresMountsFor=/var/lib/cairn-native', loop)
         self.assertIn('Before=' + OLD['unit'], loop)
@@ -838,20 +838,20 @@ class PoolMigrationTests(unittest.TestCase):
         image = '/var/lib/cairn-native/native-data.xfs'
         original = b'original ext4 unit\n'
         old = dict(OLD, unitSha256=host.hashlib.sha256(original).hexdigest())
-        host.save_migration(dict(version=1, target=dict(image='/var/lib/cairn-native/native-data.xfs', size=1 << 30),
-                                 phase='complete', old=old, uuid='f00d'))
+        host.save_migration(dict(version=1, target=dict(image=image, size=1 << 30),
+                                 phase='complete', old=old, uuid='f00d', imageLoop={'loop': '/dev/loop1'}))
         backup = host.migration_directory() / 'units' / OLD['unit']
         backup.parent.mkdir()
         backup.write_bytes(original)
         (self.units / OLD['unit']).write_text(host.pool_unit(host.pool_path(), 'f00d', 'image'))
-        (self.units / host.LOOP_SERVICE).write_text(host.loop_unit(Path(image), OLD['unit']))
+        (self.units / host.LOOP_SERVICE).write_text(host.loop_unit(Path(image), OLD['unit'], 'f00d'))
         mounts = iter([None, dict(fstype='xfs', source='/dev/loop1'), None, dict(fstype='ext4', source='/dev/loop0')])
         commands = []
         with patch.object(host, 'require_stopped'), patch.object(host, 'mount_of', side_effect=lambda *_: next(mounts)), \
                 patch.object(host, 'new_pool_mounted', return_value=True), \
                 patch.object(host, 'filesystem_uuid', return_value=OLD['uuid']), \
                 patch.object(host, 'checked', side_effect=lambda *args, **_: commands.append(args) or ''), \
-                patch.object(host, 'attached_loop', return_value=Path('/dev/loop1')), \
+                patch.object(host, 'owned_loop', return_value=Path('/dev/loop1')), \
                 patch.object(host, 'pool_tool', side_effect=lambda action, *_: commands.append(('pool', action)) or {}), \
                 contextlib.redirect_stdout(io.StringIO()):
             host.rollback_pool(pool_arguments())
@@ -890,7 +890,8 @@ class PoolMigrationTests(unittest.TestCase):
 
     def test_new_image_can_resume_after_its_receipt_preceded_the_link(self):
         image = self.root / 'new.xfs'
-        record = dict(phase='planned', target={'image': str(image), 'size': 1 << 30})
+        size = 64 * 1024
+        record = dict(phase='planned', target={'image': str(image), 'size': size})
         with patch.object(host.os, 'link', side_effect=host.MigrationError('interrupted before publication')), \
                 self.assertRaisesRegex(host.MigrationError, 'before publication'):
             host.prepare_image(record, image, False)
@@ -900,8 +901,40 @@ class PoolMigrationTests(unittest.TestCase):
         self.assertTrue(staged.is_file())
         host.prepare_image(saved, image, False)
         self.assertEqual(image.stat().st_ino, saved['createdImage']['inode'])
-        self.assertEqual(image.stat().st_size, 1 << 30)
+        self.assertEqual(image.stat().st_size, size)
+        self.assertGreaterEqual(image.stat().st_blocks * 512, size)
         self.assertFalse(staged.exists())
+
+    def test_planned_rollback_does_not_detach_an_unacquired_loop(self):
+        image = self.root / 'other.img'
+        image.write_bytes(b'other service uses this image')
+        host.save_migration(dict(phase='planned', old=OLD, target={'image': str(image)}, uuid='f00d'))
+        with patch.object(host, 'mount_of', return_value=None), \
+                patch.object(host, 'attached_loop') as associated, patch.object(host, 'checked') as commands, \
+                contextlib.redirect_stdout(io.StringIO()):
+            host.rollback_pool(pool_arguments())
+        associated.assert_not_called()
+        commands.assert_not_called()
+        self.assertTrue(image.is_file())
+        self.assertIsNone(host.load_migration())
+
+    def test_rollback_never_unmounts_a_foreign_staging_filesystem(self):
+        host.save_migration(dict(phase='formatted', old=OLD, target={'device': '/dev/synthetic'}, uuid='f00d'))
+        with patch.object(host, 'mount_of', return_value={'fstype': 'xfs', 'source': '/dev/foreign'}), \
+                patch.object(host, 'filesystem_uuid', return_value='0000'), \
+                patch.object(host, 'checked') as commands, self.assertRaisesRegex(host.MigrationError, 'outside the migration'):
+            host.rollback_pool(pool_arguments())
+        commands.assert_not_called()
+        self.assertEqual(host.load_migration()['phase'], 'formatted')
+
+    def test_buffered_image_is_refused_before_formatting(self):
+        image = self.root / 'buffered.img'
+        record = dict(phase='planned', old=OLD, target={'image': str(image)}, uuid='f00d')
+        with patch.object(host, 'prepare_image'), patch.object(host, 'owned_loop', return_value=Path('/dev/loop0')), \
+                patch.object(host, 'checked', return_value='0') as commands, \
+                self.assertRaisesRegex(host.MigrationError, 'does not support direct I/O'):
+            host.prepare_target(record, False)
+        commands.assert_called_once_with('losetup', '--noheadings', '--output', 'DIO', '/dev/loop0')
 
     def test_planned_device_can_repeat_mkfs_using_only_its_recorded_signature(self):
         device = self.root / 'synthetic-device'
