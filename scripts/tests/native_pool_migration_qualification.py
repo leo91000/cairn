@@ -165,6 +165,9 @@ def main(binary, cairn, fixture):
         command('systemctl', 'start', unit, timeout=180)
         eventually(lambda: mounted(pool) == 'xfs')
         assert direct_io(image), 'The boot-time loop device lost direct I/O.'
+        record = json.loads((root / 'native-pool-migration/state.json').read_bytes())
+        device = Path('/run') / f'cairn-native-pool-{record["uuid"]}' / 'device'
+        assert device.is_symlink() and pool.stat().st_dev == device.stat().st_rdev, 'Boot mounted outside the verified loop attachment.'
         assert 'migrated to XFS' in host(root, cairn, 'migrate-pool'), 'A completed migration did not rerun idempotently.'
         phase(binary, root, 'migrated')
 

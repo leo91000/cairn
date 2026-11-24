@@ -297,7 +297,8 @@ vérifie cette allocation et l’association de l’inode au loop avant le forma
 Le fichier et tous ses répertoires parents doivent appartenir à root, sans
 lien symbolique ni écriture pour les groupes et autres comptes. Au démarrage,
 le service loop vérifie le fichier ouvert contre le reçu de migration avant de
-l’attacher et contrôle l’UUID XFS avant de rendre le pool disponible.
+l’attacher et contrôle l’UUID XFS avant de rendre le pool disponible. L’unité de
+montage utilise le périphérique loop vérifié via un lien privé dans `/run`.
 Intégrez les éventuels drop-ins à cette unité avant d’arrêter le nœud. Le retour
 à ext4 rétablit les liens de démarrage présents avant la migration.
 La migration réserve au moins 64 Mio, plus 64 Kio par environnement, pour les

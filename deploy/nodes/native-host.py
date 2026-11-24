@@ -1242,6 +1242,10 @@ def attached_loop(image):
     return Path(devices[0]) if devices else None
 
 
+def image_device_link(filesystem):
+    return Path('/run') / f'cairn-native-pool-{filesystem}' / 'device'
+
+
 def loop_unit(image, mount_unit, filesystem):
     receipt = safe_path(str(migration_directory() / 'state.json'))
     supervisor = safe_path(str(INSTALL / 'host.py'))
@@ -1256,6 +1260,8 @@ Conflicts=umount.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+RuntimeDirectory={image_device_link(filesystem).parent.name}
+RuntimeDirectoryMode=0700
 ExecStart={command} attach {arguments}
 ExecStop={command} detach {arguments}
 [Install]
@@ -1268,12 +1274,13 @@ NEW_POOL_UNIT = 'Description=Cairn native data pool (XFS, reflink, project quota
 
 def pool_unit(pool, uuid, image, restrictions=()):
     loop = f'Requires={LOOP_SERVICE}\nAfter={LOOP_SERVICE}\n' if image else ''
+    device = image_device_link(uuid) if image else f'/dev/disk/by-uuid/{uuid}'
     options = ','.join(['prjquota', *(option for option in MOUNT_RESTRICTIONS if option in restrictions)])
     return f'''[Unit]
 {NEW_POOL_UNIT}
 {loop}Before={SERVICE}
 [Mount]
-What=/dev/disk/by-uuid/{uuid}
+What={device}
 Where={pool}
 Type=xfs
 Options={options}
@@ -1304,7 +1311,8 @@ def plan_steps(record, old, plan, pool):
     steps.append(f'Unmount the ext4 pool ({old["what"]}) and keep it unchanged as the rollback source.')
     if image:
         steps.append(f'Write {UNIT_DIRECTORY / LOOP_SERVICE} to attach {image} with direct I/O at boot.')
-    steps.append(f'Write {unit} (backing up the current unit) to mount the XFS pool by UUID at {pool}, before {SERVICE}.')
+    source = 'the verified loop device' if image else 'the XFS UUID'
+    steps.append(f'Write {unit} (backing up the current unit) to mount {source} at {pool} before {SERVICE}.')
     steps.append('Switch the controller ownership records to the new pool and run the controller pool check.')
     return steps
 
@@ -1377,8 +1385,7 @@ def mount_new_pool(record, old, pool):
     sync_directory(UNIT_DIRECTORY)
     for name in units:
         checked('systemctl', 'start', name, timeout=300)
-    mounted = mount_of(pool)
-    if not mounted or mounted.get('fstype') != 'xfs' or filesystem_uuid(mounted['source']) != record['uuid']:
+    if not new_pool_mounted(record, pool):
         raise MigrationError(f'{pool} did not mount the new XFS pool; inspect systemctl status {old["unit"]}.')
 
 
@@ -1759,6 +1766,12 @@ def boot_image_loop(action, image, expected_uuid, receipt):
                 checked('losetup', '--detach', str(device))
             else:
                 configure_image_loop(device, direct_io)
+                link = image_device_link(expected_uuid)
+                try:
+                    link.symlink_to(device)
+                except FileExistsError:
+                    if not link.is_symlink() or os.readlink(link) != str(device):
+                        raise MigrationError('The native pool runtime device link changed.') from None
         except Exception:
             if created and attached_loop(image) == device:
                 checked('losetup', '--detach', str(device))
@@ -1837,7 +1850,7 @@ def prepare_target_with_handles(record, force, handles):
         verify_target_device_path(device, device_id)
         checked('mount', '-t', 'xfs', '-o', 'prjquota', str(device), str(mountpoint), timeout=300)
         mounted = mount_of(mountpoint)
-    if not matches_new_pool(record, mounted):
+    if not matches_pool_uuid(record, mounted):
         raise MigrationError(f'{mountpoint} does not hold the migration filesystem.')
     # The new pool root becomes the pool path: root-owned, as the old one.
     os.chown(mountpoint, 0, 0)
@@ -1852,13 +1865,25 @@ def device_path(value):
     return path
 
 
-def matches_new_pool(record, mounted):
+def matches_pool_uuid(record, mounted):
     return bool(mounted and mounted.get('fstype') == 'xfs' and record.get('uuid')
                 and filesystem_uuid(mounted['source']) == record['uuid'])
 
 
+def matches_new_pool(record, mounted, pool):
+    if not matches_pool_uuid(record, mounted):
+        return False
+    if not record.get('target', {}).get('image'):
+        return True
+    try:
+        device = image_device_link(record['uuid']).stat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISBLK(device.st_mode) and pool.stat().st_dev == device.st_rdev
+
+
 def new_pool_mounted(record, pool):
-    return matches_new_pool(record, mount_of(pool))
+    return matches_new_pool(record, mount_of(pool), pool)
 
 
 def migration_target(arguments, record):
@@ -1995,8 +2020,9 @@ def activate_pool(arguments):
     record = load_migration()
     if not record or record.get('phase') != 'complete':
         raise MigrationError('Finish the XFS pool migration before activating it.')
-    mounted = mount_of(pool_path())
-    if not matches_new_pool(record, mounted):
+    pool = pool_path()
+    mounted = mount_of(pool)
+    if not matches_new_pool(record, mounted, pool):
         raise MigrationError('The mounted pool does not match the completed XFS migration.')
     if 'rw' not in mounted['options'].split(','):
         raise MigrationError('The verified XFS pool is read-only. Remount it writable before authorizing activation.')

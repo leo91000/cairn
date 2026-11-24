@@ -313,7 +313,7 @@ async fn seed(state: &Path) {
     assert_eq!(blockers.len(), 1);
     let blocker = blockers[0].as_str().unwrap();
     assert!(blocker.contains(&retiring) && blocker.contains("interrupted quota retirement"));
-    super::super::retire(&workload).await.unwrap();
+    super::super::retire(&control).await.unwrap();
     assert!(
         plan(state).unwrap()["blockers"]
             .as_array()

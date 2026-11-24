@@ -699,14 +699,17 @@ class PoolMigrationTests(unittest.TestCase):
         receipt = host.migration_directory() / 'state.json'
         self.assertIn(f'pool-loop attach {image} f00d {receipt}\n', loop)
         self.assertIn(f'pool-loop detach {image} f00d {receipt}\n', loop)
+        self.assertIn('RuntimeDirectory=cairn-native-pool-f00d\n', loop)
         self.assertIn('RequiresMountsFor=/var/lib/cairn-native', loop)
         self.assertIn('Before=' + OLD['unit'], loop)
         self.assertNotRegex(loop.replace('$$', ''), r'\$')
         unit = host.pool_unit(pool, 'f00d', image)
-        for line in ('What=/dev/disk/by-uuid/f00d', 'Where=' + str(pool), 'Type=xfs', 'Options=prjquota',
+        for line in ('What=/run/cairn-native-pool-f00d/device', 'Where=' + str(pool), 'Type=xfs', 'Options=prjquota',
                      'Before=' + host.SERVICE, 'Requires=' + host.LOOP_SERVICE, 'WantedBy=local-fs.target'):
             self.assertIn(line + '\n', unit)
-        self.assertNotIn(host.LOOP_SERVICE, host.pool_unit(pool, 'f00d', None))
+        device_unit = host.pool_unit(pool, 'f00d', None)
+        self.assertNotIn(host.LOOP_SERVICE, device_unit)
+        self.assertIn('What=/dev/disk/by-uuid/f00d\n', device_unit)
         restricted = host.pool_unit(pool, 'f00d', image, ('nosuid', 'nodev', 'noexec', 'ext4-only'))
         self.assertIn('Options=prjquota,nosuid,nodev,noexec\n', restricted)
 
@@ -1056,6 +1059,22 @@ class PoolMigrationTests(unittest.TestCase):
             with patch.object(host, 'attached_loop') as loops, self.assertRaisesRegex(host.MigrationError, 'does not match'):
                 host.boot_image_loop('attach', str(image), 'f00d', str(host.migration_directory() / 'state.json'))
         loops.assert_not_called()
+
+    def test_image_activation_refuses_a_duplicate_uuid_on_another_device(self):
+        record = dict(phase='complete', uuid='f00d', target={'image': '/var/lib/cairn/data.xfs'})
+        host.save_migration(record)
+        mounted = dict(fstype='xfs', source='/dev/synthetic', options='rw,prjquota')
+        link = Mock()
+        pool = Mock()
+        link.stat.return_value = Mock(st_mode=host.stat.S_IFBLK | 0o600, st_rdev=100)
+        pool.stat.return_value = Mock(st_dev=101)
+        with patch.object(host, 'filesystem_uuid', return_value=record['uuid']), \
+                patch.object(host, 'mount_of', return_value=mounted), patch.object(host, 'pool_path', return_value=pool), \
+                patch.object(host, 'image_device_link', return_value=link), patch.object(host, 'pool_tool') as controller, \
+                self.assertRaisesRegex(host.MigrationError, 'does not match'):
+            host.activate_pool(pool_arguments())
+        controller.assert_not_called()
+        self.assertEqual(host.load_migration(), record)
 
     def test_new_image_can_resume_after_its_receipt_preceded_the_link(self):
         image = self.root / 'new.xfs'

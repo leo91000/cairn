@@ -17,7 +17,10 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    os::{fd::AsRawFd, unix::fs::MetadataExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{FileTypeExt, MetadataExt},
+    },
     path::{Path, PathBuf},
 };
 
@@ -57,6 +60,16 @@ pub(in crate::native) async fn require_settled(state: &Path) -> Result<()> {
                 return Err(Error::conflict(
                     "The mounted native data pool does not match the completed XFS migration.",
                 ));
+            }
+            if value["target"]["image"].is_string() {
+                let device = std::fs::metadata(format!("/run/cairn-native-pool-{uuid}/device"))
+                    .map_err(|_| Error::conflict("Missing verified native pool loop device."))?;
+                if !device.file_type().is_block_device() || pool.metadata()?.dev() != device.rdev()
+                {
+                    return Err(Error::conflict(
+                        "The mounted native data pool is not the verified loop device.",
+                    ));
+                }
             }
             super::super::block::require_writable(&pool).map_err(|error| {
                 if error.raw_os_error() == Some(libc::EROFS) {

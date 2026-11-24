@@ -187,14 +187,20 @@ fn inode_capacity(pool: &File, status: &libc::statfs) -> Result<u64> {
         return Ok(status.f_files);
     }
     let geometry = xfs_geometry(pool)?;
-    let ceiling = u128::from(geometry.data_blocks)
-        * u128::from(geometry.block_size)
-        * u128::from(geometry.inode_max_percent)
-        / 100
-        / u128::from(geometry.inode_size.max(1));
-    Ok(u64::try_from(ceiling)
-        .unwrap_or(u64::MAX)
-        .max(status.f_files))
+    Ok(xfs_inode_capacity(&geometry).max(status.f_files))
+}
+
+fn xfs_inode_capacity(geometry: &XfsGeometry) -> u64 {
+    // mkfs.xfs maxpct=0 allows all data blocks to hold inodes.
+    let percentage = match geometry.inode_max_percent {
+        0 => 100,
+        limit => limit,
+    };
+    let ceiling =
+        u128::from(geometry.data_blocks) * u128::from(geometry.block_size) * u128::from(percentage)
+            / 100
+            / u128::from(geometry.inode_size.max(1));
+    u64::try_from(ceiling).unwrap_or(u64::MAX)
 }
 
 pub(super) fn describe(state: &Path) -> Result<serde_json::Value> {
@@ -776,6 +782,19 @@ mod tests {
     use super::*;
     use std::{fs::OpenOptions, io::Write};
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[test]
+    fn xfs_zero_maxpct_uses_geometry_instead_of_current_free_space() {
+        let mut geometry = XfsGeometry {
+            data_blocks: 8_192,
+            block_size: 4_096,
+            inode_size: 512,
+            ..XfsGeometry::default()
+        };
+        assert_eq!(xfs_inode_capacity(&geometry), 65_536);
+        geometry.inode_max_percent = 25;
+        assert_eq!(xfs_inode_capacity(&geometry), 16_384);
+    }
 
     #[tokio::test]
     async fn project_allocator_is_exclusive_across_independent_waiters() {
