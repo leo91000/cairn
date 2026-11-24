@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statfsSync,
   writeFileSync,
 } from 'node:fs'
 import os from 'node:os'
@@ -18,10 +19,48 @@ import { instrumentBackend } from '../backend-ci-phase-overlay.mjs'
 import { observeCommand } from '../ci-deadline.mjs'
 import { selectJobClock } from '../ci-diagnostic-source.mjs'
 
-function temporary(t) {
-  const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-ci-deadline-'))
+function temporary(t, parent = os.tmpdir()) {
+  const directory = mkdtempSync(path.join(parent, 'cairn-ci-deadline-'))
   t.onTestFinished(() => rmSync(directory, { recursive: true, force: true }))
   return directory
+}
+
+function deadlineFixture(t) {
+  function allocate(parent) {
+    // The observer also looks for a backend log beside the evidence directory.
+    const root = temporary(t, parent)
+    const output = path.join(root, 'evidence')
+    try {
+      mkdirSync(output)
+    }
+    catch (error) {
+      rmSync(root, { force: true, recursive: true })
+      throw error
+    }
+
+    return output
+  }
+
+  // The evidence rename is synchronous. Prefer the standard shared-memory
+  // mount so disk writeback cannot hold the timed fixture.
+  const sharedMemory = '/dev/shm'
+  const tmpfsMagic = 0x01021994
+  try {
+    if (process.platform === 'linux') {
+      const filesystem = statfsSync(sharedMemory)
+      // Replacing a receipt requires both the old and new files, alongside
+      // the PID markers. Leave modest headroom before starting the clock.
+      const hasSpace = filesystem.bavail * filesystem.bsize >= 1024 * 1024 && filesystem.ffree >= 16
+      if (filesystem.type === tmpfsMagic && hasSpace)
+        return allocate(sharedMemory)
+    }
+  }
+  catch (error) {
+    if (!['EACCES', 'EDQUOT', 'ENOENT', 'ENOSPC', 'ENOTDIR', 'EPERM', 'EROFS'].includes(error.code))
+      throw error
+  }
+
+  return allocate(os.tmpdir())
 }
 
 function live(pid) {
@@ -34,7 +73,7 @@ function live(pid) {
 }
 
 it('captures a blocked command before the job limit and kills only its owned subtree', async (t) => {
-  const directory = temporary(t)
+  const directory = deadlineFixture(t)
   const pids = path.join(directory, 'pids.json')
   const secret = 'private-environment-and-argument-must-not-be-observed'
   const child = `process.on('SIGTERM',()=>{});setInterval(()=>{},1000)`
@@ -197,7 +236,7 @@ it('reports incomplete process inventory as UNKNOWN instead of succeeding', asyn
 
 for (const startupDelayMs of [0, 1200]) {
   it(`adopts and closes an escaped stdout owner within the publication reserve (startup ${startupDelayMs} ms)`, async (t) => {
-    const output = temporary(t)
+    const output = deadlineFixture(t)
     const file = path.join(output, 'escaped.pid')
     const code = `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${startupDelayMs});const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:['ignore','inherit','inherit']});require('node:fs').writeFileSync(${JSON.stringify(file)},''+child.pid);child.unref()`
     let pid
@@ -216,13 +255,14 @@ for (const startupDelayMs of [0, 1200]) {
         closeGraceMs: 50,
         onCommandSettled: () => cleanupStartedAt = Date.now(),
       })
+      const returnedAt = Date.now()
       pid = Number(readFileSync(file, 'utf8'))
       assert.notEqual(status, 0)
       // Startup consumes the job clock, while this assertion qualifies the
       // cleanup/pipe-close phase after the guard has observed command completion.
       assert.ok(cleanupStartedAt !== undefined)
-      assert.ok(Date.now() - cleanupStartedAt < 1000, 'pipe/close wait must retain its evidence-upload reserve')
-      assert.ok(Date.now() - started < 3000, 'startup and cleanup must stay inside the original job clock')
+      assert.ok(returnedAt - cleanupStartedAt < 1000, 'pipe/close wait must retain its evidence-upload reserve')
+      assert.ok(returnedAt - started < 3000, 'startup and cleanup must stay inside the original job clock')
       const proof = JSON.parse(readFileSync(path.join(output, 'latest.json'), 'utf8'))
       assert.equal(proof.containmentReady, true)
       assert.equal(proof.cleanupUnknown, false)
