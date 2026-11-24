@@ -45,22 +45,32 @@ function createCatalog(provider: Provider) {
   let pendingConnection: Promise<void> | undefined
   let pending: Promise<void> | undefined
   let revision = 0
+  let nextConnectionRequest = 0
+  let appliedConnectionRequest = 0
+
+  function applyConnection(value: ModelCatalog['connected'], request: number) {
+    if (request < appliedConnectionRequest)
+      return
+    appliedConnectionRequest = request
+    catalog.connected = value
+  }
 
   function checkConnection() {
     if (pendingConnection)
       return pendingConnection
+    const request = ++nextConnectionRequest
     const signal = AbortSignal.timeout(30000)
     connection.loading = true
     pendingConnection = listModelAvailability((path, options) => api(path, { ...options, signal }), { provider })
       .then((value) => {
-        catalog.connected = value.connected
+        applyConnection(value.connected, request)
         connection.failed = false
         store(key, catalog)
       })
       .catch((error: unknown) => {
         if (error instanceof ApiError && error.status === 404 && error.message === 'Not found') {
           // Older servers have no lightweight route. Keep their picker behavior.
-          catalog.connected = undefined
+          applyConnection(undefined, request)
           connection.failed = false
           store(key, catalog)
         }
@@ -80,6 +90,7 @@ function createCatalog(provider: Provider) {
     if (pending)
       return pending
     const requestRevision = revision
+    const connectionRequest = ++nextConnectionRequest
     catalog.loading = true
     pending = listModels(api, { provider })
       .then((value) => {
@@ -87,8 +98,8 @@ function createCatalog(provider: Provider) {
           return
         // A stale, empty inventory can still confirm the account pool.
         const models = value.connected === true && value.stale && !value.models.length ? catalog.models : value.models
-        const hasConnectionCheck = connection.loaded || connection.loading
-        const connected = hasConnectionCheck ? catalog.connected : value.connected
+        applyConnection(value.connected, connectionRequest)
+        const connected = catalog.connected
         Object.assign(catalog, value, { models, nativeDefaults: value.nativeDefaults, connected })
         store(key, catalog)
         // Inventory can discover a rejected credential during its own provider call.

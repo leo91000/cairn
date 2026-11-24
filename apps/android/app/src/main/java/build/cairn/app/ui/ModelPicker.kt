@@ -175,6 +175,8 @@ private val GeminiMark by lazy {
     )
 }
 
+private data class ConnectionObservation(val request: Long, val connected: Boolean?)
+
 /**
  * One entry point for the coding agent, model, reasoning effort and Codex speed, shared by the
  * composer and agent settings. Empty values preserve server inheritance. When [changeProvider] is
@@ -214,11 +216,17 @@ internal fun ModelPicker(
     change: (String, String) -> Unit,
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
-    val lastConnection = remember { mutableStateMapOf<String, Boolean?>() }
+    val lastConnection = remember { mutableStateMapOf<String, ConnectionObservation>() }
     val verified = remember(open) { mutableStateMapOf<String, Boolean>() }
+    var nextConnectionRequest by remember { mutableLongStateOf(0L) }
+    fun applyConnection(value: String, connected: Boolean?, request: Long) {
+        val previous = lastConnection[value]
+        if (previous == null || request >= previous.request)
+            lastConnection[value] = ConnectionObservation(request, connected)
+    }
     fun connectionFor(value: String): Boolean? =
         when {
-            value in lastConnection -> lastConnection[value]
+            value in lastConnection -> lastConnection[value]?.connected
             value == provider -> catalog.connected
             else -> catalogs?.get(value)?.connected
         }
@@ -328,26 +336,30 @@ internal fun ModelPicker(
             var discoveryAttempt by remember { mutableIntStateOf(0) }
             val checkingConnections = refreshCatalog != null && verified.size < codingAgents.size
             suspend fun refreshInventory() {
+                val request = ++nextConnectionRequest
                 val fresh = reload() ?: return
-                // Inventory can verify a rejected credential during the provider call.
-                if (refreshCatalog != null && fresh.connected != lastConnection[provider])
-                    discoveryAttempt++
+                if (refreshCatalog == null) return
+                applyConnection(provider, fresh.connected, request)
+                // A discarded inventory result can reflect a credential rejected by the CLI.
+                if (fresh.connected != lastConnection[provider]?.connected) discoveryAttempt++
             }
-            if (refresh != null) Poll(provider, 300_000) { refreshInventory() }
             if (refreshCatalog != null) {
                 Poll(discoveryAttempt, 300_000) {
                     verified.clear()
                     coroutineScope {
                         codingAgents.forEach { agent ->
                             launch {
+                                val request = ++nextConnectionRequest
                                 val fresh = refreshCatalog(agent.provider)
-                                if (fresh != null) lastConnection[agent.provider] = fresh.connected
+                                if (fresh != null)
+                                    applyConnection(agent.provider, fresh.connected, request)
                                 verified[agent.provider] = fresh != null
                             }
                         }
                     }
                 }
             }
+            if (refresh != null) Poll(provider, 300_000) { refreshInventory() }
             var query by rememberSaveable { mutableStateOf("") }
             val connect = openConnections?.let {
                 {

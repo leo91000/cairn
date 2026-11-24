@@ -256,11 +256,14 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
     await menu.getByRole('radio', { name: 'Antigravity', exact: true }).click()
     await inventoryStarted
     await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
-    await expect(menu.getByLabel('Model name', { exact: true })).toBeVisible()
+    await menu.getByLabel('Model name', { exact: true }).fill('gemini-custom-model')
   }
   finally {
     releaseInventory.resolve()
   }
+
+  await expect(menu.getByRole('radio', { name: 'Gemini 4 Neon', exact: true })).toBeVisible()
+  await expect(menu.getByRole('radio', { name: 'gemini-custom-model', exact: true })).toHaveAttribute('aria-checked', 'true')
 
   await expect(menu.getByText(hidden.filter(label => label !== 'Antigravity').join(', '), { exact: true })).toBeVisible()
   await page.keyboard.press('Escape')

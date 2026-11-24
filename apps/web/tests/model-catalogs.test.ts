@@ -42,6 +42,46 @@ describe('coding-agent model catalogs', () => {
     expect(models.connection.failed).toBe(true)
   })
 
+  it('uses a successful inventory status after an availability request fails', async () => {
+    const { modelCatalogs } = await import('../src/models')
+    const models = modelCatalogs.opencode
+    request.mockResolvedValueOnce({ connected: true })
+    await models.checkConnection()
+    request.mockRejectedValueOnce(new FixtureApiError('Temporarily unavailable', 503))
+    await models.checkConnection()
+
+    request.mockResolvedValueOnce({
+      connected: false,
+      models: [],
+      stale: false,
+      error: '',
+    })
+    await models.load()
+    expect(models.connection.failed).toBe(true)
+    expect(models.catalog.connected).toBe(false)
+  })
+
+  it('keeps a newer confirmed connection result when an older inventory arrives', async () => {
+    const { modelCatalogs } = await import('../src/models')
+    const models = modelCatalogs.opencode
+    const older = Promise.withResolvers<unknown>()
+    request.mockReturnValueOnce(older.promise)
+    const inventory = models.load()
+    request.mockResolvedValueOnce({ connected: false })
+    await models.checkConnection()
+
+    request.mockResolvedValue({ connected: false })
+    older.resolve({
+      connected: true,
+      models: [],
+      stale: false,
+      error: '',
+    })
+    await inventory
+    await models.checkConnection()
+    expect(models.catalog.connected).toBe(false)
+  })
+
   it('refreshes saved preferences after an already pending catalog request finishes', async () => {
     let resolvePrevious!: (value: unknown) => void
     request.mockReturnValueOnce(new Promise(resolve => resolvePrevious = resolve))

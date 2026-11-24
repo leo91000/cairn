@@ -111,11 +111,6 @@ function refreshConnections() {
   void reload()
 }
 
-watch(provider, () => {
-  if (open.value)
-    void reload()
-})
-
 const inheritedModel = computed(() => props.inherit ? props.defaultModel : catalog.value.nativeDefaults?.model || props.defaultModel)
 const inheritedReasoning = computed(() => props.inherit ? props.defaultReasoning : catalog.value.nativeDefaults?.reasoning || props.defaultReasoning)
 const inheritedSpeedValue = computed(() => props.inherit ? props.defaultSpeed : catalog.value.nativeDefaults?.speed || props.defaultSpeed)
@@ -725,7 +720,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
             maxlength="100"
             placeholder="Use the provider default"
             class="mt-1"
-            @change="(event) => { const value = (event.target as HTMLInputElement).value.trim(); chooseModel({ value, chosen: value === model }) }"
+            @input="(event) => { const value = (event.target as HTMLInputElement).value.trim(); chooseModel({ value, chosen: value === model }) }"
           ></label>
         </section>
       </div>

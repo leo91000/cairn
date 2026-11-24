@@ -563,6 +563,7 @@ test('a Claude limit that stops requests waits for an account and shows the repo
 })
 
 test('Claude default names follow available metadata without pinning the model', async ({ page, workspace }, testInfo) => {
+  expect((await connectClaude(workspace, 'Default labels')).state).toBe('complete')
   await useRelayForHttpMocks(page)
   let displayName = 'Opus Fixture (1M context)'
   let description = 'Model recommended for your subscription'
