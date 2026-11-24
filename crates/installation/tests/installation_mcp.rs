@@ -6370,7 +6370,17 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
         account_http(&app, &member, "GET", "/api/antigravity/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{reconnect}");
     assert_eq!(reconnect["connected"], false, "{reconnect}");
-    assert!(text(&reconnect, "error").contains("Reconnect this Antigravity Google account"));
+    let (status, connections) =
+        account_http(&app, &owner, "GET", "/api/accounts", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let expired = connections["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["id"] == google.id)
+        .unwrap();
+    assert_eq!(expired["status"], "reconnect", "{expired}");
+    assert!(text(expired, "error").contains("Reconnect this Antigravity Google account"));
     assert!(
         !reconnect
             .to_string()
@@ -6430,7 +6440,10 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
 
     // When Gemini inventory is temporarily unavailable, order must not turn a separate
     // expired login into an installation-wide reconnection requirement.
-    for ordered_accounts in [[gemini_id, &google.id], [&google.id, gemini_id]] {
+    let google_id = google.id.clone();
+    for ordered_accounts in [[gemini_id, &google_id], [&google_id, gemini_id]] {
+        google.mark_ready();
+        s.store.save_coding_account(&google).await.unwrap();
         let (status, ordered) = account_http(
             &app,
             &owner,
@@ -6471,6 +6484,8 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     let mut gemini = s.accounts.account(&s, gemini_id).await.unwrap();
     gemini.enabled = false;
     s.store.save_coding_account(&gemini).await.unwrap();
+    google.mark_ready();
+    s.store.save_coding_account(&google).await.unwrap();
     let google_secret = format!("antigravity-account:{}", google.id);
     let mut credentials = s.vault.get(&google_secret).await.unwrap().unwrap();
     credentials["token"]["token"]["refresh_token"] = "synthetic-google-refresh-token".into();

@@ -1142,6 +1142,40 @@ async fn sign_in_google(s: &Arc<Service>) -> String {
 }
 
 #[tokio::test]
+async fn reconnecting_google_refreshes_a_partial_catalog_immediately() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let id = sign_in_google(&s).await;
+    connect(&s, "gemini", KEY).await;
+    let secret = format!("antigravity-account:{id}");
+    let mut expired = s.vault.get(&secret).await.unwrap().unwrap();
+    expired["token"]["token"]["expiry"] = "2000-01-01T00:00:00Z".into();
+    expired["token"]["token"]["refresh_token"] = "".into();
+    s.vault.set(&secret, &expired).await.unwrap();
+
+    let partial = s.antigravity.models(&s).await.unwrap();
+    assert!(text(&partial, "error").contains("Reconnect this Antigravity Google account"));
+    assert!(!s.accounts.account(&s, &id).await.unwrap().is_active());
+    assert!(!partial.to_string().contains("Gemini 3.5 Flash"));
+
+    s.accounts.reconnect(&s, &id).await.unwrap();
+    sign_in_until(&s, |view| view["acceptsCode"] == true).await;
+    s.accounts
+        .submit_code("4/fixture-authorization-code")
+        .await
+        .unwrap();
+    let finished = sign_in_until(&s, |view| view["state"] != "pending").await;
+    assert_eq!(finished["state"], "complete", "{finished}");
+
+    let catalog = s.antigravity.models(&s).await.unwrap();
+    assert_eq!(catalog["error"], "", "{catalog}");
+    assert!(
+        catalog.to_string().contains("Gemini 3.5 Flash"),
+        "{catalog}"
+    );
+}
+
+#[tokio::test]
 async fn google_accounts_sign_in_and_runs_receive_only_access_tokens() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

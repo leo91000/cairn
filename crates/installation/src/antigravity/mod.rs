@@ -21,7 +21,11 @@ use crate::{
     validation::text,
 };
 use serde_json::{Value, json};
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 use tokio::sync::Mutex;
 
 /// The oldest release whose stream-json protocol and hooks this adapter relies on.
@@ -403,9 +407,11 @@ type Inventories = Vec<(String, Vec<Value>)>;
 pub struct Catalog {
     cached: Mutex<Option<CatalogCache>>,
     latest: std::sync::RwLock<Option<Inventories>>,
+    generation: AtomicU64,
 }
 
 struct CatalogCache {
+    generation: u64,
     accounts: Vec<(String, Option<String>)>,
     at: i64,
     /// How long the listing stays current: briefly when an account kind failed, so
@@ -414,7 +420,20 @@ struct CatalogCache {
     value: Value,
 }
 
+fn disconnected_catalog() -> Value {
+    json!({
+        "models": [],
+        "checkedAt": null,
+        "stale": false,
+        "error": "Connect an Antigravity account (Gemini API key, Google Cloud credentials or Google account) in Connections to choose a model.",
+    })
+}
+
 impl Catalog {
+    pub(crate) fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
     async fn list(s: &Service, credentials: &Value) -> Result<Vec<Value>> {
         // A private directory per listing: credential files never stay on the manager.
         let home = s
@@ -472,6 +491,7 @@ impl Catalog {
     /// or, with `since`, finished after that time: launches waiting together for a
     /// relisting share one.
     async fn inventory(&self, s: &Service, since: Option<i64>) -> Result<Value> {
+        let generation = self.generation.load(Ordering::Acquire);
         let mut accounts = s
             .accounts
             .of(s, Provider::Antigravity)
@@ -481,12 +501,7 @@ impl Catalog {
             .collect::<Vec<_>>();
         accounts.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id.cmp(&b.id)));
         if accounts.is_empty() {
-            return Ok(json!({
-                "models": [],
-                "checkedAt": null,
-                "stale": false,
-                "error": "Connect an Antigravity account (Gemini API key, Google Cloud credentials or Google account) in Connections to choose a model.",
-            }));
+            return Ok(disconnected_catalog());
         }
         let fingerprint = accounts
             .iter()
@@ -494,6 +509,7 @@ impl Catalog {
             .collect::<Vec<_>>();
         let mut cached = self.cached.lock().await;
         if let Some(cache) = &*cached
+            && cache.generation == generation
             && cache.accounts == fingerprint
             && since.map_or(now() - cache.at < cache.lifetime, |since| cache.at >= since)
         {
@@ -529,9 +545,13 @@ impl Catalog {
             }
         }
         if kinds.is_empty() {
-            return Err(failure
-                .or(reconnect)
-                .unwrap_or_else(|| Error::bad_gateway("Antigravity could not list models.")));
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            if reconnect.is_some() {
+                return Ok(disconnected_catalog());
+            }
+            return Err(Error::bad_gateway("Antigravity could not list models."));
         }
         let mut entries = Vec::<Value>::new();
         for (kind, models) in &kinds {
@@ -596,18 +616,20 @@ impl Catalog {
                 entry
             })
             .collect::<Vec<_>>();
-        let complete = failure.is_none();
+        let problem = failure.or(reconnect);
+        let complete = problem.is_none();
         let value = json!({
             "models": models,
             "checkedAt": now(),
             "stale": false,
-            "error": failure.map(|e| e.message).unwrap_or_default(),
+            "error": problem.map(|e| e.message).unwrap_or_default(),
         });
         *self
             .latest
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(kinds);
         *cached = Some(CatalogCache {
+            generation,
             accounts: fingerprint,
             at: now(),
             lifetime: if complete { 300_000 } else { 30_000 },

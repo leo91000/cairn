@@ -785,6 +785,10 @@ impl Accounts {
         let provider = account.provider;
         let driver = provider.driver();
         if let Err(error) = driver.refresh(s, id, &models).await {
+            if error.code.as_deref() == Some(antigravity::RECONNECT_REQUIRED) {
+                // Renewal recorded the rejected grant before releasing its token lock.
+                return Ok(());
+            }
             if provider == Provider::Antigravity && matches!(error.status, 502..=504) {
                 tracing::warn!(
                     account_id = %id,

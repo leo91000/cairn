@@ -2,7 +2,7 @@
 //! with their project and region, or a Google account signed in through `agy`. Secrets
 //! are encrypted on the manager and reach a run only through its broker. A Google
 //! account's refresh token stays on the manager: runs receive access tokens only.
-use super::{Account, Driver, Lease, Login, broker, remove_file};
+use super::{Account, AccountState, Driver, Lease, Login, broker, remove_file};
 use crate::{
     antigravity::{ADC_FILE, GEMINI, GOOGLE, GOOGLE_CLOUD, TOKEN_FILE, kind_name},
     auth::hex_digest,
@@ -24,12 +24,27 @@ pub(super) struct Antigravity;
 
 pub(crate) const RECONNECT_REQUIRED: &str = "antigravity_google_reconnect_required";
 
-fn reconnect_required() -> Error {
-    Error::coded(
+async fn reconnect_required(s: &Service, id: &str) -> Result<Error> {
+    let error = Error::coded(
         409,
         RECONNECT_REQUIRED,
         "Reconnect this Antigravity Google account in Connections.",
-    )
+    );
+    let id = id.to_owned();
+    let message = error.message.clone();
+    s.store
+        .transaction(move |db| {
+            if let Some(mut account) = db.coding_account(&id)?
+                && (account.state != AccountState::Error || account.error != message)
+            {
+                account.state = AccountState::Error;
+                account.error = message;
+                db.save_coding_account(&account)?;
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(error)
 }
 
 fn secret_id(id: &str) -> String {
@@ -55,19 +70,23 @@ fn token_home(s: &Service, id: &str) -> PathBuf {
     s.config.data_dir.join("antigravity-accounts").join(id)
 }
 
-/// Lets `agy` renew a Google account's access token on the manager: it refreshes a
-/// saved token it considers expired and rewrites its token file. Cairn never needs
-/// the CLI's OAuth client secret.
-async fn renew(s: &Service, id: &str) -> Result<Value> {
-    static RENEWING: std::sync::LazyLock<
+fn google_token_lock(id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static TOKENS: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     > = std::sync::LazyLock::new(Default::default);
-    let lock = RENEWING
+    TOKENS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .entry(id.to_owned())
         .or_default()
-        .clone();
+        .clone()
+}
+
+/// Lets `agy` renew a Google account's access token on the manager: it refreshes a
+/// saved token it considers expired and rewrites its token file. Cairn never needs
+/// the CLI's OAuth client secret.
+async fn renew(s: &Service, id: &str) -> Result<Value> {
+    let lock = google_token_lock(id);
     let _renewing = lock.lock().await;
     // Another request may have renewed the token while this one waited.
     let saved = stored_credentials(s, id).await?;
@@ -75,7 +94,7 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
         return Ok(saved);
     }
     if text(&saved["token"]["token"], "refresh_token").is_empty() {
-        return Err(reconnect_required());
+        return Err(reconnect_required(s, id).await?);
     }
     let saved = &saved;
     let home = token_home(s, id);
@@ -99,7 +118,7 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
         if !output.success
             && (output.stdout.contains("invalid_grant") || output.stderr.contains("invalid_grant"))
         {
-            return Err(reconnect_required());
+            return Err(reconnect_required(s, id).await?);
         }
         let unavailable =
             || Error::bad_gateway("Antigravity could not refresh Google credentials.");
@@ -470,6 +489,8 @@ impl Driver for Antigravity {
 
     async fn adopt(&self, s: &Service, id: &str, home: &Path) -> Result<()> {
         let token = signed_in_token(home).await?;
+        let lock = google_token_lock(id);
+        let token_guard = lock.lock().await;
         let email = text(&token, "id_token_email").to_owned();
         let mut account = s.accounts.account(s, id).await?;
         let fingerprint = hex_digest(&format!("{GOOGLE}:{}", email.to_lowercase()));
@@ -488,6 +509,8 @@ impl Driver for Antigravity {
         s.vault
             .set(&secret_id(id), &json!({ "kind": GOOGLE, "token": token }))
             .await?;
+        s.antigravity.invalidate();
+        drop(token_guard);
         let _ = remove_file(&home.join(TOKEN_FILE)).await;
         Ok(())
     }
