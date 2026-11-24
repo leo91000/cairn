@@ -29,15 +29,18 @@ function temporary(t, parent = os.tmpdir()) {
 function deadlineFixture(t) {
   // The evidence rename is synchronous. Use the standard Linux tmpfs mount
   // when writable so shared disk writeback cannot hold the timed fixture.
-  const sharedMemory = '/dev/shm'
+  let parent = '/dev/shm'
   try {
-    accessSync(sharedMemory, constants.W_OK | constants.X_OK)
+    accessSync(parent, constants.W_OK | constants.X_OK)
   }
   catch {
-    return temporary(t)
+    parent = os.tmpdir()
   }
 
-  return temporary(t, sharedMemory)
+  // The observer also looks for a backend log beside the evidence directory.
+  const output = path.join(temporary(t, parent), 'evidence')
+  mkdirSync(output)
+  return output
 }
 
 function live(pid) {
