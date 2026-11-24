@@ -103,7 +103,15 @@ for (const filesystem of ['ext4', 'xfs']) {
 
 // The migrated pool is mounted by systemd units, so this case runs in the
 // host mount namespace with its own fixture paths and unit names.
-const migration = mkdtempSync(path.join(target, 'pool-migration-'))
+const fixtureDirectory = spawnSync('sudo', ['-n', 'mktemp', '-d', '/var/lib/cairn-pool-migration-XXXXXXXX'], {
+  encoding: 'utf8',
+  stdio: ['ignore', 'pipe', 'inherit'],
+})
+if (fixtureDirectory.error)
+  throw fixtureDirectory.error
+if (fixtureDirectory.status !== 0)
+  process.exit(fixtureDirectory.status ?? 1)
+const migration = fixtureDirectory.stdout.trim()
 const migrated = spawnSync('sudo', ['-n', 'env', 'CAIRN_NATIVE_DISPOSABLE_HOST=1', 'python3', '-B', 'scripts/tests/native_pool_migration_qualification.py', binary, cairn, migration], {
   stdio: 'inherit',
 })

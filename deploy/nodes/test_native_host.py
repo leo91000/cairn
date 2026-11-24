@@ -603,7 +603,9 @@ class PoolMigrationTests(unittest.TestCase):
         (self.root / 'state/native-data').mkdir(parents=True)
         self.units = self.root / 'units'
         self.units.mkdir()
-        for patcher in (patch.object(host, 'ROOT', self.root), patch.object(host, 'UNIT_DIRECTORY', self.units)):
+        self.require_root_path = host.require_root_path
+        for patcher in (patch.object(host, 'ROOT', self.root), patch.object(host, 'UNIT_DIRECTORY', self.units),
+                        patch.object(host, 'require_root_path')):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -694,7 +696,9 @@ class PoolMigrationTests(unittest.TestCase):
         pool = Path('/var/lib/cairn-native/state/native-data')
         image = Path('/var/lib/cairn-native/native-data.xfs')
         loop = host.loop_unit(image, OLD['unit'], 'f00d')
-        self.assertIn('losetup --direct-io=on --find --show /var/lib/cairn-native/native-data.xfs', loop)
+        receipt = host.migration_directory() / 'state.json'
+        self.assertIn(f'pool-loop attach {image} f00d {receipt}\n', loop)
+        self.assertIn(f'pool-loop detach {image} f00d {receipt}\n', loop)
         self.assertIn('RequiresMountsFor=/var/lib/cairn-native', loop)
         self.assertIn('Before=' + OLD['unit'], loop)
         self.assertNotRegex(loop.replace('$$', ''), r'\$')
@@ -1022,6 +1026,36 @@ class PoolMigrationTests(unittest.TestCase):
         with patch.object(host, 'filesystem_path', side_effect=[Path('/origin/state/alias'), Path('/origin/state')]), \
                 self.assertRaisesRegex(host.MigrationError, 'aliases'):
             host.verify_image_location(link / 'new.xfs', state, pool)
+
+    def test_pool_image_ancestry_and_file_require_safe_ownership(self):
+        image = Path('/var/lib/cairn/data.xfs')
+
+        def metadata(path):
+            return Mock(st_uid=0, st_mode=(host.stat.S_IFREG | 0o600) if path == image else (host.stat.S_IFDIR | 0o755))
+
+        with patch.object(Path, 'lstat', autospec=True, side_effect=metadata):
+            self.require_root_path(image)
+        for path, mode, uid in ((image.parent, host.stat.S_IFDIR | 0o775, 0),
+                                (image.parent, host.stat.S_IFDIR | 0o700, 1000),
+                                (image, host.stat.S_IFREG | 0o620, 0),
+                                (image.parent, host.stat.S_IFLNK | 0o777, 0)):
+            with self.subTest(path=path, mode=mode, uid=uid), \
+                    patch.object(Path, 'lstat', autospec=True, side_effect=lambda current: (
+                        Mock(st_uid=uid, st_mode=mode) if current == path else metadata(current))), \
+                    self.assertRaisesRegex(host.MigrationError, 'root-owned'):
+                self.require_root_path(image)
+
+    def test_boot_rejects_a_replaced_image_before_looking_for_any_loop(self):
+        image = self.root / 'data.xfs'
+        image.touch()
+        with image.open('rb') as initial:
+            identity = host.image_identity(initial.fileno())
+            host.save_migration(dict(phase='complete', target={'image': str(image)}, uuid='f00d', imageLoop=identity))
+            image.unlink()
+            image.touch()
+            with patch.object(host, 'attached_loop') as loops, self.assertRaisesRegex(host.MigrationError, 'does not match'):
+                host.boot_image_loop('attach', str(image), 'f00d', str(host.migration_directory() / 'state.json'))
+        loops.assert_not_called()
 
     def test_new_image_can_resume_after_its_receipt_preceded_the_link(self):
         image = self.root / 'new.xfs'

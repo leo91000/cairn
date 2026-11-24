@@ -2242,12 +2242,7 @@ impl Controller {
                     .ok_or_else(|| Error::bad("Missing native disk size."))?;
                 if let Some(base) = self.bases().lookup(&descriptors, size).await? {
                     base_key = Some(base.key.clone());
-                    let format = storage::environment::directory(&self.state, run)?;
-                    if !has_journal
-                        && !workspace::workload(&self.state, run)?.try_exists()?
-                        && !super::bases::has_initializing_base(&format)?
-                        && super::spares::has_ready(&self.state, &base.key)?
-                    {
+                    if !has_journal && self.bases().claimable_spare(run, &base.key)? {
                         spare_key = Some(base.key);
                         0
                     } else {

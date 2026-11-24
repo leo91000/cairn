@@ -164,10 +164,6 @@ fn ready(state: &Path, key: &str) -> Result<Option<Spare>> {
     Ok(None)
 }
 
-pub(super) fn has_ready(state: &Path, key: &str) -> Result<bool> {
-    Ok(ready(state, key)?.is_some())
-}
-
 #[cfg(test)]
 pub(super) fn ready_inode(state: &Path, key: &str) -> Result<Option<u64>> {
     ready(state, key)?
@@ -278,6 +274,62 @@ fn read_claim(control: &Path) -> Result<Option<Claim>> {
     }
 }
 
+/// A verified claim creates no second workspace, on either side of its rename.
+/// The caller holds the storage gate through the corresponding reservation.
+pub(super) fn claimable(state: &Path, run: &str, key: &str) -> Result<bool> {
+    let control = workspace::directory(state, run)?;
+    let workload = workspace::workload(state, run)?;
+    let Some(claim) = read_claim(&control)? else {
+        return Ok(!workload.try_exists()? && ready(state, key)?.is_some());
+    };
+    if claim.spare.key != key {
+        return Err(Error::conflict("Prepared native claim changed its base."));
+    }
+    let available = workspace::workload(state, &claim.spare.run)?;
+    let adopted_by = workspace::directory(state, &claim.spare.run)?.join(ADOPTED_BY);
+    if workload.try_exists()? {
+        check_moved_claim(state, run, &claim, &workload, &available, &adopted_by)?;
+        return Ok(true);
+    }
+    if !available.try_exists()? {
+        return Ok(false);
+    }
+    claim.check(&available)?;
+    Ok(read_adopter(&adopted_by)?.is_none_or(|owner| owner == run))
+}
+
+fn read_adopter(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(adopter) => Ok(Some(adopter)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn check_moved_claim(
+    state: &Path,
+    run: &str,
+    claim: &Claim,
+    workload: &Path,
+    available: &Path,
+    adopted_by: &Path,
+) -> Result<()> {
+    if available.try_exists()? {
+        return Err(Error::conflict(
+            "Both workload roots exist for one native spare claim.",
+        ));
+    }
+    claim.check(workload)?;
+    if index(state).join(&claim.spare.run).try_exists()?
+        && read_adopter(adopted_by)?.as_deref() != Some(run)
+    {
+        return Err(Error::conflict(
+            "Native spare belongs to a different claimant.",
+        ));
+    }
+    Ok(())
+}
+
 /// Caller serializes the selection with publication and eviction. The two
 /// control receipts survive a crash on either side of the physical rename.
 pub(super) async fn claim(state: &Path, run: &str, key: &str) -> Result<bool> {
@@ -319,16 +371,15 @@ async fn complete_claim(state: &Path, run: &str, claim: &Claim) -> Result<bool> 
             return Ok(false);
         }
         claim.check(&available)?;
-        match tokio::fs::read_to_string(&adopted_by).await {
-            Ok(owner) if owner != run => {
+        match read_adopter(&adopted_by)? {
+            Some(owner) if owner != run => {
                 finish(&control).await?;
                 return Ok(false);
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some(_) => {}
+            None => {
                 atomic_write(&adopted_by, run.as_bytes()).await?;
             }
-            Err(error) => return Err(error.into()),
         }
         workspace::require_no_mounts(&available)?;
         tokio::fs::rename(&available, &workload).await?;
@@ -337,19 +388,7 @@ async fn complete_claim(state: &Path, run: &str, claim: &Claim) -> Result<bool> 
             .sync_all()
             .await?;
     }
-    if available.try_exists()? {
-        return Err(Error::conflict(
-            "Both workload roots exist for one native spare claim.",
-        ));
-    }
-    claim.check(&workload)?;
-    if index(state).join(&spare.run).try_exists()?
-        && tokio::fs::read_to_string(&adopted_by).await? != run
-    {
-        return Err(Error::conflict(
-            "Native spare belongs to a different claimant.",
-        ));
-    }
+    check_moved_claim(state, run, claim, &workload, &available, &adopted_by)?;
     quota::adopt_prepared(&source, &control, &workload).await?;
     if source.try_exists()? || index(state).join(&spare.run).try_exists()? {
         forget(state, spare).await?;
@@ -479,12 +518,15 @@ mod tests {
         atomic_write(&source.join(ADOPTED_BY), run.as_bytes())
             .await
             .unwrap();
+        assert!(claimable(&state, &run, &ready.key).unwrap());
         std::fs::rename(&workload, &claimed).unwrap();
 
         discard_unclaimed(&state, None).await.unwrap();
         assert!(!target.join("quota-owner.json").exists());
+        assert!(claimable(&state, &run, &ready.key).unwrap());
         assert!(super::claim(&state, &run, &ready.key).await.unwrap());
         assert!(super::claim(&state, &run, &ready.key).await.unwrap());
+        assert!(claimable(&state, &run, &ready.key).unwrap());
         assert!(quota::usage(&claimed).unwrap() > 0);
         assert_eq!(
             std::fs::metadata(claimed.join("payload")).unwrap().ino(),

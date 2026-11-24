@@ -15,10 +15,31 @@ pub(crate) const SEED_TEMP_PREFIX: &str = ".cairn-seed-";
 /// Staging and retirement share the run's lock across the connector and the
 /// controller. Acquisition is nonblocking under the node-wide storage gate.
 pub(crate) async fn lock_staging(state: &Path, run: &str) -> Result<crate::file_lock::Guard> {
+    let path = staging_lock_path(state, run).await?;
+    crate::file_lock::exclusive(&path, "Native workspace staging is busy.")
+}
+
+/// Connector writers wait before acquiring the node-wide storage gate.
+pub(crate) async fn lock_staging_after_release(
+    state: &Path,
+    run: &str,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<crate::file_lock::Guard> {
+    let path = staging_lock_path(state, run).await?;
+    crate::file_lock::exclusive_after_release(
+        &path,
+        "Native staging ownership did not finish before its deadline.",
+        stop,
+        Duration::from_secs(300),
+    )
+    .await
+}
+
+async fn staging_lock_path(state: &Path, run: &str) -> Result<PathBuf> {
     crate::validation::uuid(run)?;
     let locks = state.join("native-staging-locks");
     crate::skills::private_dir(&locks).await?;
-    crate::file_lock::exclusive(&locks.join(run), "Native workspace staging is busy.")
+    Ok(locks.join(run))
 }
 
 const METADATA_RESERVE: u64 = MIB;

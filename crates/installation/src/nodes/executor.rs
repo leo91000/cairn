@@ -223,9 +223,11 @@ impl Executor {
         }
         let _staging = if self.native {
             let state = crate::native::state_dir();
-            let guard = crate::native::disk::lock_staging(&state, run).await?;
-            if state.join(format!("{attempt}.stopped")).try_exists()? {
-                return Err(Error::conflict("Native attempt has already stopped."));
+            let guard = crate::native::disk::lock_staging_after_release(&state, run, &stop).await?;
+            for terminal in ["stopped", "exit"] {
+                if state.join(format!("{attempt}.{terminal}")).try_exists()? {
+                    return Err(Error::conflict("Native attempt has already stopped."));
+                }
             }
             Some(guard)
         } else {
@@ -396,7 +398,7 @@ impl Executor {
                     tokio::spawn(async move {
                         let _staging = await_preparation(
                             &stop,
-                            super::workspace::lock_live_staging(&data, &home, &attempt),
+                            super::workspace::lock_live_staging(&data, &home, &attempt, &stop),
                         )
                         .await?;
                         check_preparing(&stop)?;
@@ -754,9 +756,12 @@ mod tests {
 
         let (run, attempt) = (crate::config::id(), crate::config::id());
         let descriptor = json!({ "dataRoot": "/guest", "plan": { "id": attempt, "runId": run, "backend": "native", "imports": [] } });
+        let plan_requested = Arc::new(tokio::sync::Notify::new());
+        let observed_plan = plan_requested.clone();
         let seed = Router::new()
             .route("/internal/node-workspace/{attempt}/plan", post(move || {
                 let descriptor = descriptor.clone();
+                observed_plan.notify_one();
                 async move { Json(descriptor) }
             }))
             .route("/internal/node-workspace/{attempt}/seed", post(|| async {
@@ -774,7 +779,10 @@ mod tests {
         let manager = tokio::spawn(async move { axum::serve(listener, seed).await.unwrap() });
         let executor = Arc::new(Executor::default());
         let client = reqwest::Client::new();
-        let preparing = {
+        let finishing_writer = crate::native::disk::lock_staging(&state, &run)
+            .await
+            .unwrap();
+        let mut preparing = {
             let (executor, client, master, attempt) = (
                 executor.clone(),
                 client.clone(),
@@ -787,6 +795,16 @@ mod tests {
                     .await
             })
         };
+        tokio::time::timeout(Duration::from_secs(5), plan_requested.notified())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut preparing)
+                .await
+                .is_err(),
+            "the new attempt must wait while the old writer owns staging"
+        );
+        drop(finishing_writer);
         let staged = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Ok(entries) = std::fs::read_dir(data.join("runs")) {
@@ -831,7 +849,7 @@ mod tests {
                 .count(),
             0
         );
-        let _released = crate::native::disk::lock_staging(&state, &run)
+        let released = crate::native::disk::lock_staging(&state, &run)
             .await
             .unwrap();
 
@@ -846,6 +864,7 @@ mod tests {
             .is_err()
         );
         std::fs::write(state.join(format!("{attempt}.stopped")), b"1").unwrap();
+        drop(released);
         drop(fence);
         assert!(
             executor

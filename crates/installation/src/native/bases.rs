@@ -274,6 +274,43 @@ impl Bases {
 
     /// Hashes a base once per controller process. Later lookups trust the
     /// sealed root-only tree after checking its records and directory identity.
+    pub(super) fn claimable_spare(&self, run: &str, key: &str) -> Result<bool> {
+        let format = storage::environment::directory(&self.state, run)?;
+        if let Some(pending) = initializing_base(&format)? {
+            if pending.key != key {
+                return Ok(false);
+            }
+            self.verify_initializing_pin(&format, &pending, key)?;
+        } else if workspace::workload(&self.state, run)?.try_exists()? {
+            return Ok(false);
+        }
+        super::spares::claimable(&self.state, run, key)
+    }
+
+    fn verify_initializing_pin(
+        &self,
+        directory: &Path,
+        pending: &InitializingBase,
+        key: &str,
+    ) -> Result<()> {
+        if pending.key != key {
+            return Err(Error::conflict(
+                "Prepared native base initialization inputs changed.",
+            ));
+        }
+        let original = std::fs::metadata(self.root().join(key).join("pin"))?;
+        let held = std::fs::symlink_metadata(directory.join(&pending.name))?;
+        if !held.is_file()
+            || held.file_type().is_symlink()
+            || (original.dev(), original.ino()) != (held.dev(), held.ino())
+        {
+            return Err(Error::conflict(
+                "Prepared native base initialization pin changed.",
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn lookup(&self, archives: &[Archive], disk_mib: u64) -> Result<Option<Ready>> {
         let Some((root, contents, ready)) = self.stored(archives, disk_mib).await? else {
             return Ok(None);
@@ -800,21 +837,7 @@ impl Bases {
                     ));
                 }
             }
-            if pending.key != ready.key {
-                return Err(Error::conflict(
-                    "Prepared native base initialization inputs changed.",
-                ));
-            }
-            let original = std::fs::metadata(self.root().join(&ready.key).join("pin"))?;
-            let held = std::fs::symlink_metadata(lease.directory.join(&pending.name))?;
-            if !held.is_file()
-                || held.file_type().is_symlink()
-                || (original.dev(), original.ino()) != (held.dev(), held.ino())
-            {
-                return Err(Error::conflict(
-                    "Prepared native base initialization pin changed.",
-                ));
-            }
+            self.verify_initializing_pin(&lease.directory, &pending, &ready.key)?;
             pending
         } else {
             super::directory::require_fresh(&lease.directory, &root, &workload)?;

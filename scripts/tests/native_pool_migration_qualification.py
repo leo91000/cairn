@@ -91,6 +91,8 @@ def cleanup(root, pool, unit):
         migration_host = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(migration_host)
         migration_host.LOOP_SERVICE = loop_service
+        migration_host.ROOT = root
+        migration_host.INSTALL = root
         expected = {
             unit: migration_host.pool_unit(pool, record['uuid'], image, record['old'].get('restrictions', ())),
             loop_service: migration_host.loop_unit(image, unit, record['uuid']),
@@ -150,6 +152,16 @@ def main(binary, cairn, fixture):
         command('systemctl', 'stop', unit)
         command('systemctl', 'stop', loop_service)
         assert not command('losetup', '--noheadings', '--associated', image).stdout.strip(), 'Loop device survived its unit.'
+        retained_image = image.with_suffix('.retained')
+        image.rename(retained_image)
+        try:
+            image.touch(mode=0o600)
+            failed = command('systemctl', 'start', loop_service, check=False)
+            assert failed.returncode != 0, 'Boot accepted a replaced pool backing inode.'
+            assert not command('losetup', '--noheadings', '--associated', image).stdout.strip(), 'Boot attached the replacement.'
+        finally:
+            image.unlink(missing_ok=True)
+            retained_image.rename(image)
         command('systemctl', 'start', unit, timeout=180)
         eventually(lambda: mounted(pool) == 'xfs')
         assert direct_io(image), 'The boot-time loop device lost direct I/O.'

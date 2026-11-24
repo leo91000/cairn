@@ -1243,32 +1243,21 @@ def attached_loop(image):
 
 
 def loop_unit(image, mount_unit, filesystem):
-    image_text = str(image)
-    attached = f'set -- $$(losetup --noheadings --output NAME --associated {image_text}); test "$$#" -le 1; '
-    same_filesystem = f'test "$$(blkid -p -s UUID -o value "$$1")" = {filesystem}'
-    ready = (
-        'ready() { '
-        f'{same_filesystem} && '
-        'test "$$(losetup --noheadings --output DIO "$$1" | tr -d " ")" = 1 && '
-        'printf "0\\n" >/sys/class/block/$${1##*/}/queue/discard_max_bytes; }; '
-    )
-    start = (
-        ready + attached +
-        f'if test "$$#" = 0; then device=$$(losetup --direct-io=on --find --show {image_text}); '
-        'if ready "$$device"; then exit 0; fi; losetup --detach "$$device"; exit 1; fi; ready "$$1"'
-    )
-    stop = attached + 'if test "$$#" = 0; then exit 0; fi; ' + same_filesystem + '; losetup --detach "$$1"'
+    receipt = safe_path(str(migration_directory() / 'state.json'))
+    supervisor = safe_path(str(INSTALL / 'host.py'))
+    command = f'/usr/bin/python3 {supervisor} pool-loop'
+    arguments = f'{image} {filesystem} {receipt}'
     return f'''[Unit]
 Description=Cairn native data pool loop device (direct I/O)
 DefaultDependencies=no
-RequiresMountsFor={image.parent}
+RequiresMountsFor={image.parent} {supervisor.parent} {receipt.parent}
 Before={mount_unit} umount.target
 Conflicts=umount.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -ec '{start}'
-ExecStop=/bin/sh -ec '{stop}'
+ExecStart={command} attach {arguments}
+ExecStop={command} detach {arguments}
 [Install]
 WantedBy=local-fs.target
 '''
@@ -1475,6 +1464,21 @@ def filesystem_path(path):
     raise MigrationError(f'Cannot identify the underlying filesystem of {path}.')
 
 
+def require_root_path(path, *, optional=False):
+    for parent in reversed(path.parents):
+        metadata = parent.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            raise MigrationError(f'Place {path} under root-owned, non-writable directories. Check {parent}.')
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        if optional:
+            return
+        raise
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+        raise MigrationError(f'{path} must be a root-owned regular file without group or other write access.')
+
+
 def verify_image_location(image, state, pool):
     parent = image.parent
     if image.is_symlink() or (image.exists() and not image.is_file()) or parent.resolve(strict=True) != parent:
@@ -1487,6 +1491,7 @@ def verify_image_location(image, state, pool):
         target_device == control_device and filesystem_path(parent).is_relative_to(filesystem_path(state))
     ):
         raise MigrationError('Keep the new image outside aliases of the old pool or controller state.')
+    require_root_path(image, optional=True)
 
 
 def staged_image_path(image, receipt):
@@ -1673,6 +1678,7 @@ def owned_loop(record, image):
     if receipt is None:
         return None
     try:
+        require_root_path(image)
         descriptor = os.open(image, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
     except FileNotFoundError:
         if record['phase'] in ('planned', 'formatted'):
@@ -1705,6 +1711,60 @@ def disable_loop_discard(device):
         raise MigrationError(f'Cannot preserve the allocated backing space of {device}.')
 
 
+def pin_image_loop(device, image_fd, handles):
+    # Keep a kernel reference from attestation through formatting or detach.
+    device_fd = os.open(device, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+    handles.callback(os.close, device_fd)
+    backing = os.fstat(image_fd)
+    expected_device = f'{os.major(backing.st_dev)}:{os.minor(backing.st_dev)}'
+    actual = checked('losetup', '--noheadings', '--output', 'BACK-INO,BACK-MAJ:MIN,DIO', str(device)).split()
+    if actual[:2] != [str(backing.st_ino), expected_device]:
+        raise MigrationError('The loop device does not bind the verified pool inode.')
+    return device_fd, actual[2:] == ['1']
+
+
+def configure_image_loop(device, direct_io):
+    if not direct_io:
+        raise MigrationError(f'{device} does not support direct I/O for this image. Choose a partition, logical volume or another image filesystem.')
+    disable_loop_discard(device)
+
+
+def boot_image_loop(action, image, expected_uuid, receipt):
+    if action not in ('attach', 'detach'):
+        raise MigrationError('Invalid native pool loop action.')
+    image, receipt = safe_path(image), safe_path(receipt)
+    require_root_path(receipt)
+    record = json.loads(receipt.read_text())
+    identity = record.get('imageLoop')
+    if (record.get('phase') not in ('copied', 'switched', 'complete') or record.get('uuid') != expected_uuid
+            or record.get('target', {}).get('image') != str(image) or not identity):
+        raise MigrationError('The loop service does not match the migrated pool receipt.')
+    require_root_path(image)
+    with ExitStack() as handles:
+        image_fd = os.open(image, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        handles.callback(os.close, image_fd)
+        check_image_inode(image_fd, identity)
+        device = attached_loop(image)
+        created = device is None
+        if created:
+            if action == 'detach':
+                return
+            device = Path(checked('losetup', '--direct-io=on', '--find', '--show', f'/proc/self/fd/{image_fd}',
+                                  descriptors=(image_fd,)).strip())
+        try:
+            device_fd, direct_io = pin_image_loop(device, image_fd, handles)
+            if filesystem_uuid(f'/proc/self/fd/{device_fd}', (device_fd,)) != expected_uuid:
+                raise MigrationError('The verified pool image does not contain the migration filesystem.')
+            if action == 'detach':
+                checked('losetup', '--detach', str(device))
+            else:
+                configure_image_loop(device, direct_io)
+        except Exception:
+            if created and attached_loop(image) == device:
+                checked('losetup', '--detach', str(device))
+            raise
+
+
 def prepare_loop(record, force, handles):
     image = Path(record['target']['image'])
     identity = prepare_image(record, image, force)
@@ -1721,18 +1781,8 @@ def prepare_loop(record, force, handles):
         record['imageLoop'] = {**image_identity(image_fd), 'loop': str(device)}
         save_migration(record)
         checked('losetup', '--direct-io=on', str(device), f'/proc/self/fd/{image_fd}', descriptors=(image_fd,))
-    # Keep a kernel reference during attestation and formatting. A detached
-    # loop cannot be assigned another backing file while this reference lives.
-    device_fd = os.open(device, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
-    handles.callback(os.close, device_fd)
-    backing = os.fstat(image_fd)
-    expected_device = f'{os.major(backing.st_dev)}:{os.minor(backing.st_dev)}'
-    actual = checked('losetup', '--noheadings', '--output', 'BACK-INO,BACK-MAJ:MIN,DIO', str(device)).split()
-    if actual[:2] != [str(backing.st_ino), expected_device]:
-        raise MigrationError('The loop device does not bind the verified pool inode.')
-    if actual[2:] != ['1']:
-        raise MigrationError(f'{device} does not support direct I/O for this image. Choose a partition, logical volume or another image filesystem.')
-    disable_loop_discard(device)
+    device_fd, direct_io = pin_image_loop(device, image_fd, handles)
+    configure_image_loop(device, direct_io)
     return device, device_fd
 
 
@@ -2089,6 +2139,8 @@ if __name__ == '__main__':
             install(sys.argv[2])
         elif len(sys.argv) == 2 and sys.argv[1] == 'run':
             run()
+        elif len(sys.argv) == 6 and sys.argv[1] == 'pool-loop':
+            boot_image_loop(*sys.argv[2:])
         elif len(sys.argv) >= 2 and sys.argv[1] == 'migrate-pool':
             require_installed_supervisor()
             offline_pool_operation(migrate_pool, pool_arguments(sys.argv[1:]))
