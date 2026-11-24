@@ -213,7 +213,7 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
   const hidden = await unconnected()
   expect(hidden).toEqual(expect.arrayContaining(['OpenCode', 'Antigravity']))
   const releaseDiscovery = Promise.withResolvers<void>()
-  await page.route('**/api/antigravity/models', async (route) => {
+  await page.route(/\/api\/antigravity\/models\?availabilityOnly=true$/, async (route) => {
     await releaseDiscovery.promise
     await route.continue()
   }, { times: 1 })
@@ -245,8 +245,23 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
     apiKey: 'synthetic-picker-gemini-key',
   })
   await menu.getByRole('button', { name: 'Refresh models', exact: true }).click()
-  await menu.getByRole('radio', { name: 'Antigravity', exact: true }).click()
-  await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
+  const antigravityInventory = /\/api\/antigravity\/models$/
+  const releaseInventory = Promise.withResolvers<void>()
+  await page.route(antigravityInventory, async (route) => {
+    await releaseInventory.promise
+    await route.continue()
+  }, { times: 1 })
+  try {
+    const inventoryStarted = page.waitForRequest(antigravityInventory)
+    await menu.getByRole('radio', { name: 'Antigravity', exact: true }).click()
+    await inventoryStarted
+    await expect(menu.getByRole('radio', { name: 'Antigravity', exact: true })).toHaveAttribute('aria-checked', 'true')
+    await expect(menu.getByLabel('Model name', { exact: true })).toBeVisible()
+  }
+  finally {
+    releaseInventory.resolve()
+  }
+
   await expect(menu.getByText(hidden.filter(label => label !== 'Antigravity').join(', '), { exact: true })).toBeVisible()
   await page.keyboard.press('Escape')
 
@@ -265,7 +280,7 @@ isolatedWorkspaceTest('points coding agents without an account to Connections in
       return route.fulfill({ status: 503, json: { error: 'Creation response lost before the write' } })
     await route.continue()
   })
-  await page.route('**/api/codex/models', route => route.fulfill({ status: 503, json: { error: 'Discovery unavailable' } }), { times: 1 })
+  await page.route(/\/api\/codex\/models\?availabilityOnly=true$/, route => route.fulfill({ status: 503, json: { error: 'Discovery unavailable' } }), { times: 1 })
   await create.click()
   await expect(page.getByRole('alert').filter({ hasText: 'Couldn’t check the Codex connection.' })).toBeVisible()
   expect(createAttempts).toHaveLength(0)

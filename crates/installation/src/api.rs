@@ -317,11 +317,23 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
         }
         ("GET", [provider, "models"]) => {
             let provider = crate::provider::Provider::parse(provider)?;
+            let availability_only = input
+                .query
+                .get("availabilityOnly")
+                .map(|value| {
+                    value
+                        .parse::<bool>()
+                        .map_err(|_| Error::bad("availabilityOnly: expected a boolean"))
+                })
+                .transpose()?;
             crate::capabilities::account_operation("list_models")
                 .expect("registered model catalog")
                 .invoke(
                     s,
-                    json!({ "provider": provider }),
+                    json!({
+                        "provider": provider,
+                        "availabilityOnly": availability_only,
+                    }),
                     crate::capabilities::ResumeContext::http(input)?,
                 )
                 .await?

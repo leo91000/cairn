@@ -38,11 +38,32 @@ function createCatalog(provider: Provider) {
     error: '',
     loading: false,
     loaded: false,
-    requestFailed: false,
     nativeDefaults: undefined as ModelCatalog['nativeDefaults'],
   })
+  const connection = reactive({ loading: false, loaded: false, failed: false })
+  let pendingConnection: Promise<void> | undefined
   let pending: Promise<void> | undefined
   let revision = 0
+
+  function checkConnection() {
+    if (pendingConnection)
+      return pendingConnection
+    const signal = AbortSignal.timeout(30000)
+    connection.loading = true
+    pendingConnection = listModels((path, options) => api(path, { ...options, signal }), { provider, availabilityOnly: true })
+      .then((value) => {
+        catalog.connected = value.connected
+        connection.failed = false
+        store(key, catalog)
+      })
+      .catch(() => { connection.failed = true })
+      .finally(() => {
+        connection.loading = false
+        connection.loaded = true
+        pendingConnection = undefined
+      })
+    return pendingConnection
+  }
 
   function load() {
     if (pending)
@@ -55,15 +76,17 @@ function createCatalog(provider: Provider) {
           return
         // A stale, empty inventory can still confirm the account pool.
         const models = value.connected === true && value.stale && !value.models.length ? catalog.models : value.models
-        Object.assign(catalog, value, { models, nativeDefaults: value.nativeDefaults, connected: value.connected })
-        catalog.requestFailed = false
-        store(key, { ...value, models })
+        const hasConnectionCheck = connection.loaded || connection.loading
+        const connected = hasConnectionCheck ? catalog.connected : value.connected
+        Object.assign(catalog, value, { models, nativeDefaults: value.nativeDefaults, connected })
+        store(key, catalog)
+        // Inventory can discover a rejected credential during its own provider call.
+        if (value.connected !== connected)
+          void (pendingConnection ?? Promise.resolve()).then(checkConnection)
       })
       .catch((error: Error) => {
-        if (requestRevision === revision) {
+        if (requestRevision === revision)
           catalog.error = error.message
-          catalog.requestFailed = true
-        }
       })
       .finally(() => {
         if (requestRevision === revision) {
@@ -85,7 +108,13 @@ function createCatalog(provider: Provider) {
     await load()
   }
 
-  return { catalog, load, refresh }
+  return {
+    catalog,
+    connection,
+    checkConnection,
+    load,
+    refresh,
+  }
 }
 
 export const modelCatalogs = Object.fromEntries(

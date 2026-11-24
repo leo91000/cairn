@@ -32,16 +32,20 @@ pub(crate) async fn read_model_catalog(s: &Service, provider: Provider) -> Resul
     };
 
     // Provider inventory can fail independently of the account pool.
-    let connected = if provider == Provider::Codex && !provider.driver().managed(s).await? {
-        crate::accounts::codex::host_login_present(s).await
-    } else {
-        !s.accounts.needs_attention(s, provider).await?
-    };
+    let connected = connection_available(s, provider).await?;
     let fields = catalog
         .as_object_mut()
         .ok_or_else(|| Error::bad_gateway("The coding agent returned an invalid model catalog."))?;
     fields.insert("connected".into(), json!(connected));
     Ok(catalog)
+}
+
+pub(crate) async fn connection_available(s: &Service, provider: Provider) -> Result<bool> {
+    if provider == Provider::Codex && !provider.driver().managed(s).await? {
+        Ok(crate::accounts::codex::host_login_present(s).await)
+    } else {
+        Ok(!s.accounts.needs_attention(s, provider).await?)
+    }
 }
 
 /// The native CLI configuration and session protocol for one coding agent.

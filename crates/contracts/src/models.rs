@@ -75,11 +75,15 @@ pub struct ModelCatalog {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListModelsInput {
     #[serde(default)]
     #[schemars(with = "String", pattern("^(codex|claude|opencode|antigravity)$"))]
     pub provider: AgentProvider,
+    /// Return connection availability without querying the model inventory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub availability_only: Option<bool>,
 }
 
 #[cfg(test)]

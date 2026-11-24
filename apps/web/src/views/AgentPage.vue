@@ -807,8 +807,8 @@ function failed(e: unknown) {
 
 async function requireCodingAgentConnection(value: AgentDraft['provider']) {
   const models = modelCatalogs[value]
-  await models.load()
-  if (!models.catalog.loaded || models.catalog.requestFailed)
+  await models.checkConnection()
+  if (models.connection.failed)
     throw new Error(`Couldn’t check the ${codingAgents[value].label} connection. Try saving again.`)
   if (models.catalog.connected === false)
     throw new Error(`Connect ${codingAgents[value].label} in Connections or choose another coding agent.`)

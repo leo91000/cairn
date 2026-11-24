@@ -183,8 +183,8 @@ private val GeminiMark by lazy {
  * across model changes. With [catalogs], agents whose catalog says no account can run are not
  * offered, except the chosen one and [savedProvider], the conversation's or saved agent's: the
  * sheet names them and, with [openConnections], leads to Connections. Opening the sheet refreshes
- * every agent's catalog with [refreshCatalog]. A new choice waits for a successful catalog read,
- * which may omit the connection field on older installations.
+ * every agent's availability with [refreshCatalog]. A new choice waits for that check, which may
+ * omit the connection field on older installations.
  */
 @Composable
 internal fun ModelPicker(
@@ -195,7 +195,7 @@ internal fun ModelPicker(
     defaultReasoning: String = "",
     inherit: Boolean = false,
     enabled: Boolean = true,
-    refresh: (suspend () -> Unit)? = null,
+    refresh: (suspend () -> ModelCatalog?)? = null,
     modifier: Modifier = Modifier,
     provider: String = "codex",
     changeProvider: ((String) -> Unit)? = null,
@@ -215,7 +215,8 @@ internal fun ModelPicker(
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
     val discovered = remember(open) { mutableStateMapOf<String, ModelCatalog?>() }
-    val shownCatalog = discovered[provider] ?: catalog
+    val shownCatalog =
+        discovered[provider]?.let { catalog.copy(connected = it.connected) } ?: catalog
     val inheritedModel =
         if (inherit) defaultModel else shownCatalog.nativeDefaults?.model ?: defaultModel
     val inheritedReasoning =
@@ -228,15 +229,16 @@ internal fun ModelPicker(
     var refreshing by remember { mutableStateOf(false) }
     var refreshError by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
-    suspend fun reload() {
-        if (refreshing || refresh == null) return
+    suspend fun reload(): ModelCatalog? {
+        if (refreshing || refresh == null) return null
         refreshing = true
         refreshError = ""
-        try {
+        return try {
             refresh()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             refreshError = "Catalogue temporairement indisponible. Réessayez."
+            null
         } finally {
             refreshing = false
         }
@@ -317,6 +319,13 @@ internal fun ModelPicker(
         ) {
             var discoveryAttempt by remember { mutableIntStateOf(0) }
             val checkingConnections = refreshCatalog != null && discovered.size < codingAgents.size
+            suspend fun refreshInventory() {
+                val fresh = reload() ?: return
+                // Inventory can verify a rejected credential during the provider call.
+                if (refreshCatalog != null && fresh.connected != discovered[provider]?.connected)
+                    discoveryAttempt++
+            }
+            if (refresh != null) Poll(provider, 300_000) { refreshInventory() }
             if (refreshCatalog != null) {
                 Poll(discoveryAttempt, 300_000) {
                     discovered.clear()
@@ -326,7 +335,7 @@ internal fun ModelPicker(
                         }
                     }
                 }
-            } else if (refresh != null) Poll(provider, 300_000) { reload() }
+            }
             var query by rememberSaveable { mutableStateOf("") }
             val connect = openConnections?.let {
                 {
@@ -408,9 +417,10 @@ internal fun ModelPicker(
                         IconButton(
                             onClick = {
                                 if (refreshCatalog != null) discoveryAttempt++
-                                else scope.launch { reload() }
+                                if (refresh != null) scope.launch { refreshInventory() }
                             },
-                            enabled = !refreshing && !checkingConnections,
+                            enabled =
+                                if (refreshCatalog != null) !checkingConnections else !refreshing,
                             modifier =
                                 Modifier.testTag("refresh-models").semantics {
                                     contentDescription =

@@ -93,22 +93,28 @@ const current = computed(() => providers.find(item => item.value === provider.va
 const retainedProvider = (value: Provider) => value === props.savedAssistant?.provider || (!props.requireConnection && value === provider.value)
 const offered = computed(() => providers.filter(item => retainedProvider(item.value) || modelCatalogs[item.value].catalog.connected !== false))
 const unconnected = computed(() => providers.filter(item => !offered.value.includes(item)))
-const refreshing = computed(() => providers.some(item => modelCatalogs[item.value].catalog.loading))
-const checkingConnections = computed(() => providers.some(item => !retainedProvider(item.value) && modelCatalogs[item.value].catalog.loading))
+const refreshing = computed(() => providers.some(item => modelCatalogs[item.value].connection.loading))
+const checkingConnections = computed(() => providers.some(item => !retainedProvider(item.value) && modelCatalogs[item.value].connection.loading))
 const connectionsCheckFailed = computed(() => providers.some(({ value }) => {
-  const catalog = modelCatalogs[value].catalog
-  return !retainedProvider(value) && !catalog.loading && catalog.requestFailed
+  const { connection } = modelCatalogs[value]
+  return !retainedProvider(value) && !connection.loading && connection.failed
 }))
 
 function canChooseProvider(value: Provider) {
-  const catalog = modelCatalogs[value].catalog
-  return retainedProvider(value) || (catalog.loaded && !catalog.loading && !catalog.requestFailed && catalog.connected !== false)
+  const { catalog, connection } = modelCatalogs[value]
+  return retainedProvider(value) || (connection.loaded && !connection.loading && !connection.failed && catalog.connected !== false)
 }
 
 function refreshConnections() {
   for (const item of providers)
-    void modelCatalogs[item.value].load()
+    void modelCatalogs[item.value].checkConnection()
+  void reload()
 }
+
+watch(provider, () => {
+  if (open.value)
+    void reload()
+})
 
 const inheritedModel = computed(() => props.inherit ? props.defaultModel : catalog.value.nativeDefaults?.model || props.defaultModel)
 const inheritedReasoning = computed(() => props.inherit ? props.defaultReasoning : catalog.value.nativeDefaults?.reasoning || props.defaultReasoning)
@@ -368,7 +374,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
             :disabled="refreshing"
             @click="refreshConnections"
           >
-            <Icon :name="refreshing ? LoaderCircle : RefreshCw" :size="15" :class="{ 'animate-spin': refreshing }" />
+            <Icon :name="refreshing || catalog.loading ? LoaderCircle : RefreshCw" :size="15" :class="{ 'animate-spin': refreshing || catalog.loading }" />
           </button>
           <button
             type="button"
@@ -714,7 +720,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
           <p v-else-if="query && !models.length" class="py-3 text-center text-xs text-muted">
             No models match “{{ query }}”.
           </p>
-          <label v-if="!catalog.loading && !catalog.models.length" class="text-2xs text-muted">Model name<input
+          <label v-if="!catalog.models.length" class="text-2xs text-muted">Model name<input
             :value="model"
             maxlength="100"
             placeholder="Use the provider default"

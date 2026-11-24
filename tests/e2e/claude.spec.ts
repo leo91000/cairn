@@ -691,6 +691,7 @@ test('plan drafts keep their mode across conversation switches and reloads', asy
 
 test('a Plan draft never becomes ordinary when its engine resolves to OpenCode', async ({ page, workspace }) => {
   test.setTimeout(120000)
+  await seedCodexAccount(workspace, 'Plan intent fallback', limits(10, 20))
   await workspace.api('/api/accounts', 'POST', {
     provider: 'opencode',
     name: 'Plan intent control',

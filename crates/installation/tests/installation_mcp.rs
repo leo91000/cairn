@@ -6344,6 +6344,19 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     assert_eq!(stale["stale"], true, "{stale}");
     assert!(!text(&stale, "error").is_empty(), "{stale}");
 
+    let (status, available) = account_http(
+        &app,
+        &member,
+        "GET",
+        "/api/opencode/models?availabilityOnly=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{available}");
+    assert_eq!(available["connected"], true, "{available}");
+    assert_eq!(available["models"], json!([]), "{available}");
+    assert_eq!(available["error"], "", "{available}");
+
     let mut google = cairn_installation::accounts::Account::new(
         cairn_installation::provider::Provider::Antigravity,
         "Expired fixture login",
@@ -6391,6 +6404,18 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
         ("/mcp", public.as_str()),
         ("/mcp-installation", agent_token),
     ] {
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_models",
+            json!({
+                "provider": "opencode",
+                "availabilityOnly": true,
+            }),
+        )
+        .await;
+        assert_eq!(result(&response), &available);
         let (_, response) = node_management_call(
             &app,
             endpoint,

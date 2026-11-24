@@ -3,5 +3,6 @@ import type { ListModelsInput } from './typescript/ListModelsInput'
 import type { ModelCatalog } from './typescript/ModelCatalog'
 
 export function listModels(request: <T>(path: string, options: RequestInit) => Promise<T>, input: ListModelsInput): Promise<ModelCatalog> {
-  return request<ModelCatalog>(`/${encodeURIComponent(input.provider)}/models`, { method: 'GET' })
+  const query = new URLSearchParams({ ...(input.availabilityOnly == null ? {} : { availabilityOnly: String(input.availabilityOnly) }) }).toString()
+  return request<ModelCatalog>(`/${encodeURIComponent(input.provider)}/models${query ? `?${query}` : ''}`, { method: 'GET' })
 }

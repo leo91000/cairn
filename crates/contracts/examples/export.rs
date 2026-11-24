@@ -244,7 +244,7 @@ fn main() {
     export::<OrderAccountsOutput>(root, &mut generator, Contract::Deserialize);
     export::<RefreshAccountsOutput>(root, &mut generator, Contract::Deserialize);
     let account_clients = serde_json::json!([
-        {"name":"listModels","input":"ListModelsInput","output":"ModelCatalog","method":"GET","path":"/{provider}/models"},
+        {"name":"listModels","input":"ListModelsInput","output":"ModelCatalog","method":"GET","path":"/{provider}/models","query":["availabilityOnly"],"optionalQuery":["availabilityOnly"]},
         {"name":"listCodingAgentAccountProviders","input":"AccountProviderInput","output":"AccountProvidersOutput","method":"GET","path":"/accounts/providers/{provider}"},
         {"name":"getCodingAgentAccountSignIn","input":"ListAccountsInput","output":"AccountSignInProgressOutput","method":"GET","path":"/accounts/sign-in"},
         {"name":"listCodingAgentAccounts","input":"ListAccountsInput","output":"CodingAgentAccounts","method":"GET","path":"/accounts"},

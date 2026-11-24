@@ -2272,7 +2272,9 @@ internal fun ChatPage(
                                                 onReasoningIntent = ::setResumeReasoningIntent,
                                                 catalogs = state.modelCatalogs,
                                                 savedProvider = editedProvider ?: currentProvider,
-                                                refreshCatalog = { vm.refreshModels(it) },
+                                                refreshCatalog = {
+                                                    vm.refreshModels(it, availabilityOnly = true)
+                                                },
                                                 openConnections =
                                                     openConnections.takeIf { state.isOwner },
                                             ) { m, r ->

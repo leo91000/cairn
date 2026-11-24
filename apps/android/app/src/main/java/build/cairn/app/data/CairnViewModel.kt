@@ -812,7 +812,7 @@ constructor(
                 async {
                     try {
                         target
-                            .listModels(ListModelsInput(agent.provider))
+                            .listModels(ListModelsInput(provider = agent.provider))
                             .withCachedInventory(state.value.modelCatalog(agent.provider))
                     } catch (e: Exception) {
                         if (e is CancellationException || (e is ApiException && e.status == 401))
@@ -897,13 +897,20 @@ constructor(
             }
     }
 
-    suspend fun refreshModels(provider: String): ModelCatalog? {
+    suspend fun refreshModels(provider: String, availabilityOnly: Boolean = false): ModelCatalog? {
         codingAgent(provider)
         val target = api
         return try {
-            val fresh = target.listModels(ListModelsInput(provider))
+            val fresh =
+                target.listModels(
+                    ListModelsInput(
+                        provider = provider,
+                        availabilityOnly = true.takeIf { availabilityOnly },
+                    )
+                )
             // A request started before sign-out or a server change must not restore old data.
             if (connection !== target || !state.value.session.authenticated) return null
+            if (availabilityOnly) return fresh
             val catalog = fresh.withCachedInventory(state.value.modelCatalog(provider))
             mutable.update { it.copy(modelCatalogs = it.modelCatalogs + (provider to catalog)) }
             catalog
@@ -914,6 +921,7 @@ constructor(
                 report(e)
                 return null
             }
+            if (availabilityOnly) return null
             mutable.update {
                 val cached = it.modelCatalog(provider)
                 val unavailable =

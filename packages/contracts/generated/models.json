@@ -6271,6 +6271,13 @@
     "ListModelsInput": {
       "additionalProperties": false,
       "properties": {
+        "availabilityOnly": {
+          "description": "Return connection availability without querying the model inventory.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "provider": {
           "default": "codex",
           "pattern": "^(codex|claude|opencode|antigravity)$",

@@ -274,7 +274,7 @@ private fun AgentPage(
 
     suspend fun requireCodingAgentConnection(provider: String) {
         val catalog =
-            checkNotNull(vm.refreshModels(provider)) {
+            checkNotNull(vm.refreshModels(provider, availabilityOnly = true)) {
                 "Impossible de vérifier la connexion de cet assistant de code. Réessayez."
             }
         check(catalog.connected != false) {
@@ -2319,7 +2319,7 @@ private fun EngineSection(
         catalogs = state.modelCatalogs,
         savedProvider = saved?.provider,
         requireConnection = agent.provider != saved?.provider,
-        refreshCatalog = { vm.refreshModels(it) },
+        refreshCatalog = { vm.refreshModels(it, availabilityOnly = true) },
         // Connections is pushed on the navigation stack, so Back restores the saved draft.
         openConnections = openConnections,
     ) { model, reasoning ->

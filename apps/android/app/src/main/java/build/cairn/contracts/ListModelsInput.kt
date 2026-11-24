@@ -5,7 +5,11 @@ import kotlinx.serialization.Serializable
 
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
-data class ListModelsInput(val provider: String = "codex") {
+data class ListModelsInput(
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val availabilityOnly: Boolean? = null,
+    val provider: String = "codex",
+) {
     init {
         require(Regex("^(codex|claude|opencode|antigravity)\$").containsMatchIn(provider))
     }

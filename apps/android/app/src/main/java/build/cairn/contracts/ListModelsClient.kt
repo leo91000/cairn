@@ -4,5 +4,12 @@ package build.cairn.contracts
 import build.cairn.app.data.CairnApi
 import build.cairn.app.data.segment
 
-suspend fun CairnApi.listModels(input: ListModelsInput): ModelCatalog =
-    send("GET", "/${segment(input.provider)}/models")
+suspend fun CairnApi.listModels(input: ListModelsInput): ModelCatalog {
+    val query =
+        listOfNotNull(input.availabilityOnly?.let { "availabilityOnly" to it.toString() })
+            .joinToString("&") { (key, value) -> "$key=${segment(value)}" }
+    return send(
+        "GET",
+        "/${segment(input.provider)}/models${if (query.isEmpty()) "" else "?$query"}",
+    )
+}
