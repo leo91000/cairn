@@ -1051,6 +1051,13 @@ def offline_pool_operation(operation, arguments):
             record = load_migration()
             target = migration_target(arguments, record)
             probe_migration_device(target, arguments.force, record)
+            if 'image' in target and (not record or record['phase'] in ('planned', 'formatted')):
+                preview = dict(record or {'phase': 'planned', 'target': target})
+                image = Path(target['image'])
+                check_migration_image(preview, image, arguments.force)
+                original = mount_of(pool_path())
+                if original and original['fstype'] == 'ext4':
+                    check_migration_image(preview, image, arguments.force, migration_plan(ROOT / 'state'))
     if arguments.dry_run:
         return operation(arguments)
     require_stopped(arguments.stop)
@@ -1473,21 +1480,42 @@ def check_image_headroom(record, image, allocated=0):
             raise MigrationError(f'Free at least {required} bytes on {path} for allocation and controller recovery receipts.')
 
 
-def prepare_image(record, image, force):
+def check_migration_image(record, image, force, plan=None):
     verify_image_location(image, ROOT / 'state', pool_path())
+    size = record['target']['size']
+    if plan is not None:
+        needed = plan['usedBytes'] + plan['usedBytes'] // 10 + 1024 ** 3
+        if size < needed:
+            raise MigrationError(f'The new pool needs at least {needed} bytes as --size.')
+        record['receiptReserveBytes'] = max(record.get('receiptReserveBytes', 0),
+                                            CONTROLLER_RECEIPT_RESERVE + len(plan['environments']) * 64 * 1024)
+    created = record.get('createdImage')
+    published = image.exists()
+    if published and not created and record['phase'] == 'planned' and not force:
+        raise MigrationError(f'{image} already exists; pass --force to reuse and overwrite it.')
+    actual = image if published or not created else staged_image_path(image, created)
+    if actual.exists():
+        metadata = actual.stat(follow_symlinks=False)
+        if created:
+            check_image_inode(metadata, created)
+        allocated = metadata.st_blocks * 512
+        if published and (metadata.st_size != size or allocated < size):
+            raise MigrationError('An existing target image must be fully allocated at the requested size.')
+        if not published and metadata.st_size > size:
+            raise MigrationError('The recorded staging image exceeds the requested size.')
+    elif created or record['phase'] != 'planned':
+        raise MigrationError(f'The image for this migration is missing: {actual}.')
+    else:
+        allocated = 0
+    check_image_headroom(record, image, allocated)
+
+
+def prepare_image(record, image, force):
+    check_migration_image(record, image, force)
     created = record.get('createdImage')
     if not created:
         if image.exists():
-            if record['phase'] == 'planned' and not force:
-                raise MigrationError(f'{image} already exists; pass --force to reuse and overwrite it.')
-            metadata = image.stat(follow_symlinks=False)
-            if metadata.st_size != record['target']['size'] or metadata.st_blocks * 512 < metadata.st_size:
-                raise MigrationError('An existing target image must be fully allocated at the requested size.')
-            check_image_headroom(record, image, metadata.st_blocks * 512)
             return
-        if record['phase'] != 'planned':
-            raise MigrationError(f'The image for this migration is missing: {image}.')
-        check_image_headroom(record, image)
         # Commit ownership while the staging file is empty, so an interrupted
         # full allocation can always be resumed or released by rollback.
         with tempfile.NamedTemporaryFile(prefix='.cairn-native-xfs-', dir=image.parent, delete=False) as output:
@@ -1618,10 +1646,13 @@ def device_path(value):
     return path
 
 
-def new_pool_mounted(record, pool):
-    mounted = mount_of(pool)
+def matches_new_pool(record, mounted):
     return bool(mounted and mounted.get('fstype') == 'xfs' and record.get('uuid')
                 and filesystem_uuid(mounted['source']) == record['uuid'])
+
+
+def new_pool_mounted(record, pool):
+    return matches_new_pool(record, mount_of(pool))
 
 
 def migration_target(arguments, record):
@@ -1646,6 +1677,13 @@ def probe_migration_device(target, force, record):
         check_device(Path(target['device']), force, uuid=record['uuid'] if record else None)
 
 
+def migration_plan(state):
+    plan = pool_tool('plan', state)
+    if plan['blockers']:
+        raise MigrationError('Resolve these before migrating:\n- ' + '\n- '.join(plan['blockers']))
+    return plan
+
+
 def migrate_pool(arguments):
     pool = pool_path()
     state = ROOT / 'state'
@@ -1663,28 +1701,10 @@ def migrate_pool(arguments):
     if record and (record['old']['unit'], record['old']['uuid']) != (old['unit'], old['uuid']):
         raise MigrationError('The pool mount changed since the migration started; run rollback-pool.')
     old = record['old'] if record else old
-    plan = pool_tool('plan', state)
-    if plan['blockers']:
-        raise MigrationError('Resolve these before migrating:\n- ' + '\n- '.join(plan['blockers']))
+    plan = migration_plan(state)
     record = record or {'version': 1, 'target': target, 'phase': 'planned', 'old': old, 'uuid': str(uuid.uuid4())}
     if 'image' in target:
-        image = Path(target['image'])
-        verify_image_location(image, state, pool)
-        needed = plan['usedBytes'] + plan['usedBytes'] // 10 + 1024 ** 3
-        if target['size'] < needed:
-            raise MigrationError(f'The new pool needs at least {needed} bytes as --size.')
-        record['receiptReserveBytes'] = max(record.get('receiptReserveBytes', 0),
-                                            CONTROLLER_RECEIPT_RESERVE + len(plan['environments']) * 64 * 1024)
-        allocated = 0
-        candidate = image
-        if not image.exists() and record.get('createdImage'):
-            candidate = staged_image_path(image, record['createdImage'])
-        if candidate.exists():
-            allocation = candidate.stat(follow_symlinks=False)
-            if record.get('createdImage'):
-                check_image_inode(allocation, record['createdImage'])
-            allocated = allocation.st_blocks * 512
-        check_image_headroom(record, image, allocated)
+        check_migration_image(record, Path(target['image']), arguments.force, plan)
     if arguments.dry_run:
         units = active_units()
         print('Native data pool migration plan (dry run, nothing changed):')
@@ -1760,8 +1780,11 @@ def activate_pool(arguments):
     record = load_migration()
     if not record or record.get('phase') != 'complete':
         raise MigrationError('Finish the XFS pool migration before activating it.')
-    if not new_pool_mounted(record, pool_path()):
+    mounted = mount_of(pool_path())
+    if not matches_new_pool(record, mounted):
         raise MigrationError('The mounted pool does not match the completed XFS migration.')
+    if 'rw' not in mounted['options'].split(','):
+        raise MigrationError('The verified XFS pool is read-only. Remount it writable before authorizing activation.')
     if arguments.dry_run:
         print('Would authorize the node to open the verified XFS pool on its next start.')
         return

@@ -766,6 +766,22 @@ class PoolMigrationTests(unittest.TestCase):
         stop.assert_not_called()
         self.assertIsNone(host.load_migration())
 
+    def test_invalid_image_is_rejected_in_preview_and_before_stop(self):
+        image = self.root / 'existing.xfs'
+        image.write_bytes(b'previous operator file')
+        mounted = dict(source='/dev/loop0', fstype='ext4', options='rw,prjquota')
+        with patch.object(host, 'pool_unit_properties'), patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
+                patch.object(host, 'mount_of', return_value=mounted), patch.object(host, 'old_pool', return_value=OLD), \
+                patch.object(host, 'pool_tool', return_value=PLAN), patch.object(host, 'require_stopped') as stop:
+            for dry_run in (True, False):
+                for force, diagnostic in ((False, 'already exists'), (True, 'fully allocated')):
+                    with self.subTest(dry_run=dry_run, force=force), self.assertRaisesRegex(host.MigrationError, diagnostic):
+                        host.offline_pool_operation(host.migrate_pool, pool_arguments(
+                            image=str(image), size='2G', force=force, stop=True, dry_run=dry_run))
+            stop.assert_not_called()
+        self.assertEqual(image.read_bytes(), b'previous operator file')
+        self.assertIsNone(host.load_migration())
+
     def test_copy_refuses_inode_flags_that_rsync_cannot_preserve(self):
         source = self.root / 'source'
         run = source / 'sample'
@@ -1238,10 +1254,12 @@ host.offline_pool_operation(lambda _: host.checked(sys.executable, '-c', *sys.ar
     def test_activation_is_explicit_and_checks_the_mounted_pool(self):
         host.migration_directory().mkdir()
         host.save_migration(dict(phase='complete', uuid='f00d'))
-        with patch.object(host, 'new_pool_mounted', return_value=False):
+        with patch.object(host, 'mount_of', return_value=None):
             with self.assertRaisesRegex(host.MigrationError, 'mounted pool'):
                 host.activate_pool(pool_arguments())
-        with patch.object(host, 'new_pool_mounted', return_value=True), patch.object(host, 'pool_tool') as check, \
+        mounted = dict(fstype='xfs', source='/dev/loop1', options='rw,prjquota')
+        with patch.object(host, 'mount_of', return_value=mounted), patch.object(host, 'filesystem_uuid', return_value='f00d'), \
+                patch.object(host, 'pool_tool') as check, \
                 contextlib.redirect_stdout(io.StringIO()):
             host.activate_pool(pool_arguments(dry_run=True))
             self.assertNotIn('activationRequested', host.load_migration())
@@ -1249,6 +1267,16 @@ host.offline_pool_operation(lambda _: host.checked(sys.executable, '-c', *sys.ar
         check.assert_called_once_with('check', self.root / 'state')
         self.assertTrue(host.load_migration()['activationRequested'])
         self.assertNotIn('activated', host.load_migration())
+
+    def test_read_only_pool_preserves_rollback_authority(self):
+        host.migration_directory().mkdir()
+        host.save_migration(dict(phase='complete', uuid='f00d'))
+        mounted = dict(fstype='xfs', source='/dev/loop1', options='ro,prjquota')
+        with patch.object(host, 'mount_of', return_value=mounted), patch.object(host, 'filesystem_uuid', return_value='f00d'), \
+                patch.object(host, 'pool_tool') as check, self.assertRaisesRegex(host.MigrationError, 'read-only'):
+            host.activate_pool(pool_arguments())
+        check.assert_not_called()
+        self.assertNotIn('activationRequested', host.load_migration())
 
     def test_offline_recovery_waits_for_a_manager_owned_pool_job(self):
         calls = []

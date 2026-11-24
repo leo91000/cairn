@@ -138,7 +138,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "native-pool-migrate",
-        arguments: "<plan|prepare|commit|switch|rollback|check> <state> [...]",
+        arguments: "<plan|prepare|commit|seal|switch|rollback|check> <state> [...]",
         description: "Move native environments to another data pool offline.",
         details: "Used by native-host.py migrate-pool while the node is stopped. Rewrites quota\nrecords; never run it while the native controller is running.",
         internal: true,

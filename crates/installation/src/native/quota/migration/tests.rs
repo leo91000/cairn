@@ -468,6 +468,10 @@ async fn kernel_pool_migration_qualification() {
             assert!(error.is_conflict() && error.message.contains("activate-pool"));
         }
         "rolled-back" => verify(&state, "ext4"),
+        "authorized-read-only" => {
+            let error = require_settled(&state).await.unwrap_err();
+            assert!(error.is_conflict() && error.message.contains("read-only"));
+        }
         "exercise" => {
             verify(&state, "xfs");
             require_settled(&state).await.unwrap();

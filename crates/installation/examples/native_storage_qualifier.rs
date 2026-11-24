@@ -185,8 +185,15 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                 let started = std::time::Instant::now();
                 let skipped = skip_workspace.then_some(std::path::Path::new("workspace"));
                 let (key, allocation) = nodes::workspace::native_seed_offer(&source, skipped);
-                json!({ "key": key, "allocation": allocation, "elapsedMs": started.elapsed().as_secs_f64() * 1000.0 })
-            }).await.map_err(Error::internal)
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                json!({
+                    "key": key,
+                    "allocation": allocation,
+                    "elapsedMs": elapsed_ms,
+                })
+            })
+            .await
+            .map_err(Error::internal)
         }
         "archive-hash" => {
             let path = PathBuf::from(

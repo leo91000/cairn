@@ -293,7 +293,7 @@ le disque n’a pas été confirmée.
 Le nœud reste arrêté à la fin. `rollback-pool` restaure l’ancien montage et ses
 reçus. Le contrôleur attend l’autorisation explicite `activate-pool`, même après
 un redémarrage de la machine. Après cette autorisation, la première ouverture
-du pool XFS ferme la possibilité de basculer vers ext4, afin de préserver les
+du pool XFS en écriture ferme la possibilité de basculer vers ext4, afin de préserver les
 nouvelles écritures. Conservez le pool ext4 et la sauvegarde pendant la
 vérification.
 

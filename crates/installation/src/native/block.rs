@@ -1011,7 +1011,7 @@ pub(crate) async fn sync_opened(directory: std::fs::File) -> std::io::Result<()>
     .map_err(std::io::Error::other)?
 }
 
-fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
+pub(super) fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
     // Native workspaces are mounted writable. ext4 can return success from

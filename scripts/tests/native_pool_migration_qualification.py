@@ -6,6 +6,7 @@ code, migrates them with the real host script and systemd units, checks that
 the mount survives a simulated reboot, rolls back, migrates again and exercises
 the migrated pool. Run as root by scripts/qualify-native-quota.mjs only.
 """
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -39,11 +40,14 @@ def phase(binary, root, name):
     assert result.returncode == 0 and 'pool-migration-phase-ok' in result.stdout, f'Migration fixture phase {name} failed.'
 
 
-def host(root, cairn, *args):
+def host(root, cairn, *args, refusal=None):
     environment = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'CAIRN_NATIVE_DISPOSABLE_HOST': '1',
                    'CAIRN_NATIVE_ROOT': str(root), 'CAIRN_NATIVE_INSTALL': str(root), 'CAIRN_NATIVE_BINARY': str(cairn)}
     result = command(sys.executable, '-B', HOST, *args, env=environment, check=False, timeout=1800)
     print(result.stdout, result.stderr, sep='\n')
+    if refusal:
+        assert result.returncode != 0 and refusal in result.stderr, f'native-host.py {args[0]} did not refuse as expected.'
+        return result.stderr
     assert result.returncode == 0, f'native-host.py {args[0]} failed.'
     return result.stdout
 
@@ -138,7 +142,15 @@ def main(binary, cairn, fixture):
         phase(binary, root, 'migrated')
         host(root, cairn, 'activate-pool', '--dry-run')
         phase(binary, root, 'migrated')
+        command('mount', '-o', 'remount,ro,prjquota,nosuid,nodev,noexec', pool)
+        host(root, cairn, 'activate-pool', refusal='read-only')
+        command('mount', '-o', 'remount,rw,prjquota,nosuid,nodev,noexec', pool)
         host(root, cairn, 'activate-pool')
+        command('mount', '-o', 'remount,ro,prjquota,nosuid,nodev,noexec', pool)
+        phase(binary, root, 'authorized-read-only')
+        receipt = json.loads((root / 'native-pool-migration/state.json').read_bytes())
+        assert not receipt.get('activated'), 'A read-only pool consumed rollback authority.'
+        command('mount', '-o', 'remount,rw,prjquota,nosuid,nodev,noexec', pool)
         phase(binary, root, 'exercise')
     finally:
         cleanup(root, pool, unit)

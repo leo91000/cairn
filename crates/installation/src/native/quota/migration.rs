@@ -58,6 +58,13 @@ pub(in crate::native) async fn require_settled(state: &Path) -> Result<()> {
                     "The mounted native data pool does not match the completed XFS migration.",
                 ));
             }
+            super::super::block::require_writable(&pool).map_err(|error| {
+                if error.raw_os_error() == Some(libc::EROFS) {
+                    Error::conflict("The migrated XFS pool is read-only. Remount it writable before starting the node.")
+                } else {
+                    error.into()
+                }
+            })?;
             if value["activated"] != true {
                 // The old pool is a pre-migration snapshot. Prohibit rollback
                 // before this controller can change ownership or start writers.
