@@ -729,11 +729,20 @@ def main():
                 (managed(run) / 'ready').unlink()
             return attempt
 
-        def qualify_environment():
+        def qualify_environment(*, administrator=False):
             if api('/health', method='GET').get('environmentProtocol') != 1:
                 return
             run = create()
-            attempt = start(run, long=False, lease=300000, environment=True)
+            administrator_workload = """
+if test -e administrator-first-turn; then
+    test "$(docker inspect --format '{{.State.Running}}' cairn-background)" = true
+else
+    test ! -e /run/cairn-docker/network.ready
+    touch administrator-first-turn
+fi
+"""
+            attempt = start(run, long=False, lease=300000, environment=True,
+                docker_script=administrator_workload if administrator else '')
             plan = json.loads((data / 'runner-plans' / (attempt + '.json')).read_text())
             def receipt(turn):
                 value = api('/runs/' + attempt + '/turn/' + turn, method='GET', timeout=25)
@@ -754,15 +763,22 @@ def main():
             docker_job = None
             if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
                 docker_job = api(control, dict(operation='start_job', requestId='docker', name='container',
-                    command='docker run -d --network=none --name=cairn-background alpine:3.22.2 sleep 300; echo started > container-ready'))['jobId']
+                    command='docker run -d --network=none --name=cairn-background alpine:3.22.2 sleep 300 && echo started > container-ready'))['jobId']
                 eventually(lambda: (managed(run) / 'container-ready').exists(), timeout=180)
                 api('/runs/' + attempt + '/lease', {'remainingMs': 300000})
                 assert api(control, dict(operation='activity', requestId=str(uuid.uuid4())))['containers'] is True
+
+                def docker_finished():
+                    result = api(control, dict(operation='job_status', requestId=str(uuid.uuid4()), jobId=docker_job))
+                    return result['outcome']['receipt'] if result['outcome']['state'] == 'finished' else None
+
+                assert eventually(docker_finished)['exitCode'] == 0
             plan['turnId'] = str(uuid.uuid4())
             accepted = api(control, dict(operation='resume_turn', requestId='second', turnId=plan['turnId'], plan=plan))
             assert accepted['event'] == 'accepted'
             second = eventually(lambda: receipt(plan['turnId']))
-            assert second['code'] == 0 and second['generation'] == first['generation']
+            assert second['code'] == 0, f"Second provider turn exited with {second['code']}."
+            assert second['generation'] == first['generation'], 'Provider turn changed the environment generation.'
             assert owned_namespace_pid(group, namespace_pid) == pid, 'Background job changed between provider turns.'
             if docker_job:
                 assert api(control, dict(operation='activity', requestId=str(uuid.uuid4())))['containers'] is True
@@ -779,8 +795,47 @@ def main():
             fenced(run, attempt)
             for suffix in ('.e', '.r'):
                 assert not (state / 'roots' / (attempt + suffix)).exists()
-            metrics['managedBackgroundJobs'] = dict(twoProviderTurns=True, sameEnvironment=True,
+            metric = 'managedAdministratorBackgroundJobs' if administrator else 'managedBackgroundJobs'
+            metrics[metric] = dict(twoProviderTurns=True, sameEnvironment=True,
                 jobCgroup=True, completionReceipt=True, socketCleanup=True, containerPreserved=bool(docker_job))
+
+        def qualify_administrator_docker_turns():
+            run = create()
+            workload = """
+if ! test -e administrator-docker-pid; then
+    test ! -e /run/cairn-docker/network.ready
+    mkfifo /tmp/cairn-docker-supervisor.log /tmp/cairn-dockerd.log /tmp/cairn-slirp.log
+    docker info >/dev/null
+    sudo -n cat /run/cairn-docker/dockerd.pid > administrator-docker-pid
+else
+    docker info >/dev/null
+    test "$(sudo -n cat /run/cairn-docker/dockerd.pid)" = "$(cat administrator-docker-pid)"
+fi
+"""
+            attempt = start(run, long=False, lease=300000, docker_script=workload, environment=True)
+            plan = json.loads((data / 'runner-plans' / (attempt + '.json')).read_text())
+            control = '/runs/' + attempt + '/environment'
+            def receipt():
+                turn = plan['turnId']
+                value = api('/runs/' + attempt + '/turn/' + turn, method='GET', timeout=25)
+                return value if value.get('turnId') == turn else None
+
+            first = eventually(receipt)
+            assert first['code'] == 0
+            daemon = int((managed(run) / 'administrator-docker-pid').read_text())
+            group = command('systemctl', 'show', 'cairn-native-' + attempt + '.service',
+                '--property=ControlGroup', '--value').stdout.strip()
+            assert Path('/proc', str(daemon), 'cgroup').read_text().startswith('0::' + group + '/')
+            plan['turnId'] = str(uuid.uuid4())
+            accepted = api(control, dict(operation='resume_turn', requestId='administrator-docker-second',
+                turnId=plan['turnId'], plan=plan))
+            assert accepted['event'] == 'accepted'
+            second = eventually(receipt)
+            assert second['code'] == 0 and second['generation'] == first['generation']
+            api(control, dict(operation='close', requestId='administrator-docker-close'))
+            api('/runs/' + attempt, method='DELETE')
+            fenced(run, attempt)
+            metrics['administratorDockerTurns'] = True
 
 
         def qualify_exclusive(owner, peer, peer_run):
@@ -1370,6 +1425,11 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                 assert api('/native-mode', target)['status'] == 'applied'
                 current_mode.update(target)
                 fenced(docker_run, fresh)
+                if api('/health', method='GET').get('environmentProtocol') == 1:
+                    progress('administrator-docker-provider-turns')
+                    qualify_administrator_docker_turns()
+                    progress('administrator-docker-job-turns')
+                    qualify_environment(administrator=True)
                 administrator_workload = Path(__file__).with_name('native_administrator_docker_workload.py').read_text()
                 administrator_script = "/usr/bin/python3 - " + str(owner_a['subuid'] + 999) + ' ' + str(owner_a['subgid'] + 999) + " <<'ADMINISTRATOR_DOCKER'\n" + administrator_workload + '\nADMINISTRATOR_DOCKER\n'
                 administrator_docker = start(docker_run, lease=300000, docker_script=administrator_script)
