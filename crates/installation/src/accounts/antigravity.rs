@@ -21,6 +21,7 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(super) struct Antigravity;
+
 pub(crate) const RECONNECT_REQUIRED: &str = "antigravity_google_reconnect_required";
 
 fn reconnect_required() -> Error {
@@ -73,6 +74,9 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
     if expiry(&saved["token"]["token"]) - now() >= RENEW_BEFORE_MS {
         return Ok(saved);
     }
+    if text(&saved["token"]["token"], "refresh_token").is_empty() {
+        return Err(reconnect_required());
+    }
     let saved = &saved;
     let home = token_home(s, id);
     let mut file = saved["token"].clone();
@@ -81,7 +85,7 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
     crate::antigravity::write_token(&home, &file).await?;
     let env = crate::antigravity::environment(&s.config, &home, None);
     let renewed = async {
-        crate::process::bounded_output(
+        let output = crate::process::bounded_output(
             crate::process::command(
                 &s.config.antigravity_bin,
                 &["models".into()],
@@ -92,14 +96,25 @@ async fn renew(s: &Service, id: &str) -> Result<Value> {
             1_000_000,
         )
         .await?;
-        let bytes = tokio::fs::read(home.join(TOKEN_FILE)).await?;
-        Ok::<_, Error>(serde_json::from_slice::<Value>(&bytes)?)
+        if !output.success
+            && (output.stdout.contains("invalid_grant") || output.stderr.contains("invalid_grant"))
+        {
+            return Err(reconnect_required());
+        }
+        let unavailable =
+            || Error::bad_gateway("Antigravity could not refresh Google credentials.");
+        let bytes = tokio::fs::read(home.join(TOKEN_FILE))
+            .await
+            .map_err(|_| unavailable())?;
+        serde_json::from_slice::<Value>(&bytes).map_err(|_| unavailable())
     }
     .await;
     let _ = crate::accounts::remove_directory(&home).await;
-    let renewed = renewed.map_err(|_| reconnect_required())?;
+    let renewed = renewed?;
     if text(&renewed["token"], "access_token").is_empty() || expiry(&renewed["token"]) <= now() {
-        return Err(reconnect_required());
+        return Err(Error::bad_gateway(
+            "Antigravity could not refresh Google credentials.",
+        ));
     }
     let mut credential = saved.clone();
     let mut token = renewed;

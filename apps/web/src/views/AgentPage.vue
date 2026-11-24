@@ -804,11 +804,22 @@ function failed(e: unknown) {
     fieldErrors.value = { ...fieldErrors.value, [target]: message }
 }
 
+async function requireCodingAgentConnection(value: AgentDraft['provider']) {
+  const models = modelCatalogs[value]
+  await models.load()
+  if (models.catalog.connected === false)
+    throw new Error(`Connect ${codingAgents[value].label} in Connections or choose another coding agent.`)
+}
+
 async function agentRequest<T>(_path: string, options: RequestInit): Promise<T> {
   const payload = JSON.parse(options.body as string)
-  return (options.method === 'POST'
-    ? await createAgent(api, payload as CreateAgentInput)
-    : await replaceAgent(api, payload as ReplaceAgentInput)) as T
+  if (options.method === 'POST')
+    return await createAgent(api, payload as CreateAgentInput) as T
+
+  const update = payload as ReplaceAgentInput
+  if (update.settings.provider !== agent.value?.provider)
+    await requireCodingAgentConnection(update.settings.provider)
+  return await replaceAgent(api, update) as T
 }
 
 async function commit(reapprove: string[]) {
@@ -820,24 +831,23 @@ async function commit(reapprove: string[]) {
   const profileChanged = isNew.value || changes(saved.value, draft.value).length > 0 || reapprove.length > 0
   let result: Agent
   try {
-    const needsConnection = agent.value ? draft.value.provider !== saved.value.provider : !creation.pendingCreation.value
-    if (needsConnection) {
-      const models = modelCatalogs[draft.value.provider]
-      await models.load()
-      if (models.catalog.connected === false)
-        throw new Error(`Connect ${provider.value.label} in Connections or choose another coding agent.`)
-    }
-
     if (isNew.value) {
+      if (!agent.value && !creation.pendingCreation.value)
+        await requireCodingAgentConnection(draft.value.provider)
       result = await creation.save<Agent>('/agents', {
         body: () => body(reapprove, nativeNodes),
         request: agentRequest,
         createBody: creationId => ({ creationId, settings: body(reapprove, nativeNodes).settings, review: body(reapprove, nativeNodes).review }),
         // A replayed creation updates the agent it created, at that agent's revision.
-        onCreated: (created) => { agent.value = created },
+        onCreated: (created) => {
+          agent.value = created
+          saved.value = draftOf(created)
+        },
       })
     }
     else if (profileChanged) {
+      if (draft.value.provider !== saved.value.provider)
+        await requireCodingAgentConnection(draft.value.provider)
       result = await replaceAgent(api, body(reapprove, nativeNodes))
     }
     else {

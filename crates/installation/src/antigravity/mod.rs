@@ -501,6 +501,7 @@ impl Catalog {
         }
         let mut kinds = Vec::<(String, Vec<Value>)>::new();
         let mut failure = None;
+        let mut reconnect = None;
         for account in &accounts {
             let kind = account.model_provider.clone().unwrap_or_default();
             if kinds.iter().any(|(k, _)| *k == kind) {
@@ -510,6 +511,13 @@ impl Catalog {
             let credentials = match crate::accounts::antigravity::credentials(s, &account.id).await
             {
                 Ok(credentials) => credentials,
+                Err(error)
+                    if error.code.as_deref()
+                        == Some(crate::accounts::antigravity::RECONNECT_REQUIRED) =>
+                {
+                    reconnect = Some(error);
+                    continue;
+                }
                 Err(error) => {
                     failure = Some(error);
                     continue;
@@ -521,9 +529,9 @@ impl Catalog {
             }
         }
         if kinds.is_empty() {
-            return Err(
-                failure.unwrap_or_else(|| Error::bad_gateway("Antigravity could not list models."))
-            );
+            return Err(failure
+                .or(reconnect)
+                .unwrap_or_else(|| Error::bad_gateway("Antigravity could not list models.")));
         }
         let mut entries = Vec::<Value>::new();
         for (kind, models) in &kinds {

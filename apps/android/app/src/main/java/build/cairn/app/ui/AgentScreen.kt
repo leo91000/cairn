@@ -271,24 +271,22 @@ private fun AgentPage(
     }
     BackHandler(enabled = !saving) { leave() }
 
+    suspend fun requireCodingAgentConnection(provider: String) {
+        val catalog = vm.refreshModels(provider) ?: vm.state.value.modelCatalog(provider)
+        check(catalog.connected != false) {
+            "Connectez ${providerLabel(provider)} ou choisissez un autre assistant de code."
+        }
+    }
+
     suspend fun commit(
         edited: Agent,
         approved: List<String>,
         nativeNodes: List<String> = emptyList(),
     ) {
         val needsConnection =
-            if (creating && creation.id.isBlank()) !creation.pendingCreation
+            if (creating) creation.id.isBlank() && !creation.pendingCreation
             else edited.provider != baseline.provider
-        if (needsConnection) {
-            val catalog =
-                vm.refreshModels(edited.provider) ?: vm.state.value.modelCatalog(edited.provider)
-            if (catalog.connected == false) {
-                saveError =
-                    "Connectez ${providerLabel(edited.provider)} ou choisissez un autre assistant de code."
-                errorSection = AgentSection.Engine
-                return
-            }
-        }
+        if (needsConnection) requireCodingAgentConnection(edited.provider)
 
         // Explicit reapproval uses the revision-checked profile API, including grant-only edits.
         val profilePending =
@@ -334,12 +332,15 @@ private fun AgentPage(
                                                     payload
                                                 )
                                             )
-                                        else
+                                        else {
+                                            if (edited.provider != baseline.provider)
+                                                requireCodingAgentConnection(edited.provider)
                                             vm.api.replaceAgent(
                                                 wireJson.decodeFromJsonElement<ReplaceAgentInput>(
                                                     payload
                                                 )
                                             )
+                                        }
                                     wireJson.encodeToJsonElement(saved)
                                 },
                             )

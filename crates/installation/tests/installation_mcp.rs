@@ -6151,11 +6151,13 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     std::fs::create_dir(root.path().join("home")).unwrap();
     let opencode = root.path().join("opencode-fixture");
     std::os::unix::fs::symlink(common::fixture_path("opencode.mjs"), &opencode).unwrap();
+    let antigravity = root.path().join("antigravity-fixture");
+    std::os::unix::fs::symlink(common::fixture_path("antigravity.mjs"), &antigravity).unwrap();
     let s = Service::new(cairn_installation::config::Config {
         codex_bin: common::fixture("codex.mjs"),
         claude_bin: common::fixture("claude.mjs"),
         opencode_bin: opencode.to_string_lossy().into_owned(),
-        antigravity_bin: common::fixture("antigravity.mjs"),
+        antigravity_bin: antigravity.to_string_lossy().into_owned(),
         ..common::config(root.path())
     })
     .await
@@ -6204,7 +6206,11 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     let codex_home = s.config.home.join(".codex");
     std::fs::create_dir_all(&codex_home).unwrap();
     let host_auth = codex_home.join("auth.json");
-    std::fs::write(&host_auth, br#"{"tokens":{"access_token":"synthetic-host-login"}}"#).unwrap();
+    std::fs::write(
+        &host_auth,
+        br#"{"tokens":{"access_token":"synthetic-host-login"}}"#,
+    )
+    .unwrap();
     let (status, codex) =
         account_http(&app, &member, "GET", "/api/codex/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{codex}");
@@ -6365,7 +6371,11 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
     assert_eq!(status, StatusCode::OK, "{reconnect}");
     assert_eq!(reconnect["connected"], false, "{reconnect}");
     assert!(text(&reconnect, "error").contains("Reconnect this Antigravity Google account"));
-    assert!(!reconnect.to_string().contains("synthetic-expired-google-token"));
+    assert!(
+        !reconnect
+            .to_string()
+            .contains("synthetic-expired-google-token")
+    );
 
     for (endpoint, token) in [
         ("/mcp", public.as_str()),
@@ -6399,6 +6409,77 @@ async fn model_catalogs_and_unsupported_account_capabilities_share_all_three_tra
         .await;
         assert_eq!(invalid["result"]["isError"], true);
     }
+
+    let (status, gemini) = account_http(
+        &app,
+        &owner,
+        "POST",
+        "/api/accounts",
+        json!({
+            "provider": "antigravity",
+            "name": "Gemini fixture key",
+            "modelProvider": "gemini",
+            "apiKey": "synthetic-gemini-fixture-key",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{gemini}");
+    assert_eq!(gemini["kind"], "connected", "{gemini}");
+    let gemini_id = text(&gemini["account"], "id");
+    std::fs::remove_file(antigravity).unwrap();
+
+    // When Gemini inventory is temporarily unavailable, order must not turn a separate
+    // expired login into an installation-wide reconnection requirement.
+    for ordered_accounts in [[gemini_id, &google.id], [&google.id, gemini_id]] {
+        let (status, ordered) = account_http(
+            &app,
+            &owner,
+            "POST",
+            "/api/accounts/order",
+            json!({
+                "provider": "antigravity",
+                "ids": ordered_accounts,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{ordered}");
+        assert_eq!(ordered["kind"], "ordered", "{ordered}");
+
+        let (status, mixed) =
+            account_http(&app, &member, "GET", "/api/antigravity/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{mixed}");
+        assert_eq!(mixed["connected"], true, "{mixed}");
+        assert_eq!(mixed["stale"], true, "{mixed}");
+        for (endpoint, token) in [
+            ("/mcp", public.as_str()),
+            ("/mcp-installation", agent_token),
+        ] {
+            let (_, response) = node_management_call(
+                &app,
+                endpoint,
+                token,
+                "list_models",
+                json!({"provider":"antigravity"}),
+            )
+            .await;
+            assert_eq!(result(&response), &mixed);
+        }
+    }
+
+    // A vanished executable is transient even for an expired Google access token if
+    // the refresh credential has not been rejected.
+    let mut gemini = s.accounts.account(&s, gemini_id).await.unwrap();
+    gemini.enabled = false;
+    s.store.save_coding_account(&gemini).await.unwrap();
+    let google_secret = format!("antigravity-account:{}", google.id);
+    let mut credentials = s.vault.get(&google_secret).await.unwrap().unwrap();
+    credentials["token"]["token"]["refresh_token"] = "synthetic-google-refresh-token".into();
+    s.vault.set(&google_secret, &credentials).await.unwrap();
+    let (status, failed_renewal) =
+        account_http(&app, &member, "GET", "/api/antigravity/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{failed_renewal}");
+    assert_eq!(failed_renewal["connected"], true, "{failed_renewal}");
+    assert_eq!(failed_renewal["stale"], true, "{failed_renewal}");
 }
 
 #[tokio::test]

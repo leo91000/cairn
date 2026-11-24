@@ -25,19 +25,25 @@ pub(crate) async fn read_model_catalog(s: &Service, provider: Provider) -> Resul
         Err(error)
             if error.code.as_deref() == Some(crate::accounts::antigravity::RECONNECT_REQUIRED) =>
         {
-            (json!({
+            (
+                json!({
+                    "models": [],
+                    "checkedAt": null,
+                    "stale": false,
+                    "error": error.message,
+                }),
+                true,
+            )
+        }
+        Err(error) if matches!(error.status, 502..=504) => (
+            json!({
                 "models": [],
                 "checkedAt": null,
-                "stale": false,
-                "error": error.message,
-            }), true)
-        }
-        Err(error) if matches!(error.status, 502..=504) => (json!({
-            "models": [],
-            "checkedAt": null,
-            "stale": true,
-            "error": "The model catalog is temporarily unavailable. Retry to refresh models.",
-        }), false),
+                "stale": true,
+                "error": "The model catalog is temporarily unavailable. Retry to refresh models.",
+            }),
+            false,
+        ),
         Err(error) => return Err(error),
     };
 

@@ -878,6 +878,43 @@ abstract class AgentPageCases {
         }
     }
 
+    @Test
+    fun creationReplayRecoversTheAgentBeforeCheckingADifferentCodingAgent() {
+        journey(
+            "",
+            prepare = {
+                it.loseCreation.set(true)
+                it.modelConnections["antigravity"] = true
+            },
+        ) { fixture ->
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Nouvel agent")
+            back()
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText("Sauvegarde de l’agent non confirmée", substring = true)
+
+            open(AgentSection.Engine)
+            compose.onNodeWithTag("model-picker").performScrollTo().performClick()
+            val tile =
+                hasAnyAncestor(hasTestTag("model-settings-sheet")) and
+                    hasText("Antigravity") and
+                    hasClickAction() and
+                    isEnabled()
+            compose.waitUntil(10000) { compose.onAllNodes(tile).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNode(tile).performScrollTo().performClick().assertIsSelected()
+            compose.onNodeWithText("Terminé").performClick()
+            back()
+
+            fixture.modelConnections["antigravity"] = false
+            waitForEnabled("Créer l’agent")
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText("Connectez Antigravity", substring = true)
+            assertEquals(listOf("/agents", "/agents"), fixture.saved.map { it.first })
+            val recovered = fixture.agents.get().single { it.name == "Nouvel agent" }
+            assertEquals("codex", recovered.provider)
+        }
+    }
+
     private fun back() {
         compose.onNodeWithContentDescription("Retour").performClick()
         compose.waitForIdle()
