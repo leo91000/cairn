@@ -20,6 +20,15 @@ use tokio::sync::Mutex;
 /// Absent (`None`), explicitly `null` (`Some(None)`) or set (`Some(Some(_))`).
 type Nullable<T> = Option<Option<T>>;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AntigravityProbeRetry {
+    pub message_id: String,
+    /// A launched wrapper may have reached the provider until a trusted
+    /// controller rejection proves that it did not start.
+    pub started: bool,
+}
+
 /// Restart state persisted once in `run_checkpoints`, serialized from this type.
 ///
 /// Unconverted chat/node boundaries still serialize these named fields. Nullable
@@ -40,6 +49,10 @@ pub struct RunCheckpoint {
     /// rejects that start: an earlier agent may still have the message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launched_turn_before: Option<String>,
+    /// The held message accepted for retry after a confirmed Antigravity CLI
+    /// probe failure. It needs the prepared environment and no provider session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) antigravity_probe_retry: Option<AntigravityProbeRetry>,
     /// Small durable row, loaded separately from the retained workspace.
     #[serde(skip)]
     pub progress: Option<super::progress::Progress>,
@@ -78,6 +91,9 @@ pub struct RunCheckpoint {
     /// The adapter confirmed failure, independently of controller transport/exit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_failed: Option<bool>,
+    /// The adapter stopped in Antigravity's CLI probe, before sending input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub antigravity_probe_failed: Option<bool>,
     /// Controller result for runner_id, distinct from the provider turn and logs.
     /// Absent: an attempt may need observation. Null: observation was exhausted
     /// or a new turn invalidated the old result; recovery must only fence it.
@@ -334,6 +350,35 @@ impl RunCheckpoint {
 
     pub fn launched(&self) -> bool {
         self.launched == Some(true)
+    }
+
+    pub(super) fn record_launch(&mut self, turn: Option<String>) {
+        self.antigravity_probe_failed = None;
+        let probe_retry = self
+            .antigravity_probe_retry
+            .take()
+            .filter(|retry| !retry.started && Some(retry.message_id.as_str()) == turn.as_deref());
+        self.launched_turn_before = self.launched_turn.take();
+        if let Some(mut retry) = probe_retry {
+            // The last wrapper failed before the provider received this turn.
+            self.launched_turn_before = None;
+            retry.started = true;
+            self.antigravity_probe_retry = Some(retry);
+        }
+        self.launched = Some(true);
+        self.launched_turn = turn;
+    }
+
+    pub(super) fn retries_antigravity_without_session(&self, message: Option<&str>) -> bool {
+        self.antigravity_probe_retry
+            .as_ref()
+            .is_some_and(|retry| !retry.started && Some(retry.message_id.as_str()) == message)
+    }
+
+    pub(super) fn antigravity_start_unconfirmed(&self) -> bool {
+        self.antigravity_probe_retry
+            .as_ref()
+            .is_some_and(|retry| retry.started)
     }
 
     pub fn completed(&self) -> bool {
@@ -713,6 +758,7 @@ impl RunCheckpoint {
 pub struct EventChanges {
     pub run: Option<crate::runs::RunChanges>,
     pub failure: Option<(String, Option<crate::run_retry::Cause>, bool)>,
+    pub antigravity_probe_failed: bool,
     pub completed: bool,
     pub progress_complete: bool,
     pub last_message: Option<String>,
@@ -976,6 +1022,7 @@ impl Checkpoint {
                 }
                 saved.last_error = Some(Some(message));
                 saved.retry_cause = Some(cause);
+                saved.antigravity_probe_failed = changes.antigravity_probe_failed.then_some(true);
                 if provider_failure {
                     saved.provider_failed = Some(true);
                     saved.completed = Some(false);

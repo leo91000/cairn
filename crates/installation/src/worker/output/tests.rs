@@ -11,6 +11,76 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 
+#[tokio::test]
+async fn antigravity_probe_retry_only_survives_a_proven_capacity_rejection() {
+    for capacity_rejection in [false, true] {
+        check_antigravity_probe_rejection(capacity_rejection).await;
+    }
+}
+
+async fn check_antigravity_probe_rejection(capacity_rejection: bool) {
+    let mut f = Fixture::new().await;
+    let message = "probe-turn";
+    f.service
+        .store
+        .update_run_boundary(
+            &f.id,
+            json!({ "chatExecution": { "messageId": message, "recovery": true } }),
+        )
+        .await
+        .unwrap();
+    f.checkpoint
+        .update(|saved| {
+            saved.runner_id = Some(Some("candidate-attempt".into()));
+            saved.prepared = Some(Some(json!({ "backend": "native" })));
+            saved.launched = Some(true);
+            saved.launched_turn = Some(message.into());
+            saved.antigravity_probe_retry =
+                Some(crate::worker::checkpoint::AntigravityProbeRetry {
+                    message_id: message.into(),
+                    started: false,
+                });
+            saved.record_launch(Some(message.into()));
+        })
+        .await
+        .unwrap();
+    let started = f.checkpoint.snapshot().await;
+    assert!(!started.retries_antigravity_without_session(Some(message)));
+
+    record(
+        &f.service,
+        &Output::new(
+            false,
+            json!({
+                "type": "runner.start_rejected",
+                "message": "No authorized node can accept this execution right now.",
+                "capacityRejection": capacity_rejection,
+            })
+            .to_string(),
+        ),
+        &f.checkpoint,
+        true,
+        &[],
+        &mut f.log_total,
+        &mut f.activity,
+    )
+    .await
+    .unwrap();
+
+    let durable = RunCheckpoint::load(&f.service.store, &f.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(durable.launched());
+    assert_eq!(durable.start_rejected, Some(true));
+    assert_eq!(
+        durable.retries_antigravity_without_session(Some(message)),
+        capacity_rejection
+    );
+    let run = f.service.store.run(&f.id).await.unwrap();
+    assert_eq!(run["chatExecution"]["recovery"], !capacity_rejection);
+}
+
 struct Fixture {
     _root: TempDir,
     service: Arc<Service>,
