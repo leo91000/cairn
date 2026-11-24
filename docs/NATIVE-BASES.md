@@ -128,7 +128,9 @@ versus direct-file block comparison is documented in [journal qualification](JOU
 
 The same native-runtime workflow drives the production connector and controller
 from a loopback fixture manager on both candidate XFS and the pinned ext4
-reference. It runs three cold and warm skill bundles per runtime. Each row in
+reference. It runs three cold and warm skill bundles per runtime, plus a warm
+launch from a prepared base. The XFS fixture verifies the skill cache hit and
+the claimed spare's original inode during that same launch. Each row in
 `connector-startup.json` reports the encoded seed bytes, cache negotiation,
 connector completion and the workload readiness marker. Its scan count is
 process-wide inside the controller's admission-to-submission interval. It excludes

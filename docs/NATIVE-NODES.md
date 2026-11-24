@@ -277,6 +277,8 @@ demandée sur le système de fichiers hôte et vérifie que le loop accepte le
 direct I/O avant de formater le pool. Il désactive le discard sur ce loop
 pour préserver l’allocation du fichier. Pour un pool source déclaré dans `/etc/fstab`, installez
 d’abord une unité `.mount` persistante équivalente et vérifiez le montage ext4.
+Intégrez les éventuels drop-ins à cette unité avant d’arrêter le nœud. Le retour
+à ext4 rétablit les liens de démarrage présents avant la migration.
 
 Après interruption, relancez `migrate-pool` avec la même cible pour reprendre.
 Le nœud reste arrêté à la fin. `rollback-pool` restaure l’ancien montage et ses

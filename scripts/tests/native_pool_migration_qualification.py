@@ -127,6 +127,7 @@ def main(binary, cairn, fixture):
         host(root, cairn, 'rollback-pool')
         assert mounted(pool) == 'ext4', 'Rollback did not remount the original pool.'
         assert not (UNITS / LOOP_SERVICE).exists(), 'Rollback kept the loop unit.'
+        assert not (UNITS / 'local-fs.target.wants' / unit).is_symlink(), 'Rollback kept the XFS boot link for a manually mounted ext4 pool.'
         phase(binary, root, 'rolled-back')
 
         second = root / 'native-data-2.xfs'

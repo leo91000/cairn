@@ -719,7 +719,7 @@ def main():
                 imports=[dict(source=str(workspace), target=str(workspace)), dict(source=str(data / 'runs' / run / 'home'), target='/home/node')])
             if environment:
                 plan.update(environmentProtocol=1, turnId=str(uuid.uuid4()), expires=int(time.time()*1000)+300000)
-            if run in base_archives:
+            if run in base_archives and connector_sample is None:
                 plan.update(nativeProjectArchives=base_archives[run], nativeProjectBase=base_keys[run])
                 os.link(state / 'native-bases' / base_keys[run] / 'pin', data / 'runs' / run / ('native-base-' + attempt + '.pin'))
             image = data / 'runs' / run / 'chat-input/attachments/native-image/image.png'
@@ -739,8 +739,11 @@ def main():
                 (data / 'runs' / run).rename(source)
                 key = skill_bundle(source, connector_sample, lambda path: manager('archive-hash', path=str(path))['hash'],
                                    root / 'connector-fingerprint')
+                descriptor = dict(dataRoot=str(data), plan=plan)
+                if run in base_archives:
+                    descriptor['projectArchives'] = base_archives[run]
                 fixture_master.preparations[attempt] = dict(
-                    descriptor=dict(dataRoot=str(data), plan=plan), lease=lease, key=key,
+                    descriptor=descriptor, lease=lease, key=key,
                     miss=seed_frames(source), hit=seed_frames(source, omit_skills=True),
                 )
                 shutil.rmtree(source)
@@ -982,24 +985,12 @@ def main():
                         assert sample['cacheSupported'] or not xfs_smoke, 'Candidate connector did not propose skill caching.'
                         assert sample['cacheHit'] == (warm and sample['cacheSupported']), 'Connector chose an unexpected seed variant.'
                         sample['warmRequest'] = warm
+                        sample['preparedBase'] = False
+                        sample['claimedSpare'] = False
                         relay('/runs/' + attempt, method='DELETE')
                         fenced(measured, attempt)
                         manager('purge', run=measured)
                         api('/disks/' + measured + '/delete', {'permanentlyDeleted': True})
-
-                with binary.open('rb') as source:
-                    binary_sha = hashlib.file_digest(source, 'sha256').hexdigest()
-                report = dict(filesystem='xfs' if xfs_smoke else 'ext4', runtimeSha256=binary_sha,
-                              scans='Controller process-wide scans from admission to submission. Connector scans excluded.',
-                              samples=metrics['connectorStartup'])
-                evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
-                evidence.mkdir(parents=True, exist_ok=True)
-                (evidence / 'connector-startup.json').write_text(json.dumps(report, indent=2) + '\n')
-                print(json.dumps(dict(connectorStartup=report)))
-                if connector_reference:
-                    return
-
-                from native_docker_workload import ALPINE
 
                 prepared_run = create()
                 prepare_base(prepared_run)
@@ -1016,21 +1007,33 @@ def main():
                             return (state / 'native-data' / identifier).stat().st_ino
                     return None
 
-                spare_inode = eventually(prepared_inode)
-                prepared_attempt = start(prepared_run)
+                spare_inode = eventually(prepared_inode) if xfs_smoke else None
+                prepared_attempt = start(prepared_run, connector_sample=2)
                 acquired = state / 'native-data' / prepared_run
-                assert acquired.stat().st_ino == spare_inode, 'Real start did not claim the prepared environment.'
-                def submitted_bootstrap():
-                    report = api('/runs/' + prepared_attempt + '/bootstrap', method='GET')['bootstrap']
-                    return report if report['status'] == 'submitted' else None
-
-                report = eventually(submitted_bootstrap)
-                metrics['preparedStartToSubmission'] = dict(ms=report['elapsedMs'], usageScans=report['usageScans'])
-                print(json.dumps(dict(preparedStartToSubmission=metrics['preparedStartToSubmission'])))
-                api('/runs/' + prepared_attempt, method='DELETE')
+                claimed = spare_inode is not None and acquired.stat().st_ino == spare_inode
+                sample = metrics['connectorStartup'][-1]
+                if xfs_smoke:
+                    assert claimed, 'The connector-driven start did not claim the prepared inode.'
+                    assert sample['cacheHit'], 'The prepared start did not reuse its cached skills.'
+                sample.update(warmRequest=True, preparedBase=True, claimedSpare=claimed)
+                relay('/runs/' + prepared_attempt, method='DELETE')
                 fenced(prepared_run, prepared_attempt)
                 manager('purge', run=prepared_run)
                 api('/disks/' + prepared_run + '/delete', {'permanentlyDeleted': True})
+
+                with binary.open('rb') as source:
+                    binary_sha = hashlib.file_digest(source, 'sha256').hexdigest()
+                report = dict(filesystem='xfs' if xfs_smoke else 'ext4', runtimeSha256=binary_sha,
+                              scans='Controller process-wide scans from admission to submission. Connector scans excluded.',
+                              samples=metrics['connectorStartup'])
+                evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
+                evidence.mkdir(parents=True, exist_ok=True)
+                (evidence / 'connector-startup.json').write_text(json.dumps(report, indent=2) + '\n')
+                print(json.dumps(dict(connectorStartup=report)))
+                if connector_reference:
+                    return
+
+                from native_docker_workload import ALPINE
 
                 volume = 'cairn-xfs-fixture'
 

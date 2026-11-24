@@ -584,7 +584,7 @@ PLAN = dict(filesystem='ext4', reflink=False, usedBytes=10 * 1024 ** 2, skipped=
                           dict(run='22222222-2222-4222-8222-222222222222', project=0, usedBytes=0, inodes=0,
                                blockHardBytes=0, inodeHard=0)])
 OLD = dict(unit='var-lib-cairn\\x2dnative-state-native\\x2ddata.mount', fragment='/etc/systemd/system/var-lib-cairn\\x2dnative-state-native\\x2ddata.mount',
-           what='/var/lib/cairn-native/native-data.ext4', type='ext4', options='loop,prjquota,nodiscard', uuid='original')
+           what='/var/lib/cairn-native/native-data.ext4', type='ext4', options='loop,prjquota,nodiscard', uuid='original', bootLink=None)
 
 
 def pool_arguments(**changes):
@@ -725,6 +725,28 @@ class PoolMigrationTests(unittest.TestCase):
             old = host.old_pool(host.pool_path())
         self.assertEqual(dict(OLD, fragment=str(fragment), unitSha256=host.hashlib.sha256(fragment.read_bytes()).hexdigest()), old)
 
+    def test_cutover_refuses_drop_ins_before_stopping_the_node(self):
+        with patch.object(host, 'mount_unit_name', return_value=OLD['unit']), \
+                patch.object(host, 'checked', return_value='DropInPaths=/etc/systemd/system/override.conf\n'), \
+                patch.object(host, 'require_stopped') as stop, self.assertRaisesRegex(host.MigrationError, 'drop-ins'):
+            host.offline_pool_operation(host.migrate_pool, pool_arguments(stop=True))
+        stop.assert_not_called()
+
+    def test_cutover_preserves_an_existing_mount_dependency(self):
+        unit = self.units / OLD['unit']
+        link = host.pool_boot_link(OLD['unit'])
+        link.parent.mkdir()
+        original_target = '../' + OLD['unit']
+        link.symlink_to(original_target)
+        old = dict(OLD, bootLink=original_target)
+        record = dict(target=dict(device='/dev/synthetic'), uuid='f00d')
+        with patch.object(host, 'back_up_unit'), patch.object(host, 'checked'), \
+                patch.object(host, 'mount_of', return_value=dict(fstype='xfs', source='/dev/synthetic')), \
+                patch.object(host, 'filesystem_uuid', return_value='f00d'):
+            host.mount_new_pool(record, old, host.pool_path())
+        self.assertEqual(os.readlink(link), original_target)
+        self.assertIn('Type=xfs', unit.read_text())
+
     def test_dry_run_prints_the_plan_without_changing_anything(self):
         tool = Mock(return_value=PLAN)
         output = io.StringIO()
@@ -779,6 +801,7 @@ class PoolMigrationTests(unittest.TestCase):
         def new_pool(record, old, pool):
             events.append(('mount-new', record['phase']))
         return [patch.object(host, 'old_pool', return_value=OLD), patch.object(host, 'pool_tool', side_effect=tool),
+                patch.object(host, 'pool_unit_properties'),
                 patch.object(host, 'back_up_unit'),
                 patch.object(host, 'require_stopped'), patch.object(host, 'prepare_target', return_value=mountpoint),
                 patch.object(host, 'copy_environment', side_effect=lambda run, *_: events.append(('copy', run))),
@@ -845,6 +868,9 @@ class PoolMigrationTests(unittest.TestCase):
         backup.parent.mkdir()
         backup.write_bytes(original)
         (self.units / OLD['unit']).write_text(host.pool_unit(host.pool_path(), 'f00d', 'image'))
+        link = host.pool_boot_link(OLD['unit'])
+        link.parent.mkdir()
+        link.symlink_to(self.units / OLD['unit'])
         (self.units / host.LOOP_SERVICE).write_text(host.loop_unit(Path(image), OLD['unit'], 'f00d'))
         mounts = iter([None, dict(fstype='xfs', source='/dev/loop1'), None, dict(fstype='ext4', source='/dev/loop0')])
         commands = []
@@ -857,6 +883,7 @@ class PoolMigrationTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             host.rollback_pool(pool_arguments())
         self.assertEqual('original ext4 unit\n', (self.units / OLD['unit']).read_text())
+        self.assertFalse(link.is_symlink(), 'Rollback must not enable an originally disabled ext4 mount')
         self.assertFalse((self.units / host.LOOP_SERVICE).exists())
         self.assertEqual(commands, [('systemctl', 'stop', OLD['unit']), ('systemctl', 'disable', '--now', host.LOOP_SERVICE),
                                     ('losetup', '--detach', '/dev/loop1'), ('systemctl', 'daemon-reload'),

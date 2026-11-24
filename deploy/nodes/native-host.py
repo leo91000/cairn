@@ -1012,6 +1012,8 @@ def require_installed_supervisor():
 
 def offline_pool_operation(operation, arguments):
     global OFFLINE_LOCK_FDS
+    if operation is migrate_pool:
+        pool_unit_properties(mount_unit_name(pool_path()))
     if arguments.dry_run:
         return operation(arguments)
     require_stopped(arguments.stop)
@@ -1062,14 +1064,42 @@ def pool_tool(*args):
     return json.loads(result.stdout)
 
 
+def pool_unit_properties(unit):
+    properties = dict(line.split('=', 1) for line in checked(
+        'systemctl', 'show', unit, '--property=FragmentPath,SourcePath,DropInPaths').splitlines() if '=' in line)
+    if properties.get('SourcePath') == '/etc/fstab':
+        raise MigrationError(f'{unit} is mounted from /etc/fstab; replace that entry with a persistent mount unit before migrating.')
+    if properties.get('DropInPaths'):
+        raise MigrationError(f'{unit} uses systemd drop-ins. Fold its effective mount configuration into the persistent unit before migrating.')
+    fragment = properties.get('FragmentPath')
+    if (UNIT_DIRECTORY / unit).is_symlink() or (fragment and Path(fragment) != UNIT_DIRECTORY / unit):
+        raise MigrationError(f'{unit} must be a regular local unit in {UNIT_DIRECTORY}, or the ext4 pool must be mounted manually.')
+    return properties
+
+
+def pool_boot_link(unit):
+    return UNIT_DIRECTORY / 'local-fs.target.wants' / unit
+
+
+def boot_link_target(unit):
+    link = pool_boot_link(unit)
+    try:
+        target = os.readlink(link)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise MigrationError(f'{link} is not a systemd dependency link.') from error
+    if (link.parent / target).resolve() != UNIT_DIRECTORY / unit:
+        raise MigrationError(f'{link} points to another unit.')
+    return target
+
+
 def old_pool(pool):
     mounted = mount_of(pool)
     if not mounted or mounted.get('fstype') != 'ext4' or 'prjquota' not in mounted.get('options', '').split(','):
         raise MigrationError(f'{pool} must be the mounted ext4 project-quota pool to migrate.')
     unit = mount_unit_name(pool)
-    properties = dict(line.split('=', 1) for line in checked('systemctl', 'show', unit, '--property=FragmentPath,SourcePath').splitlines() if '=' in line)
-    if properties.get('SourcePath') == '/etc/fstab':
-        raise MigrationError(f'{pool} is mounted from /etc/fstab; replace that entry with a {unit} unit before migrating.')
+    properties = pool_unit_properties(unit)
     fragment = properties.get('FragmentPath') or ''
     source = mounted.get('source', '')
     what, options = source, mounted['options'].split(',')
@@ -1090,6 +1120,7 @@ def old_pool(pool):
         options.insert(0, 'loop')
     return {'unit': unit, 'fragment': fragment if fragment_bytes is not None else None,
             'unitSha256': hashlib.sha256(fragment_bytes).hexdigest() if fragment_bytes is not None else None,
+            'bootLink': boot_link_target(unit),
             'what': what, 'type': 'ext4', 'options': ','.join(options),
             'uuid': filesystem_uuid(source)}
 
@@ -1254,9 +1285,16 @@ def mount_new_pool(record, old, pool):
             raise MigrationError(f'{LOOP_SERVICE} belongs to another pool.')
         atomic_bytes(loop_path, expected, 0o644)
     atomic_bytes(unit, pool_unit(pool, record['uuid'], image).encode(), 0o644)
+    link = pool_boot_link(old['unit'])
+    if boot_link_target(old['unit']) is None:
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(unit)
+    sync_directory(link.parent)
+    sync_directory(UNIT_DIRECTORY)
     checked('systemctl', 'daemon-reload')
     units = ([LOOP_SERVICE] if image else []) + [old['unit']]
-    checked('systemctl', 'enable', *units)
+    if image:
+        checked('systemctl', 'enable', LOOP_SERVICE)
     wants = UNIT_DIRECTORY / 'local-fs.target.wants'
     if wants.is_dir():
         sync_directory(wants)
@@ -1554,6 +1592,7 @@ def finish_migration(record, arguments, pool, state):
     if arguments.dry_run:
         print(f'The pool migration reached phase {record["phase"]}; a rerun only completes it.')
         return
+    pool_unit_properties(record['old']['unit'])
     if not new_pool_mounted(record, pool):
         mounted = mount_of(pool)
         if mounted is not None:
@@ -1647,6 +1686,18 @@ def rollback_pool(arguments):
         if loop:
             checked('losetup', '--detach', str(loop))
     unit = UNIT_DIRECTORY / old['unit']
+    link = pool_boot_link(old['unit'])
+    previous_link = old.get('bootLink')
+    current_link = boot_link_target(old['unit'])
+    if previous_link is None and current_link == str(unit):
+        link.unlink()
+        sync_directory(link.parent)
+    elif previous_link is not None and current_link is None:
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(previous_link)
+        sync_directory(link.parent)
+    elif current_link != previous_link:
+        raise MigrationError(f'{link} changed during migration. Inspect the dependency before rollback.')
     if original_unit is not None:
         atomic_bytes(unit, original_unit, 0o644)
     elif old['fragment'] is None and unit.exists() and NEW_POOL_UNIT in unit.read_text():
