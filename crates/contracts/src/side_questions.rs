@@ -18,6 +18,7 @@ pub enum SideQuestionStatus {
 pub enum SideQuestionUnavailable {
     /// No reply is running.
     BetweenReplies,
+    /// Reported by earlier servers for every Codex reply.
     Codex,
     Opencode,
     /// The reply's coding agent could not be read.
@@ -25,8 +26,10 @@ pub enum SideQuestionUnavailable {
     /// The reply is stopping or switching coding agent.
     Stopping,
     Compacting,
-    /// The Claude Code release is older than the one qualified for side questions.
+    /// The Claude Code release is older than the first one qualified for side questions.
     ClaudeRelease,
+    /// The Codex release is older than the first one qualified for side questions.
+    CodexRelease,
     /// The reply has not offered side questions yet: starting, or a runtime not updated.
     NotOffered,
 }

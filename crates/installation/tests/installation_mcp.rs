@@ -7586,10 +7586,9 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     let late = call(&s, &configuration, "ask_chat_side_question", ask("Now?")).await;
     assert_eq!(late["result"]["isError"], true);
 
-    // A Codex reply never takes one, even if an adapter announced it: its side
-    // conversations keep tools Cairn cannot remove before they run.
+    // A Codex release before `thread/sample` declines them, and the reason names Codex.
     let codex_id = codex["id"].as_str().unwrap();
-    s.side_questions_available(codex_id, true).await.unwrap();
+    s.side_questions_available(codex_id, false).await.unwrap();
     let mut codex_chat = s.chat_create(json!({})).await.unwrap();
     codex_chat["runId"] = codex["id"].clone();
     let codex_chat_id = codex_chat["id"].as_str().unwrap().to_owned();
@@ -7609,7 +7608,9 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     .await;
     assert_eq!(refused["result"]["isError"], true, "{refused}");
     assert!(
-        refused.to_string().contains("Codex cannot answer"),
+        refused
+            .to_string()
+            .contains("This Codex release cannot answer"),
         "{refused}"
     );
     let listed = call(
@@ -7626,6 +7627,19 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
             .unwrap()
             .contains("Codex")
     );
+    // A Codex release that announced them takes one.
+    s.side_questions_available(codex_id, true).await.unwrap();
+    let asked = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": codex_chat_id,
+            "question": { "id": uuid::Uuid::new_v4(), "text": "Why?" },
+        }),
+    )
+    .await;
+    assert_eq!(result(&asked)["status"], "pending", "{asked}");
 
     // A conversation moved to trash fails the side questions its stopped turn left.
     let (trashed_run, _) = active_run(&s, &claude).await;

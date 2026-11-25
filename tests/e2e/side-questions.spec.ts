@@ -12,7 +12,7 @@ import {
 // The fixture's first reply of a turn, which side questions refer to.
 const reply = 'I’ll trace the component boundaries and keyboard handling'
 
-// Only Claude Code answers side questions. The account belongs to this worker's workspace.
+// Claude Code answers most of these side questions. The account belongs to this worker's workspace.
 test.beforeAll(async ({ workspace }) => {
   const { accounts } = await workspace.api('/api/accounts')
   if (!accounts.some((account: { provider: string }) => account.provider === 'claude'))
@@ -387,18 +387,25 @@ test('a pending side question can be withdrawn while the reply continues', async
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
 })
 
-test('a Codex reply explains that it cannot take side questions', async ({ page, workspace }) => {
+test('a Codex reply answers side questions from its running turn', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review the layout. fixture:chat-hang', provider: 'codex' })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
   const message = page.locator('.activity-message').filter({ hasText: reply })
   await expect(message).toBeVisible()
-  await expect(message.getByRole('button', { name: 'Ask about this reply' })).toHaveCount(0)
+  await message.getByRole('button', { name: 'Ask about this reply' }).click()
+  const panel = page.getByRole('dialog', { name: 'Side questions' })
+  await expect(panel.getByText('Codex answers in a single reply.')).toBeVisible()
+  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why trace the boundaries first?')
+  await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+  await expect(panel.getByText('Side answer: Why trace the boundaries first?')).toBeVisible()
+  // The question neither steered nor joined the running turn.
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   expect(detail.run.status).toBe('running')
-  expect(detail.canAskSideQuestion).toBe(false)
-  expect(detail.sideQuestionReason).toContain('Codex cannot answer side questions')
-  await expect(workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', { id: randomUUID(), text: 'Why?' })).rejects.toThrow(/Codex cannot answer/)
+  expect(detail.sideQuestions.map((question: { status: string }) => question.status)).toEqual(['answered'])
+  const events = JSON.stringify(workspace.service.store.events(detail.run.id, 0, 200))
+  for (const side of ['Why trace the boundaries first?', 'Side answer'])
+    expect(events).not.toContain(side)
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
 })

@@ -258,6 +258,9 @@ defineExpose({ ask, show, unreachable })
       <p v-else-if="provider === 'antigravity'" class="text-xs leading-relaxed text-muted">
         Antigravity answers from the conversation recorded up to its last finished step, not the step in progress.
       </p>
+      <p v-else-if="provider === 'codex'" class="text-xs leading-relaxed text-muted">
+        Codex answers in a single reply. If it tries to use a tool instead, the tool does not run and the question fails.
+      </p>
       <form v-if="canAsk" class="space-y-3" @submit.prevent="send">
         <button
           v-if="itemId"
@@ -297,7 +300,7 @@ defineExpose({ ask, show, unreachable })
         </div>
       </form>
       <UiNotice v-else :icon="MessageSquareQuote">
-        {{ reason || 'Side questions are answered while Claude Code works on a reply.' }}
+        {{ reason || `Side questions are answered while ${engine} works on a reply.` }}
       </UiNotice>
       <UiAlert v-if="error">
         {{ error }}

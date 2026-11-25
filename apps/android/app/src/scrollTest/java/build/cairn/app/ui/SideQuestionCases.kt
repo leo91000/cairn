@@ -299,12 +299,19 @@ abstract class SideQuestionCases {
                 compose.onNodeWithText("Pourquoi cet ordre ?").assertDoesNotExist()
                 compose.onNodeWithText("Tout afficher").performClick()
                 compose.onNodeWithText("Pourquoi cet ordre ?").assertExists()
-                // A Claude Code release too old for side questions says so.
+                // A Codex release too old for side questions says so.
+                unavailable = "codex-release"
+                compose
+                    .onNodeWithText(
+                        "Cette version de Codex ne peut pas répondre aux questions à côté dans Cairn : il faut la version 0.172.0 ou une plus récente. Posez-la dans la conversation."
+                    )
+                    .assertExists()
+                // So does a Claude Code release.
                 provider = "claude"
                 unavailable = "claude-release"
                 compose
                     .onNodeWithText(
-                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : seule la version 2.1.308 a été qualifiée. Posez-la dans la conversation."
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : il faut la version 2.1.308 ou une plus récente. Posez-la dans la conversation."
                     )
                     .assertExists()
                 // A reply that has not offered them yet says so too.

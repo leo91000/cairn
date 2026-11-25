@@ -14,7 +14,7 @@ use std::{
     path::Path,
     time::Duration,
 };
-use tokio::{sync::mpsc, time::Instant};
+use tokio::{sync::mpsc, task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 pub mod resident;
@@ -25,6 +25,12 @@ use streamed_text::StreamedText;
 const STOPPED: &str = "Conversation stopped.";
 const MAX_MESSAGE: usize = 5_000_000;
 const TEXT_IDLE_FLUSH: Duration = Duration::from_millis(250);
+/// How long Codex may take to answer one side question.
+const SIDE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Precedes each side question, which Codex samples as the next user message of a copy of
+/// the running turn. It cannot run a tool there, so it is asked not to try.
+const SIDE_PROMPT: &str = "The user asks you a side question while you work. Answer it in this one reply from what you already know of the conversation and your work: tools are unavailable here, and this exchange neither changes nor continues your task.";
+const SIDE_TOOL: &str = "Codex tried to use a tool to answer, which side questions do not allow. Ask in the conversation instead.";
 
 /// A Codex thread item as a chat item: snake_case names, as the conversation events use.
 /// `planning` is a Cairn plan turn, whose boundary Cairn enforces.
@@ -258,6 +264,12 @@ struct Chat<'a> {
     /// Human request preceding the current native proposal, retained through history replay.
     proposal_request: Option<String>,
     starting_items: Option<StartingItems>,
+    /// This Codex release announced side questions for the running turn.
+    side_available: bool,
+    /// Side questions Codex is answering, with the ID of their `thread/sample` request.
+    sides: HashMap<String, u64>,
+    /// The `thread/sample` requests in progress, aborted with the attempt.
+    samples: JoinSet<(String, Result<Value>)>,
 }
 
 impl Chat<'_> {
@@ -1112,6 +1124,134 @@ impl Chat<'_> {
         if let Some(notice) = speed_notice {
             self.emit(notice).await?;
         }
+        self.offer_side_questions().await
+    }
+
+    /// Codex answers side questions with `thread/sample`: one response sampled from a copy of
+    /// the running turn's context. A tool call it attempts there never runs, and the copy
+    /// never joins the thread's history (ADR-0093).
+    async fn offer_side_questions(&mut self) -> Result<()> {
+        let release = self.session.release.clone();
+        self.side_available = crate::chats::side_questions::qualified(
+            &release,
+            crate::chats::side_questions::CODEX_MINIMUM,
+        );
+        if self.side_available {
+            self.emit(json!({ "type": "chat.side.available" })).await
+        } else {
+            // Says why, instead of leaving the reply "still starting".
+            self.emit(json!({ "type": "chat.side.unavailable", "release": release }))
+                .await
+        }
+    }
+
+    fn ask_side(&mut self, side: &Value) {
+        let question = text(side, "id").to_owned();
+        let rpc = self.session.rpc.clone();
+        let request = rpc.next_id();
+        let params = json!({
+            "threadId": self.thread,
+            "expectedTurnId": self.turn,
+            "allowInProgressTurn": true,
+            "prompt": format!("{SIDE_PROMPT}\n\n{}", text(side, "text")),
+        });
+        self.sides.insert(question.clone(), request);
+        self.samples.spawn(async move {
+            let result = rpc
+                .request_as(request, "thread/sample", params, SIDE_TIMEOUT)
+                .await;
+            (question, result)
+        });
+    }
+
+    /// Withdraws a side question silently. Its sample settles as cancelled.
+    async fn withdraw_side(&mut self, question: &str) -> Result<()> {
+        if let Some(request) = self.sides.remove(question) {
+            self.cancel_sample(request).await?;
+        }
+        Ok(())
+    }
+
+    async fn cancel_sample(&mut self, request: u64) -> Result<()> {
+        // A sample that already finished has nothing left to cancel.
+        let cancelled = self
+            .request("thread/sample/cancel", json!({ "requestId": request }))
+            .await;
+        match cancelled {
+            Err(error) if error.status == 409 => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Codex's reply to a side question. It reports no text when the model attempted a
+    /// tool, which never ran.
+    async fn side_settled(&mut self, question: String, result: Result<Value>) -> Result<()> {
+        // A withdrawn or expired question already settled.
+        if self.sides.remove(&question).is_none() {
+            return Ok(());
+        }
+        let response = match result {
+            Ok(response) => response,
+            Err(error) => {
+                let error = if error.status == 504 {
+                    "Codex did not answer this side question in time."
+                } else {
+                    "Codex could not answer this side question."
+                };
+                return self.side_failed(&question, error).await;
+            }
+        };
+        let answer = text(&response, "text");
+        if answer.trim().is_empty() {
+            return self.side_failed(&question, SIDE_TOOL).await;
+        }
+        if !crate::chats::side_questions::answer_fits(answer) {
+            return self
+                .side_failed(&question, "The side answer exceeded the size limit.")
+                .await;
+        }
+        self.emit(json!({
+            "type": "chat.side.answered",
+            "sideQuestionId": question,
+            "text": answer,
+        }))
+        .await
+    }
+
+    async fn side_failed(&mut self, question: &str, error: &str) -> Result<()> {
+        let error = if crate::chats::side_questions::error_fits(error) {
+            error
+        } else {
+            "The side question error exceeded the size limit."
+        };
+        self.emit(json!({
+            "type": "chat.side.failed",
+            "sideQuestionId": question,
+            "error": error,
+        }))
+        .await
+    }
+
+    /// Stops taking side questions once the turn ends, after recording answers that
+    /// already arrived, and withdraws the rest: they never delay the reply, and can be
+    /// asked again during the next one.
+    async fn close_sides(&mut self) -> Result<()> {
+        if !self.side_available {
+            return Ok(());
+        }
+        self.side_available = false;
+        self.emit(json!({ "type": "chat.side.closed" })).await?;
+        while let Some(joined) = self.samples.try_join_next() {
+            if let Ok((question, result)) = joined {
+                self.side_settled(question, result).await?;
+            }
+        }
+        for (question, request) in std::mem::take(&mut self.sides) {
+            self.cancel_sample(request).await?;
+            self.side_failed(&question, crate::chats::side_questions::EXPIRED)
+                .await?;
+        }
+        self.samples.abort_all();
         Ok(())
     }
 
@@ -1208,9 +1348,15 @@ impl Chat<'_> {
                     };
                     self.incoming(incoming).await?;
                 }
+                Some(joined) = self.samples.join_next(), if !self.samples.is_empty() => {
+                    if let Ok((question, result)) = joined {
+                        self.side_settled(question, result).await?;
+                    }
+                }
                 _ = interval.tick() => self.steer(plan).await?,
             }
         }
+        self.close_sides().await?;
         let turn = self.completed.take().unwrap();
         if turn["status"] != "completed" {
             // Keep the provider's error codes: they decide retries and account switches.
@@ -1250,6 +1396,22 @@ impl Chat<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
+            if message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true {
+                // A release that did not announce side questions leaves them unread, and
+                // never mistakes one for steering.
+                if self.completed.is_some()
+                    || !self.side_available
+                    || !self.attempted.insert(id.to_owned())
+                {
+                    continue;
+                }
+                if message["sideQuestionCancelled"] == true {
+                    self.withdraw_side(text(&message, "sideQuestionId")).await?;
+                } else {
+                    self.ask_side(&message["sideQuestion"]);
+                }
+                continue;
+            }
             let client_id = if message["operationalNotice"] == true {
                 format!("{OPERATIONAL_ID}{id}")
             } else {
@@ -1263,11 +1425,6 @@ impl Chat<'_> {
                 continue;
             }
             if message["questionCancelled"] == true {
-                continue;
-            }
-            // Codex never announces side questions, so none should arrive. Never
-            // mistake one for steering if the inbox carries it anyway.
-            if message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true {
                 continue;
             }
             let input = crate::attachments::input(
@@ -1396,6 +1553,9 @@ async fn run_session(
         planning: false,
         proposal_request: None,
         starting_items: None,
+        side_available: false,
+        sides: HashMap::new(),
+        samples: JoinSet::new(),
     };
     let mut result = chat.execute(&plan).await;
     // EOF, cancellation and transport errors can end without another provider

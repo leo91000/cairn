@@ -32,6 +32,7 @@ export function chatFixture() {
 
   let active
   let counter = 0
+  const heldSamples = new Set()
   let hold = false
   let questionRequest
   let asked = false
@@ -170,6 +171,34 @@ export function chatFixture() {
     if (method === 'thread/compact/start') {
       appendFileSync(path.join(process.env.CODEX_HOME, 'fixture-compactions.jsonl'), `${JSON.stringify(params)}\n`)
       compact(request)
+      return true
+    }
+
+    // Side questions: one response sampled from the running turn, which never joins it.
+    // `fixture:side-tool` stands for an attempted tool call, `fixture:side-hold` for a
+    // sample answered only by its cancellation.
+    if (method === 'thread/sample') {
+      appendFileSync(path.join(process.env.CODEX_HOME, 'fixture-samples.jsonl'), `${JSON.stringify({ requestId: request.id, ...params })}\n`)
+      if (!active || active.id !== params.expectedTurnId || params.allowInProgressTurn !== true) {
+        emit({ id: request.id, error: { code: -32000, message: 'No running turn to sample' } })
+        return true
+      }
+
+      if (params.prompt.includes('fixture:side-hold')) {
+        heldSamples.add(request.id)
+        return true
+      }
+
+      const text = params.prompt.includes('fixture:side-tool') ? null : `Side answer: ${params.prompt.split('\n\n').at(-1)}`
+      emit({ id: request.id, result: { responseId: `sample-${request.id}`, sourceTurnId: active.id, text } })
+      return true
+    }
+
+    if (method === 'thread/sample/cancel') {
+      appendFileSync(path.join(process.env.CODEX_HOME, 'fixture-sample-cancels.jsonl'), `${JSON.stringify(params)}\n`)
+      if (heldSamples.delete(params.requestId))
+        emit({ id: params.requestId, error: { code: -32603, message: 'sample canceled' } })
+      emit({ id: request.id, result: {} })
       return true
     }
 

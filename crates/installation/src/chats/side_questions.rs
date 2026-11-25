@@ -5,11 +5,11 @@
 //! receive the question or its withdrawal, so ticks and lists never read past answers.
 //!
 //! The adapter of a running reply announces `chat.side.available` once its native
-//! session can answer one: Claude Code's `side_question` control request, which runs
-//! with every tool denied. Codex and OpenCode have no side mechanism that Cairn can make
-//! tool-less before the model runs (ADR-0081), so their adapters never announce it.
-//! Adapters that do not announce it never receive side questions in their inbox and
-//! cannot mistake one for steering.
+//! session can answer one with the engine's own side mechanism, which never runs a
+//! tool: Claude Code's `side_question` control request, Codex's `thread/sample` and
+//! Antigravity's tool-less copy (ADR-0093). OpenCode has none, so its adapter never
+//! announces it. Adapters that do not announce it never receive side questions in their
+//! inbox and cannot mistake one for steering.
 use super::{chat_for_run, conversation, is_compaction, require_live};
 use crate::{
     config::now,
@@ -265,6 +265,27 @@ fn reply_start(
     ))
 }
 
+/// The first Claude Code release qualified for side questions; CI qualifies each later
+/// release it ships (ADR-0093).
+pub(crate) const CLAUDE_MINIMUM: [u64; 3] = [2, 1, 308];
+/// The first Codex release whose `thread/sample` was qualified for side questions.
+pub(crate) const CODEX_MINIMUM: [u64; 3] = [0, 172, 0];
+
+/// Whether `release`, a plain `major.minor.patch` version, is `minimum` or later.
+/// Pre-releases and builds are not qualified.
+pub(crate) fn qualified(release: &str, minimum: [u64; 3]) -> bool {
+    let parts = release
+        .split('.')
+        .map(|part| {
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            part.parse::<u64>().ok()
+        })
+        .collect::<Option<Vec<_>>>();
+    matches!(parts.as_deref(), Some(&[major, minor, patch]) if [major, minor, patch] >= minimum)
+}
+
 /// Why the chat's current reply cannot take a side question, if it cannot.
 pub(crate) fn unavailable(run: Option<&Value>) -> Option<SideQuestionUnavailable> {
     // Queued and recovering runs have no adapter that announced it yet.
@@ -275,12 +296,11 @@ pub(crate) fn unavailable(run: Option<&Value>) -> Option<SideQuestionUnavailable
     else {
         return Some(SideQuestionUnavailable::BetweenReplies);
     };
-    match Provider::of_run(run) {
-        Ok(Provider::Claude | Provider::Antigravity) => {}
-        Ok(Provider::Codex) => return Some(SideQuestionUnavailable::Codex),
+    let provider = match Provider::of_run(run) {
         Ok(Provider::Opencode) => return Some(SideQuestionUnavailable::Opencode),
+        Ok(provider) => provider,
         Err(_) => return Some(SideQuestionUnavailable::UnknownAgent),
-    }
+    };
     if !run["cancelRequestedAt"].is_null() {
         return Some(SideQuestionUnavailable::Stopping);
     }
@@ -288,7 +308,11 @@ pub(crate) fn unavailable(run: Option<&Value>) -> Option<SideQuestionUnavailable
         return Some(SideQuestionUnavailable::Compacting);
     }
     if run["sideQuestions"] == false {
-        return Some(SideQuestionUnavailable::ClaudeRelease);
+        return Some(if provider == Provider::Codex {
+            SideQuestionUnavailable::CodexRelease
+        } else {
+            SideQuestionUnavailable::ClaudeRelease
+        });
     }
     if run["sideQuestions"] != true {
         return Some(SideQuestionUnavailable::NotOffered);
@@ -302,8 +326,12 @@ pub(crate) fn reason(unavailable: SideQuestionUnavailable) -> &'static str {
         SideQuestionUnavailable::BetweenReplies => {
             "Side questions are answered while the agent works on a reply. Send a message instead."
         }
+        // Only earlier servers report it, for any Codex release.
         SideQuestionUnavailable::Codex => {
             "Codex cannot answer side questions in Cairn: its side conversations can still use tools. Ask in the conversation instead."
+        }
+        SideQuestionUnavailable::CodexRelease => {
+            "This Codex release cannot answer side questions in Cairn: they need version 0.172.0 or later. Ask in the conversation instead."
         }
         SideQuestionUnavailable::Opencode => {
             "OpenCode cannot answer side questions in Cairn yet. Ask in the conversation instead."
@@ -318,7 +346,7 @@ pub(crate) fn reason(unavailable: SideQuestionUnavailable) -> &'static str {
             "The conversation is compacting its context. Try again once it finishes."
         }
         SideQuestionUnavailable::ClaudeRelease => {
-            "This Claude Code release cannot answer side questions in Cairn: only version 2.1.308 has been qualified. Ask in the conversation instead."
+            "This Claude Code release cannot answer side questions in Cairn: they need version 2.1.308 or later. Ask in the conversation instead."
         }
         SideQuestionUnavailable::NotOffered => {
             "The agent has not offered side questions for this reply yet. Try again in a moment; if it never does, its runtime may need an update."
@@ -490,7 +518,7 @@ pub(crate) fn deliveries(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Vec<
         && RunStatus::of(run) == Some(RunStatus::Running)
         && matches!(
             Provider::of_run(run),
-            Ok(Provider::Claude | Provider::Antigravity)
+            Ok(Provider::Claude | Provider::Codex | Provider::Antigravity)
         );
     if !announced {
         return Ok(Vec::new());
@@ -1004,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_running_announced_claude_reply_takes_side_questions() {
+    fn only_a_running_announced_reply_takes_side_questions() {
         let running = |provider: &str, announced: bool| {
             json!({
                 "status": "running",
@@ -1015,15 +1043,55 @@ mod tests {
         assert!(unavailable(None).is_some());
         assert!(unavailable(Some(&json!({ "status": "succeeded" }))).is_some());
         assert!(unavailable(Some(&running("claude", false))).is_some());
+        // OpenCode has no tool-less side mechanism: never offered, even if announced.
         assert!(unavailable(Some(&running("opencode", true))).is_some());
-        // Codex forks keep tools Cairn cannot remove before they run: never offered,
-        // even if an adapter announced it.
-        assert!(unavailable(Some(&running("codex", true))).is_some());
         assert!(unavailable(Some(&running("claude", true))).is_none());
+        assert!(unavailable(Some(&running("codex", true))).is_none());
+        assert!(unavailable(Some(&running("antigravity", true))).is_none());
+        // A release the adapter declined is named by its engine.
+        assert_eq!(
+            unavailable(Some(&running("codex", false))),
+            Some(SideQuestionUnavailable::CodexRelease)
+        );
+        assert_eq!(
+            unavailable(Some(&running("claude", false))),
+            Some(SideQuestionUnavailable::ClaudeRelease)
+        );
         // A run whose engine cannot be read is refused without naming another engine.
         let unknown = unavailable(Some(&running("", true))).unwrap();
         assert_eq!(unknown, SideQuestionUnavailable::UnknownAgent);
         assert!(reason(unknown).starts_with("This agent"));
+    }
+
+    #[test]
+    fn a_release_qualifies_from_its_engine_minimum_onwards() {
+        for release in ["2.1.308", "2.1.311", "2.2.0", "3.0.0", "2.1.1000"] {
+            assert!(qualified(release, CLAUDE_MINIMUM), "{release}");
+        }
+        for release in [
+            "",
+            "2.1.307",
+            "2.0.999",
+            "1.9.400",
+            "2.1",
+            "2.1.308.1",
+            "2.1.308-rc.1",
+            "2.1.308+build",
+            "v2.1.308",
+            "2.1.x",
+            "2..308",
+            " 2.1.308",
+        ] {
+            assert!(!qualified(release, CLAUDE_MINIMUM), "{release}");
+        }
+        assert!(qualified("0.172.0", CODEX_MINIMUM));
+        assert!(qualified("0.180.2", CODEX_MINIMUM));
+        assert!(!qualified("0.171.9", CODEX_MINIMUM));
+        // The reasons name the minimum releases they enforce.
+        let minimum =
+            |release: [u64; 3]| format!("{}.{}.{} or later", release[0], release[1], release[2]);
+        assert!(reason(SideQuestionUnavailable::ClaudeRelease).contains(&minimum(CLAUDE_MINIMUM)));
+        assert!(reason(SideQuestionUnavailable::CodexRelease).contains(&minimum(CODEX_MINIMUM)));
     }
 
     #[tokio::test]
