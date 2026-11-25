@@ -228,17 +228,102 @@ fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
     for (id, state) in held {
         let mut saved: checkpoint::RunCheckpoint = serde_json::from_str(&state)?;
         if let Some(held) = saved.held_environment.take() {
+            let closing =
+                saved.closing_held_generation.take().as_deref() == Some(held.generation.as_str());
+            saved.retired_environment_deadline = Some(held.expires_at);
             jobs::unknown(
                 db,
                 &id,
                 &held.attempt,
                 "The manager restarted while background work was active; completion is unknown.",
             )?;
-            saved.store_in(db, &id)?;
             let current = db
                 .run_state(&id)?
                 .ok_or_else(|| Error::not_found("Run not found"))?;
-            let status = if matches!(current.status, RunStatus::Queued | RunStatus::Running) {
+            if closing && current.status == RunStatus::Queued && saved.turn_pending == Some(true) {
+                // The accepted fresh turn already owns its own input boundary.
+                saved.retired_environment_deadline = None;
+            }
+            let running_chat = if current.status == RunStatus::Running && current.trigger == "chat"
+            {
+                db.run(&id)?
+            } else {
+                None
+            };
+            let message = running_chat
+                .as_ref()
+                .and_then(|run| run["chatExecution"]["messageId"].as_str());
+            // The retained controller can start before the client process
+            // is recorded. A launch claim keeps its normal reconciliation.
+            let awaiting_launch = saved.turn_pending == Some(true)
+                && message.is_some()
+                && saved.launched_turn.as_deref() != message;
+            let received = saved
+                .confirmed_retained_completion(&held.attempt, message)
+                .filter(|_| current.cancel_requested_at.is_none() && saved.settled().is_none());
+            let received_completion = received.is_some();
+            let expired = !closing && now() >= held.expires_at;
+            let held_between_turns =
+                matches!(current.status, RunStatus::Waiting | RunStatus::Succeeded)
+                    || (current.status == RunStatus::Queued && saved.turn_pending == Some(true));
+            if let (Some(receipt), Some(run)) = (received, running_chat.as_ref()) {
+                let mut patch = crate::runs::RunChanges {
+                    status: Some(RunStatus::Succeeded),
+                    summary: Some(
+                        receipt
+                            .output_summary
+                            .as_deref()
+                            .unwrap_or(saved.last_message())
+                            .to_owned(),
+                    ),
+                    finished_at: Some(Some(receipt.finished_at)),
+                    error: Some(None),
+                    retry: Some(None),
+                    resume_available: Some(run["sessionId"].is_string()),
+                    ..Default::default()
+                };
+                crate::chats::keep_reply_after_compaction(run, &mut patch)?;
+                db.change_run(&id, patch)?;
+                if !expired {
+                    let completed = db
+                        .run_state(&id)?
+                        .ok_or_else(|| Error::not_found("Run not found"))?;
+                    saved.settled = Some(Some(checkpoint::Settled::from_state(&completed)));
+                }
+            } else if !expired
+                && current.cancel_requested_at.is_none()
+                && saved.settled().is_none()
+                && (held::completed_chat(db, &current)?
+                    || (closing
+                        && current.status == RunStatus::Succeeded
+                        && current.trigger == "chat"))
+            {
+                // Older checkpoints already published success without a turn
+                // receipt. Fencing the environment still cannot undo it.
+                saved.settled = Some(Some(checkpoint::Settled::from_state(&current)));
+            }
+            if expired
+                && saved.settled().is_none()
+                && (held_between_turns || awaiting_launch || received_completion)
+            {
+                held::settle_retirement(
+                    db,
+                    &id,
+                    &mut saved,
+                    held::Retirement::Deadline,
+                    held.expires_at,
+                    Some(held.expires_at),
+                )?;
+                saved.store_in(db, &id)?;
+                continue;
+            }
+            saved.store_in(db, &id)?;
+            let status = if saved
+                .settled()
+                .is_some_and(|outcome| outcome.status == RunStatus::Succeeded)
+            {
+                RunStatus::Succeeded
+            } else if matches!(current.status, RunStatus::Queued | RunStatus::Running) {
                 RunStatus::Queued
             } else {
                 RunStatus::Waiting
@@ -334,7 +419,8 @@ async fn detach_environments(s: Arc<Service>) {
         }
         let work = async {
             s.detach_stopped_environments().await?;
-            s.detach_retired_environments().await
+            s.detach_retired_environments().await?;
+            schedule::recover_completed_environments(&s).await
         };
         tokio::select! {
             () = s.shutdown.cancelled() => break,
@@ -434,6 +520,153 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_a_receipt_committed_before_run_success() {
+        use crate::run_fixture::DbRunFixture;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let finished_at = now() - 2_000;
+                for (id, receipt, expires_at) in [
+                    ("matched-expired", "current", finished_at + 1_000),
+                    ("matched-live", "current", finished_at + 60_000),
+                    ("stale-expired", "previous", finished_at + 1_000),
+                    ("stale-live", "previous", finished_at + 60_000),
+                ] {
+                    let chat_id = format!("chat-{id}");
+                    db.add_run_fixture(&json!({
+                    "id": id, "taskId": chat_id, "status": "running", "trigger": "chat",
+                    "chatExecution": {"messageId": "current", "text": "Work", "attachments": []},
+                }), None)?;
+                    db.save_conversation_boundary(&json!({"id": chat_id, "runId": id}))?;
+                    let mut saved = checkpoint::RunCheckpoint::fresh(None);
+                    saved.runner_id = Some(Some("attempt".into()));
+                    saved.completed = Some(true);
+                    saved.last_message = Some("The delivered answer".to_owned());
+                    saved.held_environment = Some(checkpoint::HeldEnvironment {
+                        attempt: "attempt".into(),
+                        generation: "generation".into(),
+                        expires_at,
+                    });
+                    saved.retained_completion = Some(checkpoint::RetainedCompletion {
+                        message_id: receipt.into(),
+                        finished_at,
+                        output_summary: None,
+                    });
+                    saved.store_in(db, id)?;
+                }
+                db.add_run_fixture(&json!({
+                    "id": "legacy", "taskId": "chat-legacy", "status": "succeeded", "trigger": "chat",
+                    "summary": "The delivered answer", "finishedAt": finished_at,
+                }), None)?;
+                db.save_conversation_boundary(&json!({"id": "chat-legacy", "runId": "legacy"}))?;
+                let mut legacy = checkpoint::RunCheckpoint::fresh(None);
+                legacy.runner_id = Some(Some("attempt".into()));
+                legacy.completed = Some(true);
+                legacy.held_environment = Some(checkpoint::HeldEnvironment {
+                    attempt: "attempt".into(),
+                    generation: "generation".into(),
+                    expires_at: finished_at + 60_000,
+                });
+                legacy.store_in(db, "legacy")?;
+                restore_after_restart(db)?;
+                for id in ["matched-expired", "matched-live", "legacy"] {
+                    let saved = checkpoint::RunCheckpoint::load_in(db, id)?.unwrap();
+                    let settled = saved.settled().unwrap();
+                    assert_eq!(settled.status, RunStatus::Succeeded);
+                    assert_eq!(settled.finished_at, Some(finished_at));
+                    assert_eq!(settled.summary.as_deref(), Some("The delivered answer"));
+                    let run = db.run_state(id)?.unwrap();
+                    assert!(run.recovery_pending);
+                    assert_eq!(run.status, RunStatus::Succeeded);
+                    assert_eq!(run.finished_at, Some(finished_at));
+                }
+                for id in ["stale-expired", "stale-live"] {
+                    let saved = checkpoint::RunCheckpoint::load_in(db, id)?.unwrap();
+                    assert!(saved.settled().is_none());
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_after_expiry_keeps_the_result_already_waiting_for_a_fence() {
+        use crate::run_fixture::DbRunFixture;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                &json!({"id":"held", "taskId":"task", "status":"queued", "recoveryPending":true}),
+                None,
+            )?;
+                let mut saved = checkpoint::RunCheckpoint::fresh(None);
+                saved.runner_id = Some(Some("attempt".into()));
+                saved.held_environment = Some(checkpoint::HeldEnvironment {
+                    attempt: "attempt".into(),
+                    generation: "generation".into(),
+                    expires_at: now() - 1,
+                });
+                saved.settled = Some(Some(checkpoint::Settled::failure(
+                    RunStatus::Failed,
+                    "The previous provider turn failed.",
+                )));
+                saved.store_in(db, "held")?;
+                restore_after_restart(db)?;
+                let saved = checkpoint::RunCheckpoint::load_in(db, "held")?.unwrap();
+                assert_eq!(
+                    saved.settled().unwrap().error.as_deref(),
+                    Some("The previous provider turn failed.")
+                );
+                assert!(saved.held_environment.is_none());
+                assert!(db.run_state("held")?.unwrap().recovery_pending);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_preserves_a_wait_when_ordinary_close_started_before_the_cutoff() {
+        use crate::run_fixture::DbRunFixture;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            let finished_at = now() - 2_000;
+            db.add_run_fixture(&json!({
+                "id": "closing", "taskId": "chat", "status": "succeeded", "trigger": "chat", "finishedAt": finished_at,
+            }), None)?;
+            db.save_conversation_boundary(&json!({"id": "chat", "runId": "closing"}))?;
+            let mut chat = db.conversation("chat")?.unwrap();
+            chat.wakeup = Some(serde_json::from_value(json!({
+                "id": "wait", "messageId": "previous", "reason": "Waiting for a delay",
+                "seconds": 60, "createdAt": finished_at, "wakeAt": finished_at + 60_000,
+            }))?);
+            db.save_conversation(&chat)?;
+            let mut saved = checkpoint::RunCheckpoint::fresh(None);
+            saved.runner_id = Some(Some("attempt".into()));
+            saved.closing_held_generation = Some("generation".into());
+            saved.held_environment = Some(checkpoint::HeldEnvironment {
+                attempt: "attempt".into(), generation: "generation".into(), expires_at: finished_at + 1_000,
+            });
+            saved.store_in(db, "closing")?;
+            restore_after_restart(db)?;
+            let saved = checkpoint::RunCheckpoint::load_in(db, "closing")?.unwrap();
+            assert!(saved.closing_held_generation.is_none());
+            assert!(saved.held_environment.is_none());
+            assert_eq!(saved.settled().unwrap().status, RunStatus::Succeeded);
+            let run = db.run_state("closing")?.unwrap();
+            assert!(run.recovery_pending);
+            assert_eq!(run.status, RunStatus::Succeeded);
+            assert_eq!(run.finished_at, Some(finished_at));
+            assert!(db.conversation("chat")?.unwrap().wakeup.is_some());
+            Ok(())
+        }).await.unwrap();
     }
 
     #[tokio::test]

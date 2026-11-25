@@ -519,7 +519,7 @@ pub(crate) fn requeue(
         checkpoint.controller_recoveries = None;
         checkpoint.controller_recovery_reservation = None;
         checkpoint.provider_failure_attempt = None;
-        checkpoint.reset_finalization_observation();
+        checkpoint.acknowledge_finalization_observation();
         checkpoint.move_recovery_reservation = None;
         checkpoint.provider_retry_reservation = None;
         checkpoint.pending_paid_admission = None;
@@ -542,6 +542,8 @@ pub(crate) fn requeue(
             checkpoint.terminal_code = Some(None);
         }
         checkpoint.settled = None;
+        checkpoint.retired_environment_deadline = None;
+        checkpoint.retained_completion = None;
         // A confirmed pre-turn failure may have no session yet. Its safety
         // evidence survives a manual budget reset until the next supervised launch.
         let pending_startup = state.session_id.is_none()
@@ -1441,11 +1443,15 @@ mod tests {
                 }), None)?;
                     db.save_checkpoint_boundary("mission", &json!({
                     "completed": completed, "outputInterrupted": true, "launched": true, "prepared": { "cwd": "/workspace" },
+                        "retiredEnvironmentDeadline": 1000,
+                        "retainedCompletion": {"messageId": "previous", "finishedAt": 900},
                 }))?;
                     let resumed = requeue(db, "mission", None, None, None, None)?;
                     assert_eq!(resumed["status"], "queued");
                     let checkpoint = db.checkpoint_boundary("mission")?.unwrap();
                     assert!(checkpoint["outputInterrupted"].is_null());
+                    assert!(checkpoint["retiredEnvironmentDeadline"].is_null());
+                    assert!(checkpoint["retainedCompletion"].is_null());
                     if completed {
                         assert_ne!(resumed["missionTurnId"], "previous-turn");
                         assert!(resumed["waitContinuation"].is_null());

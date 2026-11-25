@@ -3,6 +3,7 @@ use crate::{
     error::{Error, Result},
     execution::secret,
     provider::Provider,
+    run_status::RunStatus,
     service::Service,
     validation::text,
     worker::checkpoint::RunCheckpoint,
@@ -296,8 +297,18 @@ async fn fence_attempt_authorized(
             .and_then(RunCheckpoint::runner_id)
             .unwrap_or(run_id);
         let runner_url = crate::nodes::transport::url_for_node(s, node.as_deref());
+        let observe_finalization = checkpoint.as_ref().is_some_and(|saved| {
+            saved.managed()
+                && saved.finalization_failure_attempt.as_deref() != Some(attempt)
+                && saved.acknowledged_finalization_failure_attempt.as_deref() != Some(attempt)
+                && saved.settled().is_some_and(|outcome| {
+                    matches!(outcome.status, RunStatus::Succeeded | RunStatus::Failed)
+                })
+        });
         authorize.recheck().await?;
-        if let Some(result) = fence_runner(s, &runner_url, attempt, &authorize).await? {
+        if let Some(result) =
+            fence_runner(s, &runner_url, attempt, &authorize, observe_finalization).await?
+        {
             let id = run_id.to_owned();
             let attempt = attempt.to_owned();
             let cleanup_authorize = authorize.clone();
@@ -306,9 +317,17 @@ async fn fence_attempt_authorized(
                     cleanup_authorize.check_local(db)?;
                     if let Some(mut saved) = RunCheckpoint::load_in(db, &id)?
                         && saved.runner_id() == Some(attempt.as_str())
-                        && saved
-                            .prepared()
-                            .is_some_and(|plan| plan["backend"] == "native")
+                        && !(result.finalization_failed
+                            && result.native_cleanup.is_none()
+                            && saved.acknowledged_finalization_failure_attempt.as_deref()
+                                == Some(attempt.as_str()))
+                        && (observe_finalization
+                            || (saved.managed()
+                                && result.finalization_failed
+                                && result.native_cleanup.is_none())
+                            || saved
+                                .prepared()
+                                .is_some_and(|plan| plan["backend"] == "native"))
                     {
                         saved.record_controller_result(db, &id, &attempt, Some(result))?;
                         saved.store_in(db, &id)?;
@@ -378,6 +397,7 @@ pub(crate) async fn fence_retired(
             &runner_url,
             attempt,
             &crate::authorization::Authorization::default(),
+            false,
         )
         .await?;
     }
@@ -392,6 +412,7 @@ async fn fence_runner(
     runner_url: &str,
     attempt: &str,
     authorize: &crate::authorization::Authorization,
+    observe_finalization: bool,
 ) -> Result<Option<crate::runner::ControllerResult>> {
     authorize.recheck().await?;
     if runner_url.is_empty() {
@@ -401,10 +422,11 @@ async fn fence_runner(
     }
     let credential = secret(&s.config.data_dir, "runner-secret").await?;
     authorize.recheck().await?;
+    let url = format!("{runner_url}/runs/{attempt}");
     let response = s
         .http
-        .delete(format!("{runner_url}/runs/{attempt}"))
-        .bearer_auth(credential)
+        .delete(&url)
+        .bearer_auth(&credential)
         .timeout(Duration::from_secs(10))
         .send()
         .await;
@@ -413,6 +435,22 @@ async fn fence_runner(
         Ok(response) if response.status().is_success() => {
             if let Ok(value) = response.json::<Value>().await {
                 cleanup = crate::runner::client_cleanup_result(&value, attempt);
+                if cleanup.is_none() {
+                    cleanup = crate::runner::plain_finalization_failure(&value);
+                }
+            }
+            if cleanup.is_none() && observe_finalization {
+                // Both controllers expose explicit flush failures through the
+                // terminal result. DELETE may only acknowledge that they stopped.
+                authorize.recheck().await?;
+                cleanup = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    crate::runner::observe_plain_finalization_failure(&s.http, &url, &credential),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
             }
             true
         }

@@ -504,12 +504,38 @@ pub(crate) async fn observe_cleanup_retirement(
     wait_result(http, url, token, NATIVE_CLEANUP_RETIREMENT_QUERY).await
 }
 
+/// Plain, attempt-scoped flush failure. A structured Native receipt must be
+/// evaluated against current cleanup state by the controller's DELETE path.
+pub(crate) fn plain_finalization_failure(value: &Value) -> Option<ControllerResult> {
+    if !value["NativeCleanup"].is_null() {
+        return None;
+    }
+    terminal_result(value, "")
+        .ok()
+        .filter(|result| result.finalization_failed)
+}
+
+pub(crate) async fn observe_plain_finalization_failure(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<Option<ControllerResult>> {
+    let value = wait_value(http, url, token, "").await?;
+    Ok(plain_finalization_failure(&value))
+}
+
 async fn wait_result(
     http: &reqwest::Client,
     url: &str,
     token: &str,
     query: &str,
 ) -> Result<ControllerResult> {
+    let value = wait_value(http, url, token, query).await?;
+    let attempt = url.rsplit('/').next().unwrap_or_default();
+    terminal_result(&value, attempt)
+}
+
+async fn wait_value(http: &reqwest::Client, url: &str, token: &str, query: &str) -> Result<Value> {
     let wait_url = if query.is_empty() {
         format!("{url}/wait")
     } else {
@@ -524,17 +550,19 @@ async fn wait_result(
     if !response.status().is_success() {
         return Err(Error::unavailable("Could not wait for execution."));
     }
-    let value: Value = response
+    response
         .json()
         .await
-        .map_err(|_| Error::unavailable("Execution completion connection was interrupted."))?;
+        .map_err(|_| Error::unavailable("Execution completion connection was interrupted."))
+}
+
+fn terminal_result(value: &Value, attempt: &str) -> Result<ControllerResult> {
     let code = value["StatusCode"]
         .as_i64()
         .filter(|n| (0..=255).contains(n))
         .map(|n| n as i32)
         .ok_or_else(|| Error::bad("Invalid execution exit status."))?;
-    let expected = url.rsplit('/').next().unwrap_or_default();
-    let cleanup = cleanup_result(&value, expected);
+    let cleanup = cleanup_result(value, attempt);
     let retired = cleanup.is_some() && value["NativeCleanup"]["retired"] == true;
     let finalization_failed =
         value["FinalizationFailed"] == true && code == super::CONTROLLER_FAILED && !retired;
@@ -713,6 +741,21 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_finalization_failure_rejects_structured_cleanup_receipts() {
+        let mut receipt = json!({
+            "StatusCode": super::super::CONTROLLER_FAILED,
+            "FinalizationFailed": true,
+        });
+        assert!(plain_finalization_failure(&receipt).is_some());
+        receipt["NativeCleanup"] = json!({
+            "attemptId": "different-attempt",
+            "workloadFenced": true,
+            "message": "Pending Native cleanup",
+        });
+        assert!(plain_finalization_failure(&receipt).is_none());
+    }
 
     #[tokio::test]
     async fn broken_output_preserves_terminal_status_in_both_orders() {

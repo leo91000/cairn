@@ -398,7 +398,23 @@ async fn run_route(broker: Broker, request: Request, segments: &[&str]) -> Resul
         }
         ("DELETE", ["runs", id]) => {
             broker.stop(id).await?;
-            json_response(json!({}))
+            // A confirmed flush failure belongs to this stop receipt. The
+            // manager can settle it even if the relay drops before another read.
+            let exit = match tokio::fs::read_to_string(broker.state_file(id, "exit")).await {
+                Ok(exit) => serde_json::from_str::<Value>(&exit).ok(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    tracing::warn!(attempt = *id, %error, "Could not read the stopped VM receipt");
+                    None
+                }
+            };
+            json_response(
+                exit.filter(|result| {
+                    result["StatusCode"] == super::CONTROLLER_FAILED
+                        && result["FinalizationFailed"] == true
+                })
+                .unwrap_or_else(|| json!({})),
+            )
         }
         ("GET", ["runs", id, "logs"]) => {
             if let Some(offset) = super::logs::offset(request.uri().query())? {

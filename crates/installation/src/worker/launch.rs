@@ -1,6 +1,7 @@
 use super::{
     Admission,
-    checkpoint::{Checkpoint, RunCheckpoint},
+    checkpoint::{Checkpoint, RetainedCompletion, RunCheckpoint},
+    held::HELD_DEADLINE_CODE,
     output,
 };
 use crate::{
@@ -226,6 +227,12 @@ enum Attempt {
     Held,
     /// Usage ran out; continue the saved session, possibly on another account.
     Resume(String),
+}
+
+enum HeldTurn {
+    Resume,
+    Close,
+    Expired,
 }
 
 #[derive(Serialize)]
@@ -909,6 +916,15 @@ impl Execution<'_> {
             } else {
                 0
             };
+            let receipt_can_complete = !exit.timed_out && !self.cancel.is_cancelled();
+            let message_id = self.run["chatExecution"]["messageId"].as_str();
+            let received_at = now();
+            let output_summary =
+                if receipt_can_complete && receipt.is_some() && message_id.is_some() {
+                    self.output_summary(workspace).await
+                } else {
+                    None
+                };
             self.checkpoint
                 .update(|c| {
                     c.process = Some(None);
@@ -927,6 +943,18 @@ impl Execution<'_> {
                                 .as_ref()
                                 .map_or(environment_expiry, |held| held.expires_at),
                         });
+                        if receipt_can_complete
+                            && c.completed()
+                            && c.output_error().is_none()
+                            && !c.provider_failed()
+                            && let Some(message_id) = message_id
+                        {
+                            c.retained_completion = Some(RetainedCompletion {
+                                message_id: message_id.to_owned(),
+                                finished_at: received_at,
+                                output_summary,
+                            });
+                        }
                     }
                 })
                 .await?;
@@ -947,11 +975,20 @@ impl Execution<'_> {
         self.close_account_output(auth_broker).await;
         let exit = result?;
         let saved = self.checkpoint.snapshot().await;
-        let observation_pending = saved.terminal_observation_pending();
+        let retained_completion = self.retained_completion(&saved, &exit);
+        #[cfg(feature = "worker-fixture-hooks")]
+        if retained_completion.is_some() {
+            let path = self.directory.join("fixture-receipt.sock");
+            if tokio::fs::try_exists(&path).await? {
+                let _gate = tokio::net::UnixStream::connect(path).await?;
+                s.shutdown.cancelled().await;
+            }
+        }
         if s.shutdown.is_cancelled()
             && !self.cancel.is_cancelled()
             && !exit.timed_out
-            && (!saved.completed() || observation_pending)
+            && retained_completion.is_none()
+            && (!saved.completed() || saved.terminal_observation_pending())
         {
             // Shutdown may stop the local client before /wait responds. Keep
             // that same attempt readable after restart rather than settling
@@ -1060,7 +1097,8 @@ impl Execution<'_> {
         Ok(Attempt::Finished)
     }
 
-    async fn close_idle_environment(&self) -> Result<bool> {
+    /// Select retirement, or leave the environment available for its continuation.
+    async fn close_idle_environment(&self) -> Result<Option<HeldTurn>> {
         let id = self.id.clone();
         self.checkpoint
             .decide(move |saved, db| {
@@ -1068,7 +1106,7 @@ impl Execution<'_> {
                     .run_state(&id)?
                     .ok_or_else(|| Error::not_found("Run not found"))?;
                 if run.status == RunStatus::Queued || saved.turn_pending == Some(true) {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 let record = db
                     .run(&id)?
@@ -1085,10 +1123,27 @@ impl Execution<'_> {
                 {
                     // Completion can become visible before the scheduler queues
                     // its continuation. Keep its original environment for that handoff.
-                    return Ok(false);
+                    return Ok(None);
                 }
-                saved.held_environment = None;
-                Ok(true)
+                if saved.remaining_ms == Some(Some(0))
+                    || saved
+                        .held_environment
+                        .as_ref()
+                        .is_some_and(|held| now() >= held.expires_at)
+                {
+                    return Ok(Some(HeldTurn::Expired));
+                }
+                if let Some(held) = saved.held_environment.take() {
+                    super::held::settle_retirement(
+                        db,
+                        &id,
+                        saved,
+                        super::held::Retirement::Close,
+                        held.expires_at,
+                        None,
+                    )?;
+                }
+                Ok(Some(HeldTurn::Close))
             })
             .await
     }
@@ -1102,6 +1157,8 @@ impl Execution<'_> {
             .held_environment
             .ok_or_else(|| Error::conflict("Missing retained environment identity."))?;
         s.worker.held.lock().await.insert(self.id.clone());
+        let checkpoint = self.checkpoint;
+        let expired = || checkpoint.expired() || now() >= held.expires_at;
         let result = async {
             if let Some(account) = self.account.take() {
                 s.accounts.release(s, &account).await?;
@@ -1110,24 +1167,37 @@ impl Execution<'_> {
             let mut timer = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tokio::select! {
-                    () = self.cancel.cancelled() => return Ok(false),
-                    () = s.shutdown.cancelled() => return Ok(false),
+                    () = self.cancel.cancelled() => return Ok(HeldTurn::Close),
+                    () = s.shutdown.cancelled() => return Ok(if expired() { HeldTurn::Expired } else { HeldTurn::Close }),
                     _ = timer.tick() => {}
                 }
-                if self.checkpoint.expired() || now() >= held.expires_at {
-                    return Err(Error::conflict("Environment background work reached its time limit."));
+                if expired() {
+                    return Ok(HeldTurn::Expired);
                 }
                 let current = s.store.run(&self.id).await?;
-                if !current["cancelRequestedAt"].is_null() { return Ok(false); }
+                if !current["cancelRequestedAt"].is_null() { return Ok(HeldTurn::Close); }
                 let run_id = self.id.clone();
                 s.store.read(move |db| crate::conversation_lifecycle::require_active_run(db, &run_id)).await?;
                 *self.run = current;
                 let expected_execution = crate::waits::execution_id(self.run).clone();
-                let refreshed = async {
-                    self.refresh_access().await?;
-                    super::jobs::refresh_redacted(s, self.run, &self.sensitive.snapshot()).await
-                }.await;
+                let refreshed = match self.refresh_access().await {
+                    Err(error) if error.code.as_deref() == Some(HELD_DEADLINE_CODE) => {
+                        return Ok(HeldTurn::Expired);
+                    }
+                    Err(error) => Err(error),
+                    Ok(()) => {
+                        if expired() { return Ok(HeldTurn::Expired); }
+                        let observed = super::jobs::refresh_redacted(s, self.run, &self.sensitive.snapshot()).await;
+                        if expired() && observed.as_ref().err().is_none_or(super::held::observation_ended) {
+                            return Ok(HeldTurn::Expired);
+                        }
+                        observed
+                    }
+                };
                 if let Err(error) = refreshed {
+                    if super::held::reported_control_failure(&error) {
+                        return Err(error);
+                    }
                     let current = s.store.run(&self.id).await?;
                     if crate::waits::execution_id(&current) != &expected_execution
                         && current["status"] == RunStatus::Queued
@@ -1154,44 +1224,48 @@ impl Execution<'_> {
                     if !can_reuse_environment(self.provider, self.run)? {
                         // Keep the accepted fresh-session turn queued while this
                         // owner stops its old environment and background work.
-                        return Ok(false);
+                        return Ok(HeldTurn::Close);
                     }
-                    self.wait_for_account(&model).await?;
-                    if self.stopping() { return Ok(false); }
-                    self.mark_running().await?;
-                    self.refresh_access().await?;
-                    let authority = crate::capabilities::plugin_packages::Authority::for_run(s,self.run).await?;
-                    let credentials = crate::plugins::run_credentials::for_execution_authorized(s,self.run,&crate::project_workspaces::catalog(self.run),authority.clone()).await?;
-                    self.sensitive.extend(credentials.secrets.iter().cloned());
-                    let previous_files = execution::credential_files(&self.directory).await;
-                    if workspace.prepared["backend"] == "native"
-                        && credentials.files.iter().any(|(path, _)| !previous_files.contains(path)) {
-                        return Err(Error::conflict("New credential paths require a fresh environment."));
+                    match self.wait_for_account(&model).await {
+                        Err(error) if error.code.as_deref() == Some(HELD_DEADLINE_CODE) => {
+                            return Ok(HeldTurn::Expired);
+                        }
+                        result => result?,
                     }
-                    execution::run_credentials(&self.directory.join("home"), &self.directory, &credentials).await?;
-                    workspace.authorization = crate::plugins::run_credentials::Authorization::new(s,authority,&credentials);
-                    let home = self.prepare_state_home(&workspace.prepared).await?;
-                    workspace.env = self.environment(true, &home).await?;
-                    workspace.state_home = home;
-                    workspace.mcp = s.mcps.run_configuration(s, self.run).await?;
-                    self.sensitive.extend(workspace.mcp["redactions"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
-                    for (key, value) in workspace.mcp["env"].as_object().unwrap() {
-                        workspace.env.insert(key.clone(), value.as_str().unwrap_or("").into());
+                    if expired() {
+                        return Ok(HeldTurn::Expired);
+                    }
+                    if self.stopping() { return Ok(HeldTurn::Close); }
+                    match self.prepare_retained_turn(workspace).await {
+                        Err(error) if error.code.as_deref() == Some(HELD_DEADLINE_CODE) => {
+                            return Ok(HeldTurn::Expired);
+                        }
+                        result => result?,
+                    }
+                    if expired() {
+                        return Ok(HeldTurn::Expired);
                     }
                     self.retained = true;
-                    return Ok(true);
+                    return Ok(HeldTurn::Resume);
                 }
                 let id = self.id.clone();
                 let pending = s.store.read(move |db| {
                     let jobs: i64 = db.0.query_row("SELECT count(*) FROM background_jobs WHERE run_id=? AND (outcome IS NULL OR json_extract(outcome,'$.state')='running')", [id], |row| row.get(0))?;
                     Ok(jobs > 0)
                 }).await?;
-                let activity = super::held::request(s,self.run,&crate::background_jobs::protocol::Request::Activity { request_id: crate::config::id() }).await?;
-                match activity {
+                let activity = super::held::request(s,self.run,&crate::background_jobs::protocol::Request::Activity { request_id: crate::config::id() }).await;
+                if expired()
+                    && (matches!(activity, Ok(crate::background_jobs::protocol::Event::Activity { .. }))
+                        || activity.as_ref().is_err_and(super::held::observation_ended))
+                {
+                    return Ok(HeldTurn::Expired);
+                }
+                match activity? {
                     crate::background_jobs::protocol::Event::Activity { jobs, containers, .. } => {
                         if !pending && !jobs && !containers {
-                            let may_close = self.close_idle_environment().await?;
-                            if may_close { return Ok(false); }
+                            if let Some(retirement) = self.close_idle_environment().await? {
+                                return Ok(retirement);
+                            }
                             s.worker.notify();
                         }
                     }
@@ -1200,63 +1274,155 @@ impl Execution<'_> {
                 }
             }
         }.await;
-        if !matches!(result, Ok(true)) {
-            // Request the helper's TERM/reap barrier before the existing
-            // outer cgroup/VM fence. Failure still proceeds to that fence.
-            let _ = super::held::request_bound(
-                s,
-                self.run,
-                Some(&held.attempt),
-                &crate::background_jobs::protocol::Request::Close {
-                    request_id: crate::config::id(),
-                },
-            )
-            .await;
-            let id = self.id.clone();
+        if matches!(result, Ok(HeldTurn::Resume)) {
+            s.worker.held.lock().await.remove(&self.id);
+            return Ok(true);
+        }
+
+        let close_after_settlement = !matches!(result, Ok(HeldTurn::Close));
+        let close_request = crate::config::id();
+        let close = crate::background_jobs::protocol::Request::Close {
+            request_id: close_request.clone(),
+        };
+        // The helper's TERM/reap barrier comes before the outer cgroup/VM
+        // fence. Ordinary closure keeps its hold until the helper responds.
+        let close_environment =
+            || super::held::request_bound(s, self.run, Some(&held.attempt), &close);
+        let early_failure = if close_after_settlement {
+            None
+        } else {
             let attempt = held.attempt.clone();
-            let interruption = result
-                .as_ref()
-                .err()
-                .map(|error| run_output::redact(&error.message, &self.sensitive.snapshot()));
+            let generation = held.generation.clone();
             self.checkpoint
-                .decide(move |state, db| {
-                    state.held_environment = None;
-                    super::jobs::unknown(
-                        db,
-                        &id,
-                        &attempt,
-                        "The environment stopped before background completion was confirmed.",
-                    )?;
-                    let run = db
-                        .run_state(&id)?
-                        .ok_or_else(|| Error::not_found("Run not found"))?;
-                    if run.cancel_requested_at.is_some() {
-                        state.settled = Some(Some(super::checkpoint::Settled::failure(
-                            RunStatus::Cancelled,
-                            "Background work was stopped.",
-                        )));
-                    } else if let Some(message) = interruption {
-                        state.settled = Some(Some(super::checkpoint::Settled::failure(
-                            RunStatus::Failed,
-                            &message,
-                        )));
-                        db.change_run(
-                            &id,
-                            crate::runs::RunChanges {
-                                wakeup: Some(None),
-                                ..Default::default()
-                            },
-                        )?;
-                        db.event(&id, &EventKind::Error, &message, None)?;
+                .decide(move |state, _db| {
+                    if state.held_environment.as_ref().is_some_and(|current| {
+                        current.attempt == attempt && current.generation == generation
+                    }) {
+                        state.closing_held_generation = Some(generation);
                     }
                     Ok(())
                 })
                 .await?;
+            super::held::close_control_failure(close_environment().await, &close_request)
+        };
+        // Cleanup time cannot change the cause selected by the owner.
+        let reached_deadline = matches!(result, Ok(HeldTurn::Expired));
+        let observed_close_failure = early_failure.is_some();
+        let expired_at = (reached_deadline
+            || ((result.is_err() || observed_close_failure) && expired()))
+        .then(|| {
+            checkpoint
+                .deadline()
+                .map_or(held.expires_at, |deadline| deadline.min(held.expires_at))
+        });
+        let interruption = result
+            .err()
+            .or(early_failure)
+            .map(|error| run_output::redact(&error.message, &self.sensitive.snapshot()));
+        let id = self.id.clone();
+        let original_hold = held.clone();
+        self.checkpoint
+            .decide(move |state, db| {
+                super::jobs::unknown(
+                    db,
+                    &id,
+                    &original_hold.attempt,
+                    "Background supervision ended before job completion was confirmed.",
+                )?;
+                let Some(retiring) = state.held_environment.take() else {
+                    // Idle closure released the hold before the helper request.
+                    // A follow-up may already own the checkpoint now.
+                    if observed_close_failure && let Some(message) = interruption.as_deref() {
+                        super::held::record_close_failure(
+                            db,
+                            &id,
+                            state,
+                            &original_hold,
+                            expired_at,
+                            message,
+                        )?;
+                    }
+                    return Ok(());
+                };
+                state.closing_held_generation = None;
+                let reason = match interruption.as_deref() {
+                    Some(message) => super::held::Retirement::Interrupted(message),
+                    None if reached_deadline => super::held::Retirement::Deadline,
+                    None => super::held::Retirement::Close,
+                };
+                super::held::settle_retirement(
+                    db,
+                    &id,
+                    state,
+                    reason,
+                    retiring.expires_at,
+                    expired_at,
+                )
+            })
+            .await?;
+
+        if close_after_settlement
+            && let Some(error) =
+                super::held::close_control_failure(close_environment().await, &close_request)
+        {
+            let id = self.id.clone();
+            let message = run_output::redact(&error.message, &self.sensitive.snapshot());
+            self.checkpoint
+                .decide(move |state, db| {
+                    super::held::record_close_failure(db, &id, state, &held, expired_at, &message)
+                })
+                .await?;
         }
-        if matches!(result, Ok(true)) {
-            s.worker.held.lock().await.remove(&self.id);
+        Ok(false)
+    }
+
+    async fn prepare_retained_turn(&mut self, workspace: &mut Workspace) -> Result<()> {
+        let s = self.s;
+        self.mark_running().await?;
+        self.refresh_access().await?;
+        let authority =
+            crate::capabilities::plugin_packages::Authority::for_run(s, self.run).await?;
+        let credentials = crate::plugins::run_credentials::for_execution_authorized(
+            s,
+            self.run,
+            &crate::project_workspaces::catalog(self.run),
+            authority.clone(),
+        )
+        .await?;
+        self.sensitive.extend(credentials.secrets.iter().cloned());
+        let previous_files = execution::credential_files(&self.directory).await;
+        if workspace.prepared["backend"] == "native"
+            && credentials
+                .files
+                .iter()
+                .any(|(path, _)| !previous_files.contains(path))
+        {
+            return Err(Error::conflict(
+                "New credential paths require a fresh environment.",
+            ));
         }
-        result
+        execution::run_credentials(&self.directory.join("home"), &self.directory, &credentials)
+            .await?;
+        workspace.authorization =
+            crate::plugins::run_credentials::Authorization::new(s, authority, &credentials);
+        let home = self.prepare_state_home(&workspace.prepared).await?;
+        workspace.env = self.environment(true, &home).await?;
+        workspace.state_home = home;
+        workspace.mcp = s.mcps.run_configuration(s, self.run).await?;
+        self.sensitive.extend(
+            workspace.mcp["redactions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        );
+        for (key, value) in workspace.mcp["env"].as_object().unwrap() {
+            workspace
+                .env
+                .insert(key.clone(), value.as_str().unwrap_or("").into());
+        }
+        Ok(())
     }
 
     async fn resume_environment(
@@ -1740,6 +1906,7 @@ impl Execution<'_> {
                         now(),
                     ));
                     c.process = Some(identity);
+                    c.retained_completion = None;
                     c.turn_pending = None;
                     c.recovery_deadline_ms = None;
                     c.record_launch(launched_turn.clone());
@@ -2008,8 +2175,10 @@ impl Execution<'_> {
                 .held_environment
                 .is_some_and(|held| now() >= held.expires_at)
             {
-                return Err(Error::conflict(
-                    "Environment background work reached its time limit.",
+                return Err(Error::coded(
+                    409,
+                    HELD_DEADLINE_CODE,
+                    super::held::DEADLINE_MESSAGE,
                 ));
             }
             let speed = text(&self.run["snapshot"]["agent"], "speed");
@@ -2035,6 +2204,37 @@ impl Execution<'_> {
         Ok(())
     }
 
+    fn retained_completion<'saved>(
+        &self,
+        saved: &'saved RunCheckpoint,
+        exit: &Exit,
+    ) -> Option<&'saved RetainedCompletion> {
+        saved
+            .held_environment
+            .as_ref()
+            .and_then(|held| {
+                saved.confirmed_retained_completion(
+                    &held.attempt,
+                    self.run["chatExecution"]["messageId"].as_str(),
+                )
+            })
+            .filter(|_| exit.code == Some(0) && !exit.timed_out)
+    }
+
+    async fn output_summary(&self, workspace: &Workspace) -> Option<String> {
+        let summary = crate::skills::small_file(Path::new(workspace.output()))
+            .await
+            .ok()?;
+        (!summary.is_empty()).then(|| self.redact_summary(&summary))
+    }
+
+    fn redact_summary(&self, summary: &str) -> String {
+        run_output::redact(summary, &self.sensitive.snapshot())
+            .chars()
+            .take(SUMMARY_LIMIT)
+            .collect()
+    }
+
     async fn finish(
         &self,
         workspace: &Workspace,
@@ -2043,13 +2243,11 @@ impl Execution<'_> {
         has_session: bool,
     ) -> Result<()> {
         let s = self.s;
-        let output_summary = crate::skills::small_file(Path::new(workspace.output()))
-            .await
-            .unwrap_or_default();
+        let retained_completion = self.retained_completion(saved, exit);
         let status = if self.cancel.is_cancelled() {
             RunStatus::Cancelled
         } else if exit.timed_out
-            || self.checkpoint.expired()
+            || (retained_completion.is_none() && self.checkpoint.expired())
             || saved.output_error().is_some()
             || saved.provider_failed()
         {
@@ -2077,16 +2275,16 @@ impl Execution<'_> {
         }
         let error = self.failure_message(status, exit, saved);
         let summary = if status != RunStatus::Succeeded {
-            &error
-        } else if !output_summary.is_empty() {
-            &output_summary
+            self.redact_summary(&error)
+        } else if let Some(summary) =
+            retained_completion.and_then(|receipt| receipt.output_summary.as_deref())
+        {
+            summary.to_owned()
         } else {
-            saved.last_message()
+            self.output_summary(workspace)
+                .await
+                .unwrap_or_else(|| self.redact_summary(saved.last_message()))
         };
-        let summary = run_output::redact(summary, &self.sensitive.snapshot())
-            .chars()
-            .take(SUMMARY_LIMIT)
-            .collect::<String>();
         let resume_available = (status != RunStatus::Succeeded
             || self.run["chatExecution"].is_object())
             && has_session;
@@ -2098,7 +2296,11 @@ impl Execution<'_> {
             .map(|message| json!({ "error": { "message": message } }));
         let mut patch = crate::runs::RunChanges {
             status: Some(status),
-            finished_at: Some(Some(now())),
+            finished_at: Some(Some(if status == RunStatus::Succeeded {
+                retained_completion.map_or_else(now, |receipt| receipt.finished_at)
+            } else {
+                now()
+            })),
             resume_available: Some(resume_available),
             summary: Some((summary).to_owned()),
             error: Some(error.clone()),
@@ -2112,7 +2314,8 @@ impl Execution<'_> {
         let deadline = self.checkpoint.deadline();
         // The fenced workload already stopped. Time spent confirming optional
         // cleanup retirement must not replace its recorded failure.
-        let report_expiration = exit.timed_out || !saved.native_cleanup_failure();
+        let report_expiration =
+            exit.timed_out || (retained_completion.is_none() && !saved.native_cleanup_failure());
         s.store.transaction(move |db| {
             let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
             let expired = report_expiration && deadline.is_some_and(|deadline| now() >= deadline);
@@ -2152,6 +2355,9 @@ impl Execution<'_> {
     }
 
     fn failure_message(&self, status: RunStatus, exit: &Exit, saved: &RunCheckpoint) -> String {
+        if status == RunStatus::Succeeded {
+            return String::new();
+        }
         if self.cancel.is_cancelled() {
             return "Run stopped. You can resume this conversation.".into();
         }
@@ -2160,9 +2366,6 @@ impl Execution<'_> {
         }
         if let Some(error) = saved.output_error() {
             return error.to_owned();
-        }
-        if status == RunStatus::Succeeded {
-            return String::new();
         }
         if let Some(error) = saved.finalization_error() {
             return error.to_owned();
@@ -2347,7 +2550,7 @@ mod tests {
             turn: String::new(),
             output_probe: None,
         };
-        assert!(!execution.close_idle_environment().await.unwrap());
+        assert!(execution.close_idle_environment().await.unwrap().is_none());
         let saved = checkpoint.snapshot().await;
         assert!(!saved.completed());
         assert_eq!(saved.turn_pending, Some(true));
@@ -2406,14 +2609,30 @@ mod tests {
             turn: String::new(),
             output_probe: None,
         };
-        assert!(!execution.close_idle_environment().await.unwrap());
+        assert!(execution.close_idle_environment().await.unwrap().is_none());
         assert!(checkpoint.snapshot().await.held_environment.is_some());
         service
             .store
             .write(move |db| db.save_wakeup(false, &id, None))
             .await
             .unwrap();
-        assert!(execution.close_idle_environment().await.unwrap());
+        checkpoint
+            .update(|saved| saved.held_environment.as_mut().unwrap().expires_at = now() - 1)
+            .await
+            .unwrap();
+        assert!(matches!(
+            execution.close_idle_environment().await.unwrap(),
+            Some(HeldTurn::Expired)
+        ));
+        assert!(checkpoint.snapshot().await.held_environment.is_some());
+        checkpoint
+            .update(|saved| saved.held_environment.as_mut().unwrap().expires_at = now() + 60_000)
+            .await
+            .unwrap();
+        assert!(matches!(
+            execution.close_idle_environment().await.unwrap(),
+            Some(HeldTurn::Close)
+        ));
     }
 
     #[tokio::test]
@@ -2483,16 +2702,10 @@ mod tests {
                 turn: String::new(),
                 output_probe: None,
             };
-            let error = execution
-                .wait_for_next_turn(&mut workspace)
-                .await
-                .unwrap_err();
-            if credential_clear_failure {
-                assert!(!error.message.contains("time limit"));
-            } else {
-                assert!(error.message.contains("time limit"));
-            }
-            let expected_message = error.message;
+            assert!(!execution.wait_for_next_turn(&mut workspace).await.unwrap());
+            let pending = service.store.run_state(&id).await.unwrap();
+            assert_eq!(pending.status, RunStatus::Queued);
+            assert!(pending.recovery_pending);
             checkpoint
                 .update(|saved| saved.terminal_code = Some(Some(0)))
                 .await
@@ -2500,6 +2713,11 @@ mod tests {
             let saved = checkpoint.snapshot().await;
             assert!(saved.held_environment.is_none());
             assert_eq!(saved.settled().unwrap().status, RunStatus::Failed);
+            let expected_message = saved.settled().unwrap().error.clone().unwrap();
+            assert_eq!(
+                expected_message.contains("time limit"),
+                !credential_clear_failure
+            );
             service
                 .store
                 .transaction(move |db| {
@@ -2515,6 +2733,85 @@ mod tests {
                 })
                 .await
                 .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmed_turn_keeps_success_when_finish_crosses_the_budget() {
+        for timed_out in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (service, mut run) = preparation_fixture(root.path()).await;
+            let id = text(&run, "id").to_owned();
+            let authority = Authority::for_run(&service, &run).await.unwrap();
+            run["chatExecution"] = json!({ "messageId": "turn" });
+            let workspace = Workspace {
+                prepared: json!({}),
+                state_home: root.path().into(),
+                env: Environment::new(),
+                mcp: json!({}),
+                authorization: crate::plugins::run_credentials::Authorization::new(
+                    &service,
+                    authority,
+                    &RunCredentials::default(),
+                ),
+            };
+            let mut saved = RunCheckpoint::fresh(Some(0));
+            let finished_at = now() - 1_000;
+            saved.runner_id = Some(Some("attempt".into()));
+            saved.completed = Some(true);
+            saved.last_message = Some("Completed answer".into());
+            saved.held_environment = Some(super::super::checkpoint::HeldEnvironment {
+                attempt: "attempt".into(),
+                generation: "generation".into(),
+                expires_at: now() - 1,
+            });
+            saved.retained_completion = Some(super::super::checkpoint::RetainedCompletion {
+                message_id: "turn".into(),
+                finished_at,
+                output_summary: None,
+            });
+            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved.clone());
+            assert!(checkpoint.expired());
+            let cancel = CancellationToken::new();
+            let sensitive = History::default();
+            let execution = Execution {
+                s: &service,
+                id: id.clone(),
+                admission_revision: Value::Null,
+                run: &mut run,
+                account: &mut None,
+                preparation: None,
+                cancel: &cancel,
+                checkpoint: &checkpoint,
+                sensitive: &sensitive,
+                observation: None,
+                provider: Provider::Codex,
+                directory: root.path().join("run"),
+                attempt_id: "attempt".into(),
+                reservation: None,
+                retained: true,
+                turn: String::new(),
+                output_probe: None,
+            };
+            let exit = Exit {
+                code: Some(if timed_out { STOPPED } else { 0 }),
+                timed_out,
+                exhausted: false,
+            };
+            execution
+                .finish(&workspace, &exit, &saved, true)
+                .await
+                .unwrap();
+            let state = service.store.run_state(&id).await.unwrap();
+            if timed_out {
+                assert_eq!(state.status, RunStatus::Failed);
+                assert_eq!(state.error.as_deref(), Some("Run exceeded its time limit."));
+            } else {
+                assert_eq!(state.status, RunStatus::Succeeded);
+                assert_eq!(state.finished_at, Some(finished_at));
+                assert_eq!(state.summary, "Completed answer");
+                assert!(state.error.is_none());
+            }
         }
     }
 
@@ -2648,6 +2945,7 @@ mod tests {
             .await
             .unwrap();
         let error = execution.wait_for_account("").await.unwrap_err();
+        assert_eq!(error.code.as_deref(), Some(HELD_DEADLINE_CODE));
         assert!(error.message.contains("time limit"));
     }
 

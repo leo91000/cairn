@@ -10,7 +10,8 @@ mod routes;
 pub(crate) use broker::validate as validate_plan;
 pub(crate) use client::cleanup_result as client_cleanup_result;
 pub(crate) use client::{
-    ControllerResult, NATIVE_CLEANUP_RETIREMENT_QUERY, observe_cleanup_retirement, wait_for_exit,
+    ControllerResult, NATIVE_CLEANUP_RETIREMENT_QUERY, observe_cleanup_retirement,
+    observe_plain_finalization_failure, plain_finalization_failure, wait_for_exit,
 };
 pub use client::{TerminalReason, client};
 
@@ -435,6 +436,17 @@ mod tests {
         .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({ "StatusCode": 70, "FinalizationFailed": true })
+        );
+        let mut request = authorized_post(format!("/runs/{id}"), Body::empty());
+        *request.method_mut() = axum::http::Method::DELETE;
+        let response = router(broker).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let receipt = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&receipt).unwrap(),
             json!({ "StatusCode": 70, "FinalizationFailed": true })
         );
     }

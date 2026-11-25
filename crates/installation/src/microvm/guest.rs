@@ -4,7 +4,10 @@ mod filesystems;
 
 use super::{
     plan::{CHAT_INBOX, Plan},
-    protocol::{Encoding, Event, GuestRequest, GuestStatus, Reply},
+    protocol::{
+        Encoding, EnvironmentControlError, EnvironmentReply, Event, GuestRequest, GuestStatus,
+        Reply,
+    },
     wire,
 };
 use crate::{
@@ -131,7 +134,7 @@ async fn handle(
                 .await
                 .clone()
                 .ok_or_else(|| Error::unavailable("Guest environment is not active."))?;
-            wire::write(&mut write, &channel.request(request).await?).await
+            reply_to_environment_request(&mut write, &channel, request).await
         }
         GuestRequest::Freeze => freeze(&mut write, true).await,
         GuestRequest::Thaw => freeze(&mut write, false).await,
@@ -793,6 +796,26 @@ fn forward_output(
     });
 }
 
+async fn reply_to_environment_request(
+    write: &mut (impl AsyncWrite + Unpin),
+    channel: &crate::background_jobs::channel::Channel,
+    request: crate::background_jobs::protocol::Request,
+) -> Result<()> {
+    let reply = match channel.request(request).await {
+        Ok(event) => EnvironmentReply::Event(event),
+        Err(error)
+            if error.code.as_deref()
+                == Some(crate::background_jobs::protocol::INVALID_CONTROL_FRAME) =>
+        {
+            EnvironmentReply::Rejected {
+                reason: EnvironmentControlError::InvalidFrame,
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    wire::write(write, &reply).await
+}
+
 async fn stream_environment(
     write: &mut (impl AsyncWrite + Unpin),
     plan: &Plan,
@@ -809,7 +832,7 @@ async fn stream_environment(
         spawn_agent(plan, codex, timing, Some(child_control.as_raw_fd()))?;
     drop(child_control);
     let (channel, mut events) = Channel::attach(tokio::net::UnixStream::from_std(parent)?);
-    *environment.lock().await = Some(channel);
+    *environment.lock().await = Some(channel.clone());
     let result = async {
         let mut output_open = true;
         loop {
@@ -823,6 +846,7 @@ async fn stream_environment(
                 }
                 event = events.recv() => match event {
                     Some(event) => event,
+                    None if channel.invalid_frame() => return Err(channel.disconnect_error()),
                     None => {
                         // The private channel closes before the clean helper's
                         // process exit can become observable. Await that same
@@ -839,6 +863,11 @@ async fn stream_environment(
         }
     }.await;
     *environment.lock().await = None;
+    if channel.invalid_frame() {
+        let _ = wire::write(write, &Event::EnvironmentProtocolFailed).await;
+        let _ = child.kill().await;
+        return Err(channel.disconnect_error());
+    }
     let code = match result {
         Ok(code) => code,
         Err(error) => {
@@ -961,6 +990,41 @@ async fn read_result(plan: &Plan) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_helper_frame_is_replied_to_as_a_protocol_failure() {
+        use crate::background_jobs::{channel::Channel, protocol::Request};
+
+        let (guest, helper) = tokio::net::UnixStream::pair().unwrap();
+        let (channel, _events) = Channel::attach(guest);
+        let (mut guest_reply, host_reply) = tokio::io::duplex(1024);
+        let request = reply_to_environment_request(
+            &mut guest_reply,
+            &channel,
+            Request::Activity {
+                request_id: "activity".into(),
+            },
+        );
+        let helper = async move {
+            let mut stream = BufReader::new(helper);
+            assert!(wire::read(&mut stream).await.unwrap().is_some());
+            stream.get_mut().write_all(b"invalid\n").await.unwrap();
+        };
+        let host = async move {
+            let value = wire::read(&mut BufReader::new(host_reply))
+                .await
+                .unwrap()
+                .unwrap();
+            let reply: EnvironmentReply = serde_json::from_value(value).unwrap();
+            assert_eq!(reply.into_event().unwrap_err().status, 502);
+        };
+        let (sent, (), ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(request, helper, host)
+        })
+        .await
+        .unwrap();
+        sent.unwrap();
+    }
 
     #[tokio::test]
     async fn anonymous_warmup_replaces_preinstalled_home_without_inheriting_state() {

@@ -4,6 +4,17 @@ use serde_json::Value;
 
 use super::Outcome;
 
+pub(crate) const CONTROL_INTERRUPTED: &str = "environment_control_interrupted";
+pub(crate) const INVALID_CONTROL_FRAME: &str = "environment_invalid_control_frame";
+
+pub(crate) fn invalid_control_frame() -> crate::error::Error {
+    crate::error::Error::coded(
+        502,
+        INVALID_CONTROL_FRAME,
+        "Execution environment sent an invalid control frame.",
+    )
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(
     tag = "operation",

@@ -147,6 +147,19 @@ fn run_is_active(run: &Value) -> bool {
     RunStatus::of(run).is_some_and(RunStatus::is_active)
 }
 
+fn can_join_current_turn(db: &Db<'_>, run: &Value) -> Result<bool> {
+    if !run_is_active(run) {
+        return Ok(false);
+    }
+    let id = text(run, "id");
+    if run["recoveryPending"] == true
+        && RunCheckpoint::load_in(db, id)?.is_some_and(|saved| saved.settled().is_some())
+    {
+        return Ok(false);
+    }
+    Ok(!RunCheckpoint::held_deadline_elapsed_in(db, id, now())?)
+}
+
 fn touch(chat: &mut Conversation) {
     chat.updated_at = now();
     chat.last_activity_at = Some(chat.updated_at);
@@ -392,9 +405,13 @@ fn compaction_blocker(
             "This workspace has been cleaned up. Start a new chat.".into(),
         ));
     }
-    let fresh_session =
-        chat.session_restart_requested || RunCheckpoint::fresh_session_in(db, text(run, "id"))?;
-    if !run["sessionId"].is_string() || fresh_session {
+    let (fresh_session, held_expired) = RunCheckpoint::compaction_flags_in(db, text(run, "id"))?;
+    if held_expired {
+        return Ok(Some(
+            "Wait for the previous environment to stop before compacting.".into(),
+        ));
+    }
+    if !run["sessionId"].is_string() || chat.session_restart_requested || fresh_session {
         return Ok(Some(
             "This conversation has no saved native session to compact.".into(),
         ));
@@ -564,26 +581,36 @@ pub(crate) fn history_run(db: &Db<'_>, id: &str) -> Result<String> {
 }
 
 /// Steering joins the running turn, whose provider, model, reasoning and speed are fixed.
-fn changes_running_agent(message: &Value, run: &Value) -> Result<bool> {
+fn changes_running_agent(message: &Message, run: &Value) -> Result<bool> {
     let agent = &run["snapshot"]["agent"];
-    let provider = Value::from(Provider::of_run(run)?.as_str());
-    let differs = |key: &str, current: &Value| {
-        !text(message, key).is_empty() && text(message, key) != current.as_str().unwrap_or("")
+    let differs = |choice: &str, current: &Value| {
+        !choice.is_empty() && choice != current.as_str().unwrap_or("")
     };
+    let provider_changed =
+        !message.provider.is_empty() && message.provider != Provider::of_run(run)?.as_str();
     // A turn without a speed runs at Standard, so asking for Standard changes nothing.
-    let speed = |value: &str| {
-        if value.is_empty() {
-            crate::models::STANDARD_SPEED.to_owned()
-        } else {
-            value.to_owned()
-        }
-    };
-    let changes_speed = !text(message, "speed").is_empty()
-        && speed(text(message, "speed")) != speed(text(agent, "speed"));
-    Ok(differs("provider", &provider)
-        || differs("model", &agent["model"])
-        || differs("reasoning", &agent["reasoning"])
-        || changes_speed)
+    let running_speed = agent["speed"]
+        .as_str()
+        .filter(|speed| !speed.is_empty())
+        .unwrap_or(crate::models::STANDARD_SPEED);
+    Ok(provider_changed
+        || differs(&message.model, &agent["model"])
+        || differs(&message.reasoning, &agent["reasoning"])
+        || (!message.speed.is_empty() && message.speed != running_speed))
+}
+
+fn retained_followup_key(message: &str) -> String {
+    format!("retained-followup:{message}")
+}
+
+fn steering_requested(db: &Db<'_>, message: &Message) -> Result<bool> {
+    Ok(message.mode == MessageMode::Steer && db.kv(&retained_followup_key(&message.id))?.is_none())
+}
+
+fn steering_fits_turn(db: &Db<'_>, message: &Message, run: &Value) -> Result<bool> {
+    Ok(steering_requested(db, message)?
+        && (!message.plan || planning(run))
+        && !changes_running_agent(message, run)?)
 }
 
 /// The coding agent a message's turn runs with: the one it names, else the running turn's
@@ -594,8 +621,9 @@ fn message_provider(db: &Db<'_>, chat: &Conversation, message: &Message) -> Resu
         return Ok(message.provider.clone());
     }
     let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
-    if message.mode == MessageMode::Steer
-        && let Some(run) = run.as_ref().filter(|run| run_is_active(run))
+    if steering_requested(db, message)?
+        && let Some(run) = run.as_ref()
+        && can_join_current_turn(db, run)?
     {
         return Ok(Provider::of_run(run)?.as_str().to_owned());
     }
@@ -638,20 +666,23 @@ fn validate_speed(db: &Db<'_>, chat: &Conversation, message: &Message) -> Result
 }
 
 fn validate_steer(db: &Db<'_>, chat: &Conversation, message: &Message) -> Result<()> {
-    if message.mode != MessageMode::Steer {
+    if !steering_requested(db, message)? {
         return Ok(());
     }
     let Some(run) = db.run(chat.run_id.as_deref().unwrap_or(""))? else {
         return Ok(());
     };
-    if run_is_active(&run) && changes_running_agent(&serde_json::to_value(message)?, &run)? {
+    if !can_join_current_turn(db, &run)? {
+        return Ok(());
+    }
+    if changes_running_agent(message, &run)? {
         return Err(Error::conflict(
             "Queue this message to change provider, model, reasoning or speed on the next turn.",
         ));
     }
     // Steering joins the running turn with its permissions: a plan request cannot
     // restrict a turn that may already change files.
-    if run_is_active(&run) && message.plan && !planning(&run) {
+    if message.plan && !planning(&run) {
         return Err(Error::conflict(
             "Queue this message to plan on the next turn: the running turn can change files.",
         ));
@@ -908,7 +939,27 @@ pub(crate) fn send(
         };
     }
     touch(&mut chat);
-    chat.wakeup = None;
+    let created_at = now();
+    let retired_followup = if let Some(run_id) = chat.run_id.as_deref()
+        && RunCheckpoint::retained_input_deadline_in(db, run_id)?
+            .is_some_and(|deadline| created_at >= deadline)
+    {
+        RunCheckpoint::held_deadline_elapsed_in(db, run_id, created_at)?
+            || db
+                .run_state(run_id)?
+                .is_some_and(|run| run.recovery_pending)
+    } else {
+        false
+    };
+    let expiry_owns_wait = match (&chat.wakeup, chat.run_id.as_deref()) {
+        (Some(_), Some(run_id)) => {
+            RunCheckpoint::expired_hold_owns_wait_in(db, run_id, created_at)?
+        }
+        _ => false,
+    };
+    if !expiry_owns_wait {
+        chat.wakeup = None;
+    }
     db.save_conversation(&chat)?;
     if let Some((mut question, answers)) = answer {
         question.status = QuestionStatus::Answering;
@@ -919,8 +970,13 @@ pub(crate) fn send(
     }
     values.chat_id = chat_id.to_owned();
     values.status = MessageStatus::Queued;
-    values.created_at = now();
+    values.created_at = created_at;
     let saved = db.save_message(&values)?;
+    if retired_followup && saved.mode == MessageMode::Steer {
+        // Keep the submitted mode for idempotent retries while the queue retains
+        // the original admission decision through later provider turns.
+        db.set(&retained_followup_key(&saved.id), &Value::Bool(true), None)?;
+    }
     crate::conversation_writers::record_message(
         db,
         chat_id,
@@ -939,6 +995,7 @@ fn withdraw(db: &Db<'_>, chat_id: &str, message: &Message) -> Result<Value> {
             "A submitted answer cannot be removed. Send a new message to correct it.",
         ));
     }
+    db.delete(&retained_followup_key(&message.id))?;
     db.0.execute(
         "DELETE FROM chat_messages WHERE chat_id=? AND id=?",
         rusqlite::params![chat_id, &message.id],
@@ -1112,6 +1169,7 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     }
     message.status = MessageStatus::Delivered;
     db.save_message(&message)?;
+    db.delete(&retained_followup_key(&message.id))?;
     crate::rules::engine::conversations::delivered_input(db, &chat_id, run_id, message_id)?;
     let private = db.private_answer_message(message_id)?;
     if let Some(question_id) = message.question_id.as_deref()
@@ -1140,9 +1198,29 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Marks steering messages as sending so the running turn picks them up. A plan request
-/// only joins a plan turn: one admitted while no turn ran stays queued for its own turn
-/// rather than joining a later turn that can change files.
+/// Recheck preparation against the currently selected execution.
+fn same_turn(expected: &Value, current: &Value) -> bool {
+    expected["id"] == current["id"]
+        && expected["status"] == current["status"]
+        && expected["recoveryPending"] == current["recoveryPending"]
+        && crate::waits::execution_id(expected) == crate::waits::execution_id(current)
+        && expected["environmentAdmissionRevision"] == current["environmentAdmissionRevision"]
+}
+
+fn steering_run(db: &Db<'_>, expected: &Value) -> Result<Option<Value>> {
+    let id = text(expected, "id");
+    let current = db.run(id)?;
+    let unchanged = current
+        .as_ref()
+        .is_some_and(|current| same_turn(expected, current));
+    if !unchanged || RunCheckpoint::held_deadline_elapsed_in(db, id, now())? {
+        return Ok(None);
+    }
+    Ok(current)
+}
+
+/// Marks compatible steering messages as sending. A message keeps its own turn
+/// when a later launch cannot honor its explicit agent settings or plan mode.
 fn claim_steering(db: &Db<'_>, chat_id: &str, paused: bool, run: &Value) -> Result<Vec<Value>> {
     let delivering = &run["chatExecution"]["messageId"];
     if conversation(db, chat_id)
@@ -1156,12 +1234,10 @@ fn claim_steering(db: &Db<'_>, chat_id: &str, paused: bool, run: &Value) -> Resu
             message.status == MessageStatus::Queued || message.status == MessageStatus::Sending;
         // Answers to questions still flow while the chat is paused.
         let deliverable = !paused || message.question_id.is_some();
-        let joins = !message.plan || planning(run);
         if deliverable
             && pending
-            && joins
-            && message.mode == MessageMode::Steer
             && message.id.as_str() != delivering.as_str().unwrap_or("")
+            && steering_fits_turn(db, &message, run)?
         {
             message.status = MessageStatus::Sending;
             db.save_message(&message)?;
@@ -1215,12 +1291,17 @@ struct Unsent {
     held: Vec<Message>,
 }
 
-/// When a turn that did not succeed ended: when Stop was pressed, or when it finished.
-fn turn_end(run: &Value) -> i64 {
-    run["cancelRequestedAt"]
+/// Latest timestamp attributable to the stopped turn's input. A message at a
+/// retained environment deadline already belongs to the next turn.
+fn turn_end(db: &Db<'_>, run: &Value) -> Result<i64> {
+    let ended = run["cancelRequestedAt"]
         .as_i64()
         .or_else(|| run["finishedAt"].as_i64())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    Ok(
+        RunCheckpoint::retained_input_deadline_in(db, text(run, "id"))?
+            .map_or(ended, |deadline| ended.min(deadline.saturating_sub(1))),
+    )
 }
 
 /// Whether resuming the conversation should leave its stopped turn alone: the turn's
@@ -1232,7 +1313,7 @@ pub(crate) fn skips_replay(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bo
         return Ok(true);
     }
     let turn = run["chatExecution"]["messageId"].as_str();
-    let ended_at = turn_end(run);
+    let ended_at = turn_end(db, run)?;
     let written_since = db.conversation_messages(chat_id)?.iter().any(|message| {
         message.status == MessageStatus::Queued
             && message.question_id.is_none()
@@ -1248,7 +1329,7 @@ pub(crate) fn skips_replay(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bo
 /// check what it did, and held messages follow it.
 pub(crate) fn turn_held(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bool> {
     let turn = run["chatExecution"]["messageId"].as_str();
-    let ended_at = turn_end(run);
+    let ended_at = turn_end(db, run)?;
     Ok(db.conversation_messages(chat_id)?.iter().any(|message| {
         message.status == MessageStatus::Sending
             || (message.status == MessageStatus::Queued
@@ -1280,7 +1361,7 @@ fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> {
     // while those of rules and agents wait for a person, as after any failure.
     let operation = !execution["operation"].is_null();
     let turn = execution["messageId"].as_str();
-    let ended_at = turn_end(run);
+    let ended_at = turn_end(db, run)?;
     let mut unsent = Unsent::default();
     let mut received = None;
     for message in db.conversation_messages(chat_id)? {
@@ -1355,7 +1436,7 @@ fn settle_turn(db: &Db<'_>, chat_id: &str, ended: &Value) -> Result<()> {
     let unsent = unsent(db, chat_id, &run)?;
     // A cancellation already paused the conversation when it was requested.
     let held = !unsent.held.is_empty();
-    let ended_at = turn_end(&run);
+    let ended_at = turn_end(db, &run)?;
     for mut message in unsent.held {
         // A message claimed after Stop stays claimed: the turn holds it, so resuming replays
         // the turn first and delivers it again.
@@ -1568,7 +1649,7 @@ fn continue_run(
     checkpoint.controller_recoveries = None;
     checkpoint.controller_recovery_reservation = None;
     checkpoint.provider_failure_attempt = None;
-    checkpoint.reset_finalization_observation();
+    checkpoint.acknowledge_finalization_observation();
     checkpoint.move_recovery_reservation = None;
     checkpoint.provider_retry_reservation = None;
     checkpoint.pending_paid_admission = None;
@@ -1591,6 +1672,8 @@ fn continue_run(
     }
     checkpoint.last_message = None;
     checkpoint.settled = None;
+    checkpoint.retired_environment_deadline = None;
+    checkpoint.retained_completion = None;
     checkpoint.store_in(db, run_id)?;
     let compaction = execution.operation.as_deref() == Some(COMPACT);
     let mut patch = crate::runs::RunChanges {
@@ -1641,27 +1724,21 @@ fn launch_turn(
     if chat.agent_id != snapshot["snapshot"]["agent"]["id"] {
         return Ok(());
     }
-    // Rebuild backend-dependent preparation if an explicit choice committed
-    // while the snapshot was being prepared. The message stays queued.
+    // Retry preparation if a new turn, retirement or backend choice committed
+    // while the snapshot was being built. The message stays queued.
     let current = db.run(chat.run_id.as_deref().unwrap_or(""))?;
-    let same_environment = match (&run, &current) {
-        (Some(expected), Some(current)) => {
-            expected["id"] == current["id"]
-                && expected["environmentAdmissionRevision"]
-                    == current["environmentAdmissionRevision"]
-        }
+    let same_run = match (&run, &current) {
+        (Some(expected), Some(current)) => same_turn(expected, current),
         (None, None) => true,
         _ => false,
     };
-    if !same_environment {
+    if !same_run {
         return Ok(());
     }
     let waking = message["wakeup"].is_object();
     let unchanged = if waking {
-        let current = db.run(chat.run_id.as_deref().unwrap_or(""))?;
         continuation::ready(db, &chat, current.as_ref(), now())?
             && serde_json::to_value(&chat.wakeup)? == message["wakeup"]
-            && current.as_ref().map(|run| &run["id"]) == run.as_ref().map(|run| &run["id"])
             && (!message["wakeup"]["condition"].is_object()
                 || current.as_ref().is_some_and(|run| {
                     wait_for::observation(db, &chat.id, run, now())
@@ -1681,11 +1758,16 @@ fn launch_turn(
     {
         return Ok(());
     }
-    // The interrupted environment is detached once its execution has stopped.
-    if let Some(run) = &run
-        && crate::environment_expiration::pending(db, text(run, "id"))?
-    {
-        return Ok(());
+    if let Some(run) = &current {
+        let run_id = text(run, "id");
+        // The expiry owner settles the last turn before a follow-up can use
+        // this conversation again. Its poll may be behind the scheduler.
+        if crate::environment_expiration::pending(db, run_id)?
+            || (run["status"] == RunStatus::Succeeded
+                && RunCheckpoint::held_deadline_elapsed_in(db, run_id, now())?)
+        {
+            return Ok(());
+        }
     }
     crate::coding_agent_configuration::freeze_message(db, &mut snapshot, run.as_ref(), &message)?;
     let provider = Provider::of_run(&snapshot)?;
@@ -2272,25 +2354,30 @@ impl Service {
         let chat_id = chat.id.clone();
         let paused = chat.paused;
         let claiming = run.clone();
-        let run_id = text(run, "id").to_owned();
         // Only a reply that announced side questions, with some to receive, reads them; a
         // later tick sees an announcement or a question made since this one read them.
         let announced = side_open && run["sideQuestions"] == true;
-        let (mut steering, side_turn) = self
+        let Some((mut steering, side_turn)) = self
             .store
             .transaction(move |db| {
-                let mut steering = claim_steering(db, &chat_id, paused, &claiming)?;
+                let Some(current) = steering_run(db, &claiming)? else {
+                    return Ok(None);
+                };
+                let mut steering = claim_steering(db, &chat_id, paused, &current)?;
                 // Side questions are not chat messages: the queue, pause and steering never
                 // hold them, and the adapter answers them beside the turn. The run is read
                 // again here: a launch since the tick read it withdrew its announcement.
                 let mut side_turn = String::new();
-                if announced && let Some(run) = db.run(&run_id)? {
-                    steering.extend(side_questions::deliveries(db, &chat_id, &run)?);
-                    side_turn = text(&run["chatExecution"], "messageId").to_owned();
+                if announced {
+                    steering.extend(side_questions::deliveries(db, &chat_id, &current)?);
+                    side_turn = text(&current["chatExecution"], "messageId").to_owned();
                 }
-                Ok((steering, side_turn))
+                Ok(Some((steering, side_turn)))
             })
-            .await?;
+            .await?
+        else {
+            return Ok(());
+        };
         let skills = &run["snapshot"]["skills"];
         for message in &mut steering {
             let side =
@@ -2460,6 +2547,147 @@ mod tests {
             launch_turn(db, "chat", Some(stale.clone()), message, stale)?;
             assert_eq!(db.run("run")?.unwrap(), before);
             assert_eq!(db.messages("chat")?[0]["status"], "queued");
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_chat_preparation_preserves_pending_environment_retirement() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            crate::chat_plan_settings::save(db, cairn_contracts::ChatPlanSettings {
+                enabled: true,
+                ..Default::default()
+            })?;
+            db.add_run_fixture(&json!({
+                "id": "run", "taskId": "chat", "status": "succeeded", "trigger": "chat",
+                "chatExecution": { "messageId": "previous", "text": "Done", "attachments": [], "recovery": false },
+                "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID, "provider": "codex" } },
+            }), None)?;
+            db.save_conversation_boundary(&json!({
+                "id": "chat", "runId": "run", "agentId": crate::config::MAIN_AGENT_ID,
+                "nativeProvenanceUnknown": false,
+            }))?;
+            let stale = db.run("run")?.unwrap();
+            db.save_agent(&serde_json::from_value(stale["snapshot"]["agent"].clone())?)?;
+            let mut chat = conversation(db, "chat")?;
+            chat.wakeup = Some(serde_json::from_value(json!({
+                "id": "wait", "messageId": "previous", "reason": "Waiting for background work",
+                "seconds": 60, "createdAt": 1, "wakeAt": 60_001,
+            }))?);
+            let preserved_wait = chat.wakeup.clone();
+            db.save_conversation(&chat)?;
+            let mut saved = RunCheckpoint::fresh(None);
+            saved.runner_id = Some(Some("attempt".into()));
+            saved.held_environment = Some(crate::worker::checkpoint::HeldEnvironment {
+                attempt: "attempt".into(),
+                generation: "generation".into(),
+                expires_at: now() - 1,
+            });
+            saved.store_in(db, "run")?;
+            let message = send(db, "chat", parse_message(json!({
+                "id": crate::config::id(), "text": "Follow-up",
+            }))?, None, &crate::native::policy::Origin::default())?;
+            assert!(conversation(db, "chat")?.wakeup.is_some());
+            let before_admission = db.run("run")?.unwrap();
+            assert!(steering_run(db, &before_admission)?.is_none());
+            launch_turn(db, "chat", Some(before_admission.clone()), message.clone(), stale.clone())?;
+            assert_eq!(db.run("run")?.unwrap(), before_admission);
+            assert_eq!(db.messages("chat")?[0]["status"], "queued");
+            assert!(RunCheckpoint::load_in(db, "run")?.unwrap().held_environment.is_some());
+
+            saved.retired_environment_deadline = saved.held_environment.take().map(|held| held.expires_at);
+            saved.settled = Some(Some(crate::worker::checkpoint::Settled::from_state(
+                &db.run_state("run")?.unwrap(),
+            )));
+            saved.store_in(db, "run")?;
+            db.change_run("run", crate::runs::RunChanges {
+                status: Some(RunStatus::Queued),
+                recovery_pending: Some(true),
+                ..Default::default()
+            })?;
+            let retiring = db.run("run")?.unwrap();
+            assert!(steering_run(db, &before_admission)?.is_none());
+            let arrived = message["createdAt"].as_i64().unwrap();
+            let plan = send(db, "chat", parse_message(json!({
+                "id": crate::config::id(), "text": "Plan the next change", "mode": "steer", "plan": true,
+            }))?, None, &crate::native::policy::Origin::default())?;
+            assert_eq!(plan["status"], "queued");
+            assert!(conversation(db, "chat")?.wakeup.is_none());
+            launch_turn(db, "chat", Some(stale.clone()), message, stale)?;
+            assert_eq!(db.run("run")?.unwrap(), retiring);
+            assert_eq!(db.messages("chat")?[0]["status"], "queued");
+            let mut saved = RunCheckpoint::load_in(db, "run")?.unwrap();
+            assert_eq!(saved.settled().unwrap().status, RunStatus::Succeeded);
+
+            let mut outcome = crate::worker::checkpoint::Settled::failure(
+                RunStatus::Failed,
+                "The filesystem could not be flushed.",
+            );
+            outcome.finished_at = Some(arrived + 1);
+            saved.settled = Some(Some(outcome.clone()));
+            saved.retired_environment_deadline = Some(arrived);
+            saved.store_in(db, "run")?;
+            let plan = send(db, "chat", parse_message(json!({
+                "id": crate::config::id(), "text": "Plan after the interruption", "mode": "steer", "plan": true,
+            }))?, None, &crate::native::policy::Origin::default())?;
+            assert_eq!(plan["status"], "queued");
+            let selected = send(db, "chat", parse_message(json!({
+                "id": crate::config::id(), "text": "Choose a model for my turn", "mode": "steer", "model": "chosen-model",
+            }))?, None, &crate::native::policy::Origin::default())?;
+            let late = parse_message(json!({
+                "id": crate::config::id(), "text": "Follow the selected model's turn", "mode": "steer",
+            }))?;
+            let queued = send(db, "chat", late.clone(), None, &crate::native::policy::Origin::default())?;
+            assert_eq!(send(db, "chat", late, None, &crate::native::policy::Origin::default())?, queued);
+            db.change_run("run", outcome.run_changes())?;
+            settle_turn(db, "chat", &db.run("run")?.unwrap())?;
+            assert!(db.messages("chat")?.iter().all(|message| message["status"] == "queued"));
+            assert!(!conversation(db, "chat")?.paused);
+            let first = next_queued(db, "chat")?.unwrap();
+            let mut next = db.run("run")?.unwrap();
+            next["status"] = "running".into();
+            next["chatExecution"]["messageId"] = first["id"].clone();
+            next["snapshot"]["agent"]["model"] = "first-model".into();
+            let mut stopping = db.run("run")?.unwrap();
+            stopping["cancelRequestedAt"] = (arrived + 2).into();
+            assert!(turn_end(db, &stopping)? < arrived);
+            saved.retired_environment_deadline = None;
+            saved.store_in(db, "run")?;
+            assert!(claim_steering(db, "chat", false, &next)?.is_empty());
+            assert!(!continuation::has_unhandled_input(db, &conversation(db, "chat")?, &next)?);
+            let mut chosen = db.conversation_message("chat", text(&selected, "id"))?.unwrap();
+            assert_eq!(chosen.status, MessageStatus::Queued);
+            assert_eq!(chosen.model, "chosen-model");
+            chosen.model = "first-model".into();
+            assert!(!changes_running_agent(&chosen, &next)?);
+            assert!(!steering_fits_turn(db, &chosen, &next)?);
+            db.save_message(&chosen)?;
+            assert!(!continuation::has_unhandled_input(db, &conversation(db, "chat")?, &next)?);
+            for closing in [false, true] {
+                let mut chat = conversation(db, "chat")?;
+                chat.wakeup = preserved_wait.clone();
+                db.save_conversation(&chat)?;
+                db.change_run("run", crate::runs::RunChanges {
+                    status: Some(RunStatus::Succeeded), recovery_pending: Some(false), error: Some(None),
+                    ..Default::default()
+                })?;
+                saved.retired_environment_deadline = Some(arrived);
+                saved.settled = Some(Some(crate::worker::checkpoint::Settled::from_state(&db.run_state("run")?.unwrap())));
+                if closing {
+                    saved.closing_held_generation = Some("generation".into());
+                    saved.held_environment = Some(crate::worker::checkpoint::HeldEnvironment {
+                        attempt: "attempt".into(), generation: "generation".into(), expires_at: arrived,
+                    });
+                }
+                saved.store_in(db, "run")?;
+                let input = send(db, "chat", parse_message(json!({
+                    "id": crate::config::id(), "text": "Continue sooner", "mode": "steer",
+                }))?, None, &crate::native::policy::Origin::default())?;
+                assert!(conversation(db, "chat")?.wakeup.is_none());
+                assert_eq!(db.kv(&retained_followup_key(text(&input, "id")))?.is_some(), closing);
+            }
             Ok(())
         }).await.unwrap();
     }
@@ -3205,6 +3433,21 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM reta
                 let idle = view(db, chat(db, "chat")?)?;
                 assert_eq!(idle["contextUsage"]["contextTokens"], 150_000);
                 assert_eq!(idle["compaction"], json!({ "supported": true, "running": false, "available": true, "reason": null }));
+
+                let mut saved = RunCheckpoint::load_in(db, "run")?.unwrap();
+                saved.held_environment = Some(crate::worker::checkpoint::HeldEnvironment {
+                    attempt: "attempt".into(),
+                    generation: "generation".into(),
+                    expires_at: now() - 1,
+                });
+                saved.store_in(db, "run")?;
+                let expiring = view(db, chat(db, "chat")?)?;
+                assert_eq!(expiring["compaction"]["available"], false);
+                let error = compact(db, "chat", &origin).unwrap_err();
+                assert_eq!(expiring["compaction"]["reason"], error.message);
+                assert_eq!(db.run("run")?.unwrap()["summary"], "Last reply");
+                saved.held_environment = None;
+                saved.store_in(db, "run")?;
 
                 // A queued follow-up is delivered first: compaction never reorders the queue.
                 let queued = json!({ "id": "queued", "chatId": "chat", "text": "Next", "status": "queued", "createdAt": 1 });

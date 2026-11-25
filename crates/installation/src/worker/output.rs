@@ -568,13 +568,12 @@ async fn apply_event(
         changes.boundary = Some(json!({ "contextUsage": event["usage"] }));
         changed = true;
     }
-    let message = (event["item"]["type"] == "agent_message" && event["item"]["text"].is_string())
-        .then(|| {
-            truncate(
-                &run_output::redact(text(&event["item"], "text"), secrets),
-                MESSAGE_LIMIT,
-            )
-        });
+    let item = &event["item"];
+    let reply = item["type"] == "agent_message"
+        || (event["type"] == "item.completed" && item["type"] == "proposed_plan");
+    let reply_text = text(item, "text");
+    let message = (reply && !reply_text.is_empty())
+        .then(|| truncate(&run_output::redact(reply_text, secrets), MESSAGE_LIMIT));
     let completed = event["type"] == "turn.completed";
     if completed && !event["usage"].is_null() {
         changes.boundary = Some(json!({ "usage": event["usage"] }));
