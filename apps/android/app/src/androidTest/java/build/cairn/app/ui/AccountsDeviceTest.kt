@@ -167,37 +167,39 @@ class AccountsDeviceTest {
                     DeviceAccountsVault(),
                     beaconOrigin = "",
                 )
-            compose.setContent {
-                val state by vm.state.collectAsStateWithLifecycle()
-                LaunchedEffect(Unit) {
-                    vm.state.first { it.ready }
-                    vm.connect(server.url("/").toString())
+            FixtureUi(compose).use { fixture ->
+                fixture.setContent(vm) {
+                    val state by vm.state.collectAsStateWithLifecycle()
+                    LaunchedEffect(Unit) {
+                        vm.state.first { it.ready }
+                        vm.connect(server.url("/").toString())
+                    }
+                    CairnTheme { if (state.session.authenticated) ConnectionsScreen(vm, state) }
                 }
-                CairnTheme { if (state.session.authenticated) ConnectionsScreen(vm, state) }
-            }
-            val name = "Personal Google"
-            compose.waitUntil(15000) {
+                val name = "Personal Google"
+                compose.waitUntil(15000) {
+                    compose
+                        .onAllNodesWithContentDescription(name, substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertFalse(checked.get())
+                compose.onNodeWithContentDescription("Vérifier l’usage maintenant").performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Quotas dans les détails du compte")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertTrue(checked.get())
                 compose
-                    .onAllNodesWithContentDescription(name, substring = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+                    .onNodeWithContentDescription(name, substring = true)
+                    .performScrollTo()
+                    .performClick()
+                compose.onNodeWithText("Semaine · Gemini Models").assertIsDisplayed()
+                compose.onNodeWithText("75 %").assertIsDisplayed()
+                compose.onNodeWithText("Reprise ", substring = true).assertIsDisplayed()
             }
-            assertFalse(checked.get())
-            compose.onNodeWithContentDescription("Vérifier l’usage maintenant").performClick()
-            compose.waitUntil(10000) {
-                compose
-                    .onAllNodesWithText("Quotas dans les détails du compte")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            assertTrue(checked.get())
-            compose
-                .onNodeWithContentDescription(name, substring = true)
-                .performScrollTo()
-                .performClick()
-            compose.onNodeWithText("Semaine · Gemini Models").assertIsDisplayed()
-            compose.onNodeWithText("75 %").assertIsDisplayed()
-            compose.onNodeWithText("Reprise ", substring = true).assertIsDisplayed()
         }
     }
 
