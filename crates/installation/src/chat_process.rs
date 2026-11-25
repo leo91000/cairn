@@ -266,6 +266,8 @@ struct Chat<'a> {
     starting_items: Option<StartingItems>,
     /// This Codex release announced side questions for the running turn.
     side_available: bool,
+    /// Codex recorded the turn's request in the thread, so a sample of the thread sees it.
+    turn_recorded: bool,
     /// Side questions Codex is answering, with the ID of their `thread/sample` request.
     sides: HashMap<String, u64>,
     /// The `thread/sample` requests in progress, aborted with the attempt.
@@ -732,6 +734,9 @@ impl Chat<'_> {
                 self.emit(json!({ "type": "turn.started" })).await?;
             }
             "item/started" | "item/completed" => {
+                if incoming.method == "item/completed" && params["item"]["type"] == "userMessage" {
+                    self.turn_recorded |= self.turn_submitted;
+                }
                 let kind = incoming.method.replace('/', ".");
                 self.item(params["item"].clone(), &kind).await?;
             }
@@ -1401,9 +1406,11 @@ impl Chat<'_> {
             let id = text(&message, "id");
             if message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true {
                 // A release that did not announce side questions leaves them unread, and
-                // never mistakes one for steering.
+                // never mistakes one for steering. Until Codex records the turn's request,
+                // a sample would not see it: they wait in the inbox.
                 if self.completed.is_some()
                     || !self.side_available
+                    || !self.turn_recorded
                     || !self.attempted.insert(id.to_owned())
                 {
                     continue;
@@ -1557,6 +1564,7 @@ async fn run_session(
         proposal_request: None,
         starting_items: None,
         side_available: false,
+        turn_recorded: false,
         sides: HashMap::new(),
         samples: JoinSet::new(),
     };

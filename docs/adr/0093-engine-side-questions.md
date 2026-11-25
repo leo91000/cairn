@@ -16,6 +16,8 @@ history. What changes is how Cairn meets it:
   turn runs. Codex reports no text when that response is a tool call, and never runs
   the call. The sample is not written to the thread's history and is cancelled with
   `thread/sample/cancel`. Its prompt also tells the model that tools are unavailable.
+  The adapter samples only once Codex reports the turn's user message completed: a
+  sample taken earlier copies a thread without the request the agent is working on.
   Codex's `/side` command, a `thread/fork` that keeps its tools, stays unused.
 - **Gate on a minimum release, qualified in CI.** Adapters announce side questions
   from the first release probed (Claude Code 2.1.308, Codex 0.172.0) onwards, for plain
