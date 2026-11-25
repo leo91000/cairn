@@ -25,19 +25,21 @@ impl Seed {
         phase: &'static str,
         started: Instant,
     ) -> Self {
-        Self((enabled && crate::performance::enabled()).then(|| Report {
-            operation,
-            attempt: crate::performance::identity(attempt).to_owned(),
-            started_at_ms: crate::config::now() - started.elapsed().as_millis() as i64,
-            started,
-            phase_started: started,
-            phase,
-            completed_phases: Vec::new(),
-            received_bytes: 0,
-            cache_hit: false,
-            reserved: false,
-            finished: false,
-        }))
+        Self(
+            (enabled && tracing::level_enabled!(tracing::Level::INFO)).then(|| Report {
+                operation,
+                attempt: crate::performance::identity(attempt).to_owned(),
+                started_at_ms: crate::config::now() - started.elapsed().as_millis() as i64,
+                started,
+                phase_started: started,
+                phase,
+                completed_phases: Vec::new(),
+                received_bytes: 0,
+                cache_hit: false,
+                reserved: false,
+                finished: false,
+            }),
+        )
     }
 
     pub(in crate::nodes) fn next(&mut self, phase: &'static str) {
@@ -78,7 +80,7 @@ impl Drop for Seed {
         };
         let phase_ms = report.phase_started.elapsed().as_millis() as u64;
         let elapsed_ms = report.started.elapsed().as_millis() as u64;
-        crate::performance::try_record(move |delivery| {
+        crate::performance::try_record_detached(move |delivery| {
             tracing::info!(
                 target: "cairn_performance",
                 operation = report.operation,

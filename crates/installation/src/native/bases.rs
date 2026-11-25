@@ -493,6 +493,13 @@ impl Bases {
         Ok(freed)
     }
 
+    pub(super) async fn can_warm(&self, archives: &[Archive], disk_mib: u64) -> Result<bool> {
+        if self.stored(archives, disk_mib).await?.is_some() {
+            return Ok(true);
+        }
+        crate::project_archives::available(&self.data, archives).await
+    }
+
     /// Runs inside an owning blocking worker: cancellation cannot drop its
     /// storage lease or temporary directory while nested I/O still writes.
     pub async fn warm(
@@ -527,9 +534,13 @@ impl Bases {
             if stop.is_cancelled() {
                 return Ok(());
             }
-            expanded = expanded.saturating_add(
-                crate::project_archives::cached_allocation(&self.data, archive, unit, stop).await?,
-            );
+            match crate::project_archives::cached_allocation(&self.data, archive, unit, stop).await
+            {
+                Ok(bytes) => expanded = expanded.saturating_add(bytes),
+                // A cold archive can be evicted after the worker's readiness check.
+                Err(error) if error.is_not_found() => return Ok(()),
+                Err(error) => return Err(error),
+            }
         }
         // Shared extracted caches may not exhaust the data pool's inodes.
         // Allocation rounded per entry is a conservative upper bound on

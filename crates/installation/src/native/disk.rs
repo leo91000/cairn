@@ -676,8 +676,9 @@ pub(crate) async fn recover_exports(state: &Path) -> Result<()> {
 }
 
 pub(crate) struct StorageGuard {
-    _storage: StorageOwnership,
+    _storage: crate::file_lock::Guard,
     _priority: crate::file_lock::Guard,
+    _observation: Option<StorageObservation>,
 }
 
 pub(crate) struct StorageOwnership {
@@ -693,6 +694,28 @@ struct StorageObservation {
     wait_ms: u64,
 }
 
+impl StorageObservation {
+    fn new(operation: &'static str, id: &str, started: Instant) -> Option<Self> {
+        if !tracing::level_enabled!(tracing::Level::INFO) {
+            return None;
+        }
+
+        let acquired = Instant::now();
+        let safe_id = if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            id
+        } else {
+            crate::performance::identity(id)
+        };
+        Some(Self {
+            operation,
+            id: safe_id.to_owned(),
+            acquired,
+            acquired_at_ms: crate::config::now(),
+            wait_ms: acquired.duration_since(started).as_millis() as u64,
+        })
+    }
+}
+
 impl Drop for StorageObservation {
     fn drop(&mut self) {
         let operation = self.operation;
@@ -700,7 +723,7 @@ impl Drop for StorageObservation {
         let acquired_at_ms = self.acquired_at_ms;
         let wait_ms = self.wait_ms;
         let held_ms = self.acquired.elapsed().as_millis() as u64;
-        crate::performance::try_record(move |delivery| {
+        crate::performance::try_record_detached(move |delivery| {
             tracing::info!(
                 target: "cairn_performance",
                 operation = "native_storage_lock",
@@ -716,32 +739,6 @@ impl Drop for StorageObservation {
     }
 }
 
-impl StorageOwnership {
-    fn observe(
-        lock: crate::file_lock::Guard,
-        operation: &'static str,
-        id: &str,
-        started: Instant,
-    ) -> Self {
-        let acquired = Instant::now();
-        let safe_id = if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            id
-        } else {
-            crate::performance::identity(id)
-        };
-        Self {
-            _lock: lock,
-            _observation: crate::performance::enabled().then(|| StorageObservation {
-                operation,
-                id: safe_id.to_owned(),
-                acquired,
-                acquired_at_ms: crate::config::now(),
-                wait_ms: acquired.duration_since(started).as_millis() as u64,
-            }),
-        }
-    }
-}
-
 pub(crate) fn try_storage_lock(
     state: &Path,
     operation: &'static str,
@@ -750,7 +747,10 @@ pub(crate) fn try_storage_lock(
 ) -> Result<StorageOwnership> {
     let started = Instant::now();
     let lock = crate::file_lock::exclusive(&state.join("storage.lock"), busy)?;
-    Ok(StorageOwnership::observe(lock, operation, id, started))
+    Ok(StorageOwnership {
+        _lock: lock,
+        _observation: StorageObservation::new(operation, id, started),
+    })
 }
 
 #[cfg(test)]
@@ -786,8 +786,9 @@ pub(crate) async fn observed_lock(
             ) {
                 Ok(owner) => {
                     return Ok(StorageGuard {
-                        _storage: StorageOwnership::observe(owner, operation, id, started),
+                        _storage: owner,
                         _priority: priority,
+                        _observation: StorageObservation::new(operation, id, started),
                     });
                 }
                 Err(error) if error.status == 409 => {

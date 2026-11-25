@@ -243,6 +243,59 @@ fn background_preparation_yields_to_foreground_intent_and_then_finishes() {
 }
 
 #[tokio::test]
+async fn background_preparation_discards_missing_and_evicted_archives_while_storage_is_busy() {
+    use std::{sync::Arc, time::Duration};
+
+    let (_root, bases, archive, _) = fixture().await;
+    let storage =
+        crate::file_lock::exclusive(&bases.state.join("storage.lock"), "fixture storage owner")
+            .unwrap();
+    let warm = Arc::new(super::bases_warmer::Warmer::default());
+    let budget = Arc::new(tokio::sync::Mutex::new(
+        json!({ "limits": { "diskMiB": 16384 } }),
+    ));
+    let stop = CancellationToken::new();
+    let missing = Archive {
+        hash: "c".repeat(64),
+        ..archive.clone()
+    };
+    warm.enqueue(
+        bases.clone(),
+        json!({ "archives": [missing], "diskMiB": 128, "individual": true }),
+        budget.clone(),
+        stop.clone(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), warm.wait_idle())
+        .await
+        .expect("a missing archive must not compete for the storage lock");
+
+    let delayed = budget.lock().await;
+    warm.enqueue(
+        bases.clone(),
+        json!({ "archives": [&archive], "diskMiB": 128, "individual": true }),
+        budget.clone(),
+        stop,
+    )
+    .await
+    .unwrap();
+    tokio::fs::remove_file(
+        bases
+            .data
+            .join("project-archives")
+            .join(format!("{}.zip", archive.hash)),
+    )
+    .await
+    .unwrap();
+    drop(delayed);
+    tokio::time::timeout(Duration::from_secs(2), warm.wait_idle())
+        .await
+        .expect("an evicted archive must be discarded while storage is still busy");
+    drop(storage);
+}
+
+#[tokio::test]
 #[ignore = "executed by the isolated background preparation wrapper"]
 async fn background_preparation_yields_to_foreground_intent_and_then_finishes_child() {
     use std::{sync::Arc, time::Duration};

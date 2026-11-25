@@ -304,7 +304,7 @@ pub(crate) async fn prefetch(
     token: String,
     descriptors: Vec<Archive>,
     stop: CancellationToken,
-) -> Result<Vec<Archive>> {
+) -> Result<()> {
     prefetch_into(
         crate::nodes::node_data_dir(),
         client,
@@ -323,11 +323,10 @@ async fn prefetch_into(
     token: String,
     descriptors: Vec<Archive>,
     stop: CancellationToken,
-) -> Result<Vec<Archive>> {
-    let mut available = Vec::new();
+) -> Result<()> {
     for descriptor in descriptors {
         if stop.is_cancelled() {
-            break;
+            return Ok(());
         }
         // A best-effort warmer never queues behind active filesystem mutation.
         let state = crate::native::state_dir();
@@ -339,21 +338,18 @@ async fn prefetch_into(
                 "Native storage busy.",
             ) {
                 Ok(guard) => Some(guard),
-                Err(error) if error.status == 409 => break,
+                Err(error) if error.status == 409 => return Ok(()),
                 Err(error) => return Err(error),
             }
         } else {
             None
         };
         let Some(_guard) = lock().try_lock().ok() else {
-            break;
+            return Ok(());
         };
         clean_interrupted_downloads(&root).await?;
         match cached(&root, &descriptor).await {
-            Ok(Some(_)) => {
-                available.push(descriptor);
-                continue;
-            }
+            Ok(Some(_)) => continue,
             Ok(None) => {}
             Err(error) => {
                 tracing::debug!(project_id = %descriptor.project_id, status = error.status, "Project archive preload deferred");
@@ -390,31 +386,18 @@ async fn prefetch_into(
                 // Keep both mutation guards until accepted writes and any
                 // publication already in flight have settled.
                 let _ = fetch.await;
-                break;
+                return Ok(());
             }
             result = &mut fetch => {
-                match result {
-                    Ok(()) => available.push(descriptor.clone()),
-                    Err(error) if !stop.is_cancelled() => {
-                        tracing::debug!(
-                            project_id = %descriptor.project_id,
-                            status = error.status,
-                            "Project archive preload deferred"
-                        );
-                    }
-                    Err(_) => break,
+                if let Err(error) = result
+                    && !stop.is_cancelled()
+                {
+                    tracing::debug!(project_id = %descriptor.project_id, status = error.status, "Project archive preload deferred");
                 }
             },
         }
     }
-    // A later download can evict an earlier hit while pruning the cache.
-    let mut retained = Vec::with_capacity(available.len());
-    for descriptor in available {
-        if cached(&root, &descriptor).await?.is_some() {
-            retained.push(descriptor);
-        }
-    }
-    Ok(retained)
+    Ok(())
 }
 
 /// OS locks make the foreground priority visible to the controller process as
@@ -481,17 +464,6 @@ mod tests {
             project_id: crate::config::id(),
             ..first.clone()
         };
-        let evicted = Archive {
-            project_id: crate::config::id(),
-            hash: "c".repeat(64),
-            bytes: CACHE_BYTES,
-            ..first.clone()
-        };
-        std::fs::create_dir(root.path().join("project-archives")).unwrap();
-        std::fs::File::create(evicted.path(root.path()))
-            .unwrap()
-            .set_len(CACHE_BYTES)
-            .unwrap();
         let first_id = first.project_id.clone();
         let expected_requests = [first.project_id.clone(), second.project_id.clone()];
         let (requests, mut received_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -514,23 +486,16 @@ mod tests {
             .parse()
             .unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let available = prefetch_into(
+        prefetch_into(
             root.path().to_owned(),
             reqwest::Client::new(),
             master,
             "fixture".into(),
-            vec![evicted.clone(), first, second.clone()],
+            vec![first, second.clone()],
             CancellationToken::new(),
         )
         .await
         .unwrap();
-        assert_eq!(
-            available
-                .iter()
-                .map(|archive| archive.project_id.as_str())
-                .collect::<Vec<_>>(),
-            [second.project_id.as_str()]
-        );
         for project in expected_requests {
             assert_eq!(received_requests.try_recv().unwrap(), project);
         }
@@ -538,7 +503,6 @@ mod tests {
             tokio::fs::read(second.path(root.path())).await.unwrap(),
             payload
         );
-        assert!(!evicted.path(root.path()).exists());
         server.abort();
     }
 

@@ -52,8 +52,9 @@ impl Catalogs {
 
         let refresh = now >= entry.refresh_at;
         if refresh {
-            // Coalesce concurrent refreshes and back off when the remote fails.
-            entry.refresh_at = now + REFRESH_AFTER;
+            // An in-flight discovery owns refresh until it ends or the
+            // catalogue expires. A cold caller can then replace this entry.
+            entry.refresh_at = entry.discovered_at + EXPIRES_AFTER;
         }
         Some((entry.tools.clone(), refresh))
     }
@@ -116,6 +117,15 @@ impl Catalogs {
             current.refresh_at = now + REFRESH_AFTER;
         } else {
             entries.remove(id);
+        }
+    }
+
+    fn defer_refresh_retry(&self, id: &str, expected: Identity, previous: &Arc<Vec<Value>>) {
+        if let Some(entry) = self.0.lock().unwrap().get_mut(id)
+            && entry.identity == expected
+            && Arc::ptr_eq(previous, &entry.tools)
+        {
+            entry.refresh_at = Instant::now() + REFRESH_AFTER;
         }
     }
 
@@ -198,7 +208,7 @@ pub(super) async fn list(s: &Arc<Service>, id: &str, bearer: &str) -> Result<Val
         tracing::info!(target: "cairn_performance", operation = "mcp_gateway_catalog", connection_id = id, event = "hit", refresh);
         let result = access.listing(&tools);
         if refresh {
-            refresh_in_background(s.clone(), access, identity, tools);
+            refresh_in_background(s.clone(), access, identity, tools, REFRESH_TIMEOUT);
         }
         return Ok(result);
     }
@@ -211,7 +221,7 @@ pub(super) async fn list(s: &Arc<Service>, id: &str, bearer: &str) -> Result<Val
     if let Some((tools, refresh)) = s.mcps.gateway_catalogs.get(id, identity) {
         let result = access.listing(&tools);
         if refresh {
-            refresh_in_background(s.clone(), access, identity, tools);
+            refresh_in_background(s.clone(), access, identity, tools, REFRESH_TIMEOUT);
         }
         return Ok(result);
     }
@@ -225,34 +235,36 @@ fn refresh_in_background(
     access: Access,
     expected: Identity,
     previous: Arc<Vec<Value>>,
+    list_timeout: Duration,
 ) {
     tokio::spawn(async move {
+        let id = &access.server.id;
         let refresh = async {
-            let id = access.server.id.clone();
+            let connection = id.clone();
             let authorize = access.authorize.with_guard(move |db| {
-                let current = db.mcp_credentials(&id)?.map(|bytes| blake3::hash(&bytes));
+                let current = db
+                    .mcp_credentials(&connection)?
+                    .map(|bytes| blake3::hash(&bytes));
                 if current != expected.credentials {
                     return Err(Error::conflict("MCP credentials changed during discovery."));
                 }
                 Ok(())
             });
 
-            let id = &access.server.id;
             let mut timing =
                 crate::performance::Operation::new("mcp_gateway_refresh", id, "connect");
-            let discovery = tokio::time::timeout(REFRESH_TIMEOUT, async {
-                let mut client =
-                    Client::connect_for_catalog_refresh(&s, &access.server, authorize.clone())
-                        .await?;
-                timing.next("list");
-                let tools = client.discover().await;
-                Ok::<_, Error>((client, tools))
-            })
-            .await;
-            let (client, result) = match discovery {
-                Ok(Ok((client, tools))) => (Some(client), tools),
-                Ok(Err(error)) => (None, Err(error)),
-                Err(_) => return Ok(()),
+            let session =
+                Client::connect_for_catalog_refresh(&s, &access.server, authorize.clone()).await;
+            let (client, result) = match session {
+                Ok(mut client) => {
+                    timing.next("list");
+                    let tools = match tokio::time::timeout(list_timeout, client.discover()).await {
+                        Ok(result) => result,
+                        Err(_) => Err(Error::timeout("MCP catalogue refresh timed out.")),
+                    };
+                    (Some(client), tools)
+                }
+                Err(error) => (None, Err(error)),
             };
 
             timing.next("publish");
@@ -282,6 +294,9 @@ fn refresh_in_background(
             () = s.shutdown.cancelled() => {}
             _ = refresh => {}
         }
+        s.mcps
+            .gateway_catalogs
+            .defer_refresh_retry(id, expected, &previous);
     });
 }
 
@@ -466,7 +481,7 @@ mod tests {
                 move |headers: HeaderMap| {
                     let (entered, release) = (entered.clone(), release.clone());
                     async move {
-                        if headers.get("mcp-session-id").is_some_and(|id| id == "2") {
+                        if headers.get("mcp-session-id").is_some_and(|id| id == "2" || id == "4") {
                             entered.notify_one();
                             release.notified().await;
                         }
@@ -558,6 +573,29 @@ mod tests {
             "updated_fixture"
         );
         close_release.notify_one();
+
+        let access = Access::for_grant(&s, id, bearer).await.unwrap();
+        let identity = access.identity(&s).await.unwrap();
+        let (previous, _) = s.mcps.gateway_catalogs.get(id, identity).unwrap();
+        refresh_in_background(
+            s.clone(),
+            access,
+            identity,
+            previous,
+            Duration::from_millis(250),
+        );
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), close_entered.notified())
+            .await
+            .expect("the timed-out listing must close the legacy session");
+        assert_eq!(
+            list(&s, id, bearer).await.unwrap()["tools"][0]["name"],
+            "updated_fixture"
+        );
+        close_release.notify_one();
+        release.notify_one();
         upstream.abort();
     }
 }

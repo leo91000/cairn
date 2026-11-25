@@ -262,16 +262,24 @@ impl Client {
             "capabilities": {},
             "clientInfo": client_info(),
         });
-        let result = client.request("initialize", params).await?;
+        let result = match client.request("initialize", params).await {
+            Ok(result) => result,
+            Err(error) => {
+                client.close().await;
+                return Err(error);
+            }
+        };
         let version = text(&result, "protocolVersion");
         if !VERSIONS[1..].contains(&version) {
+            client.close().await;
             return Err(unsupported_version());
         }
         client.protocol = version.into();
         client.capabilities = result["capabilities"].clone();
-        client
-            .notify("notifications/initialized", json!({}))
-            .await?;
+        if let Err(error) = client.notify("notifications/initialized", json!({})).await {
+            client.close().await;
+            return Err(error);
+        }
         Ok(client)
     }
 

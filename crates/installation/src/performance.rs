@@ -6,7 +6,7 @@ mod isolated;
 pub(crate) mod native;
 
 pub use activity::{Activity, heartbeat};
-pub(crate) use isolated::{Delivery, try_record};
+pub(crate) use isolated::{Delivery, try_record, try_record_detached};
 
 #[cfg(test)]
 pub(crate) use isolated::flush;

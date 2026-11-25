@@ -780,9 +780,9 @@ pub(super) async fn seed_with_stop(
     if let Err(error) = received {
         if error.message == SEED_OUTGREW_RESERVATION && reserved {
             timing.next("reservation_retry");
-            drop(timing);
             drop(temp);
             drop(reservation);
+            drop(timing);
             selection[skill_cache::NEGOTIATE] = Value::Null;
             return Box::pin(seed_with_stop(
                 client,
@@ -814,10 +814,10 @@ pub(super) async fn seed_with_stop(
                     );
                     let _ = tokio::fs::remove_file(cache.join(&key)).await;
                     timing.next("cache_retry");
-                    drop(timing);
                     drop(temp);
                     drop(reservation);
                     drop(storage_guard);
+                    drop(timing);
                     selection[skill_cache::NEGOTIATE] = Value::Null;
                     return Box::pin(seed_with_stop(
                         client,

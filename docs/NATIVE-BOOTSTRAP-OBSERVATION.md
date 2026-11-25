@@ -99,8 +99,9 @@ On the node, `native_storage_lock` reports the operation that held the
 shared pool lock, its acquisition timestamp and its hold duration. Compare
 those intervals with the connector's `storage_wait` phase. The records are
 best-effort and bounded. An absent or delayed record does not rule out
-contention. Background archive warming is queued only for archives that
-prefetch actually found or downloaded.
+contention. The controller queues background warming for a ready base or for
+archives present in its cache. It rechecks availability before building because
+archives can be evicted after prefetch.
 
 For end-to-end latency, measure from the stored first message to the
 `thread.started` event. The `submitted` bootstrap milestone ends earlier.

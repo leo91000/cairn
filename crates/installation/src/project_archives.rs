@@ -82,6 +82,15 @@ async fn cached(root: &Path, descriptor: &Archive) -> Result<Option<std::fs::Fil
     }
 }
 
+pub(crate) async fn available(root: &Path, archives: &[Archive]) -> Result<bool> {
+    for archive in archives {
+        if cached(root, archive).await?.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 async fn fingerprint(file: std::fs::File) -> Result<(String, u64)> {
     tokio::task::spawn_blocking(move || {
         use std::io::Read;

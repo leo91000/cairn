@@ -61,33 +61,43 @@ impl Warmer {
         } else {
             vec![archives]
         };
-        let mut queue = self.queue.lock().await;
+        let mut candidates = Vec::new();
         for archives in groups {
             if !Bases::eligible(&archives, disk_mib) {
                 continue;
             }
             let key = bases.key(&archives, disk_mib)?;
+            if bases.can_warm(&archives, disk_mib).await? {
+                candidates.push(Job {
+                    archives,
+                    disk_mib,
+                    key,
+                });
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
+        let mut queue = self.queue.lock().await;
+        for job in candidates {
             if value["individual"] != true {
-                queue.failures.remove(&key);
+                queue.failures.remove(&job.key);
             }
             if queue
                 .failures
-                .get(&key)
+                .get(&job.key)
                 .is_some_and(|failure| failure.retry_at > Instant::now())
             {
                 continue;
             }
-            if queue.jobs.iter().any(|job| job.key == key) {
+            if queue.jobs.iter().any(|queued| queued.key == job.key) {
                 continue;
             }
             if queue.jobs.len() == 64 {
                 queue.jobs.pop_front();
             }
-            queue.jobs.push_back(Job {
-                archives,
-                disk_mib,
-                key,
-            });
+            queue.jobs.push_back(job);
         }
         if queue.running {
             return Ok(());
@@ -118,6 +128,9 @@ impl Warmer {
                 };
                 job
             };
+            if !matches!(bases.can_warm(&job.archives, job.disk_mib).await, Ok(true)) {
+                continue;
+            }
             let limits = budget.lock().await;
             let limit = limits["limits"]["diskMiB"]
                 .as_u64()
@@ -169,6 +182,9 @@ impl Warmer {
             let result = tokio::task::spawn_blocking(move || {
                 let _owner = owner;
                 handle.block_on(async {
+                    if !worker.can_warm(&work.archives, work.disk_mib).await? {
+                        return Ok(());
+                    }
                     let policy =
                         match tokio::fs::read(worker.state.join("storage-policy.json")).await {
                             Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
