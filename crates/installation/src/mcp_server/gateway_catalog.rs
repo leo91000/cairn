@@ -11,17 +11,19 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::time::Instant;
+use tokio::time::{Instant, timeout_at};
 
 const REFRESH_AFTER: Duration = Duration::from_secs(60);
 const EXPIRES_AFTER: Duration = Duration::from_secs(300);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 32;
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
+const MAX_REFRESH_PAGES: usize = 64;
+const MAX_REFRESHES: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Identity {
@@ -39,12 +41,37 @@ struct Entry {
 }
 
 #[derive(Default)]
-pub(crate) struct Catalogs(Mutex<HashMap<String, Entry>>);
+pub(crate) struct Catalogs {
+    entries: Mutex<HashMap<String, Entry>>,
+    refreshing: Arc<Mutex<HashSet<String>>>,
+}
+
+struct RefreshLease {
+    refreshing: Arc<Mutex<HashSet<String>>>,
+    id: String,
+}
+
+impl Drop for RefreshLease {
+    fn drop(&mut self) {
+        self.refreshing.lock().unwrap().remove(&self.id);
+    }
+}
 
 impl Catalogs {
+    fn begin_refresh(&self, id: &str) -> Option<RefreshLease> {
+        let mut active = self.refreshing.lock().unwrap();
+        if active.len() >= MAX_REFRESHES || !active.insert(id.to_owned()) {
+            return None;
+        }
+        Some(RefreshLease {
+            refreshing: self.refreshing.clone(),
+            id: id.to_owned(),
+        })
+    }
+
     fn get(&self, id: &str, identity: Identity) -> Option<(Arc<Vec<Value>>, bool)> {
         let now = Instant::now();
-        let mut entries = self.0.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap();
         let entry = entries.get_mut(id)?;
         if entry.identity != identity || now.duration_since(entry.discovered_at) >= EXPIRES_AFTER {
             return None;
@@ -66,7 +93,7 @@ impl Catalogs {
         }
 
         let now = Instant::now();
-        let mut entries = self.0.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap();
         if entries.len() >= MAX_CONNECTIONS
             && !entries.contains_key(&id)
             && let Some(oldest) = entries
@@ -88,7 +115,7 @@ impl Catalogs {
     }
 
     pub(crate) fn invalidate(&self, id: &str) {
-        self.0.lock().unwrap().remove(id);
+        self.entries.lock().unwrap().remove(id);
     }
 
     /// Update the entry that requested refresh. A newer cold or management
@@ -102,7 +129,7 @@ impl Catalogs {
     ) {
         let tools =
             tools.filter(|tools| encoded_size(tools).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES));
-        let mut entries = self.0.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap();
         let Some(current) = entries.get_mut(id) else {
             return;
         };
@@ -121,7 +148,7 @@ impl Catalogs {
     }
 
     fn defer_refresh_retry(&self, id: &str, expected: Identity, previous: &Arc<Vec<Value>>) {
-        if let Some(entry) = self.0.lock().unwrap().get_mut(id)
+        if let Some(entry) = self.entries.lock().unwrap().get_mut(id)
             && entry.identity == expected
             && Arc::ptr_eq(previous, &entry.tools)
         {
@@ -235,9 +262,17 @@ fn refresh_in_background(
     access: Access,
     expected: Identity,
     previous: Arc<Vec<Value>>,
-    list_timeout: Duration,
+    refresh_timeout: Duration,
 ) {
+    let Some(lease) = s.mcps.gateway_catalogs.begin_refresh(&access.server.id) else {
+        s.mcps
+            .gateway_catalogs
+            .defer_refresh_retry(&access.server.id, expected, &previous);
+        return;
+    };
+    let deadline = Instant::now() + refresh_timeout;
     tokio::spawn(async move {
+        let _lease = lease;
         let id = &access.server.id;
         let refresh = async {
             let connection = id.clone();
@@ -253,12 +288,22 @@ fn refresh_in_background(
 
             let mut timing =
                 crate::performance::Operation::new("mcp_gateway_refresh", id, "connect");
-            let session =
-                Client::connect_for_catalog_refresh(&s, &access.server, authorize.clone()).await;
+            let session = Client::connect_for_catalog_refresh(
+                &s,
+                &access.server,
+                authorize.clone(),
+                deadline,
+            )
+            .await;
             let (client, result) = match session {
                 Ok(mut client) => {
                     timing.next("list");
-                    let tools = match tokio::time::timeout(list_timeout, client.discover()).await {
+                    let tools = match timeout_at(
+                        deadline,
+                        client.discover_catalog(MAX_CATALOG_BYTES, MAX_REFRESH_PAGES),
+                    )
+                    .await
+                    {
                         Ok(result) => result,
                         Err(_) => Err(Error::timeout("MCP catalogue refresh timed out.")),
                     };
@@ -268,24 +313,28 @@ fn refresh_in_background(
             };
 
             timing.next("publish");
-            authorize.recheck().await?;
-            match result {
-                Ok(tools) if validate(&tools).is_ok() => {
-                    s.mcps
-                        .gateway_catalogs
-                        .apply_refresh(id, expected, &previous, Some(tools));
+            if timeout_at(deadline, authorize.recheck())
+                .await
+                .is_ok_and(|result| result.is_ok())
+            {
+                match result {
+                    Ok(tools) if validate(&tools).is_ok() => {
+                        s.mcps
+                            .gateway_catalogs
+                            .apply_refresh(id, expected, &previous, Some(tools));
+                    }
+                    Err(error) if crate::mcp_client::upstream_access_denied(&error) => {
+                        s.mcps
+                            .gateway_catalogs
+                            .apply_refresh(id, expected, &previous, None);
+                    }
+                    _ => {}
                 }
-                Err(error) if crate::mcp_client::upstream_access_denied(&error) => {
-                    s.mcps
-                        .gateway_catalogs
-                        .apply_refresh(id, expected, &previous, None);
-                }
-                _ => {}
             }
             timing.next("close");
             if let Some(client) = client {
                 // The client bounds legacy DELETE separately from discovery.
-                client.close().await;
+                client.close_catalog_refresh().await;
             }
             timing.finish();
             Ok::<_, Error>(())
@@ -366,6 +415,80 @@ mod tests {
     };
 
     #[test]
+    fn refresh_slots_survive_entry_eviction_and_bound_total_work() {
+        let catalogs = Catalogs::default();
+        let mut leases = (0..MAX_REFRESHES)
+            .map(|index| catalogs.begin_refresh(&format!("fixture-{index}")).unwrap())
+            .collect::<Vec<_>>();
+        catalogs.invalidate("fixture-0");
+        assert!(catalogs.begin_refresh("fixture-0").is_none());
+        assert!(catalogs.begin_refresh("another").is_none());
+
+        drop(leases.swap_remove(0));
+        assert!(catalogs.begin_refresh("fixture-0").is_some());
+    }
+
+    #[tokio::test]
+    async fn background_catalogue_stops_at_cumulative_page_and_byte_limits() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = Router::new().route(
+            "/mcp",
+            post({
+                let calls = calls.clone();
+                move |Json(request): Json<Value>| {
+                    let calls = calls.clone();
+                    async move {
+                        let result = match text(&request, "method") {
+                            "server/discover" => json!({
+                                "supportedVersions": [crate::mcp_client::MODERN],
+                                "capabilities": { "tools": {} },
+                            }),
+                            "tools/list" => {
+                                let counter = calls.fetch_add(1, Ordering::Relaxed);
+                                json!({
+                                    "tools": [{
+                                        "name": "fixture",
+                                        "description": "x".repeat(160),
+                                        "inputSchema": { "type": "object" },
+                                    }],
+                                    "nextCursor": counter.to_string(),
+                                })
+                            }
+                            method => panic!("unexpected MCP method {method}"),
+                        };
+                        Json(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }))
+                    }
+                }
+            }),
+        );
+        let (listener, address) = crate::common::bind().await;
+        let upstream = crate::common::serve(listener, router);
+        let root = tempfile::tempdir().unwrap();
+        let s = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+        let server: McpServer = serde_json::from_value(json!({
+            "url": format!("http://{address}/mcp"),
+            "allowPrivateNetwork": true,
+        }))
+        .unwrap();
+        let mut client = Client::connect_server(&s, &server).await.unwrap();
+
+        let page_limit = client.discover_catalog(4096, 1).await.unwrap_err();
+        assert_eq!(page_limit.status, 413);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let byte_limit = client.discover_catalog(300, 4).await.unwrap_err();
+        assert_eq!(byte_limit.status, 413);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+
+        client.close().await;
+        upstream.abort();
+    }
+
+    #[test]
     fn refresh_is_coalesced_and_expiry_never_serves_an_old_credential() {
         let catalogs = Catalogs::default();
         let identity = Identity {
@@ -380,7 +503,7 @@ mod tests {
         assert!(!refresh);
 
         catalogs
-            .0
+            .entries
             .lock()
             .unwrap()
             .get_mut("fixture")
@@ -412,7 +535,7 @@ mod tests {
                 .is_none()
         );
         catalogs
-            .0
+            .entries
             .lock()
             .unwrap()
             .get_mut("fixture")
@@ -536,7 +659,7 @@ mod tests {
         list(&s, id, bearer).await.unwrap();
         s.mcps
             .gateway_catalogs
-            .0
+            .entries
             .lock()
             .unwrap()
             .get_mut(id)
@@ -582,7 +705,7 @@ mod tests {
             access,
             identity,
             previous,
-            Duration::from_millis(250),
+            Duration::from_secs(1),
         );
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
             .await

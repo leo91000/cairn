@@ -9,7 +9,7 @@ use crate::{
     },
     service::Service,
     store::Db,
-    validation::text,
+    validation::{encoded_size, text},
 };
 use reqwest::{
     Method,
@@ -17,6 +17,7 @@ use reqwest::{
 };
 use serde_json::{Map, Value, json};
 use std::{collections::HashSet, time::Duration};
+use tokio::time::{Instant, timeout_at};
 
 pub const MODERN: &str = "2026-07-28";
 
@@ -122,11 +123,35 @@ impl Client {
         s: &Service,
         server: &McpServer,
         authorize: Authorization,
+        deadline: Instant,
     ) -> Result<Self> {
-        authorize.recheck().await?;
-        let secrets = s.mcps.server_secrets(s, &server.id).await?;
-        authorize.recheck().await?;
-        Self::open(s, server, &secrets, authorize).await
+        if !server.is_http() {
+            return Err(Error::bad("Background catalogue discovery requires HTTP."));
+        }
+        let timeout = || Error::timeout("MCP catalogue connection timed out.");
+        let mut client = timeout_at(deadline, async {
+            authorize.recheck().await?;
+            let secrets = s.mcps.server_secrets(s, &server.id).await?;
+            let authorize = Some(authorize);
+            let transport = Self::transport(s, server, &secrets, &authorize).await?;
+            Ok::<_, Error>(Self::new(transport, MODERN, authorize))
+        })
+        .await
+        .map_err(|_| timeout())??;
+
+        let handshake = timeout_at(deadline, async {
+            if !client.probe_modern().await? {
+                client.open_legacy_session().await?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|_| Err(timeout()));
+        if let Err(error) = handshake {
+            client.close_catalog_refresh().await;
+            return Err(error);
+        }
+        Ok(client)
     }
 
     pub(crate) async fn connect_authorized(
@@ -212,29 +237,33 @@ impl Client {
             MODERN,
             authorization,
         );
-        match client.request("server/discover", json!({})).await {
+        match client.probe_modern().await {
+            Ok(true) => Ok(client),
+            Ok(false) => client.initialize_legacy(s, server, secrets).await,
+            Err(error) => {
+                client.close().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// True when the modern session is ready, false when legacy negotiation
+    /// is appropriate for this transport and response.
+    async fn probe_modern(&mut self) -> Result<bool> {
+        match self.request("server/discover", json!({})).await {
             Ok(discovery) => {
                 let modern = discovery["supportedVersions"]
                     .as_array()
                     .is_some_and(|versions| versions.iter().any(|v| v == MODERN));
                 if !modern {
-                    client.close().await;
                     return Err(unsupported_version());
                 }
-                client.capabilities = discovery["capabilities"].clone();
-                Ok(client)
+                self.capabilities = discovery["capabilities"].clone();
+                Ok(true)
             }
-            Err(error) if [401, 403].contains(&error.status) => {
-                client.close().await;
-                Err(error)
-            }
-            Err(error) if [400, 405, 501].contains(&error.status) || client.is_stdio() => {
-                client.initialize_legacy(s, server, secrets).await
-            }
-            Err(error) => {
-                client.close().await;
-                Err(error)
-            }
+            Err(error) if upstream_access_denied(&error) => Err(error),
+            Err(error) if [400, 405, 501].contains(&error.status) || self.is_stdio() => Ok(false),
+            Err(error) => Err(error),
         }
     }
 
@@ -256,31 +285,28 @@ impl Client {
         } else {
             self
         };
-        client.protocol = LEGACY.into();
+        if let Err(error) = client.open_legacy_session().await {
+            client.close().await;
+            return Err(error);
+        }
+        Ok(client)
+    }
+
+    async fn open_legacy_session(&mut self) -> Result<()> {
+        self.protocol = LEGACY.into();
         let params = json!({
             "protocolVersion": LEGACY,
             "capabilities": {},
             "clientInfo": client_info(),
         });
-        let result = match client.request("initialize", params).await {
-            Ok(result) => result,
-            Err(error) => {
-                client.close().await;
-                return Err(error);
-            }
-        };
+        let result = self.request("initialize", params).await?;
         let version = text(&result, "protocolVersion");
         if !VERSIONS[1..].contains(&version) {
-            client.close().await;
             return Err(unsupported_version());
         }
-        client.protocol = version.into();
-        client.capabilities = result["capabilities"].clone();
-        if let Err(error) = client.notify("notifications/initialized", json!({})).await {
-            client.close().await;
-            return Err(error);
-        }
-        Ok(client)
+        self.protocol = version.into();
+        self.capabilities = result["capabilities"].clone();
+        self.notify("notifications/initialized", json!({})).await
     }
 
     async fn transport(
@@ -372,6 +398,18 @@ impl Client {
     }
 
     pub async fn discover(&mut self) -> Result<Vec<Value>> {
+        self.discover_tools(None).await
+    }
+
+    pub(crate) async fn discover_catalog(
+        &mut self,
+        bytes: usize,
+        pages: usize,
+    ) -> Result<Vec<Value>> {
+        self.discover_tools(Some((bytes, pages))).await
+    }
+
+    async fn discover_tools(&mut self, mut budget: Option<(usize, usize)>) -> Result<Vec<Value>> {
         if self.capabilities.get("tools").is_none() {
             return Ok(vec![]);
         }
@@ -379,25 +417,35 @@ impl Client {
         let mut cursors = HashSet::new();
         let mut cursor = Value::Null;
         loop {
+            if let Some((_, pages)) = &mut budget {
+                *pages = pages.checked_sub(1).ok_or_else(|| {
+                    Error::too_large("MCP catalogue exceeds the background page limit.")
+                })?;
+            }
             let params = if cursor.is_null() {
                 json!({})
             } else {
                 json!({ "cursor": cursor })
             };
             let page = self.request("tools/list", params).await?;
+            if let Some((bytes, _)) = &mut budget {
+                *bytes = bytes.checked_sub(encoded_size(&page)?).ok_or_else(|| {
+                    Error::too_large("MCP catalogue exceeds the background byte limit.")
+                })?;
+            }
             let Some(batch) = page["tools"].as_array() else {
                 return Err(Error::bad_gateway(
                     "MCP server returned an invalid tool catalog.",
                 ));
             };
-            tools.extend(batch.iter().cloned());
             cursor = page["nextCursor"].clone();
             let repeated = !cursor.is_null() && !cursors.insert(cursor.to_string());
-            if tools.len() > MAX_TOOLS || repeated {
+            if tools.len().saturating_add(batch.len()) > MAX_TOOLS || repeated {
                 return Err(Error::bad_gateway(
                     "Tool catalog is too large or has an invalid cursor.",
                 ));
             }
+            tools.extend(batch.iter().cloned());
             if cursor.is_null() {
                 return Ok(tools);
             }
@@ -418,6 +466,10 @@ impl Client {
                 http.close(&self.protocol).await;
             }
         }
+    }
+
+    pub(crate) async fn close_catalog_refresh(self) {
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.close()).await;
     }
 }
 
