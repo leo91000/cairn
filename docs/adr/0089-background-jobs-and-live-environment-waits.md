@@ -40,6 +40,15 @@ atomically over idle closure; cancellation and restart fence the original
 attempt and never send a job to its replacement. A missing start acknowledgement
 is reconciled by its original request identity rather than by issuing a command.
 
+When the environment reaches its deadline after the conversation has finished,
+Cairn keeps the completed turn's outcome and records the deadline in activity.
+The controller still closes the environment and any unconfirmed job outcomes
+become unknown. The saved outcome survives a manager restart during fencing.
+A successful controller receipt also identifies the exact completed chat turn
+if the manager restarts before publishing its outcome.
+A confirmed workspace finalization failure overrides the completed outcome.
+An outstanding wait or in-flight continuation still reports an interruption.
+
 Native continuation refreshes existing transient bind inodes through controller-
 owned handles. Managed provider credentials are removed inside the retained environment after
 the provider tree is reaped and before its completion is acknowledged. A changed

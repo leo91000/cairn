@@ -420,11 +420,14 @@ impl Execution {
             .await;
         timer.abort();
         if let Some(environment) = environment {
-            let message = result.as_ref().err().map_or_else(
-                || "Execution environment stopped.".to_owned(),
-                |error| error.message.clone(),
-            );
-            environment.fail(message).await;
+            match &result {
+                Ok(_) => {
+                    environment
+                        .fail("Execution environment stopped.".into())
+                        .await;
+                }
+                Err(error) => environment.fail_with(error.clone()).await,
+            }
         }
         let broker = &self.broker;
         let id = &self.id;
@@ -474,8 +477,12 @@ impl Execution {
 /// replacement VM that cannot start under memory pressure, is retried a few
 /// times rather than reported as the agent's own exit status.
 fn exit_code(result: Result<i32>, lease_expired: bool) -> i32 {
+    use crate::background_jobs::protocol::{CONTROL_INTERRUPTED, INVALID_CONTROL_FRAME};
+
     match result {
         _ if lease_expired => CONTROLLER_INTERRUPTED,
+        Err(error) if error.code.as_deref() == Some(CONTROL_INTERRUPTED) => CONTROLLER_INTERRUPTED,
+        Err(error) if error.code.as_deref() == Some(INVALID_CONTROL_FRAME) => CONTROLLER_FAILED,
         Err(error) if error.is_unavailable() => CONTROLLER_INTERRUPTED,
         Err(error) if error.is_internal() => CONTROLLER_FAILED,
         Err(_) => 1,
@@ -1237,6 +1244,19 @@ mod tests {
         assert_ne!(
             CONTROLLER_FAILED, 1,
             "agent exit 1 must stay a final failure"
+        );
+    }
+
+    #[test]
+    fn wire_failure_and_workload_interruption_keep_their_controller_exit_classes() {
+        use crate::background_jobs::protocol::{CONTROL_INTERRUPTED, invalid_control_frame};
+
+        let interrupted =
+            Error::coded(502, CONTROL_INTERRUPTED, "Workload termination is unknown.");
+        assert_eq!(exit_code(Err(interrupted), false), CONTROLLER_INTERRUPTED);
+        assert_eq!(
+            exit_code(Err(invalid_control_frame()), false),
+            CONTROLLER_FAILED
         );
     }
 

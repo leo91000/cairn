@@ -457,6 +457,7 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
         format!("turn-speed:{run}"),
         format!("turn-returned:{run}"),
         format!("turn-settled:{run}"),
+        format!("environment-control-failure:{run}"),
         format!("chat-error:{cid}"),
     ]
     .into_iter()
@@ -473,7 +474,8 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     }
     db.revoke_mcp_run(run)?;
     db.0.execute(
-        "DELETE FROM kv WHERE key IN (SELECT 'message-returned:'||id FROM chat_messages WHERE chat_id=?)",
+        "DELETE FROM kv WHERE key IN (SELECT 'message-returned:'||id FROM chat_messages WHERE chat_id=?1)
+                        OR key IN (SELECT 'retained-followup:'||id FROM chat_messages WHERE chat_id=?1)",
         [cid],
     )?;
     db.0.execute("DELETE FROM chat_messages WHERE chat_id=?", [cid])?;

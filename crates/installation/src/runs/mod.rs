@@ -319,6 +319,14 @@ impl Db<'_> {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    pub(crate) fn completed_recovery_ids(&self) -> Result<Vec<String>> {
+        Ok(self
+            .0
+            .prepare_cached("SELECT id FROM runs WHERE status='succeeded' AND recovery_pending=1 ORDER BY created_at")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     pub(crate) fn run_record(&self, id: &str) -> Result<Option<RunRecord>> {
         if self.0.is_autocommit() {
             let tx = rusqlite::Transaction::new_unchecked(

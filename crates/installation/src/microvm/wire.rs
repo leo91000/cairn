@@ -9,6 +9,24 @@ use tokio::io::{
 pub const PORT: u32 = 5200;
 pub const MAX_MESSAGE: usize = 2_000_000;
 pub const MAX_CHUNK: usize = 65536;
+pub(crate) const INVALID_WIRE_FRAME: &str = "vm_invalid_control_frame";
+
+pub(super) fn disconnected(error: &std::io::Error) -> Error {
+    tracing::debug!(%error, "VM control connection interrupted");
+    Error::unavailable("Guest control connection was interrupted.")
+}
+
+pub(super) fn stream_error(error: std::io::Error) -> Error {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::BrokenPipe
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::ConnectionReset
+        | ErrorKind::NotConnected
+        | ErrorKind::UnexpectedEof => disconnected(&error),
+        _ => error.into(),
+    }
+}
 
 /// Archive data stays binary on its dedicated import connection. A zero length
 /// terminates the archive; EOF before that marker is an interrupted transfer.
@@ -34,23 +52,29 @@ pub async fn read_chunk(reader: &mut (impl AsyncRead + Unpin), buffer: &mut [u8]
 pub async fn read(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<Value>> {
     let mut bytes = Vec::new();
     loop {
-        let chunk = reader.fill_buf().await?;
+        let chunk = reader.fill_buf().await.map_err(stream_error)?;
         if chunk.is_empty() {
             return if bytes.is_empty() {
                 Ok(None)
             } else {
-                Err(Error::bad("Truncated VM message."))
+                Err(Error::unavailable("Truncated VM message."))
             };
         }
         let end = chunk.iter().position(|b| *b == b'\n');
         let count = end.map_or(chunk.len(), |n| n + 1);
         if bytes.len() + count > MAX_MESSAGE {
-            return Err(Error::bad("VM message exceeds limit."));
+            return Err(Error::coded(
+                400,
+                INVALID_WIRE_FRAME,
+                "VM message exceeds limit.",
+            ));
         }
         bytes.extend_from_slice(&chunk[..count]);
         reader.consume(count);
         if end.is_some() {
-            return Ok(Some(serde_json::from_slice(&bytes)?));
+            let value = serde_json::from_slice(&bytes)
+                .map_err(|_| Error::coded(500, INVALID_WIRE_FRAME, "Guest sent malformed JSON."))?;
+            return Ok(Some(value));
         }
     }
 }
@@ -69,14 +93,20 @@ pub async fn write(
         return Err(Error::bad("VM message exceeds limit."));
     }
     bytes.push(b'\n');
-    writer.write_all(&bytes).await?;
-    writer.flush().await?;
+    writer.write_all(&bytes).await.map_err(stream_error)?;
+    writer.flush().await.map_err(stream_error)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_io_does_not_relabel_full_storage_as_a_guest_disconnect() {
+        assert!(stream_error(std::io::ErrorKind::StorageFull.into()).is_internal());
+        assert!(stream_error(std::io::ErrorKind::ConnectionReset.into()).is_unavailable());
+    }
 
     #[tokio::test]
     async fn archive_frames_preserve_bytes_and_reject_truncated_or_oversized_data() {

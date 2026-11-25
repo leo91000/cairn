@@ -486,8 +486,8 @@ fn failure_changes(status: RunStatus, needs_fence: bool, summary: &str) -> crate
     }
 }
 
-/// Returns whether the execution is confirmed stopped. Otherwise the run is
-/// requeued for recovery with its outcome saved in the checkpoint.
+/// Returns whether the execution is confirmed stopped. Otherwise recovery
+/// still owes the fence, with the outcome saved in the checkpoint.
 async fn fence(s: &Service, checkpoint: &Checkpoint) -> Result<bool> {
     let run_id = checkpoint.id.as_str();
     let has_runner = checkpoint
@@ -502,6 +502,7 @@ async fn fence(s: &Service, checkpoint: &Checkpoint) -> Result<bool> {
         return Ok(true);
     }
     let current = s.store.run_state(run_id).await?;
+    let preserves_success = current.status == RunStatus::Succeeded && current.recovery_pending;
     if current.status != RunStatus::Queued {
         let settled = Settled::from_state(&current);
         checkpoint
@@ -509,9 +510,9 @@ async fn fence(s: &Service, checkpoint: &Checkpoint) -> Result<bool> {
             .await?;
     }
     let patch = crate::runs::RunChanges {
-        status: Some(RunStatus::Queued),
+        status: (!preserves_success).then_some(RunStatus::Queued),
         recovery_pending: Some(true),
-        finished_at: Some(None),
+        finished_at: (!preserves_success).then_some(None),
         account_wait_reason: Some(Some(
             (if current
                 .account_wait_reason

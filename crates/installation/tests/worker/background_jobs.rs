@@ -12,8 +12,24 @@ struct JobsController {
     root: PathBuf,
     jobs: tokio::sync::Mutex<Registry>,
     turns: tokio::sync::Mutex<Vec<(Value, Vec<Value>, bool)>>,
+    activity: tokio::sync::Notify,
+    disconnect_activity: Option<tokio_util::sync::CancellationToken>,
+    close_started: tokio::sync::Notify,
+    hold_close: Option<tokio_util::sync::CancellationToken>,
+    deadline: Option<DeadlineCase>,
     closed: AtomicBool,
     deleted: AtomicBool,
+}
+
+fn invalid_control_response() -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({
+            "error": "Execution environment sent an invalid control frame.",
+            "code": "environment_invalid_control_frame",
+        })),
+    )
+        .into_response()
 }
 
 impl JobsController {
@@ -41,9 +57,14 @@ impl JobsController {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             }
+            let item = if index == 0 && state.root.join("propose-plan").exists() {
+                json!({"id":"answer","type":"proposed_plan","text":"## Proposed plan"})
+            } else {
+                json!({"id":"answer","type":"agent_message","text":if index == 0 {"Background work started"} else {"Background completion observed"}})
+            };
             let output = format!(
                 "{}\n{}\n",
-                json!({"type":"item.completed","item":{"id":"answer","type":"agent_message","text":if index == 0 {"Background work started"} else {"Background completion observed"}}}),
+                json!({"type":"item.completed","item":item}),
                 json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}})
             );
             let mut turns = state.turns.lock().await;
@@ -99,11 +120,43 @@ async fn serve_jobs_controller(
                     outcome,
                 }
             }
-            JobRequest::Activity { request_id } => Event::Activity {
-                request_id,
-                jobs: state.jobs.lock().await.active(),
-                containers: false,
-            },
+            JobRequest::Activity { request_id } => {
+                if let Some(disconnect) = &state.disconnect_activity {
+                    use futures_util::StreamExt;
+
+                    let disconnect = disconnect.clone();
+                    state.activity.notify_one();
+                    if state.deadline == Some(DeadlineCase::InvalidActivity) {
+                        disconnect.cancelled().await;
+                        return invalid_control_response();
+                    }
+                    if state.deadline == Some(DeadlineCase::GatewayDuringActivity) {
+                        disconnect.cancelled().await;
+                        return StatusCode::BAD_GATEWAY.into_response();
+                    }
+                    if state.deadline == Some(DeadlineCase::GatewayTimeoutDuringActivity) {
+                        disconnect.cancelled().await;
+                        return StatusCode::GATEWAY_TIMEOUT.into_response();
+                    }
+                    let header =
+                        futures_util::stream::iter([Ok(axum::body::Bytes::from_static(b"{"))]);
+                    let disconnected = futures_util::stream::once(async move {
+                        disconnect.cancelled().await;
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "fixture disconnected",
+                        ))
+                    });
+                    return Body::from_stream(header.chain(disconnected)).into_response();
+                }
+                let jobs = state.jobs.lock().await.active();
+                state.activity.notify_one();
+                Event::Activity {
+                    request_id,
+                    jobs,
+                    containers: false,
+                }
+            }
             JobRequest::ResumeTurn {
                 request_id, plan, ..
             } => {
@@ -111,8 +164,27 @@ async fn serve_jobs_controller(
                 Event::Accepted { request_id }
             }
             JobRequest::Close { request_id } => {
+                if let Some(hold) = &state.hold_close {
+                    state.close_started.notify_one();
+                    hold.cancelled().await;
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
                 state.jobs.lock().await.close().await.unwrap();
                 state.closed.store(true, Ordering::SeqCst);
+                if state.deadline == Some(DeadlineCase::InvalidClose) {
+                    return invalid_control_response();
+                }
+                if state.deadline == Some(DeadlineCase::MalformedClose) {
+                    return "{invalid".into_response();
+                }
+                if state.deadline == Some(DeadlineCase::UnexpectedCloseResponse) {
+                    return Json(Event::Activity {
+                        request_id,
+                        jobs: false,
+                        containers: false,
+                    })
+                    .into_response();
+                }
                 Event::Accepted { request_id }
             }
         };
@@ -201,7 +273,40 @@ async fn serve_jobs_controller(
     if request.method() == "DELETE" && path.starts_with("/runs/") {
         state.jobs.lock().await.close().await.unwrap();
         state.deleted.store(true, Ordering::SeqCst);
+        if matches!(
+            state.deadline,
+            Some(
+                DeadlineCase::FlushFailedOnDelete
+                    | DeadlineCase::ShutdownDuringWaitWithFlushFailure
+            )
+        ) {
+            return Json(json!({ "StatusCode": 70, "FinalizationFailed": true })).into_response();
+        }
         return Json(json!({})).into_response();
+    }
+    if path.ends_with("/wait")
+        && matches!(
+            state.deadline,
+            Some(DeadlineCase::FlushFailedOnWait | DeadlineCase::WaitingWithFlushFailure)
+        )
+        && state.deleted.load(Ordering::SeqCst)
+    {
+        return Json(json!({ "StatusCode": 70, "FinalizationFailed": true })).into_response();
+    }
+    if path.ends_with("/wait") && state.deadline == Some(DeadlineCase::OfflineAtDeadline) {
+        return Json(json!({ "StatusCode": 143, "PhysicalFinalized": true })).into_response();
+    }
+    if path.ends_with("/wait") && state.deadline == Some(DeadlineCase::RetiredNativeCleanup) {
+        return Json(json!({
+            "StatusCode": 70,
+            "FinalizationFailed": true,
+            "NativeCleanup": {
+                "attemptId": path.split('/').nth(2).unwrap(),
+                "workloadFenced": true,
+                "message": "The old cleanup receipt is stale.",
+            },
+        }))
+        .into_response();
     }
     serve_controller(State(state.legacy.clone()), request).await
 }
@@ -229,10 +334,35 @@ async fn workspace_call(plan: &Value, name: &str, args: Value, call: u64) -> Val
     reply["result"]["structuredContent"].clone()
 }
 
-#[tokio::test]
-async fn managed_job_wait_releases_account_and_resumes_the_same_environment() {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeadlineCase {
+    Completed,
+    DisconnectedDuringActivity,
+    GatewayDuringActivity,
+    GatewayTimeoutDuringActivity,
+    InvalidActivity,
+    InvalidClose,
+    MalformedClose,
+    UnexpectedCloseResponse,
+    Waiting,
+    FlushFailedOnDelete,
+    FlushFailedOnWait,
+    WaitingWithFlushFailure,
+    RestartDuringFence,
+    ShutdownDuringWait,
+    ShutdownDuringWaitWithFlushFailure,
+    OfflineAtDeadline,
+    RetiredNativeCleanup,
+}
+
+async fn jobs_fixture(
+    deadline: Option<DeadlineCase>,
+) -> (Fixture, Arc<JobsController>, tokio::task::JoinHandle<()>) {
     let mut fixture = Fixture::with_concurrency(1).await;
     fixture.stop(false).await;
+    if deadline.is_some() {
+        fixture.clock = Some(FixtureClock::new(fixture.root.path()));
+    }
     let service = fixture.service.clone();
     let mut account = serde_json::to_value(
         service
@@ -266,6 +396,28 @@ async fn managed_job_wait_releases_account_and_resumes_the_same_environment() {
             cairn_installation::background_jobs::boot_ms().unwrap() + 60_000,
         )),
         turns: tokio::sync::Mutex::new(Vec::new()),
+        activity: tokio::sync::Notify::new(),
+        disconnect_activity: matches!(
+            deadline,
+            Some(
+                DeadlineCase::DisconnectedDuringActivity
+                    | DeadlineCase::GatewayDuringActivity
+                    | DeadlineCase::GatewayTimeoutDuringActivity
+                    | DeadlineCase::InvalidActivity
+            )
+        )
+        .then(tokio_util::sync::CancellationToken::new),
+        close_started: tokio::sync::Notify::new(),
+        hold_close: matches!(
+            deadline,
+            Some(
+                DeadlineCase::RestartDuringFence
+                    | DeadlineCase::ShutdownDuringWait
+                    | DeadlineCase::ShutdownDuringWaitWithFlushFailure
+            )
+        )
+        .then(tokio_util::sync::CancellationToken::new),
+        deadline,
         closed: AtomicBool::new(false),
         deleted: AtomicBool::new(false),
     });
@@ -275,7 +427,6 @@ async fn managed_job_wait_releases_account_and_resumes_the_same_environment() {
         config.runner_url = format!("http://{address}");
     })
     .await;
-    let service = fixture.service.clone();
     let server = common::serve(
         listener,
         Router::new()
@@ -285,6 +436,13 @@ async fn managed_job_wait_releases_account_and_resumes_the_same_environment() {
     cairn_installation::nodes::refresh_local(&fixture.service)
         .await
         .unwrap();
+    (fixture, state, server)
+}
+
+#[tokio::test]
+async fn managed_job_wait_releases_account_and_resumes_the_same_environment() {
+    let (mut fixture, state, server) = jobs_fixture(None).await;
+    let service = fixture.service.clone();
     let chat = fixture
         .start_chat(message("Start and await a managed measurement"))
         .await;
@@ -387,6 +545,448 @@ async fn managed_job_wait_releases_account_and_resumes_the_same_environment() {
     .await;
     assert!(state.closed.load(Ordering::SeqCst));
     assert_eq!(state.legacy.plans.lock().await.len(), 1);
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn background_deadline_preserves_a_completed_chat_without_a_wait() {
+    check_background_deadline(DeadlineCase::Completed).await;
+}
+
+#[tokio::test]
+async fn background_deadline_preserves_success_when_the_controller_stream_disconnects() {
+    check_background_deadline(DeadlineCase::DisconnectedDuringActivity).await;
+}
+
+#[tokio::test]
+async fn background_deadline_preserves_success_when_the_gateway_loses_the_controller() {
+    for case in [
+        DeadlineCase::GatewayDuringActivity,
+        DeadlineCase::GatewayTimeoutDuringActivity,
+    ] {
+        check_background_deadline(case).await;
+    }
+}
+
+#[tokio::test]
+async fn background_deadline_keeps_an_observed_controller_protocol_failure() {
+    check_background_deadline(DeadlineCase::InvalidActivity).await;
+}
+
+#[tokio::test]
+async fn background_deadline_keeps_a_controller_protocol_failure_during_close() {
+    for case in [
+        DeadlineCase::InvalidClose,
+        DeadlineCase::MalformedClose,
+        DeadlineCase::UnexpectedCloseResponse,
+    ] {
+        check_background_deadline(case).await;
+    }
+}
+
+#[tokio::test]
+async fn background_deadline_reports_interruption_when_the_chat_is_waiting() {
+    check_background_deadline(DeadlineCase::Waiting).await;
+}
+
+#[tokio::test]
+async fn background_deadline_surfaces_a_flush_failure_in_the_delete_receipt() {
+    check_background_deadline(DeadlineCase::FlushFailedOnDelete).await;
+}
+
+#[tokio::test]
+async fn background_deadline_observes_a_flush_failure_after_delete() {
+    check_background_deadline(DeadlineCase::FlushFailedOnWait).await;
+}
+
+#[tokio::test]
+async fn background_deadline_keeps_a_confirmed_flush_failure_for_an_active_wait() {
+    check_background_deadline(DeadlineCase::WaitingWithFlushFailure).await;
+}
+
+#[tokio::test]
+async fn background_deadline_finishes_fencing_after_the_manager_restarts() {
+    check_background_deadline(DeadlineCase::RestartDuringFence).await;
+}
+
+#[tokio::test]
+async fn background_deadline_keeps_a_wait_during_graceful_manager_shutdown() {
+    check_background_deadline(DeadlineCase::ShutdownDuringWait).await;
+}
+
+#[tokio::test]
+async fn shutdown_at_deadline_keeps_the_already_confirmed_provider_reply() {
+    check_shutdown_after_receipt(ReceiptExit::Graceful).await;
+}
+
+#[tokio::test]
+async fn restart_at_deadline_keeps_the_confirmed_plan_without_an_agent_message() {
+    check_shutdown_after_receipt(ReceiptExit::Plan).await;
+}
+
+#[tokio::test]
+async fn restart_at_deadline_keeps_the_whole_confirmed_multipart_reply() {
+    check_shutdown_after_receipt(ReceiptExit::Multipart).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReceiptExit {
+    Graceful,
+    Plan,
+    Multipart,
+}
+
+async fn check_shutdown_after_receipt(exit: ReceiptExit) {
+    let (mut fixture, state, server) = jobs_fixture(Some(DeadlineCase::Completed)).await;
+    let summary = match exit {
+        ReceiptExit::Plan => {
+            tokio::fs::write(state.root.join("propose-plan"), "")
+                .await
+                .unwrap();
+            "## Proposed plan"
+        }
+        ReceiptExit::Multipart => "First part\nBackground work started",
+        ReceiptExit::Graceful => "Background work started",
+    };
+    let chat = fixture.start_chat(message("Start a background job")).await;
+    fixture.start().await;
+    let run = fixture.chat_run(&chat).await;
+    fixture
+        .until(&run, |run| run["sessionId"].is_string())
+        .await;
+    let plan = state.turns.lock().await[0].0.clone();
+    let clock = fixture.clock.as_mut().unwrap();
+    let deadline = clock.millis + 10_000;
+    let plan_path = fixture
+        .service
+        .config
+        .data_dir
+        .join("runner-plans")
+        .join(format!("{}.json", text(&plan, "id")));
+    let mut deadline_plan = plan;
+    deadline_plan["expires"] = deadline.into();
+    tokio::fs::write(plan_path, serde_json::to_vec(&deadline_plan).unwrap())
+        .await
+        .unwrap();
+    if exit == ReceiptExit::Multipart {
+        let path = fixture.run_directory(&run).join("output/result.md");
+        tokio::fs::write(path, summary).await.unwrap();
+    }
+    let gate =
+        tokio::net::UnixListener::bind(fixture.run_directory(&run).join("fixture-receipt.sock"))
+            .unwrap();
+    tokio::fs::write(state.root.join("finish-provider"), "")
+        .await
+        .unwrap();
+    let (_connection, _) = tokio::time::timeout(Duration::from_secs(10), gate.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let saved = fixture.checkpoint(&run).await;
+    let reported_at = saved["retainedCompletion"]["finishedAt"].as_i64().unwrap();
+    if exit == ReceiptExit::Multipart {
+        assert_eq!(saved["retainedCompletion"]["outputSummary"], summary);
+    }
+
+    assert_eq!(
+        fixture.service.store.run(&run).await.unwrap()["status"],
+        "running"
+    );
+    let clock = fixture.clock.as_mut().unwrap();
+    clock.advance(deadline - clock.millis + 1);
+    let abrupt = exit != ReceiptExit::Graceful;
+    fixture.stop(abrupt).await;
+    let retired = if abrupt {
+        fixture.start().await;
+        fixture
+            .until(&run, |run| {
+                run["status"] == "succeeded"
+                    && run["recoveryPending"] == false
+                    && state.deleted.load(Ordering::SeqCst)
+            })
+            .await
+    } else {
+        fixture.service.store.run(&run).await.unwrap()
+    };
+    assert_eq!(retired["status"], "succeeded");
+    assert_eq!(retired["finishedAt"], reported_at);
+    assert_eq!(retired["summary"], summary);
+    assert!(state.deleted.load(Ordering::SeqCst));
+    assert_eq!(state.turns.lock().await.len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn background_deadline_clears_the_chat_wait_if_ordinary_close_confirms_failed_flush() {
+    check_background_deadline(DeadlineCase::ShutdownDuringWaitWithFlushFailure).await;
+}
+
+#[tokio::test]
+async fn background_deadline_retires_a_completed_chat_when_the_manager_missed_expiry() {
+    check_background_deadline(DeadlineCase::OfflineAtDeadline).await;
+}
+
+#[tokio::test]
+async fn background_deadline_trusts_confirmed_retirement_over_stale_native_cleanup() {
+    check_background_deadline(DeadlineCase::RetiredNativeCleanup).await;
+}
+
+async fn check_background_deadline(case: DeadlineCase) {
+    let (mut fixture, state, server) = jobs_fixture(Some(case)).await;
+    let chat = fixture.start_chat(message("Start a background job")).await;
+    fixture.start().await;
+    let run = fixture.chat_run(&chat).await;
+    fixture
+        .until(&run, |run| run["sessionId"].is_string())
+        .await;
+    let plan = state.turns.lock().await[0].0.clone();
+    let job = workspace_call(
+        &plan,
+        "start_job",
+        json!({"name":"measurement","command":"exec sleep 120"}),
+        71,
+    )
+    .await;
+    let job_id = text(&job, "jobId");
+    let waiting = matches!(
+        case,
+        DeadlineCase::Waiting
+            | DeadlineCase::WaitingWithFlushFailure
+            | DeadlineCase::ShutdownDuringWait
+            | DeadlineCase::ShutdownDuringWaitWithFlushFailure
+    );
+    if waiting {
+        let wait = workspace_call(
+            &plan,
+            "wait_for",
+            json!({"conditions":[{"type":"job_finished","jobId":job_id},{"type":"delay","seconds":45}],"mode":"any","timeoutSeconds":55,"reason":"Await measurement"}),
+            72,
+        )
+        .await;
+        assert_eq!(wait["deferred"], true);
+    }
+    // The controller's deadline comes before the wait's own timeout. Keep the
+    // worker clock fixed until the provider receipt and its success are saved.
+    let clock = fixture.clock.as_ref().unwrap();
+    let deadline = clock.millis + 10_000;
+    let plan_path = fixture
+        .service
+        .config
+        .data_dir
+        .join("runner-plans")
+        .join(format!("{}.json", text(&plan, "id")));
+    let mut deadline_plan = plan.clone();
+    deadline_plan["expires"] = deadline.into();
+    tokio::fs::write(&plan_path, serde_json::to_vec(&deadline_plan).unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(state.root.join("finish-provider"), "")
+        .await
+        .unwrap();
+    let completed = fixture
+        .until(&run, |run| run["status"] == "succeeded")
+        .await;
+    assert_eq!(completed["summary"], "Background work started");
+    assert_eq!(fixture.worker_active_runs().await, Some(1));
+    assert!(matches!(
+        state.jobs.lock().await.status(job_id).unwrap(),
+        Outcome::Running
+    ));
+
+    tokio::time::timeout(Duration::from_secs(10), state.activity.notified())
+        .await
+        .unwrap();
+    if matches!(
+        case,
+        DeadlineCase::ShutdownDuringWait | DeadlineCase::ShutdownDuringWaitWithFlushFailure
+    ) {
+        let mut clock = fixture.clock.take().unwrap();
+        let release_close = async {
+            tokio::time::timeout(Duration::from_secs(10), state.close_started.notified())
+                .await
+                .unwrap();
+            clock.advance(deadline - clock.millis + 1);
+            state.hold_close.as_ref().unwrap().cancel();
+        };
+        tokio::join!(fixture.stop(false), release_close);
+        let retired = fixture.service.store.run(&run).await.unwrap();
+        let flush_failed = case == DeadlineCase::ShutdownDuringWaitWithFlushFailure;
+        if flush_failed {
+            assert_eq!(retired["status"], "failed");
+            assert!(text(&retired, "error").contains("filesystem could not be flushed"));
+        } else {
+            assert_eq!(retired["status"], "succeeded");
+            assert_eq!(retired["finishedAt"], completed["finishedAt"]);
+        }
+        assert!(fixture.checkpoint(&run).await["heldEnvironment"].is_null());
+        let waiting = fixture
+            .service
+            .store
+            .read(move |db| Ok(db.conversation(&chat)?.unwrap().wakeup.is_some()))
+            .await
+            .unwrap();
+        assert_eq!(waiting, !flush_failed);
+        assert!(state.deleted.load(Ordering::SeqCst));
+        server.abort();
+        return;
+    }
+    if case == DeadlineCase::OfflineAtDeadline {
+        assert!(fixture.checkpoint(&run).await["heldEnvironment"].is_object());
+        fixture.stop(true).await;
+    }
+    let clock = fixture.clock.as_mut().unwrap();
+    clock.advance(deadline - clock.millis + 1);
+    if let Some(disconnect) = &state.disconnect_activity {
+        disconnect.cancel();
+    }
+    if let Some(hold) = &state.hold_close {
+        tokio::time::timeout(Duration::from_secs(10), state.close_started.notified())
+            .await
+            .unwrap();
+        let recovering = fixture.service.store.run(&run).await.unwrap();
+        assert_eq!(recovering["recoveryPending"], true);
+        assert_eq!(recovering["status"], "succeeded");
+        assert_eq!(recovering["finishedAt"], completed["finishedAt"]);
+        let saved = fixture.checkpoint(&run).await;
+        assert_eq!(saved["settled"]["status"], "succeeded");
+        assert!(saved["heldEnvironment"].is_null());
+        assert!(!state.deleted.load(Ordering::SeqCst));
+        let relay = common::relay_fixture::context(&fixture.service).await;
+        reqwest::Client::new()
+            .post(format!("{}/api/chats/{chat}/stop", fixture.url))
+            .header("x-test-relay-token", text(&relay, "value"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert!(fixture.service.store.run(&run).await.unwrap()["cancelRequestedAt"].is_null());
+        fixture.stop(true).await;
+        hold.cancel();
+        fixture.start().await;
+    }
+    if case == DeadlineCase::OfflineAtDeadline {
+        fixture.start().await;
+    }
+    let expected_status = match case {
+        DeadlineCase::Completed
+        | DeadlineCase::DisconnectedDuringActivity
+        | DeadlineCase::GatewayDuringActivity
+        | DeadlineCase::GatewayTimeoutDuringActivity
+        | DeadlineCase::RestartDuringFence
+        | DeadlineCase::OfflineAtDeadline
+        | DeadlineCase::RetiredNativeCleanup => "succeeded",
+        DeadlineCase::InvalidActivity
+        | DeadlineCase::InvalidClose
+        | DeadlineCase::MalformedClose
+        | DeadlineCase::UnexpectedCloseResponse
+        | DeadlineCase::Waiting
+        | DeadlineCase::FlushFailedOnDelete
+        | DeadlineCase::FlushFailedOnWait
+        | DeadlineCase::WaitingWithFlushFailure => "failed",
+        DeadlineCase::ShutdownDuringWait | DeadlineCase::ShutdownDuringWaitWithFlushFailure => {
+            unreachable!("shutdown verified while worker is stopped")
+        }
+    };
+    let restarted = matches!(
+        case,
+        DeadlineCase::RestartDuringFence | DeadlineCase::OfflineAtDeadline
+    );
+    if restarted {
+        fixture
+            .until(&run, |run| {
+                matches!(run["status"].as_str(), Some("succeeded" | "failed"))
+                    && run["recoveryPending"] == false
+                    && state.deleted.load(Ordering::SeqCst)
+            })
+            .await;
+    }
+    fixture.until_worker_quiescent().await;
+    assert_eq!(state.closed.load(Ordering::SeqCst), !restarted);
+    assert!(state.deleted.load(Ordering::SeqCst));
+    assert_eq!(state.turns.lock().await.len(), 1);
+    assert!(fixture.checkpoint(&run).await["heldEnvironment"].is_null());
+
+    let retired = fixture.service.store.run(&run).await.unwrap();
+    assert_eq!(retired["status"], expected_status, "{}", retired["error"]);
+    assert_eq!(retired["recoveryPending"], false);
+    let control_fault = match case {
+        DeadlineCase::InvalidActivity | DeadlineCase::InvalidClose => {
+            Some("Execution controller failed to complete the control request.")
+        }
+        DeadlineCase::MalformedClose | DeadlineCase::UnexpectedCloseResponse => {
+            Some("Execution environment sent an invalid control frame.")
+        }
+        _ => None,
+    };
+    match case {
+        DeadlineCase::InvalidActivity
+        | DeadlineCase::InvalidClose
+        | DeadlineCase::MalformedClose
+        | DeadlineCase::UnexpectedCloseResponse => {
+            assert_eq!(retired["error"], control_fault.unwrap());
+        }
+        DeadlineCase::Waiting => assert_eq!(
+            retired["error"],
+            "Environment background work reached its time limit."
+        ),
+        DeadlineCase::FlushFailedOnDelete
+        | DeadlineCase::FlushFailedOnWait
+        | DeadlineCase::WaitingWithFlushFailure => {
+            assert!(text(&retired, "error").contains("filesystem could not be flushed"));
+        }
+        DeadlineCase::Completed
+        | DeadlineCase::DisconnectedDuringActivity
+        | DeadlineCase::GatewayDuringActivity
+        | DeadlineCase::GatewayTimeoutDuringActivity
+        | DeadlineCase::RestartDuringFence
+        | DeadlineCase::OfflineAtDeadline
+        | DeadlineCase::RetiredNativeCleanup => {
+            assert_eq!(retired["summary"], completed["summary"]);
+            assert_eq!(retired["finishedAt"], completed["finishedAt"]);
+            assert!(retired["error"].is_null());
+        }
+        DeadlineCase::ShutdownDuringWait | DeadlineCase::ShutdownDuringWaitWithFlushFailure => {
+            unreachable!("shutdown verified while worker is stopped")
+        }
+    }
+    assert_eq!(retired["sessionId"], completed["sessionId"]);
+    assert_eq!(retired["workspace"], completed["workspace"]);
+    let job_id = job_id.to_owned();
+    let (outcome, deadline_event): (String, String) = fixture
+        .service
+        .store
+        .read(move |db| {
+            let outcome = db.0.query_row(
+                "SELECT json_extract(outcome,'$.state') FROM background_jobs WHERE job_id=?",
+                [job_id],
+                |row| row.get(0),
+            )?;
+            let deadline_event = db.0.query_row(
+                "SELECT type FROM events WHERE run_id=? AND text=? ORDER BY id DESC LIMIT 1",
+                [
+                    run,
+                    control_fault
+                        .unwrap_or("Environment background work reached its time limit.")
+                        .into(),
+                ],
+                |row| row.get(0),
+            )?;
+            Ok((outcome, deadline_event))
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, "unknown");
+    assert_eq!(
+        deadline_event,
+        if waiting || control_fault.is_some() {
+            "error"
+        } else {
+            "diagnostic"
+        }
+    );
     fixture.stop(false).await;
     server.abort();
 }

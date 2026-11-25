@@ -38,6 +38,18 @@ pub(crate) struct AntigravityProbeRetry {
 pub struct RunCheckpoint {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_environment: Option<HeldEnvironment>,
+    /// The controller has been asked to close this generation for an ordinary stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) closing_held_generation: Option<String>,
+    /// A new turn was explicitly queued after this attempt's failure was shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) acknowledged_finalization_failure_attempt: Option<String>,
+    /// A successful controller turn receipt, recorded before the run view is settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) retained_completion: Option<RetainedCompletion>,
+    /// Input at or after this deadline cannot belong to the retired turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) retired_environment_deadline: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launched: Option<bool>,
     /// The chat message (or wakeup) whose turn last launched a process, empty for a launch
@@ -153,6 +165,15 @@ pub struct HeldEnvironment {
     pub attempt: String,
     pub generation: String,
     pub expires_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RetainedCompletion {
+    pub message_id: String,
+    pub finished_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_summary: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -323,14 +344,55 @@ impl RunCheckpoint {
 
     /// A display decision must not decode the retained workspace, tool sources,
     /// process identity and recovery state merely to inspect this flag.
-    pub(crate) fn fresh_session_in(db: &Db<'_>, run_id: &str) -> Result<bool> {
-        let value: Option<Option<bool>> =
-            db.0.prepare_cached(
-                "SELECT json_extract(state,'$.freshSession') FROM run_checkpoints WHERE run_id=?",
+    pub(crate) fn compaction_flags_in(db: &Db<'_>, run_id: &str) -> Result<(bool, bool)> {
+        let flags = db.0.prepare_cached(
+            "SELECT json_extract(state,'$.freshSession'), json_extract(state,'$.heldEnvironment.expiresAt') FROM run_checkpoints WHERE run_id=?",
+        )?.query_row([run_id], |row| {
+            let fresh: Option<bool> = row.get(0)?;
+            let deadline: Option<i64> = row.get(1)?;
+            Ok((fresh.unwrap_or(false), deadline.is_some_and(|deadline| now() >= deadline)))
+        }).optional()?;
+        Ok(flags.unwrap_or_default())
+    }
+
+    pub(crate) fn held_deadline_elapsed_in(db: &Db<'_>, run_id: &str, at: i64) -> Result<bool> {
+        let deadline: Option<Option<i64>> = db
+            .0
+            .prepare_cached(
+                "SELECT json_extract(state,'$.heldEnvironment.expiresAt') FROM run_checkpoints WHERE run_id=?",
             )?
             .query_row([run_id], |row| row.get(0))
             .optional()?;
-        Ok(value.flatten().unwrap_or(false))
+        Ok(deadline.flatten().is_some_and(|deadline| at >= deadline))
+    }
+
+    /// An expired live hold owns its wait until retirement, unless ordinary
+    /// closure already selected a cause before the controller request.
+    pub(crate) fn expired_hold_owns_wait_in(db: &Db<'_>, run_id: &str, at: i64) -> Result<bool> {
+        let owns_wait = db.0.prepare_cached(
+            "SELECT COALESCE(
+                json_extract(state,'$.heldEnvironment.expiresAt') <= ?2
+                AND json_extract(state,'$.heldEnvironment.attempt') = json_extract(state,'$.runnerId')
+                AND json_extract(state,'$.closingHeldGeneration') IS NOT json_extract(state,'$.heldEnvironment.generation'),
+                0
+            ) FROM run_checkpoints WHERE run_id=?1",
+        )?.query_row(rusqlite::params![run_id, at], |row| row.get::<_, bool>(0)).optional()?;
+        Ok(owns_wait.unwrap_or(false))
+    }
+
+    pub(crate) fn retained_input_deadline_in(db: &Db<'_>, run_id: &str) -> Result<Option<i64>> {
+        let deadline: Option<Option<i64>> = db
+            .0
+            .prepare_cached(
+                "SELECT COALESCE(
+                    CASE WHEN json_extract(state,'$.heldEnvironment.attempt') = json_extract(state,'$.runnerId')
+                         THEN json_extract(state,'$.heldEnvironment.expiresAt') END,
+                    json_extract(state,'$.retiredEnvironmentDeadline')
+                ) FROM run_checkpoints WHERE run_id=?",
+            )?
+            .query_row([run_id], |row| row.get(0))
+            .optional()?;
+        Ok(deadline.flatten())
     }
 
     pub async fn store(&self, store: &Store, run_id: &str) -> Result<()> {
@@ -479,6 +541,13 @@ impl RunCheckpoint {
             self.controller_observation = None;
         }
         self.finalization_failure_attempt = None;
+    }
+
+    pub fn acknowledge_finalization_observation(&mut self) {
+        if let Some(attempt) = &self.finalization_failure_attempt {
+            self.acknowledged_finalization_failure_attempt = Some(attempt.clone());
+        }
+        self.reset_finalization_observation();
     }
 
     /// Publish the cleanup failure once the optional proof has settled.
@@ -669,6 +738,22 @@ impl RunCheckpoint {
         self.process.as_ref()?.as_ref()
     }
 
+    pub(super) fn confirmed_retained_completion(
+        &self,
+        attempt: &str,
+        message: Option<&str>,
+    ) -> Option<&RetainedCompletion> {
+        self.retained_completion.as_ref().filter(|receipt| {
+            message == Some(receipt.message_id.as_str())
+                && self.runner_id() == Some(attempt)
+                && self.completed()
+                && self.process().is_none()
+                && self.output_error().is_none()
+                && !self.provider_failed()
+                && self.finalization_failure_attempt.as_deref() != Some(attempt)
+        })
+    }
+
     pub fn last_error(&self) -> &str {
         self.last_error
             .as_ref()
@@ -688,6 +773,7 @@ impl RunCheckpoint {
     /// it to be reused until an explicit capacity rejection proves no start.
     pub fn bind_paid_admission(&mut self, runner: &str, state: &cairn_contracts::RunState) {
         if self.runner_id() != Some(runner) {
+            self.acknowledged_finalization_failure_attempt = None;
             let controller =
                 self.controller_recoveries() > 0 && self.has_controller_recovery_reservation();
             let provider_paid = self.turn_pending != Some(true)
@@ -719,6 +805,9 @@ impl RunCheckpoint {
             self.held_environment = None;
         }
         self.runner_id = Some(Some(runner.to_owned()));
+        self.retained_completion = None;
+        self.retired_environment_deadline = None;
+        self.closing_held_generation = None;
         self.provider_failure_attempt = None;
         self.reset_finalization_observation();
         self.controller_recovery_reservation = None;

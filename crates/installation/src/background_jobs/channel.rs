@@ -1,7 +1,10 @@
 //! A framed request multiplexer on the environment's inherited private socket.
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use tokio::{
@@ -19,6 +22,7 @@ use crate::{
 
 struct Pending {
     replies: Mutex<HashMap<String, Option<oneshot::Sender<Event>>>>,
+    invalid_frame: AtomicBool,
 }
 
 struct RequestGuard {
@@ -53,6 +57,7 @@ impl Channel {
         let (events, received) = mpsc::channel(32);
         let pending = Arc::new(Pending {
             replies: Mutex::new(HashMap::new()),
+            invalid_frame: AtomicBool::new(false),
         });
         let stop = CancellationToken::new();
         let writing_stop = stop.clone();
@@ -81,10 +86,14 @@ impl Channel {
                     () = reading_stop.cancelled() => break,
                     value = wire::read(&mut read) => value,
                 };
-                let Ok(Some(value)) = value else {
-                    break;
+                let event = match value {
+                    Ok(Some(value)) => serde_json::from_value::<Event>(value).ok(),
+                    Ok(None) => break,
+                    Err(error) if error.is_unavailable() => break,
+                    Err(_) => None,
                 };
-                let Ok(event) = serde_json::from_value::<Event>(value) else {
+                let Some(event) = event else {
+                    reading_pending.invalid_frame.store(true, Ordering::Release);
                     break;
                 };
                 let request = match &event {
@@ -129,6 +138,17 @@ impl Channel {
         )
     }
 
+    pub(crate) fn invalid_frame(&self) -> bool {
+        self.pending.invalid_frame.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn disconnect_error(&self) -> Error {
+        if self.invalid_frame() {
+            return super::protocol::invalid_control_frame();
+        }
+        Error::unavailable("Execution environment disconnected.")
+    }
+
     pub async fn request(&self, request: Request) -> Result<Event> {
         let id = match &request {
             Request::StartJob { request_id, .. }
@@ -142,7 +162,7 @@ impl Channel {
         {
             let mut replies = self.pending.replies.lock().unwrap();
             if self.stop.is_cancelled() {
-                return Err(Error::unavailable("Execution environment disconnected."));
+                return Err(self.disconnect_error());
             }
             if replies.len() >= 32 {
                 return Err(Error::too_many_requests(
@@ -166,10 +186,8 @@ impl Channel {
             self.output
                 .send(request)
                 .await
-                .map_err(|_| Error::unavailable("Execution environment disconnected."))?;
-            receiver.await.map_err(|_| {
-                Error::unavailable("Execution environment did not acknowledge the request.")
-            })
+                .map_err(|_| self.disconnect_error())?;
+            receiver.await.map_err(|_| self.disconnect_error())
         })
         .await
         .map_err(|_| Error::timeout("Execution environment request timed out."));
@@ -186,11 +204,35 @@ impl Channel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn pending_request_distinguishes_invalid_frames_from_transport_loss() {
+        for (reply, status) in [
+            (b"invalid\n".as_slice(), 502),
+            (b"{}\n".as_slice(), 502),
+            (b"{".as_slice(), 503),
+        ] {
+            let (host, guest) = UnixStream::pair().unwrap();
+            let (channel, _events) = Channel::attach(host);
+            let request = channel.request(Request::Activity {
+                request_id: "activity".into(),
+            });
+            let respond = async move {
+                let mut guest = BufReader::new(guest);
+                assert!(wire::read(&mut guest).await.unwrap().is_some());
+                guest.get_mut().write_all(reply).await.unwrap();
+            };
+            let (reply, ()) = tokio::join!(request, respond);
+            assert_eq!(reply.unwrap_err().status, status);
+        }
+    }
 
     #[test]
     fn replying_keeps_request_id_reserved_until_owner_finishes() {
         let pending = Arc::new(Pending {
             replies: Mutex::new(HashMap::new()),
+            invalid_frame: AtomicBool::new(false),
         });
         let (sender, _receiver) = oneshot::channel();
         pending

@@ -536,7 +536,7 @@ fn registering(db: &Db<'_>, bearer: &str, request: &Request) -> Result<(Value, O
         if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
             return Err(Error::conflict("This conversation is no longer active."));
         }
-        if chat.paused || continuation::has_unhandled_input(db, chat)? {
+        if chat.paused || continuation::has_unhandled_input(db, chat, &run)? {
             return Err(Error::conflict(
                 "Handle pending user input before registering a wait.",
             ));

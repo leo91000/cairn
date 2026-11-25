@@ -1,5 +1,5 @@
 //! Durable continuation of the same conversation, independent of its native process.
-use super::{Conversation, MessageMode};
+use super::Conversation;
 use crate::{
     error::{Result, required},
     run_status::RunStatus,
@@ -20,15 +20,19 @@ pub(crate) fn has_pending_input(db: &Db<'_>, chat: &Conversation) -> Result<bool
 
 /// Input the current turn must handle before waiting: steering, answers and
 /// messages being delivered. Queued follow-ups wait for the task, wakeup included.
-pub(crate) fn has_unhandled_input(db: &Db<'_>, chat: &Conversation) -> Result<bool> {
-    Ok(db
-        .conversation_messages(&chat.id)?
-        .iter()
-        .any(|message| match message.status {
-            MessageStatus::Sending => true,
-            MessageStatus::Queued => message.mode == MessageMode::Steer,
-            _ => false,
-        }))
+pub(crate) fn has_unhandled_input(db: &Db<'_>, chat: &Conversation, run: &Value) -> Result<bool> {
+    let cutoff =
+        super::RunCheckpoint::retained_input_deadline_in(db, crate::validation::text(run, "id"))?;
+    for message in db.conversation_messages(&chat.id)? {
+        if message.status == MessageStatus::Sending
+            || (message.status == MessageStatus::Queued
+                && cutoff.is_none_or(|deadline| message.created_at < deadline)
+                && super::steering_fits_turn(db, &message, run)?)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The wakeup can still resume the turn that scheduled it.
@@ -49,7 +53,10 @@ pub(crate) fn resumable(chat: &Conversation, run: Option<&Value>) -> bool {
 
 /// Queued follow-ups start after the continuation of a wakeup that can still resume.
 pub(super) fn holds_queue(db: &Db<'_>, chat: &Conversation, run: Option<&Value>) -> Result<bool> {
-    Ok(resumable(chat, run) && !has_unhandled_input(db, chat)?)
+    let Some(run) = run else {
+        return Ok(false);
+    };
+    Ok(resumable(chat, Some(run)) && !has_unhandled_input(db, chat, run)?)
 }
 
 /// Rechecked in the launch transaction after async snapshot preparation.
