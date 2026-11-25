@@ -1106,6 +1106,9 @@ impl Chat<'_> {
             service_tier: Some(service_tier.as_str()).filter(|tier| !tier.is_empty()),
         };
         let params = serde_json::to_value(params)?;
+        // Before the turn's own items, which Codex may send before accepting it. Side
+        // questions are read from the inbox only once it is accepted.
+        self.offer_side_questions().await?;
         self.turn_submitted = true;
         self.starting_items = self.planning.then(StartingItems::default);
         let started = self.request("turn/start", params).await?;
@@ -1124,7 +1127,7 @@ impl Chat<'_> {
         if let Some(notice) = speed_notice {
             self.emit(notice).await?;
         }
-        self.offer_side_questions().await
+        Ok(())
     }
 
     /// Codex answers side questions with `thread/sample`: one response sampled from a copy of
