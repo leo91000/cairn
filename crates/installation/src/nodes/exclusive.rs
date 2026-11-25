@@ -172,7 +172,7 @@ fn valid_record(db: &Db<'_>, record: &Reservation) -> Result<bool> {
         && (chat.paused
             || chat.wakeup.is_some()
             || chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
-            || crate::chats::continuation::has_unhandled_input(db, &chat)?)
+            || crate::chats::continuation::has_unhandled_input(db, &chat, &run)?)
     {
         return Ok(false);
     }

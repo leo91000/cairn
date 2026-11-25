@@ -506,13 +506,17 @@ impl Controller {
             generation,
         }) = ready
         else {
-            return Err(Error::unavailable("Invalid environment readiness."));
+            return Err(if ready.is_none() {
+                channel.disconnect_error()
+            } else {
+                Error::bad_gateway("Invalid environment readiness.")
+            });
         };
         if attempt_id != id {
             return Err(Error::forbidden("Environment attempt does not match."));
         }
         control.canonical_plan(plan.clone()).await;
-        control.attach(channel, generation).await?;
+        control.attach(channel.clone(), generation).await?;
         let turn = plan["turnId"]
             .as_str()
             .ok_or_else(|| Error::bad("Missing provider turn identity."))?;
@@ -549,14 +553,24 @@ impl Controller {
                     control.finished(id, &turn_id, code, length).await?;
                 }
                 Some(EnvironmentEvent::TurnFailed { message, .. }) => {
-                    return Err(Error::unavailable(message));
+                    return Err(Error::coded(
+                        502,
+                        crate::background_jobs::protocol::CONTROL_INTERRUPTED,
+                        message,
+                    ));
                 }
                 Some(EnvironmentEvent::JobChanged {
                     outcome: crate::background_jobs::Outcome::Unknown { message },
                     ..
-                }) => return Err(Error::unavailable(message)),
+                }) => {
+                    return Err(Error::coded(
+                        502,
+                        crate::background_jobs::protocol::CONTROL_INTERRUPTED,
+                        message,
+                    ));
+                }
                 Some(_) => {}
-                None => return Err(Error::unavailable("Execution environment disconnected.")),
+                None => return Err(channel.disconnect_error()),
             }
         }
     }
@@ -1943,7 +1957,7 @@ impl Controller {
                     .environment(&id, &plan, uid, listener, control.clone(), stop.clone())
                     .await
                 {
-                    control.fail(error.message).await;
+                    control.fail_with(error).await;
                     stop.cancel();
                 }
             }))

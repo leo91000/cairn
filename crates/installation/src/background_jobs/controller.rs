@@ -34,7 +34,7 @@ struct State {
     generation: Option<String>,
     turns: HashMap<String, TurnReceipt>,
     starts: HashMap<String, u64>,
-    failure: Option<String>,
+    failure: Option<Error>,
     canonical_plan: Option<serde_json::Value>,
     native_bindings: Vec<NativeBinding>,
 }
@@ -167,7 +167,7 @@ impl Control {
         let (channel, guest_socket, native_bindings, first_turn) = {
             let state = self.state.lock().await;
             if let Some(error) = &state.failure {
-                return Err(Error::unavailable(error.clone()));
+                return Err(error.clone());
             }
             if let Request::ResumeTurn { plan, .. } = &mut request {
                 if state
@@ -255,8 +255,24 @@ impl Control {
                 &socket,
                 &crate::microvm::protocol::GuestRequest::Environment { request },
             )
-            .await?;
-            return serde_json::from_value(reply).map_err(Error::from);
+            .await
+            .map_err(|error| {
+                if error.code.as_deref() == Some(crate::microvm::wire::INVALID_WIRE_FRAME) {
+                    super::protocol::invalid_control_frame()
+                } else if error.is_internal() {
+                    Error::coded(
+                        502,
+                        super::protocol::CONTROL_INTERRUPTED,
+                        "Guest environment control I/O failed.",
+                    )
+                } else {
+                    error
+                }
+            })?;
+            let reply: crate::microvm::protocol::EnvironmentReply =
+                serde_json::from_value(reply)
+                    .map_err(|_| super::protocol::invalid_control_frame())?;
+            return reply.into_event();
         }
         Err(Error::unavailable("Execution environment is not ready."))
     }
@@ -328,7 +344,7 @@ impl Control {
                     return Ok(receipt.clone());
                 }
                 if let Some(error) = &state.failure {
-                    return Err(Error::unavailable(error.clone()));
+                    return Err(error.clone());
                 }
             }
             changed.await;
@@ -343,7 +359,7 @@ impl Control {
             {
                 let state = self.state.lock().await;
                 if let Some(error) = &state.failure {
-                    return Err(Error::unavailable(error.clone()));
+                    return Err(error.clone());
                 }
                 if let Some(offset) = state.starts.get(turn) {
                     return Ok(*offset);
@@ -354,11 +370,17 @@ impl Control {
     }
 
     pub async fn fail(&self, message: String) {
+        self.fail_with(Error::unavailable(message)).await;
+    }
+
+    pub(crate) async fn fail_with(&self, error: Error) {
         // A cancelled HTTP request cannot release captured inodes while its
         // blocking refresh still writes them. Keep physical teardown behind it.
         let _refresh = self.file_refresh.lock().await;
         let mut state = self.state.lock().await;
-        state.failure = Some(message);
+        if state.failure.as_ref().is_none_or(Error::is_unavailable) {
+            state.failure = Some(error);
+        }
         state.channel = None;
         state.guest_socket = None;
         state.native_bindings.clear();
@@ -389,6 +411,35 @@ fn replace_origin(value: &mut serde_json::Value, origin: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn guest_control_distinguishes_io_errors_from_a_missing_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        for (socket, expected_code) in [
+            (root.path().join("missing.sock"), None),
+            (
+                root.path().join("x".repeat(128)),
+                Some(super::super::protocol::CONTROL_INTERRUPTED),
+            ),
+        ] {
+            let control = Control::default();
+            control
+                .attach_guest(socket, "generation".into())
+                .await
+                .unwrap();
+            let error = control
+                .request(Request::Close {
+                    request_id: "close".into(),
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(error.code.as_deref(), expected_code);
+            assert_eq!(
+                error.status,
+                if expected_code.is_some() { 502 } else { 503 }
+            );
+        }
+    }
 
     #[tokio::test]
     async fn turn_receipts_require_a_start_and_preserve_exact_log_bounds() {
@@ -511,6 +562,23 @@ mod tests {
                 .unwrap()
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn normal_teardown_keeps_the_reported_control_failure() {
+        let control = Control::default();
+        control
+            .fail_with(Error::bad_gateway("Invalid control frame."))
+            .await;
+        control.fail("Execution environment stopped.".into()).await;
+        let failure = control
+            .request(Request::Activity {
+                request_id: "activity".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.status, 502);
+        assert_eq!(failure.message, "Invalid control frame.");
     }
 
     #[tokio::test]

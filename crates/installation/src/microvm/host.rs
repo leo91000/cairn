@@ -148,13 +148,27 @@ async fn install_control_image(source: &Path, target: &Path) -> Result<()> {
 }
 
 pub(super) async fn connect(socket: &Path) -> Result<BufReader<UnixStream>> {
-    let mut stream = UnixStream::connect(socket).await?;
+    use std::io::ErrorKind;
+    let mut stream = UnixStream::connect(socket).await.map_err(|error| {
+        if matches!(
+            error.kind(),
+            ErrorKind::NotFound | ErrorKind::ConnectionRefused
+        ) {
+            wire::disconnected(&error)
+        } else {
+            wire::stream_error(error)
+        }
+    })?;
     stream
         .write_all(format!("CONNECT {}\n", wire::PORT).as_bytes())
-        .await?;
+        .await
+        .map_err(wire::stream_error)?;
     let mut stream = BufReader::new(stream);
     let mut answer = String::new();
-    stream.read_line(&mut answer).await?;
+    stream
+        .read_line(&mut answer)
+        .await
+        .map_err(wire::stream_error)?;
     if !answer.starts_with("OK ") {
         return Err(Error::unavailable("Guest connection is not ready."));
     }
@@ -454,6 +468,31 @@ mod tests {
         stream.get_mut().write_all(b"OK 5200\n").await.unwrap();
         let value = wire::read(&mut stream).await.unwrap().unwrap();
         (stream, serde_json::from_value(value).unwrap())
+    }
+
+    #[tokio::test]
+    async fn guest_request_distinguishes_disconnect_from_malformed_reply() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("vsock");
+        let error = guest_request(&socket, &GuestRequest::Status)
+            .await
+            .unwrap_err();
+        assert!(error.is_unavailable());
+
+        let listener = UnixListener::bind(&socket).unwrap();
+        for (reply, unavailable) in [(b"{".as_slice(), true), (b"invalid\n".as_slice(), false)] {
+            let guest = async {
+                let (mut stream, message) = request(&listener).await;
+                assert!(matches!(message, GuestRequest::Status));
+                stream.get_mut().write_all(reply).await.unwrap();
+            };
+            let (observed, ()) = tokio::join!(guest_request(&socket, &GuestRequest::Status), guest);
+            let error = observed.unwrap_err();
+            assert_eq!(error.is_unavailable(), unavailable);
+            if !unavailable {
+                assert_eq!(error.code.as_deref(), Some(wire::INVALID_WIRE_FRAME));
+            }
+        }
     }
 
     #[tokio::test]

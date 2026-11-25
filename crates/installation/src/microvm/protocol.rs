@@ -123,6 +123,35 @@ impl Reply {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum EnvironmentReply {
+    Event(crate::background_jobs::protocol::Event),
+    Rejected {
+        #[serde(rename = "controlError")]
+        reason: EnvironmentControlError,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum EnvironmentControlError {
+    InvalidFrame,
+}
+
+impl EnvironmentReply {
+    pub(crate) fn into_event(
+        self,
+    ) -> crate::error::Result<crate::background_jobs::protocol::Event> {
+        match self {
+            Self::Event(event) => Ok(event),
+            Self::Rejected {
+                reason: EnvironmentControlError::InvalidFrame,
+            } => Err(crate::background_jobs::protocol::invalid_control_frame()),
+        }
+    }
+}
+
 /// Run stream from the guest, also persisted line by line as the attempt log.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -139,6 +168,7 @@ pub enum Event {
     Environment {
         event: crate::background_jobs::protocol::Event,
     },
+    EnvironmentProtocolFailed,
     FinalizationFailed,
     Heartbeat,
     #[serde(other)]

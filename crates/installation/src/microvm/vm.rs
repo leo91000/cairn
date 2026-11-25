@@ -1077,7 +1077,7 @@ async fn run(
             }
             Event::Environment { event } => {
                 use crate::background_jobs::protocol::{
-                    Event as EnvironmentEvent, Request as EnvironmentRequest,
+                    CONTROL_INTERRUPTED, Event as EnvironmentEvent, Request as EnvironmentRequest,
                 };
                 let control = plan
                     .environment()
@@ -1127,14 +1127,17 @@ async fn run(
                             .await?;
                     }
                     EnvironmentEvent::TurnFailed { message, .. } => {
-                        return Err(Error::unavailable(message));
+                        return Err(Error::coded(502, CONTROL_INTERRUPTED, message));
                     }
                     EnvironmentEvent::JobChanged {
                         outcome: crate::background_jobs::Outcome::Unknown { message },
                         ..
-                    } => return Err(Error::unavailable(message)),
+                    } => return Err(Error::coded(502, CONTROL_INTERRUPTED, message)),
                     _ => {}
                 }
+            }
+            Event::EnvironmentProtocolFailed => {
+                return Err(crate::background_jobs::protocol::invalid_control_frame());
             }
             Event::FinalizationFailed => {
                 finalization_failed.store(true, Ordering::SeqCst);
