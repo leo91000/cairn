@@ -30,6 +30,13 @@ const name = ref(props.account.name)
 const removing = ref(false)
 const runs = ref<RunListItem[]>([])
 const quota = computed(() => props.account.antigravityQuota)
+const quotaPrerequisite = computed(() => {
+  if (props.account.state === 'error')
+    return 'Reconnect this Google account to check its quota.'
+  if (!props.account.enabled)
+    return 'Turn on Use for new runs to check this account’s quota.'
+  return ''
+})
 const general = computed(() => generalWindows(props.account.usage))
 const others = computed(() => (props.account.usage?.windows ?? []).filter(window => window.models.length))
 const paused = computed(() => props.account.status === 'paused')
@@ -65,7 +72,7 @@ const note = computed(() => {
     return 'Finish signing in to see this account’s usage.'
   if (props.account.provider === 'antigravity') {
     if (props.account.modelProvider === 'google')
-      return quota.value?.error ?? 'Use Check usage now in Connections to check this Google account’s quota.'
+      return quotaPrerequisite.value || quota.value?.error || 'Use Check usage now in Connections to check this Google account’s quota.'
     return 'Usage is available in the Google dashboard for your project.'
   }
 
@@ -117,7 +124,7 @@ const note = computed(() => {
             </div>
           </div>
           <p v-if="quota.error || quota.stale" class="mt-3 text-xs text-muted" role="status">
-            {{ quota.error || 'These values are out of date. Use Check usage now in Connections to check again.' }}
+            {{ quotaPrerequisite || quota.error || 'These values are out of date. Use Check usage now in Connections to check again.' }}
           </p>
         </template>
         <div v-else-if="general.length" class="flex items-center gap-5">

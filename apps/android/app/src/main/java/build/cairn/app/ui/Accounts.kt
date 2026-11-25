@@ -503,6 +503,13 @@ internal fun AccountSheet(
     }
     val quota = account.antigravityQuota
     val quotaWindows = quota?.windows.orEmpty()
+    val quotaPrerequisite =
+        when {
+            account.state == "error" -> "Reconnectez ce compte Google pour vérifier son quota."
+            !account.enabled ->
+                "Activez « Utiliser pour les nouvelles exécutions » pour vérifier le quota."
+            else -> null
+        }
     val quotaError =
         quota?.error?.let {
             "Impossible de lire le quota Antigravity. Relancez la vérification dans Connexions."
@@ -595,7 +602,8 @@ internal fun AccountSheet(
                 }
                 if (quotaError != null || quota?.stale == true)
                     Text(
-                        quotaError
+                        quotaPrerequisite
+                            ?: quotaError
                             ?: "Ces valeurs datent. Utilisez Vérifier l’usage maintenant dans Connexions pour les mettre à jour.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -633,7 +641,8 @@ internal fun AccountSheet(
                         account.usage?.error != null -> account.usage.error
                         account.provider == "antigravity" ->
                             if (account.modelProvider == "google")
-                                quotaError
+                                quotaPrerequisite
+                                    ?: quotaError
                                     ?: "Utilisez Vérifier l’usage maintenant dans Connexions pour consulter le quota de ce compte Google."
                             else "Consultez l’usage de votre projet dans le tableau de bord Google."
                         account.status == "unavailable" ->
