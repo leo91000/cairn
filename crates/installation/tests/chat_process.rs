@@ -2190,6 +2190,101 @@ async fn a_finished_turn_withdraws_the_side_questions_codex_is_still_answering()
 }
 
 #[tokio::test]
+async fn an_answer_codex_sent_as_the_turn_ends_is_recorded_before_admission_closes() {
+    const LAST: &str = "a1b2c3d4-0000-4000-8000-000000000006";
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let observed = home.clone();
+    let config = config(&root);
+    let input = plan(&root, "fixture:chat-hang");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
+    });
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            events.push(event.clone());
+            if event["type"] == "chat.side.available" {
+                // Codex answers it while the adapter steers the turn to its end, and
+                // completes the turn before refusing that steer.
+                let question = side_question(LAST, "fixture:side-finish");
+                deliver(&root, &json!([question])).await;
+                until(|| !fixture_lines(&observed, "fixture-samples.jsonl").is_empty()).await;
+                let finish = json!({ "id": "finish", "text": "finish now" });
+                deliver(&root, &json!([question, finish])).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+
+    // The worker expires the questions still open once admission closes, so the answer
+    // must come first.
+    let answered = position(&events, "chat.side.answered");
+    assert_eq!(events[answered]["sideQuestionId"], LAST);
+    assert_eq!(events[answered]["text"], "Side answer: fixture:side-finish");
+    assert!(answered < position(&events, "chat.side.closed"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.side.failed")
+    );
+}
+
+#[tokio::test]
+async fn side_questions_wait_while_codex_compacts_the_turn() {
+    const WAITING: &str = "a1b2c3d4-0000-4000-8000-000000000007";
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let observed = home.clone();
+    let config = config(&root);
+    let input = plan(&root, "fixture:chat-hang fixture:mid-turn-compaction");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
+    });
+    let mut events = Vec::new();
+    let mut sampled_while_compacting = None;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            events.push(event.clone());
+            if event["type"] == "chat.side.compacting" && event["compacting"] == true {
+                let question = side_question(WAITING, "Why?");
+                deliver(&root, &json!([question])).await;
+                // Several inbox polls, none of which may sample it yet.
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                sampled_while_compacting =
+                    Some(!fixture_lines(&observed, "fixture-samples.jsonl").is_empty());
+                let end = json!({ "id": "end", "text": "end compaction" });
+                deliver(&root, &json!([question, end])).await;
+            }
+            if event["type"] == "chat.side.answered" {
+                let finish = json!({ "id": "finish", "text": "finish now" });
+                deliver(&root, &json!([finish])).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+
+    assert_eq!(sampled_while_compacting, Some(false));
+    let started = events
+        .iter()
+        .position(|event| event["type"] == "chat.side.compacting" && event["compacting"] == true)
+        .unwrap();
+    let ended = events
+        .iter()
+        .position(|event| event["type"] == "chat.side.compacting" && event["compacting"] == false)
+        .unwrap();
+    let answered = position(&events, "chat.side.answered");
+    assert!(started < ended && ended < answered);
+    assert_eq!(events[answered]["sideQuestionId"], WAITING);
+}
+
+#[tokio::test]
 async fn a_codex_release_before_thread_sample_never_takes_side_questions() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

@@ -9,8 +9,8 @@ before deciding whether to reuse an image. It prints JSON and, when
 
 | Tool | Official source | Channel | Native check in CI |
 | --- | --- | --- | --- |
-| Codex | npm `@openai/codex` | dist-tag `latest` | plan-turn boundary |
-| Claude Code | npm `@anthropic-ai/claude-code` | exact `2.1.311` | catalog, usage, turn, resumption, plan-turn boundary |
+| Codex | npm `@openai/codex` | dist-tag `latest` | plan-turn boundary, side questions |
+| Claude Code | npm `@anthropic-ai/claude-code` | exact `2.1.311` | catalog, usage, turn, resumption, plan-turn boundary, side questions |
 | OpenCode | npm `opencode-ai` | dist-tag `latest` | catalog, turn, resumption |
 | Antigravity | Google updater manifest `linux_amd64.json` | current release only | `tests/antigravity.rs` |
 | GitHub CLI | GitHub `cli/cli` latest release | not draft or prerelease | none |

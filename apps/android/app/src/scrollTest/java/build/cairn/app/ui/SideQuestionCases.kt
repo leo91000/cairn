@@ -293,6 +293,11 @@ abstract class SideQuestionCases {
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
                     )
                     .assertExists()
+                compose
+                    .onNodeWithText(
+                        "Codex répond en un seul message. S’il tente d’utiliser un outil à la place, l’outil ne s’exécute pas et la question échoue."
+                    )
+                    .assertExists()
                 compose.onNodeWithText("Demander").assertDoesNotExist()
                 // Focused on one reply, only its question shows until the user asks for all.
                 compose.onNodeWithText("Et les tests ?").assertExists()

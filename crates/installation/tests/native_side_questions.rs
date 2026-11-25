@@ -169,6 +169,11 @@ fn check(events: &[Value], workspace: &Path) {
         settled(events, TOOL_ID).is_some(),
         "the tool side question did not settle"
     );
+    // The same call ran in the main turn, so the side question's call was executable.
+    assert!(
+        workspace.join("main-write").exists(),
+        "the main turn's tool call did not run"
+    );
     assert!(
         !workspace.join("side-write").exists(),
         "a side question ran a tool"
@@ -222,6 +227,18 @@ fn codex_reply(item: &Value) -> String {
     ])
 }
 
+/// Codex's code-mode shell, as its models call it.
+fn codex_shell(command: &str) -> Value {
+    json!({
+        "type": "custom_tool_call",
+        "id": format!("ctc_{}", uuid::Uuid::new_v4().simple()),
+        "call_id": format!("call_{}", uuid::Uuid::new_v4().simple()),
+        "namespace": "functions",
+        "name": "exec",
+        "input": format!("const result = await tools.exec_command({{ cmd: {} }});\ntext(result);", Value::from(command)),
+    })
+}
+
 fn codex_message(text: &str) -> Value {
     json!({
         "type": "message",
@@ -259,8 +276,9 @@ async fn native_codex_answers_side_questions_without_tools_or_history() {
     let root = TempDir::new().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
-    let write = format!("touch {}/side-write", workspace.display());
+    let write = |name: &str| format!("touch {}/{name}", workspace.display());
 
+    let (write_side, write_main) = (write("side-write"), write("main-write"));
     let release = Arc::new(AtomicBool::new(false));
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let (recorded, holding) = (requests.clone(), release.clone());
@@ -270,19 +288,19 @@ async fn native_codex_answers_side_questions_without_tools_or_history() {
             let request: Value = serde_json::from_slice(&body).unwrap();
             recorded.lock().unwrap().push(request.clone());
             let latest = codex_user_texts(&request).pop().unwrap_or_default();
-            let (holding, write) = (holding.clone(), write.clone());
+            // Codex's own instructions name the output type, so look at the items.
+            let started = request["input"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|item| item["type"] == "custom_tool_call_output");
+            let holding = holding.clone();
+            let (side_write, main_write) = (write_side.clone(), write_main.clone());
             async move {
                 let item = match marker(&latest) {
                     Some(TEXT) => codex_message(SIDE_REPLY),
-                    // Codex's code-mode shell, as its models call it.
-                    Some(TOOL) => json!({
-                        "type": "custom_tool_call",
-                        "id": format!("ctc_{}", uuid::Uuid::new_v4().simple()),
-                        "call_id": format!("call_{}", uuid::Uuid::new_v4().simple()),
-                        "namespace": "functions",
-                        "name": "exec",
-                        "input": format!("const result = await tools.exec_command({{ cmd: {} }});\ntext(result);", Value::from(write)),
-                    }),
+                    Some(TOOL) => codex_shell(&side_write),
+                    None if !started => codex_shell(&main_write),
                     _ => {
                         released(&holding).await;
                         codex_message(MAIN_REPLY)
@@ -405,6 +423,15 @@ fn claude_latest_user_text(request: &Value) -> String {
         .unwrap_or_default()
 }
 
+fn claude_bash(agent: &str, command: &str) -> Value {
+    json!({
+        "type": "tool_use",
+        "id": format!("toolu_{agent}_probe_00000000000000"),
+        "name": "Bash",
+        "input": { "command": command, "description": "write" },
+    })
+}
+
 fn claude_reply(model: &Value, block: &Value, stop: &str) -> String {
     let (start, delta) = if block["type"] == "tool_use" {
         let mut start = block.clone();
@@ -450,8 +477,9 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
     let root = TempDir::new().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
-    let write = format!("touch {}/side-write", workspace.display());
+    let write = |name: &str| format!("touch {}/{name}", workspace.display());
 
+    let (write_side, write_main) = (write("side-write"), write("main-write"));
     let release = Arc::new(AtomicBool::new(false));
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let (recorded, holding) = (requests.clone(), release.clone());
@@ -461,7 +489,8 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
             post(move |body: Bytes| {
                 let request: Value = serde_json::from_slice(&body).unwrap();
                 recorded.lock().unwrap().push(request.clone());
-                let (holding, write) = (holding.clone(), write.clone());
+                let holding = holding.clone();
+                let (side_write, main_write) = (write_side.clone(), write_main.clone());
                 async move {
                     let model = &request["model"];
                     if request["stream"] != true {
@@ -478,22 +507,26 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
                         return ([("content-type", "application/json")], reply.to_string());
                     }
                     let main = request["tools"].to_string().contains("\"Bash\"");
+                    let started = request["messages"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|message| {
+                            message["content"].as_array().cloned().unwrap_or_default()
+                        })
+                        .any(|block| block["type"] == "tool_result");
                     let body = match marker(&claude_latest_user_text(&request)) {
                         Some(TEXT) => claude_reply(
                             model,
                             &json!({ "type": "text", "text": SIDE_REPLY }),
                             "end_turn",
                         ),
-                        Some(TOOL) => claude_reply(
-                            model,
-                            &json!({
-                                "type": "tool_use",
-                                "id": "toolu_side_probe_00000000000000",
-                                "name": "Bash",
-                                "input": { "command": write, "description": "write" },
-                            }),
-                            "tool_use",
-                        ),
+                        Some(TOOL) => {
+                            claude_reply(model, &claude_bash("side", &side_write), "tool_use")
+                        }
+                        None if main && !started => {
+                            claude_reply(model, &claude_bash("main", &main_write), "tool_use")
+                        }
                         Some(_) => {
                             released(&holding).await;
                             claude_reply(

@@ -18,6 +18,9 @@ history. What changes is how Cairn meets it:
   `thread/sample/cancel`. Its prompt also tells the model that tools are unavailable.
   The adapter samples only once Codex reports the turn's user message completed: a
   sample taken earlier copies a thread without the request the agent is working on.
+  As for Claude Code, new side questions wait while Codex compacts the turn's context,
+  and a sample that times out is cancelled. Answers Codex sent before the turn ended are
+  recorded before admission closes.
   Codex's `/side` command, a `thread/fork` that keeps its tools, stays unused.
 - **Gate on a minimum release, qualified in CI.** Adapters announce side questions
   from the first release probed (Claude Code 2.1.308, Codex 0.172.0) onwards, for plain
@@ -28,7 +31,9 @@ history. What changes is how Cairn meets it:
   answer while the turn runs, one whose answer calls a shell tool settles without the
   tool running, a withdrawn one settles silently, the turn completes, and no side
   question reaches the saved session or the next turn's context. A release that breaks
-  this fails the build rather than Cairn's users.
+  this fails the build rather than Cairn's users. A release no build shipped, such as
+  one an operator installs by hand, is trusted from the same minimum: the qualification
+  covers what Cairn ships.
 - **Unchanged.** OpenCode offers no tool-less side mechanism and stays unavailable.
   Only a running execution whose adapter announced `chat.side.available` receives side
   questions, so an older adapter never delivers one as steering. Withdrawal, expiry at
