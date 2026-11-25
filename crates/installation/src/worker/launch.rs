@@ -2222,9 +2222,21 @@ impl Execution<'_> {
     }
 
     async fn output_summary(&self, workspace: &Workspace) -> Option<String> {
-        let summary = crate::skills::small_file(Path::new(workspace.output()))
+        // A result is read before the turn receipt is saved. A pipe in the
+        // output directory must not block completion while awaiting a writer.
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(workspace.output())
             .await
             .ok()?;
+        if !file.metadata().await.ok()?.is_file() {
+            return None;
+        }
+        let bytes = crate::process::read_bounded(file, SUMMARY_LIMIT)
+            .await
+            .ok()?;
+        let summary = String::from_utf8(bytes).ok()?;
         (!summary.is_empty()).then(|| self.redact_summary(&summary))
     }
 

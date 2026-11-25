@@ -205,12 +205,9 @@ pub async fn small_file(path: &Path) -> Result<String> {
 async fn bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let mut file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .await?;
-    if !file.metadata().await?.is_file() {
-        return Err(Error::bad("Expected a regular file."));
-    }
     let mut bytes = Vec::new();
     (&mut file).take(limit + 1).read_to_end(&mut bytes).await?;
     if bytes.len() as u64 > limit {
