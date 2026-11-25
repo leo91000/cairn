@@ -53,6 +53,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -120,6 +121,14 @@ internal fun windowLabel(window: AccountWindow): String {
         }
         .replace("Usage window", "Fenêtre d’usage")
 }
+
+internal fun antigravityQuotaLabel(label: String): String =
+    when {
+        label.startsWith("Weekly · ") -> "Semaine · ${label.removePrefix("Weekly · ")}"
+        label.startsWith("5-hour window · ") ->
+            "5 heures · ${label.removePrefix("5-hour window · ")}"
+        else -> label
+    }
 
 private fun count(n: Int, unit: String) = "$n $unit${if (n > 1) "s" else ""}"
 
@@ -203,7 +212,10 @@ internal fun AccountRow(account: Account, open: () -> Unit) {
     val note =
         when {
             account.state != "ready" -> null
-            account.usage?.error != null -> "Usage indisponible"
+            account.usage?.error != null || account.antigravityQuota?.error != null ->
+                "Usage indisponible"
+            account.antigravityQuota?.windows?.isNotEmpty() == true ->
+                "Quotas dans les détails du compte"
             account.modelProvider != null && account.modelProvider != "opencode-go" ->
                 "Usage non consulté"
             windows.isEmpty() -> "Usage pas encore connu"
@@ -489,6 +501,8 @@ internal fun AccountSheet(
         )
         changed()
     }
+    val quota = account.antigravityQuota
+    val quotaWindows = quota?.windows.orEmpty()
     val general = account.usage?.general.orEmpty()
     val others = account.usage?.windows.orEmpty().filter { it.models.isNotEmpty() }
     val muted = account.status == "paused" || account.stale
@@ -545,7 +559,44 @@ internal fun AccountSheet(
                     style = MaterialTheme.typography.bodyMedium,
                 )
             Eyebrow("Usage restant")
-            if (general.isNotEmpty()) {
+            if (quotaWindows.isNotEmpty()) {
+                quotaWindows.forEach { window ->
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row {
+                            Text(
+                                antigravityQuotaLabel(window.label),
+                                Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Text(
+                                "${window.remainingPercent.roundToInt()} %",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        UsageBar(
+                            window.remainingPercent,
+                            account.status == "paused" || quota?.stale == true,
+                            Modifier.fillMaxWidth(),
+                        )
+                        window.resetsAt?.let { reset ->
+                            Text(
+                                if (reset * 1000 <= System.currentTimeMillis()) "Échéance passée"
+                                else "Reprise ${resetsIn(reset)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                if (quota?.error != null || quota?.stale == true)
+                    Text(
+                        quota.error
+                            ?: "Ces valeurs datent. Utilisez Vérifier l’usage maintenant dans Connexions pour les mettre à jour.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+            } else if (general.isNotEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     UsageRing(general, account.remainingPercent, muted)
                     Spacer(Modifier.width(18.dp))
@@ -577,7 +628,10 @@ internal fun AccountSheet(
                             "Terminez la connexion pour voir l’usage de ce compte."
                         account.usage?.error != null -> account.usage.error
                         account.provider == "antigravity" ->
-                            "Antigravity n’indique pas l’usage restant. Les exécutions peuvent utiliser ce compte."
+                            if (account.modelProvider == "google")
+                                quota?.error
+                                    ?: "Utilisez Vérifier l’usage maintenant dans Connexions pour consulter le quota de ce compte Google."
+                            else "Consultez l’usage de votre projet dans le tableau de bord Google."
                         account.status == "unavailable" ->
                             "L’usage apparaît après la première vérification, sous une minute."
                         else ->

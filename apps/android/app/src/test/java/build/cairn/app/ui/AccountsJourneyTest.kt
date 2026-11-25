@@ -516,7 +516,7 @@ class AccountsJourneyTest {
             }
             waitText("Usage non consulté")
             compose.onNode(hasContentDescription("Gemini, ", substring = true)).performClick()
-            waitText("Antigravity n’indique pas l’usage restant")
+            waitText("Consultez l’usage de votre projet dans le tableau de bord Google.")
             compose.onNodeWithText("Remplacer la clé API").assertExists()
         }
     }

@@ -123,6 +123,69 @@
         }
       },
       "type": "object"
+    },
+    "AntigravityQuota": {
+      "properties": {
+        "attemptedAt": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "checkedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stale": {
+          "default": false,
+          "type": "boolean"
+        },
+        "windows": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/AntigravityQuotaWindow"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "AntigravityQuotaWindow": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "remainingPercent": {
+          "format": "double",
+          "type": "number"
+        },
+        "resetsAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "remainingPercent"
+      ],
+      "type": "object"
     }
   },
   "properties": {
@@ -132,6 +195,17 @@
         "type": "string"
       },
       "type": "array"
+    },
+    "antigravityQuota": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AntigravityQuota"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Informational model-group quotas from an explicit Antigravity check."
     },
     "checkedAt": {
       "default": null,

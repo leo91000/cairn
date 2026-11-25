@@ -91,6 +91,19 @@ outside this first integration. See [ADR 0042](adr/0042-opencode-api-key-integra
 
 Screenshots use synthetic accounts: [desktop](screenshots/agent-accounts/desktop-light.png) · [account detail](screenshots/agent-accounts/detail-light.png) · [mobile, dark theme](screenshots/agent-accounts/mobile-dark.png) · [Android](screenshots/agent-accounts/android-light.png).
 
+## Antigravity
+
+For an active Google account, use **Check usage now** in **Connections** and
+open the account details to see the remaining quota and reset time by model
+group. The installation owner initiates the reading and Connections picks up
+the result on its next update. Readings last until the manager restarts or the
+account reconnects. Agents with installation
+management access can list the last reading through either MCP interface. Google
+does not support invoking this read-only CLI command from a third-party app with
+a consumer account. Gemini API keys and Google Cloud credentials use their
+respective Google dashboards. See [ADR 0090](adr/0090-antigravity-coding-agent.md#décision)
+and [Google’s guidance](https://discuss.ai.google.dev/t/tos-clarification-read-only-agy-p-usage-credits-from-acp-clients-or-native-quota-surface/203283/2).
+
 ## API
 
 | Route | Purpose |

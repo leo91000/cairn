@@ -168,7 +168,20 @@ test('Antigravity shows Google’s terms and requires confirmation before a Goog
     modelProviderName: 'Google account',
     state: 'ready',
   })
-  await expect(page.getByRole('region', { name: 'Antigravity accounts' })).toContainText('Personal Google')
+  const accountRow = page.getByRole('region', { name: 'Antigravity accounts' }).getByRole('button', { name: /^Personal Google,/ })
+  await expect(accountRow).toBeVisible()
+  await expect(flow).toHaveCount(0)
+  await accountRow.click()
+  const details = page.getByRole('dialog', { name: 'Personal Google' })
+  await expect(details.getByText('Use Check usage now in Connections to check this Google account’s quota.')).toBeVisible()
+  await details.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await page.getByRole('button', { name: 'Check usage now' }).click()
+  await expect(accountRow).toContainText('See quotas in account details', { timeout: 20000 })
+  await accountRow.click()
+  await expect(details.getByText('Weekly · Gemini Models')).toBeVisible()
+  await expect(details.getByRole('progressbar', { name: 'Personal Google Weekly · Gemini Models remaining' })).toHaveAttribute('aria-valuenow', '75')
+  await expect(details.getByText('5-hour window · Claude and GPT models')).toBeVisible()
+  await expect(details.getByText(/\bResets\s+\S/)).toHaveCount(2)
   expect(errors).toEqual([])
 })
 
