@@ -11,21 +11,6 @@ const MAX_ITEMS: usize = 128;
 
 pub(crate) const SCHEMA: &str = "CREATE TABLE run_progress(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));";
 
-pub(crate) fn upgrade(connection: &mut rusqlite::Connection) -> Result<()> {
-    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 20 {
-        tx.execute_batch(SCHEMA)?;
-        tx.pragma_update(None, "user_version", 21)?;
-    } else if !(21..=crate::store::DATABASE_VERSION).contains(&version) {
-        return Err(crate::error::Error::bad(
-            "Unexpected installation database version during progress upgrade.",
-        ));
-    }
-    tx.commit()?;
-    Ok(())
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Progress {
@@ -842,69 +827,15 @@ mod tests {
 }
 
 #[cfg(test)]
-mod migration_tests {
-    use super::*;
-
-    #[test]
-    fn upgrade_is_atomic_idempotent_preserves_rows_and_cascades() {
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE runs(id TEXT PRIMARY KEY); INSERT INTO runs VALUES('retained'); PRAGMA user_version=20;").unwrap();
-        upgrade(&mut db).unwrap();
-        upgrade(&mut db).unwrap();
-        assert_eq!(
-            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
-                .unwrap(),
-            21
-        );
-        db.execute("INSERT INTO run_progress VALUES('retained','{}')", [])
-            .unwrap();
-        db.execute("DELETE FROM runs WHERE id='retained'", [])
-            .unwrap();
-        assert_eq!(
-            db.query_row::<i64, _, _>("SELECT count(*) FROM run_progress", [], |row| row.get(0))
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn failed_upgrade_does_not_advance_version() {
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE run_progress(existing TEXT); PRAGMA user_version=20;")
-            .unwrap();
-        assert!(upgrade(&mut db).is_err());
-        assert_eq!(
-            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
-                .unwrap(),
-            20
-        );
-    }
-
-    #[test]
-    fn upgrade_accepts_a_database_already_advanced_by_another_opener() {
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("PRAGMA user_version=22;").unwrap();
-        upgrade(&mut db).unwrap();
-        assert_eq!(
-            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
-                .unwrap(),
-            22
-        );
-    }
-}
-
-#[cfg(test)]
 mod compatibility_tests {
     use super::*;
 
     #[test]
-    fn actual_full_schemas_seventeen_nineteen_twenty_and_twenty_one_use_the_safe_collector() {
+    fn current_schema_uses_the_safe_collector() {
         let root = tempfile::tempdir().unwrap();
+        drop(crate::store::Store::open(root.path()).unwrap());
         let database = root.path().join("manager.db");
-        let mut connection = rusqlite::Connection::open(&database).unwrap();
-        connection
-            .execute_batch(include_str!("../../tests/fixtures/personal-state-v17.sql"))
-            .unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
         connection.execute("INSERT INTO runs(id,task_id,status,created_at,recovery_pending,resume_available,resume_count,boundary) VALUES('progress-compat','progress-task','running',1,0,1,0,?)", [json!({"missionTurnId":"turn"}).to_string()]).unwrap();
         connection
             .execute(
@@ -935,23 +866,6 @@ mod compatibility_tests {
             );
         };
         let check = |expected: &str| check_at(expected, 3);
-        check("unknown");
-        crate::reads::migration::upgrade(&mut connection).unwrap();
-        crate::runs::projections::upgrade(&mut connection).unwrap();
-        assert_eq!(
-            connection
-                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
-                .unwrap(),
-            19
-        );
-        check("unknown");
-        // The released version-20 contract adds hooks, before progress exists.
-        connection
-            .execute_batch(crate::plugins::hooks::SCHEMA)
-            .unwrap();
-        connection.pragma_update(None, "user_version", 20).unwrap();
-        check("unknown");
-        upgrade(&mut connection).unwrap();
         check("unknown");
         let mut progress = Progress::launched(
             "execution".into(),

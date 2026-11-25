@@ -28,7 +28,7 @@ pub(crate) use cairn_hooks::record_question;
 
 pub(crate) mod conversations;
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json, json};
 use std::{
@@ -119,24 +119,6 @@ CREATE TABLE IF NOT EXISTS hook_rule_quiet_hours(
  PRIMARY KEY(rule_id,hour)
 ) WITHOUT ROWID;
 ";
-
-/// Version 32 to 33. No triggering exists before.
-pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if (33..=crate::store::DATABASE_VERSION).contains(&version) {
-        return Ok(());
-    }
-    if version != 32 {
-        return Err(Error::bad(
-            "Unexpected installation database version during upgrade.",
-        ));
-    }
-    tx.execute_batch(SCHEMA)?;
-    tx.pragma_update(None, "user_version", 33)?;
-    tx.commit()?;
-    Ok(())
-}
 
 /// How long intake retries an event whose resources could not be resolved.
 const DELIVERY_PATIENCE: i64 = 10 * 60_000;

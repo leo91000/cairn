@@ -5,7 +5,6 @@ use crate::worker::checkpoint::RunCheckpoint;
 use cairn_contracts::EventKind;
 
 mod handoff;
-pub(crate) mod question_migration;
 pub(crate) mod question_storage;
 pub(crate) mod questions;
 pub(crate) mod side_questions;
@@ -37,7 +36,6 @@ pub use storage::{Conversation, Message, MessageAnswer};
 pub mod engine_switch;
 #[cfg(test)]
 pub(crate) mod list_measurements;
-pub(crate) mod migration;
 #[cfg(test)]
 mod read_tests;
 pub(crate) mod storage;

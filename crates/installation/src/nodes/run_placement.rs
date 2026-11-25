@@ -155,25 +155,6 @@ pub const FIELDS: &[&str] = &[
 
 pub(crate) const COLUMNS: &str = "placement_node_id,placement_node_state,placement_pinned_node_id,placement_preferred_node_id,placement_target_node_id,placement_required_tags,placement_resources,placement_native_mode,placement_native_mode_interruption,placement_execution_backend,placement_move_request,placement_move_reservation,placement_movement_error,placement_suspended_by_exclusive";
 
-pub(crate) const ALTER: &str = "
-ALTER TABLE runs ADD COLUMN placement_node_id TEXT;
-ALTER TABLE runs ADD COLUMN placement_node_state TEXT CHECK(placement_node_state IN ('pausing','saving','restoring','resuming','updating','waiting-for-node'));
-ALTER TABLE runs ADD COLUMN placement_pinned_node_id TEXT;
-ALTER TABLE runs ADD COLUMN placement_preferred_node_id TEXT;
-ALTER TABLE runs ADD COLUMN placement_target_node_id TEXT;
-ALTER TABLE runs ADD COLUMN placement_required_tags TEXT CHECK(placement_required_tags IS NULL OR (json_valid(placement_required_tags) AND json_type(placement_required_tags)='array'));
-ALTER TABLE runs ADD COLUMN placement_resources TEXT CHECK(placement_resources IS NULL OR json_valid(placement_resources));
-ALTER TABLE runs ADD COLUMN placement_native_mode TEXT CHECK(placement_native_mode IS NULL OR json_valid(placement_native_mode));
-ALTER TABLE runs ADD COLUMN placement_native_mode_interruption TEXT;
-ALTER TABLE runs ADD COLUMN placement_execution_backend TEXT CHECK(placement_execution_backend IN ('native','firecracker'));
-ALTER TABLE runs ADD COLUMN placement_move_request TEXT CHECK(placement_move_request IS NULL OR json_valid(placement_move_request));
-ALTER TABLE runs ADD COLUMN placement_move_reservation TEXT REFERENCES attempts(id) DEFERRABLE INITIALLY DEFERRED;
-ALTER TABLE runs ADD COLUMN placement_movement_error TEXT;
-ALTER TABLE runs ADD COLUMN placement_suspended_by_exclusive TEXT CHECK(placement_suspended_by_exclusive IS NULL OR json_valid(placement_suspended_by_exclusive));
-CREATE INDEX runs_placement_node ON runs(placement_node_id);
-CREATE INDEX runs_placement_move_reservation ON runs(placement_move_reservation) WHERE placement_move_reservation IS NOT NULL;
-";
-
 fn json<T: serde::de::DeserializeOwned>(
     row: &rusqlite::Row<'_>,
     index: usize,

@@ -75,7 +75,6 @@ pub mod runs;
 pub mod service;
 pub mod skills;
 pub mod storage;
-mod storage_migration;
 pub mod store;
 pub mod supervisor;
 pub(crate) mod task_storage;
@@ -108,7 +107,3 @@ pub(crate) use common::{
     account_fixture, agent_fixture, attempt_fixture, mission_fixture, node_fixture, relay_fixture,
     run_fixture,
 };
-
-#[cfg(test)]
-#[path = "../tests/common/placement_migration_fixture.rs"]
-pub(crate) mod placement_migration_fixture;

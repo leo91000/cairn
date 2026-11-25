@@ -1,5 +1,3 @@
-mod legacy_disks;
-
 use crate::{
     config::now,
     error::{Error, Result, required},
@@ -107,8 +105,8 @@ impl Store {
         let file = directory.join("manager.db");
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
-        let mut version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh && !(11..=DATABASE_VERSION).contains(&version) {
+        let version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if !fresh && version != DATABASE_VERSION {
             return Err(Error::bad(
                 "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
@@ -118,171 +116,6 @@ impl Store {
         // Allow durable writes on a slow disk to finish under contention.
         writer.busy_timeout(Duration::from_secs(30))?;
         writer.execute_batch("PRAGMA foreign_keys=ON;")?;
-        if !fresh && version == 11 {
-            let upgraded = crate::nodes::inventory::migration::upgrade(&mut writer);
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            // Another startup can finish later atomic steps while this one
-            // waits for the inventory migration's immediate transaction.
-            if !(12..=DATABASE_VERSION).contains(&version) {
-                upgraded?;
-            }
-        }
-        if !fresh && version == 12 {
-            // Only small metadata changes here; v2 disk objects migrate lazily.
-            // Fence older binaries before publishing the first v3 object.
-            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if current == 12 {
-                tx.execute_batch("CREATE TABLE direct_storage_grants(object TEXT PRIMARY KEY REFERENCES shared_objects(id) ON DELETE CASCADE,expires_at INTEGER NOT NULL,settled INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0,1)));")?;
-                tx.execute_batch("CREATE TABLE direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(object);")?;
-                tx.execute_batch(legacy_disks::LEGACY_DISK_ACK_SCHEMA)?;
-                tx.pragma_update(None, "user_version", 13)?;
-            } else if !(13..=DATABASE_VERSION).contains(&current) {
-                return Err(Error::bad(
-                    "Unexpected installation database version during direct storage upgrade.",
-                ));
-            }
-            tx.commit()?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 13 {
-            crate::accounts::migration::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 14 {
-            crate::chats::migration::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 15 {
-            crate::chats::question_migration::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 16 {
-            crate::attachments::migration::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 17 {
-            crate::reads::migration::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 18 {
-            crate::runs::projections::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 19 {
-            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if current == 19 {
-                tx.execute_batch(crate::plugins::hooks::SCHEMA)?;
-                tx.pragma_update(None, "user_version", 20)?;
-            } else if !(20..=DATABASE_VERSION).contains(&current) {
-                return Err(Error::bad(
-                    "Unexpected database version during plugin hooks upgrade.",
-                ));
-            }
-            tx.commit()?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 20 {
-            crate::worker::progress::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 21 {
-            crate::timeline::migration::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 22 {
-            crate::nodes::attempts_migration::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 23 {
-            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? == 23 {
-                crate::plugins::grants::migrate(&Db(&tx), directory)?;
-                tx.pragma_update(None, "user_version", 24)?;
-            }
-            tx.commit()?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 24 {
-            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let current_version =
-                tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))?;
-            if current_version == 24 {
-                tx.execute_batch(crate::coding_agent_configuration::SCHEMA)?;
-                tx.pragma_update(None, "user_version", 25)?;
-            } else if !(25..=DATABASE_VERSION).contains(&current_version) {
-                return Err(Error::bad(
-                    "Unexpected installation database version during coding-agent configuration upgrade.",
-                ));
-            }
-            tx.commit()?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 25 {
-            crate::artifacts::migration::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 26 {
-            crate::chats::migration::plan_requests(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && (27..=28).contains(&version) {
-            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if (27..=28).contains(&current) {
-                // Version 28 on main added this index. Keep it when upgrading
-                // main, and create it when upgrading directly from version 27.
-                tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turn_boundaries ON events(run_id,id) WHERE (type IN ('turn.started','turn.completed','turn.failed') OR (type='status' AND json_type(payload,'$.attempt')='true'));")?;
-                let has_capability = tx
-                    .prepare("PRAGMA table_info(nodes)")?
-                    .query_map([], |row| row.get::<_, String>(1))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-                    .iter()
-                    .any(|name| name == "vm_disks");
-                if !has_capability {
-                    tx.execute_batch("ALTER TABLE nodes ADD COLUMN vm_disks INTEGER NOT NULL DEFAULT 0 CHECK(vm_disks IN (0,1));")?;
-                }
-                tx.pragma_update(None, "user_version", 29)?;
-            } else if !(29..=DATABASE_VERSION).contains(&current) {
-                return Err(Error::bad(
-                    "Unexpected database version during native VM disk capability upgrade.",
-                ));
-            }
-            tx.commit()?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 29 {
-            crate::agent_access::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 30 {
-            crate::rules::storage::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 31 {
-            legacy_disks::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 32 {
-            crate::rules::engine::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 33 {
-            crate::conversation_writers::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 34 {
-            crate::rules::engine::conversations::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 35 {
-            crate::worker::jobs::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        }
-        if !fresh && version == 36 {
-            crate::provider::upgrade_storage(&mut writer)?;
-        }
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
@@ -305,8 +138,6 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::runs::SCHEMA)?;
             tx.execute_batch(crate::worker::progress::SCHEMA)?;
             tx.execute_batch(crate::accounts::sql::SCHEMA)?;
-            tx.execute_batch(legacy_disks::LEGACY_DISK_SCHEMA)?;
-            tx.execute_batch(legacy_disks::LEGACY_DISK_ACK_SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
             tx.execute_batch(crate::nodes::inventory::SCHEMA)?;
             tx.execute_batch(crate::nodes::attempts::SCHEMA)?;
@@ -1091,8 +922,7 @@ impl Db<'_> {
             AND id>? ORDER BY id LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
         let rows = stmt.query_map(params![run, after, limit], event_row)?;
-        let mut events = within_budget(rows, limit, EventBudget::Raw(max_bytes), false)?.0;
-        self.mark_legacy_plan_approvals(run, &mut events)?;
+        let events = within_budget(rows, limit, EventBudget::Raw(max_bytes), false)?.0;
         Ok(events)
     }
 
@@ -1159,43 +989,7 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
         let (mut events, trimmed) = within_budget(&mut rows, limit, budget, true)?;
         let more = trimmed || rows.next().transpose()?.is_some();
         events.reverse();
-        self.mark_legacy_plan_approvals(run, &mut events)?;
         Ok((events, more))
-    }
-
-    /// Legacy receipts have no request ID. Derive their approval state from the full
-    /// run rather than the bounded event page, while leaving authored payloads intact.
-    fn mark_legacy_plan_approvals(&self, run: &str, events: &mut [Event]) -> Result<()> {
-        if !events.iter().any(is_legacy_root_plan) {
-            return Ok(());
-        }
-
-        let (request_count, latest_request, latest_proposal): (i64, Option<i64>, Option<i64>) =
-            self.0.query_row(
-                "SELECT (SELECT COUNT(DISTINCT CASE
-                     WHEN json_type(payload,'$.messageId')='text'
-                       AND json_extract(payload,'$.messageId')!=''
-                     THEN 'message:' || json_extract(payload,'$.messageId')
-                     ELSE 'source:' || id
-                 END) FROM events WHERE run_id=? AND type='chat.user'),
-                 (SELECT MAX(id) FROM events WHERE run_id=? AND type='chat.user'),
-                 (SELECT MAX(id) FROM events WHERE run_id=?
-                   AND type IN ('item.started','item.updated','item.completed')
-                   AND json_extract(payload,'$.item.type')='proposed_plan'
-                   AND COALESCE(json_extract(payload,'$.item.parent_id'),'')='')",
-                rusqlite::params![run, run, run],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-
-        for event in events.iter_mut().filter(|event| is_legacy_root_plan(event)) {
-            event.legacy_plan_approval = Some(
-                request_count == 1
-                    && latest_request.is_some_and(|request| request < event.id)
-                    && latest_proposal == Some(event.id),
-            );
-        }
-
-        Ok(())
     }
 
     pub fn has_run(&self, id: &str) -> Result<bool> {
@@ -1253,31 +1047,6 @@ fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     ))
 }
 
-fn is_legacy_root_plan(event: &Event) -> bool {
-    if !matches!(
-        event.kind.as_str(),
-        "item.started" | "item.updated" | "item.completed"
-    ) {
-        return false;
-    }
-
-    let Some(payload) = &event.payload else {
-        return false;
-    };
-    let Ok(payload) = serde_json::from_str::<Value>(payload.get()) else {
-        return false;
-    };
-    let Some(item) = payload.get("item") else {
-        return false;
-    };
-
-    item.get("type").and_then(Value::as_str) == Some("proposed_plan")
-        && item
-            .get("parent_id")
-            .is_none_or(|parent| parent.is_null() || parent.as_str() == Some(""))
-        && item.get("request_id").is_none()
-}
-
 /// Serialize each candidate once and probe geometrically increasing byte batches.
 /// Large/noisy rows stop early instead of reading and compressing 1,000 rows.
 /// Backwards reads measure chronological order, as delivered to the clients.
@@ -1311,7 +1080,6 @@ fn within_budget(
             text,
             display_id: display_id.filter(|first| *first != id),
             timeline: false,
-            legacy_plan_approval: None,
             payload: payload
                 .map(serde_json::value::RawValue::from_string)
                 .transpose()?,
@@ -1427,73 +1195,6 @@ pub fn merge(value: &mut Value, patch: &Value) {
 mod schema_tests {
     use super::*;
     use crate::agent_fixture::StoreAgentFixture;
-
-    #[tokio::test]
-    async fn historical_layouts_upgrade_capabilities_without_adopting_unreported_vm_support() {
-        use crate::node_fixture::StoreNodeFixture;
-        for version in [27, 28] {
-            let root = tempfile::tempdir().unwrap();
-            let store = Store::open(root.path()).unwrap();
-            let node = crate::config::id();
-            store
-                .put_node_fixture(json!({ "id": node, "name": "Retained node" }))
-                .await
-                .unwrap();
-            drop(store);
-            let connection = Connection::open(root.path().join("manager.db")).unwrap();
-            connection
-                .execute_batch(&format!(
-                    "DROP TABLE background_jobs; DROP TABLE agent_account_access; ALTER TABLE nodes DROP COLUMN vm_disks; PRAGMA user_version={version};"
-                ))
-                .unwrap();
-            if version == 27 {
-                connection
-                    .execute_batch("DROP INDEX events_turn_boundaries;")
-                    .unwrap();
-            }
-            drop(connection);
-            let upgraded = Store::open(root.path()).unwrap();
-            let mut retained = upgraded.node_boundary(&node).await.unwrap().unwrap();
-            assert_eq!(retained["name"], "Retained node");
-            assert!(retained["capabilities"]["vmDisks"].is_null());
-            retained["capabilities"]["vmDisks"] = true.into();
-            upgraded.put_node_fixture(retained).await.unwrap();
-            drop(upgraded);
-            let reopened = Store::open(root.path()).unwrap();
-            assert_eq!(
-                reopened.node_boundary(&node).await.unwrap().unwrap()["capabilities"]["vmDisks"],
-                Value::Null
-            );
-            let connection = Connection::open(root.path().join("manager.db")).unwrap();
-            assert_eq!(
-                connection
-                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
-                    .unwrap(),
-                DATABASE_VERSION
-            );
-            assert_eq!(
-                connection
-                    .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
-                    .unwrap(),
-                "ok"
-            );
-            assert!(
-                !connection
-                    .prepare("PRAGMA foreign_key_check")
-                    .unwrap()
-                    .exists([])
-                    .unwrap()
-            );
-            let turn_index_exists = connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='events_turn_boundaries')",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )
-                .unwrap();
-            assert!(turn_index_exists);
-        }
-    }
 
     #[test]
     fn wal_contention_has_one_timeout_budget_and_can_be_retried_after_release() {
@@ -1632,14 +1333,8 @@ mod schema_tests {
     }
 
     #[test]
-    fn existing_databases_upgrade_to_index_all_history_turn_boundaries() {
+    fn fresh_databases_index_all_history_turn_boundaries() {
         let root = tempfile::tempdir().unwrap();
-        drop(Store::open(root.path()).unwrap());
-        let db = Connection::open(root.path().join("manager.db")).unwrap();
-        db.execute_batch("DROP TABLE background_jobs; DROP TABLE agent_account_access; DROP INDEX events_turn_boundaries; PRAGMA user_version=27;")
-            .unwrap();
-        drop(db);
-
         drop(Store::open(root.path()).unwrap());
         let db = Connection::open(root.path().join("manager.db")).unwrap();
         assert_eq!(
@@ -1708,277 +1403,9 @@ mod schema_tests {
         }
     }
 
-    // Reconstruct the released layout from a real previous writer's database,
-    // rather than changing the version of today's placement tables.
-    fn version_nineteen_database(root: &Path) -> Connection {
-        let mut db = Connection::open(root.join("manager.db")).unwrap();
-        db.execute_batch(include_str!("../tests/fixtures/placements-v15.sql"))
-            .unwrap();
-        db.pragma_update(None, "foreign_keys", true).unwrap();
-        crate::chats::question_migration::upgrade(&mut db).unwrap();
-        crate::attachments::migration::upgrade(&mut db).unwrap();
-        crate::reads::migration::upgrade(&mut db).unwrap();
-        crate::runs::projections::upgrade(&mut db).unwrap();
-        db
-    }
-
-    #[test]
-    fn version_thirty_six_upgrade_admits_antigravity_without_rewriting_rows() {
-        let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("manager.db");
-        drop(Store::open(root.path()).unwrap());
-        // Restore the version 36 constraints that exclude Antigravity.
-        let db = Connection::open(&file).unwrap();
-        db.pragma_update(None, "writable_schema", true).unwrap();
-        db.execute(
-            "UPDATE sqlite_schema SET sql=replace(sql,?1,'') WHERE type='table'",
-            [",'antigravity'"],
-        )
-        .unwrap();
-        let schema: i64 = db
-            .pragma_query_value(None, "schema_version", |r| r.get(0))
-            .unwrap();
-        db.pragma_update(None, "schema_version", schema + 1)
-            .unwrap();
-        db.pragma_update(None, "writable_schema", false).unwrap();
-        db.pragma_update(None, "user_version", 36).unwrap();
-        drop(db);
-        let db = Connection::open(&file).unwrap();
-        let insert = "INSERT INTO coding_agent_accounts(id,provider,name,enabled,state,error,revision,updated_at) VALUES(?1,?2,'Account',1,'ready','','r',0)";
-        db.execute(insert, ["codex-account", "codex"]).unwrap();
-        assert!(db.execute(insert, ["refused", "antigravity"]).is_err());
-        drop(db);
-
-        drop(Store::open(root.path()).unwrap());
-        // A second startup sees version 37 and changes nothing.
-        drop(Store::open(root.path()).unwrap());
-        let db = Connection::open(&file).unwrap();
-        assert_eq!(
-            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
-                .unwrap(),
-            DATABASE_VERSION
-        );
-        db.execute(insert, ["antigravity-account", "antigravity"])
-            .unwrap();
-        assert!(db.execute(insert, ["unknown", "gemini"]).is_err());
-        let providers: Vec<String> = db
-            .prepare("SELECT provider FROM coding_agent_accounts ORDER BY id")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(providers, ["antigravity", "codex"]);
-        for table in [
-            "agents",
-            "account_leases",
-            "coding_agent_configurations",
-            "runs",
-            "chat_messages",
-            "conversation_engine_switches",
-        ] {
-            let sql: String = db
-                .query_row(
-                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?",
-                    [table],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert!(sql.contains("'antigravity'"), "{table}");
-        }
-    }
-
-    #[test]
-    fn version_nineteen_upgrade_adds_hook_queues_without_touching_existing_work() {
-        let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("manager.db");
-        let db = version_nineteen_database(root.path());
-        db.execute(
-            "INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true')",
-            [],
-        )
-        .unwrap();
-        drop(db);
-        drop(Store::open(root.path()).unwrap());
-        drop(Store::open(root.path()).unwrap());
-        let db = Connection::open(file).unwrap();
-        assert_eq!(
-            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
-                .unwrap(),
-            DATABASE_VERSION
-        );
-        assert!(db.table_exists(None, "plugin_hook_events").unwrap());
-        assert!(db.table_exists(None, "plugin_hook_receipts").unwrap());
-        assert_eq!(
-            db.query_row(
-                "SELECT data FROM kv WHERE key='hook-upgrade-fixture'",
-                [],
-                |r| r.get::<_, String>(0)
-            )
-            .unwrap(),
-            "true"
-        );
-    }
-
-    #[test]
-    fn version_twenty_upgrade_preserves_hook_schema_and_persisted_work() {
-        let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("manager.db");
-        let db = version_nineteen_database(root.path());
-        db.execute_batch(crate::plugins::hooks::SCHEMA).unwrap();
-        db.pragma_update(None, "user_version", 20).unwrap();
-        let hook_schema = |db: &Connection| -> Vec<String> {
-            db.prepare(
-                "SELECT sql FROM sqlite_schema WHERE name LIKE 'plugin_hook_%' ORDER BY name",
-            )
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap()
-        };
-        let retained = hook_schema(&db);
-        db.execute(
-            "INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true')",
-            [],
-        )
-        .unwrap();
-        drop(db);
-        drop(Store::open(root.path()).unwrap());
-        drop(Store::open(root.path()).unwrap());
-        let db = Connection::open(file).unwrap();
-        assert_eq!(
-            db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
-                .unwrap(),
-            DATABASE_VERSION
-        );
-        assert_eq!(hook_schema(&db), retained);
-        assert!(db.table_exists(None, "run_progress").unwrap());
-        assert_eq!(
-            db.query_row::<String, _, _>(
-                "SELECT data FROM kv WHERE key='progress-upgrade-fixture'",
-                [],
-                |r| r.get(0)
-            )
-            .unwrap(),
-            "true"
-        );
-    }
-
-    #[test]
-    fn version_twelve_upgrade_preserves_data_and_fences_older_binaries() {
-        let root = tempfile::tempdir().unwrap();
-        drop(Store::open(root.path()).unwrap());
-        let file = root.path().join("manager.db");
-        let db = Connection::open(&file).unwrap();
-        crate::chats::migration::tests::version14(&db);
-        db.execute_batch("DROP TABLE background_jobs; DROP TABLE account_leases; DROP TABLE account_usage_windows; DROP TABLE account_usage; DROP TABLE account_exhaustion; DROP TABLE coding_agent_accounts; DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations; PRAGMA user_version=12;
-            INSERT INTO kv(key,data) VALUES('migration-fixture','{\"preserved\":true}');
-            INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES('old-object','bucket','hash',4096,'{}','ready');").unwrap();
-        drop(db);
-
-        drop(Store::open(root.path()).unwrap());
-        drop(Store::open(root.path()).unwrap());
-        let db = Connection::open(file).unwrap();
-        assert_eq!(
-            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
-                .unwrap(),
-            DATABASE_VERSION
-        );
-        assert_eq!(
-            db.query_row(
-                "SELECT data FROM kv WHERE key='migration-fixture'",
-                [],
-                |r| r.get::<_, String>(0)
-            )
-            .unwrap(),
-            "{\"preserved\":true}"
-        );
-        assert_eq!(
-            db.query_row(
-                "SELECT state FROM shared_objects WHERE id='old-object'",
-                [],
-                |r| r.get::<_, String>(0)
-            )
-            .unwrap(),
-            "ready"
-        );
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM direct_storage_grants", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
-                .unwrap(),
-            "ok"
-        );
-    }
-
-    #[test]
-    fn startup_steps_accept_a_database_upgraded_by_another_startup() {
-        type Upgrade = fn(&mut Connection) -> Result<()>;
-        let steps: [(&str, Upgrade); 14] = [
-            ("accounts", crate::accounts::migration::upgrade),
-            ("conversations", crate::chats::migration::upgrade),
-            ("questions", crate::chats::question_migration::upgrade),
-            ("attachments", crate::attachments::migration::upgrade),
-            ("personal state", crate::reads::migration::upgrade),
-            ("progress", crate::worker::progress::upgrade),
-            ("timeline", crate::timeline::migration::upgrade),
-            ("placement", crate::nodes::attempts_migration::upgrade),
-            ("deliverables", crate::artifacts::migration::upgrade),
-            ("agent access", crate::agent_access::upgrade),
-            ("conversation writers", crate::conversation_writers::upgrade),
-            (
-                "rule conversations",
-                crate::rules::engine::conversations::upgrade,
-            ),
-            ("background jobs", crate::worker::jobs::upgrade),
-            ("antigravity storage", crate::provider::upgrade_storage),
-        ];
-        let root = tempfile::tempdir().unwrap();
-        drop(Store::open(root.path()).unwrap());
-        let mut db = Connection::open(root.path().join("manager.db")).unwrap();
-        db.execute("INSERT INTO kv VALUES('startup-sentinel','true',NULL)", [])
-            .unwrap();
-        let schema = |db: &Connection| {
-            db.prepare("SELECT name,sql FROM sqlite_schema ORDER BY name")
-                .unwrap()
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
-        let before = schema(&db);
-        // A startup may have observed an earlier version before it waited for
-        // another startup's immediate transaction. Completed steps must be no-ops.
-        for (name, upgrade) in steps {
-            upgrade(&mut db).unwrap_or_else(|error| panic!("{name}: {error}"));
-            assert_eq!(
-                db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-                    .unwrap(),
-                DATABASE_VERSION
-            );
-            assert_eq!(schema(&db), before, "{name}");
-            assert_eq!(
-                db.query_row(
-                    "SELECT data FROM kv WHERE key='startup-sentinel'",
-                    [],
-                    |row| row.get::<_, String>(0)
-                )
-                .unwrap(),
-                "true"
-            );
-        }
-    }
-
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        let unsupported_versions = (0..=10).chain([DATABASE_VERSION + 1, 99]);
+        let unsupported_versions = (0..DATABASE_VERSION).chain([DATABASE_VERSION + 1, 99]);
         for version in unsupported_versions {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();

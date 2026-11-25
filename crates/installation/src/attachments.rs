@@ -29,7 +29,6 @@ pub const MAX_FILE: usize = 10 * 1024 * 1024;
 const MAX_MESSAGE: u64 = 40 * 1024 * 1024;
 pub(crate) const MAX_CHAT: u64 = 200 * 1024 * 1024;
 
-pub(crate) mod migration;
 pub(crate) mod sql;
 mod uploads;
 

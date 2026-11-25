@@ -25,7 +25,6 @@ mod assignment;
 
 pub mod policy;
 
-pub(crate) mod legacy_fences;
 pub mod runtime;
 
 pub mod cache;

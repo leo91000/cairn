@@ -207,16 +207,8 @@ pub(crate) async fn erase(
     retirement: &str,
     workspaces: &[Value],
     projects: &[Value],
-    publications: &crate::nodes::retired_publications::RetiredPublications,
 ) -> Result<()> {
     let retired = directory(s, retirement);
-    crate::nodes::retired_publications::retire_detached_environment(
-        s,
-        run,
-        publications,
-        &retired.join("node-backups"),
-    )
-    .await?;
     let old_root = s.config.data_dir.join("runs").join(run);
     let moved_root = retired.join("runs");
     for workspace in workspaces
@@ -304,16 +296,7 @@ mod tests {
             .await
             .unwrap();
         detach(&service, &run, &retirement).await.unwrap();
-        erase(
-            &service,
-            &run,
-            &retirement,
-            &[],
-            &[],
-            &crate::nodes::retired_publications::RetiredPublications::default(),
-        )
-        .await
-        .unwrap();
+        erase(&service, &run, &retirement, &[], &[]).await.unwrap();
         assert_eq!(
             tokio::fs::read(manager.join("new.txt")).await.unwrap(),
             b"new files"
@@ -377,16 +360,9 @@ mod tests {
         std::fs::write(next.join("new.txt"), b"new work").unwrap();
         let workspaces = vec![json!({ "kind":"worktree", "path":old, "projectId":"project" })];
         let projects = vec![json!({ "id":"project", "path":project })];
-        erase(
-            &service,
-            &run,
-            &retirement,
-            &workspaces,
-            &projects,
-            &crate::nodes::retired_publications::RetiredPublications::default(),
-        )
-        .await
-        .unwrap();
+        erase(&service, &run, &retirement, &workspaces, &projects)
+            .await
+            .unwrap();
         assert!(!directory(&service, &retirement).exists());
         assert_eq!(std::fs::read(next.join("new.txt")).unwrap(), b"new work");
         git(&next, &["status", "--porcelain"]);

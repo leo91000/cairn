@@ -211,6 +211,7 @@ impl State {
         self.active_wait.as_ref().map(|wait| wait.card.as_str())
     }
 
+    #[cfg(test)]
     pub(crate) fn reason_sources(&self) -> Vec<i64> {
         self.failure
             .iter()

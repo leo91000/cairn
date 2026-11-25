@@ -86,8 +86,6 @@ macro_rules! wire_fields {
     };
 }
 
-pub(crate) mod projections;
-
 // SQLite computes generated columns on every row update, including VIRTUAL ones.
 // Keep wire construction on the read side so scalar updates do not parse and
 // reconstruct the frozen snapshot.
@@ -177,8 +175,6 @@ CREATE UNIQUE INDEX runs_active_task ON runs(task_id) WHERE status IN ('queued',
 "#,
     projection_schema!()
 );
-
-pub(crate) const REBUILD_PROJECTIONS: &str = concat!("DROP VIEW run_views;", projection_schema!());
 
 const STATE_COLUMNS: &str = "id,task_id,project_id,status,trigger,created_at,started_at,finished_at,summary,error,session_id,workspace,workspace_cleaned_at,recovery_pending,resume_available,resume_count,cancel_requested_at,account_id,account_name,account_wait_reason,account_required,capacity_wait_until,retry_attempt,retry_limit,retry_next_at,retry_started_at,retry_deadline_at,retry_cause,requested_by";
 

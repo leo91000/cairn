@@ -3132,13 +3132,6 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             )
                 .into_response());
         }
-        ("POST", ["disks", run, "publication-fence"]) => {
-            uuid(run)?;
-            let value = input(request, 16384).await?;
-            let publication = text(&value, "backupId");
-            crate::storage::legacy_fences::fence(&controller.state, run, publication).await?;
-            json!({ "fenced": publication })
-        }
         ("POST", ["disks", run, "storage-status"]) => {
             uuid(run)?;
             let mut status = block::status(&controller.state, run).await?;
@@ -6656,37 +6649,6 @@ pub(crate) mod tests {
             tokio::fs::read(fresh_root.join("home")).await.unwrap(),
             b"new private home"
         );
-    }
-
-    #[tokio::test]
-    async fn legacy_publication_fence_needs_no_native_disk_or_publication_api() {
-        let (_fixture, controller) = fixture().await;
-        let run = crate::config::id();
-        let publication = crate::config::id();
-        let root = workspace::directory(&controller.state, &run).unwrap();
-        let body = json!({ "backupId": publication });
-        let response = route(
-            controller.clone(),
-            request(&format!("/disks/{run}/publication-fence"), &body),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), 200);
-        let bytes = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&bytes).unwrap()["fenced"],
-            publication
-        );
-        assert!(!root.exists());
-        let error = route(
-            controller,
-            request(&format!("/disks/{run}/published"), &body),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(error.status, 404 | 405));
     }
 
     #[tokio::test]

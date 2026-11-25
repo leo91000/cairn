@@ -343,36 +343,14 @@ CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,
 }
 
 #[tokio::test]
-async fn legacy_and_current_answers_preserve_shapes_order_and_saved_privacy() {
+async fn answers_preserve_shapes_order_and_saved_privacy() {
     use serde_json::json;
-    for sensitivity in [Some(true), Some(false), None] {
+    for private in [true, false] {
         let root = tempfile::tempdir().unwrap();
-        let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
-        db.execute_batch(include_str!("../../tests/fixtures/questions-waits-v15.sql"))
-            .unwrap();
-        let (question_key, definition): (String, String) = db
-            .query_row(
-                "SELECT key,data FROM kv WHERE key LIKE 'chat-question:%' LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        let mut question: serde_json::Value = serde_json::from_str(&definition).unwrap();
-        let private = sensitivity.unwrap_or(true);
-        question["fields"][0]["secret"] = private.into();
-        if sensitivity.is_some() {
-            db.execute(
-                "UPDATE kv SET data=? WHERE key=?",
-                [question.to_string(), question_key],
-            )
-            .unwrap();
-        } else {
-            db.execute("DELETE FROM kv WHERE key=?", [question_key])
-                .unwrap();
-        }
-        let chat = question["chatId"].as_str().unwrap().to_owned();
-        let field = question["fields"][0]["id"].as_str().unwrap().to_owned();
-        // Legacy lists have neither current choice/comment limits nor identities.
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let chat = "00000000-0000-4000-8000-0000000000c1".to_owned();
+        let run = "00000000-0000-4000-8000-0000000000r1".to_owned();
+        let field = "secret_field".to_owned();
         let private_text = "Private historical free text. ".repeat(500);
         let mut items = vec![private_text.clone(), "Second choice".into(), private_text];
         items.extend((0..33).map(|index| format!("Historical item {index}")));
@@ -382,28 +360,65 @@ async fn legacy_and_current_answers_preserve_shapes_order_and_saved_privacy() {
             "current": {"selected": ["second", "first"], "comment": "Private current comment"},
         });
         let delivery = "Private historical delivery text";
-        db.execute(
-            "UPDATE chat_messages SET answers=?1,text=?2 WHERE chat_id=?3",
-            rusqlite::params![answers.to_string(), delivery, chat],
-        )
+        let question: cairn_contracts::ChatQuestion = serde_json::from_value(json!({
+            "id": "00000000-0000-4000-8000-0000000000q1",
+            "chatId": chat,
+            "runId": run,
+            "blocking": true,
+            "source": "cairn",
+            "status": "answered",
+            "createdAt": 1,
+            "fields": [{
+                "id": "secret_field",
+                "title": "Secret",
+                "secret": private,
+                "mode": "single",
+                "options": [{ "id": "first", "label": "First" }],
+            }],
+        }))
         .unwrap();
-        let expected_ids = db
-            .prepare("SELECT id FROM chat_messages WHERE chat_id=? ORDER BY created_at,rowid")
-            .unwrap()
-            .query_map([&chat], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert!(!expected_ids.is_empty());
-        let mut replacement: cairn_contracts::ChatQuestion =
-            serde_json::from_value(question).unwrap();
-        for field in &mut replacement.fields {
-            field.secret = !private;
-        }
+        let mut replacement = question.clone();
+        replacement.fields[0].secret = !private;
 
+        let chat_seed = chat.clone();
+        let run_seed = run.clone();
+        let answers_seed = answers.clone();
+        store
+            .transaction(move |db| {
+                let state: cairn_contracts::RunState = serde_json::from_value(json!({
+                    "id": run_seed,
+                    "taskId": chat_seed,
+                    "status": "running",
+                    "createdAt": 1,
+                }))?;
+                db.admit_run(&state, None, &json!({}), None)?;
+                db.save_conversation_boundary(&json!({
+                    "id": chat_seed,
+                    "runId": run_seed,
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                }))?;
+                db.save_question(&question)?;
+                let message: Message = serde_json::from_value(json!({
+                    "id": "00000000-0000-4000-8000-0000000000m1",
+                    "chatId": chat_seed,
+                    "text": delivery,
+                    "status": "queued",
+                    "createdAt": 2,
+                    "questionId": question.id,
+                    "answers": answers_seed,
+                }))?;
+                db.save_message(&message)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(store);
+
+        let expected_ids = vec!["00000000-0000-4000-8000-0000000000m1".to_owned()];
         for _ in 0..2 {
             let store = crate::store::Store::open(root.path()).unwrap();
             let chat = chat.clone();
+            let run = run.clone();
             let expected = answers.clone();
             let expected_ids = expected_ids.clone();
             let replacement = replacement.clone();
@@ -442,10 +457,6 @@ async fn legacy_and_current_answers_preserve_shapes_order_and_saved_privacy() {
                     assert_projection(public_detail(db, &chat)?);
                     db.0.execute("DELETE FROM chat_questions WHERE chat_id=?", [&chat])?;
                     assert_projection(public_detail(db, &chat)?);
-                    let run: String = db.0.query_row("SELECT id FROM runs LIMIT 1", [], |row| row.get(0))?;
-                    let mut conversation = conversation(db, &chat)?;
-                    conversation.run_id = Some(run.clone());
-                    db.save_conversation(&conversation)?;
                     for restore_definition in [false, true] {
                         if restore_definition {
                             db.save_question(&replacement)?;
@@ -464,12 +475,6 @@ async fn legacy_and_current_answers_preserve_shapes_order_and_saved_privacy() {
                             assert_eq!(serde_json::from_str::<Value>(&payload)?["text"], expected_text);
                         }
                     }
-                    let stored: String = db.0.query_row(
-                        "SELECT text FROM chat_messages WHERE chat_id=? LIMIT 1",
-                        [&chat],
-                        |row| row.get(0),
-                    )?;
-                    assert_eq!(stored, "Questionnaire response");
                     Ok(())
                 })
                 .await

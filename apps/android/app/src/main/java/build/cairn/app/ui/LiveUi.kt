@@ -663,12 +663,8 @@ internal fun proposedPlanApproval(
         return null
     val item = proposal.item()
     val authoredRequest = item.string("request_id")
-    if (item?.containsKey("request_id") != true && proposal.legacyPlanApproval != true) return null
-
     if (
-        item?.containsKey("request_id") == true &&
-            (authoredRequest.isBlank() ||
-                requestSource != Long.MIN_VALUE && authoredRequest != requestId)
+        authoredRequest.isBlank() || requestSource != Long.MIN_VALUE && authoredRequest != requestId
     )
         return null
     return "${proposal.runId}:${proposal.id}"
