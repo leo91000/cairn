@@ -297,17 +297,19 @@ async fn fence_attempt_authorized(
             .and_then(RunCheckpoint::runner_id)
             .unwrap_or(run_id);
         let runner_url = crate::nodes::transport::url_for_node(s, node.as_deref());
-        let observe_finalization = checkpoint.as_ref().is_some_and(|saved| {
-            saved.managed()
-                && saved.finalization_failure_attempt.as_deref() != Some(attempt)
-                && saved.acknowledged_finalization_failure_attempt.as_deref() != Some(attempt)
-                && saved.settled().is_some_and(|outcome| {
-                    matches!(outcome.status, RunStatus::Succeeded | RunStatus::Failed)
-                })
-        });
+        let settled_status = checkpoint
+            .as_ref()
+            .filter(|saved| {
+                saved.managed()
+                    && saved.finalization_failure_attempt.as_deref() != Some(attempt)
+                    && saved.acknowledged_finalization_failure_attempt.as_deref() != Some(attempt)
+            })
+            .and_then(RunCheckpoint::settled)
+            .map(|outcome| outcome.status)
+            .filter(|status| matches!(status, RunStatus::Succeeded | RunStatus::Failed));
         authorize.recheck().await?;
         if let Some(result) =
-            fence_runner(s, &runner_url, attempt, &authorize, observe_finalization).await?
+            fence_runner(s, &runner_url, attempt, &authorize, settled_status).await?
         {
             let id = run_id.to_owned();
             let attempt = attempt.to_owned();
@@ -321,7 +323,7 @@ async fn fence_attempt_authorized(
                             && result.native_cleanup.is_none()
                             && saved.acknowledged_finalization_failure_attempt.as_deref()
                                 == Some(attempt.as_str()))
-                        && (observe_finalization
+                        && (settled_status.is_some()
                             || (saved.managed()
                                 && result.finalization_failed
                                 && result.native_cleanup.is_none())
@@ -397,7 +399,7 @@ pub(crate) async fn fence_retired(
             &runner_url,
             attempt,
             &crate::authorization::Authorization::default(),
-            false,
+            None,
         )
         .await?;
     }
@@ -412,7 +414,7 @@ async fn fence_runner(
     runner_url: &str,
     attempt: &str,
     authorize: &crate::authorization::Authorization,
-    observe_finalization: bool,
+    settled_status: Option<RunStatus>,
 ) -> Result<Option<crate::runner::ControllerResult>> {
     authorize.recheck().await?;
     if runner_url.is_empty() {
@@ -439,7 +441,14 @@ async fn fence_runner(
                     cleanup = crate::runner::plain_finalization_failure(&value);
                 }
             }
-            if cleanup.is_none() && observe_finalization {
+            if cleanup
+                .as_ref()
+                .is_some_and(|result| result.native_cleanup.is_some())
+                && settled_status == Some(RunStatus::Succeeded)
+                && confirm_late_native_cleanup(s, &url, attempt, &credential, authorize).await
+            {
+                cleanup = None;
+            } else if cleanup.is_none() && settled_status.is_some() {
                 // Both controllers expose explicit flush failures through the
                 // terminal result. DELETE may only acknowledge that they stopped.
                 authorize.recheck().await?;
@@ -463,6 +472,50 @@ async fn fence_runner(
         ));
     }
     Ok(cleanup)
+}
+
+/// Keep an acknowledged fence while giving a successful turn's close a short
+/// grace. The historical wait proves this attempt flushed. DELETE rechecks
+/// the conversation's current quarantine before we discard the pending result.
+async fn confirm_late_native_cleanup(
+    s: &Service,
+    url: &str,
+    attempt: &str,
+    credential: &str,
+    authorize: &crate::authorization::Authorization,
+) -> bool {
+    let observe = async {
+        loop {
+            let result =
+                crate::runner::observe_cleanup_retirement(&s.http, url, credential).await?;
+            if result.native_cleanup.is_none() {
+                return Ok(false);
+            }
+            if result.physical_finalized {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        authorize.recheck().await?;
+        let response = s
+            .http
+            .delete(url)
+            .bearer_auth(credential)
+            .send()
+            .await
+            .map_err(Error::internal)?;
+        if !response.status().is_success() {
+            return Ok(false);
+        }
+        let result = response.json::<Value>().await.map_err(Error::internal)?;
+        Ok::<_, Error>(result["NativeCleanupRetired"]["attemptId"].as_str() == Some(attempt))
+    };
+    tokio::select! {
+        () = s.shutdown.cancelled() => false,
+        result = tokio::time::timeout(Duration::from_secs(7), observe) => {
+            matches!(result, Ok(Ok(true)))
+        }
+    }
 }
 
 /// An unreachable runner is only presumed stopped once its node lease has lapsed.

@@ -67,6 +67,11 @@ physical closure after the disk flushes and retires. Recovery resumes an
 interrupted cleanup observation and commits its diagnostic with publication.
 The recorded execution failure continues to block automatic replay because
 the workload's exit status remains unknown.
+After DELETE has acknowledged a pending cleanup, the manager gives an already
+settled successful turn a bounded window to observe retirement. It preserves
+that outcome only after DELETE returns the attempt-bound
+`NativeCleanupRetired` receipt, which also checks the conversation's current
+quarantine.
 The live manager checkpoint serializes fencing and reloads its durable evidence
 before heartbeat or output persistence can overwrite it; placement lease renewal
 continues independently while the fence waits.
