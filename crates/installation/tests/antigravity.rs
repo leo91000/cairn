@@ -35,7 +35,10 @@ fn launcher(root: &Path, binary: &str, base_url: Option<&str>) -> String {
     let script = format!(
         "#!/bin/sh\nhooks=\"$HOME/.gemini/config/hooks.json\"\n\
          if [ -f \"$hooks\" ]; then sed -i 's|{test}|{cairn}|g' \"$hooks\"; fi\n\
-         {base}exec '{binary}' \"$@\"\n",
+         {base}if [ \"${{1-}}\" = '-p' ] && [ \"${{2-}}\" = '/usage' ]; then\n\
+           exec bash -c 'exec \"$@\"' cairn-quota '{binary}' \"$@\"\n\
+         fi\n\
+         exec '{binary}' \"$@\"\n",
         test = test.display(),
     );
     let path = root.join("agy-launcher.sh");
@@ -1139,6 +1142,150 @@ async fn sign_in_google(s: &Arc<Service>) -> String {
         .next()
         .unwrap();
     account.id.to_string()
+}
+
+async fn quota_usage(s: &Service, id: &str) -> Option<cairn_contracts::AntigravityQuota> {
+    s.accounts
+        .list(s)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|account| account.id == id)
+        .and_then(|account| account.antigravity_quota)
+}
+
+#[tokio::test]
+async fn manual_refresh_reads_google_quota_without_changing_admission() {
+    async fn refresh(s: &Arc<Service>, id: &str) -> cairn_contracts::AntigravityQuota {
+        let previous = quota_usage(s, id).await.map(|usage| usage.attempted_at);
+        let result = common::owner_api_route(s, "POST", "/api/accounts/refresh", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result["kind"], "refreshed");
+        common::eventually(
+            Duration::from_secs(15),
+            Duration::from_millis(30),
+            async || {
+                let usage = quota_usage(s, id).await?;
+                (Some(usage.attempted_at) > previous).then_some(usage)
+            },
+        )
+        .await
+    }
+
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let id = sign_in_google(&s).await;
+    let key = connect(&s, "gemini", KEY).await;
+    let cloud = connect(&s, "google-cloud", &google_cloud_secret()).await;
+
+    s.accounts.poll(&s, true).await.unwrap();
+    assert!(quota_usage(&s, &id).await.is_none());
+
+    let usage = refresh(&s, &id).await;
+    assert!(usage.checked_at.is_some());
+    assert!(usage.attempted_at > 0);
+    assert!(!usage.stale);
+    assert_eq!(usage.windows.len(), 4);
+    assert_eq!(usage.windows[0].label, "Weekly · Gemini Models");
+    assert_eq!(usage.windows[0].remaining_percent, 75.0);
+    assert!(usage.windows[0].resets_at.is_some());
+    assert!(
+        usage.windows[1].resets_at.is_none(),
+        "untouched bucket has no reset"
+    );
+    assert!(
+        usage.windows[2].resets_at.is_none(),
+        "invalid reset is unknown"
+    );
+    assert_eq!(usage.windows[3].remaining_percent, 0.0);
+    for other in [&key, &cloud] {
+        assert!(quota_usage(&s, text(other, "id")).await.is_none());
+    }
+    assert!(s.accounts.account(&s, &id).await.unwrap().usage.is_none());
+
+    s.accounts.exhausted(&s, &id, MODEL).await.unwrap();
+    let previous = refresh(&s, &id).await;
+    let exhausted = s.accounts.account(&s, &id).await.unwrap();
+    assert!(exhausted.exhausted.unwrap().usage.is_none());
+
+    let secret = format!("antigravity-account:{id}");
+    let mut credential = s.vault.get(&secret).await.unwrap().unwrap();
+    credential["token"]["token"]["access_token"] = "fixture-quota-unavailable".into();
+    s.vault.set(&secret, &credential).await.unwrap();
+    let failed = refresh(&s, &id).await;
+    assert!(s.accounts.account(&s, &id).await.unwrap().is_active());
+    assert_eq!(failed.windows, previous.windows);
+    assert_eq!(failed.checked_at, previous.checked_at);
+    assert!(failed.error.is_some());
+
+    credential["token"]["token"]["expiry"] = "2000-01-01T00:00:00Z".into();
+    credential["token"]["token"]["refresh_token"] = "fixture-renew-unavailable".into();
+    s.vault.set(&secret, &credential).await.unwrap();
+    let failed_renewal = refresh(&s, &id).await;
+    assert!(s.accounts.account(&s, &id).await.unwrap().is_active());
+    assert_eq!(failed_renewal.windows, previous.windows);
+    assert!(failed_renewal.error.is_some());
+    assert!(
+        std::fs::read_dir(s.config.data_dir.join("antigravity-accounts"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn overlapping_quota_refresh_includes_newly_enabled_accounts() {
+    use cairn_installation::accounts::{Account, AccountState};
+
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let id = sign_in_google(&s).await;
+    let secret = format!("antigravity-account:{id}");
+    let mut credential = s.vault.get(&secret).await.unwrap().unwrap();
+    credential["token"]["token"]["access_token"] = "fixture-quota-hold".into();
+    s.vault.set(&secret, &credential).await.unwrap();
+
+    let mut second = Account::new(Provider::Antigravity, "Second Google", AccountState::Ready);
+    second.model_provider = Some("google".into());
+    second.enabled = false;
+    s.store.save_coding_account(&second).await.unwrap();
+    credential["token"]["token"]["access_token"] = "fixture-second-google-access".into();
+    s.vault
+        .set(&format!("antigravity-account:{}", second.id), &credential)
+        .await
+        .unwrap();
+
+    let private = s.config.data_dir.join("antigravity-accounts");
+    let hold = private.join("fixture-quota-hold");
+    std::fs::create_dir_all(&private).unwrap();
+    std::fs::write(&hold, "").unwrap();
+    let refresh = || common::owner_api_route(&s, "POST", "/api/accounts/refresh", json!({}));
+    assert_eq!(refresh().await.unwrap()["kind"], "refreshed");
+    common::eventually(
+        Duration::from_secs(8),
+        Duration::from_millis(30),
+        async || {
+            private
+                .join("fixture-quota-started")
+                .is_file()
+                .then_some(())
+        },
+    )
+    .await;
+    assert!(quota_usage(&s, &id).await.is_none());
+
+    second.enabled = true;
+    s.store.save_coding_account(&second).await.unwrap();
+    assert_eq!(refresh().await.unwrap()["kind"], "refreshed");
+    std::fs::remove_file(hold).unwrap();
+    let quota = common::eventually(
+        Duration::from_secs(15),
+        Duration::from_millis(30),
+        async || quota_usage(&s, &second.id).await,
+    )
+    .await;
+    assert_eq!(quota.windows.len(), 4);
 }
 
 #[tokio::test]

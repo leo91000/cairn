@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AntigravityQuotaWindow": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "remainingPercent": {
+          "format": "double",
+          "type": "number"
+        },
+        "resetsAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "remainingPercent"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "attemptedAt": {
+      "default": 0,
+      "format": "int64",
+      "type": "integer"
+    },
+    "checkedAt": {
+      "default": null,
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "error": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stale": {
+      "default": false,
+      "type": "boolean"
+    },
+    "windows": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/AntigravityQuotaWindow"
+      },
+      "type": "array"
+    }
+  },
+  "title": "AntigravityQuota",
+  "type": "object"
+}

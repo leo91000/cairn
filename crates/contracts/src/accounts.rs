@@ -61,12 +61,38 @@ pub struct CodingAgentAccount {
     pub max_concurrent_runs: u64,
     pub active_run_ids: Vec<String>,
     pub usage: Option<AccountUsage>,
+    /// Informational model-group quotas from an explicit Antigravity check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub antigravity_quota: Option<AntigravityQuota>,
     pub remaining_percent: Option<f64>,
     #[ts(type = "number | null")]
     pub resets_at: Option<i64>,
     #[serde(default = "account_enabled")]
     pub stale: bool,
     pub exhausted: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AntigravityQuota {
+    #[ts(type = "number | null")]
+    pub checked_at: Option<i64>,
+    #[ts(type = "number")]
+    pub attempted_at: i64,
+    pub stale: bool,
+    pub windows: Vec<AntigravityQuotaWindow>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityQuotaWindow {
+    pub id: String,
+    pub label: String,
+    pub remaining_percent: f64,
+    #[ts(type = "number | null")]
+    pub resets_at: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

@@ -9,6 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
 import okhttp3.mockwebserver.*
@@ -118,6 +119,86 @@ class AccountsDeviceTest {
             assertEquals("""{"code":"fixture-code"}""", codes.single())
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("claude@example.test").fetchSemanticsNodes().isNotEmpty()
+            }
+        }
+    }
+
+    @Test
+    fun antigravityGoogleQuotaAppearsAfterAnExplicitRefresh() {
+        MockWebServer().use { server ->
+            val checked = AtomicBoolean(false)
+            fun accounts(): String {
+                val quota =
+                    if (checked.get())
+                        """{"windows":[{"id":"gemini-weekly","label":"Weekly · Gemini Models","remainingPercent":75,"resetsAt":1894017600}]}"""
+                    else "null"
+                return """{"accounts":[{"id":"google","provider":"antigravity","name":"Personal Google","modelProvider":"google","state":"ready","status":"next","antigravityQuota":$quota}]}"""
+            }
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val result =
+                            when ("${request.method} ${request.path?.substringBefore('?')}") {
+                                "GET /api/installations" -> beaconInstallationsFixture()
+                                "GET /api/account/session" -> beaconAccountFixture("fixture")
+                                "GET /api/installations/fixture/api/accounts" -> accounts()
+                                "POST /api/installations/fixture/api/accounts/refresh" -> {
+                                    val before = accounts()
+                                    checked.set(true)
+                                    """{"kind":"refreshed","overview":$before}"""
+                                }
+                                "GET /api/installations/fixture/api/overview",
+                                "GET /api/installations/fixture/api/codex/models",
+                                "GET /api/installations/fixture/api/claude/models" -> "{}"
+                                "GET /api/installations/fixture/api/agents" -> """{"agents":[]}"""
+                                "GET /api/installations/fixture/api/projects" ->
+                                    """{"projects":[]}"""
+                                "GET /api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
+                                "GET /api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
+                                else -> "[]"
+                            }
+                        return MockResponse().setBody(result)
+                    }
+                }
+            server.start()
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    DeviceAccountsVault(),
+                    beaconOrigin = "",
+                )
+            FixtureUi(compose).use { fixture ->
+                fixture.setContent(vm) {
+                    val state by vm.state.collectAsStateWithLifecycle()
+                    LaunchedEffect(Unit) {
+                        vm.state.first { it.ready }
+                        vm.connect(server.url("/").toString())
+                    }
+                    CairnTheme { if (state.session.authenticated) ConnectionsScreen(vm, state) }
+                }
+                val name = "Personal Google"
+                compose.waitUntil(15000) {
+                    compose
+                        .onAllNodesWithContentDescription(name, substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertFalse(checked.get())
+                compose.onNodeWithContentDescription("Vérifier l’usage maintenant").performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Quotas dans les détails du compte")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertTrue(checked.get())
+                compose
+                    .onNodeWithContentDescription(name, substring = true)
+                    .performScrollTo()
+                    .performClick()
+                compose.onNodeWithText("Semaine · Gemini Models").assertIsDisplayed()
+                compose.onNodeWithText("75 %").assertIsDisplayed()
+                compose.onNodeWithText("Reprise ", substring = true).assertIsDisplayed()
             }
         }
     }

@@ -29,6 +29,24 @@ const emit = defineEmits<{ close: [], reconnect: [] }>()
 const name = ref(props.account.name)
 const removing = ref(false)
 const runs = ref<RunListItem[]>([])
+const quota = computed(() => props.account.antigravityQuota)
+const quotaPrerequisite = computed(() => {
+  if (props.account.state === 'error')
+    return 'Reconnect this Google account to check its quota.'
+  if (!props.account.enabled)
+    return 'Turn on Use for new runs to check this account’s quota.'
+  return ''
+})
+const quotaNotice = computed(() => {
+  const messages: string[] = []
+  if (quota.value?.error)
+    messages.push('Antigravity quota is unavailable.')
+  if (quota.value?.stale && quota.value.windows.length)
+    messages.push('These values are out of date.')
+  if (messages.length)
+    messages.push(quotaPrerequisite.value || 'Use Check usage now in Connections to check again.')
+  return messages.join(' ')
+})
 const general = computed(() => generalWindows(props.account.usage))
 const others = computed(() => (props.account.usage?.windows ?? []).filter(window => window.models.length))
 const paused = computed(() => props.account.status === 'paused')
@@ -62,10 +80,14 @@ const note = computed(() => {
   const { usage, state } = props.account
   if (state === 'pending')
     return 'Finish signing in to see this account’s usage.'
+  if (props.account.provider === 'antigravity') {
+    if (props.account.modelProvider === 'google')
+      return quotaNotice.value || quotaPrerequisite.value || 'Use Check usage now in Connections to check this Google account’s quota.'
+    return 'Usage is available in the Google dashboard for your project.'
+  }
+
   if (usage?.error)
     return usage.error
-  if (props.account.provider === 'antigravity')
-    return 'Antigravity doesn’t report usage. Runs can still use this account.'
   return props.account.status === 'unavailable' ? 'Usage appears after the first check, within a minute.' : `${provider.value.label} has not reported usage yet. Runs can still use this account.`
 })
 </script>
@@ -99,7 +121,23 @@ const note = computed(() => {
         <h3 id="account-usage" class="eyebrow mb-3.5">
           Usage left
         </h3>
-        <div v-if="general.length" class="flex items-center gap-5">
+        <template v-if="quota?.windows.length">
+          <div class="grid gap-3">
+            <div v-for="window in quota.windows" :key="window.id" class="grid gap-1.5">
+              <div class="flex justify-between gap-3 text-xs">
+                <span>{{ window.label }}</span><b class="tabular-nums">{{ Math.round(window.remainingPercent) }}%</b>
+              </div>
+              <UsageBar :remaining="window.remainingPercent" :muted="paused || quota.stale" :label="`${account.name} ${window.label} remaining`" />
+              <p v-if="window.resetsAt" class="text-xs text-muted">
+                {{ window.resetsAt * 1000 <= Date.now() ? 'Reset time passed' : `Resets ${resetsIn(window.resetsAt)}` }}
+              </p>
+            </div>
+          </div>
+          <p v-if="quotaNotice" class="mt-3 text-xs text-muted" role="status">
+            {{ quotaNotice }}
+          </p>
+        </template>
+        <div v-else-if="general.length" class="flex items-center gap-5">
           <UsageRing :windows="general" :remaining="account.remainingPercent" :muted="paused || account.stale" />
           <dl class="grid min-w-0 flex-1 gap-2.5 text-xs">
             <div v-for="(window, index) in general" :key="window.id" class="grid grid-cols-[10px_minmax(0,1fr)] gap-x-2">

@@ -193,7 +193,7 @@ impl AccountOperation {
         if !human && self.name == "refresh_coding_agent_accounts" {
             let _: ListAccountsInput = decode(input)?;
             return Ok(serde_json::to_value(RefreshAccountsOutput::HumanRequired {
-                message: "An authenticated installation owner must refresh accounts in Connections. Agents can read the automatically refreshed usage.".into(),
+                message: "An authenticated installation owner must refresh accounts in Connections. Agents can read the latest available usage.".into(),
                 path: "/connections".into(),
             })?);
         }
@@ -268,6 +268,8 @@ impl AccountOperation {
                     result.sign_in = None;
                 }
                 if self.name == "refresh_coding_agent_accounts" {
+                    authorize.recheck().await?;
+                    crate::accounts::antigravity::schedule_quota_refresh(s);
                     serde_json::to_value(RefreshAccountsOutput::Refreshed { overview: result })?
                 } else {
                     serde_json::to_value(result)?

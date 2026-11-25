@@ -13,8 +13,10 @@ use crate::{
     skills::private_dir,
     validation::text,
 };
+use cairn_contracts::{AntigravityQuota, AntigravityQuotaWindow};
 use serde_json::{Value, json};
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -164,10 +166,14 @@ async fn credentials(s: &Service, id: &str) -> Result<Value> {
     if expiry(&credential["token"]["token"]) - now() < RENEW_BEFORE_MS {
         credential = renew(s, id).await?;
     }
+    strip_refresh_token(&mut credential);
+    Ok(credential)
+}
+
+fn strip_refresh_token(credential: &mut Value) {
     if let Some(token) = credential["token"]["token"].as_object_mut() {
         token.remove("refresh_token");
     }
-    Ok(credential)
 }
 
 /// The catalog and broker hold the account lock while checking credentials and
@@ -184,6 +190,298 @@ async fn credentials_with_status(s: &Service, id: &str) -> Result<Value> {
         super::save(s, &account).await?;
     }
     result
+}
+
+const QUOTA_ERROR: &str = "Antigravity quota is unavailable. Try refreshing again in Connections.";
+
+/// The CLI reports subscription buckets by model group, without the model IDs or
+/// overage settings needed to make admission decisions.
+fn parse_quota(stdout: &str, checked: i64) -> Option<AntigravityQuota> {
+    let result: Value = serde_json::from_str(stdout).ok()?;
+    if result["status"] != "SUCCESS"
+        || result["num_turns"] != 0
+        || result["command"]["name"] != "usage"
+    {
+        return None;
+    }
+    let groups = result.pointer("/command/data/groups")?.as_array()?;
+    let mut windows = Vec::new();
+    let mut ids = HashSet::new();
+    for group in groups {
+        let group_name = text(group, "name");
+        if !quota_label(group_name) {
+            continue;
+        }
+        for bucket in group["buckets"].as_array().into_iter().flatten() {
+            let id = text(bucket, "id");
+            let Some(remaining) = bucket["remaining_fraction"].as_f64() else {
+                continue;
+            };
+            if !crate::antigravity::valid_slug(id)
+                || !(0.0..=1.0).contains(&remaining)
+                || !ids.insert(id)
+            {
+                continue;
+            }
+            let (label, duration_mins) = match text(bucket, "window") {
+                "weekly" => ("Weekly", Some(10_080)),
+                "5h" => ("5-hour window", Some(300)),
+                _ => {
+                    let label = text(bucket, "name");
+                    if !quota_label(label) {
+                        continue;
+                    }
+                    (label, None)
+                }
+            };
+            let resets_at = chrono::DateTime::parse_from_rfc3339(text(bucket, "reset_time"))
+                .ok()
+                .map(|time| time.timestamp())
+                .filter(|reset| *reset > 0)
+                .filter(|reset| {
+                    // An untouched bucket reports a moving reset one full window away.
+                    remaining != 1.0
+                        || duration_mins.is_none_or(|minutes| {
+                            reset.abs_diff(checked / 1000 + minutes * 60) > 120
+                        })
+                });
+            windows.push(AntigravityQuotaWindow {
+                id: id.into(),
+                label: format!("{label} · {group_name}"),
+                remaining_percent: remaining * 100.0,
+                resets_at,
+            });
+        }
+    }
+    if windows.is_empty() {
+        return None;
+    }
+    Some(AntigravityQuota {
+        windows,
+        checked_at: Some(checked),
+        ..AntigravityQuota::default()
+    })
+}
+
+fn quota_label(label: &str) -> bool {
+    !label.trim().is_empty() && label.len() <= 100 && !label.chars().any(char::is_control)
+}
+
+async fn read_quota(s: &Service, credential: &Value) -> Result<AntigravityQuota> {
+    let root = s.config.data_dir.join("antigravity-accounts");
+    private_dir(&root).await?;
+    let home = tempfile::Builder::new().prefix("quota-").tempdir_in(root)?;
+    crate::antigravity::write_token(home.path(), &credential["token"]).await?;
+    let mut env = crate::antigravity::environment(&s.config, home.path(), Some(credential));
+    // This command never launches a turn or restores another shell's HOME.
+    env.remove("BASH_ENV");
+    env.remove("CAIRN_PREVIOUS_BASH_ENV");
+
+    crate::antigravity::check_version(&s.config, &env).await?;
+    let output = crate::process::bounded_output(
+        crate::process::command(
+            &s.config.antigravity_bin,
+            &[
+                "-p".into(),
+                "/usage".into(),
+                "--output-format".into(),
+                "json".into(),
+                "--log-file".into(),
+                "/dev/null".into(),
+            ],
+            &env,
+            Some(home.path()),
+        ),
+        Duration::from_secs(10),
+        65_536,
+    )
+    .await?;
+    if !output.success {
+        return Err(Error::bad_gateway(QUOTA_ERROR));
+    }
+    parse_quota(&output.stdout, now()).ok_or_else(|| Error::bad_gateway(QUOTA_ERROR))
+}
+
+#[derive(Default)]
+enum QuotaRefresh {
+    #[default]
+    Idle,
+    Running,
+    Pending,
+}
+
+/// Manual readings are presentation data. Keeping them separate from persisted
+/// account usage also keeps older managers from treating them as admission limits.
+#[derive(Default)]
+pub(super) struct QuotaReads {
+    state: QuotaRefresh,
+    readings: HashMap<String, Option<AntigravityQuota>>,
+}
+
+impl QuotaReads {
+    pub(super) fn snapshot(&self, id: &str, evaluated_at: i64) -> Option<AntigravityQuota> {
+        let mut reading = self.readings.get(id)?.clone()?;
+        let elapsed = reading
+            .checked_at
+            .is_none_or(|checked| evaluated_at - checked > 300_000);
+        let reset_passed = reading.windows.iter().any(|window| {
+            window
+                .resets_at
+                .is_some_and(|reset| reset <= evaluated_at / 1000)
+        });
+        reading.stale = elapsed || reset_passed;
+        Some(reading)
+    }
+}
+
+/// Accepts a request from the authenticated owner's refresh action. Clients
+/// receive completed readings on their next ordinary Connections poll.
+pub(crate) fn schedule_quota_refresh(s: &std::sync::Arc<Service>) {
+    if s.shutdown.is_cancelled() {
+        return;
+    }
+    {
+        let mut quota = s
+            .accounts
+            .antigravity_quota
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match quota.state {
+            QuotaRefresh::Idle => quota.state = QuotaRefresh::Running,
+            QuotaRefresh::Running | QuotaRefresh::Pending => {
+                quota.state = QuotaRefresh::Pending;
+                return;
+            }
+        }
+    }
+    let s = s.clone();
+    tokio::spawn(async move {
+        loop {
+            let result = tokio::select! {
+                biased;
+                () = s.shutdown.cancelled() => Ok(()),
+                result = refresh_google_quotas(&s) => result,
+            };
+            if let Err(error) = result {
+                tracing::warn!(status = error.status, "Antigravity quota refresh failed");
+            }
+            let mut quota = s
+                .accounts
+                .antigravity_quota
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !s.shutdown.is_cancelled() && matches!(quota.state, QuotaRefresh::Pending) {
+                quota.state = QuotaRefresh::Running;
+            } else {
+                quota.state = QuotaRefresh::Idle;
+                break;
+            }
+        }
+    });
+}
+
+async fn refresh_google_quotas(s: &Service) -> Result<()> {
+    let google = s.accounts.of(s, Provider::Antigravity).await?;
+    let ids: Vec<_> = google
+        .into_iter()
+        .filter(|account| account.is_active() && account.model_provider.as_deref() == Some(GOOGLE))
+        .map(|account| account.id)
+        .collect();
+    for batch in ids.chunks(2) {
+        for result in
+            futures_util::future::join_all(batch.iter().map(|id| refresh_quota(s, id))).await
+        {
+            if let Err(error) = result {
+                tracing::warn!(
+                    status = error.status,
+                    "Antigravity quota reading could not be completed"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn refresh_quota(s: &Service, id: &str) -> Result<()> {
+    let guard = s.accounts.lock(id).await;
+    if !can_read_quota(s, id).await? {
+        return Ok(());
+    }
+    let attempted = now();
+    // The worker serializes readings for an account. Removing its slot on
+    // reconnect or deletion invalidates this reading without fencing renewals.
+    s.accounts
+        .antigravity_quota
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .readings
+        .entry(id.into())
+        .or_default();
+    // The preceding account refresh handles renewal. The quota job only has
+    // access-token work to cancel on shutdown.
+    let mut credential = stored_credentials(s, id).await.unwrap_or(Value::Null);
+    let token_path = "/token/token/access_token";
+    if credential["kind"] != GOOGLE
+        || credential
+            .pointer(token_path)
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || expiry(&credential["token"]["token"]) <= attempted
+    {
+        record_quota(s, id, attempted, None);
+        return Ok(());
+    }
+    strip_refresh_token(&mut credential);
+    drop(guard);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(10), read_quota(s, &credential))
+        .await
+        .ok()
+        .and_then(Result::ok);
+
+    // A slow quota read can overlap run admission, reconnecting or removing the account.
+    let _guard = s.accounts.lock(id).await;
+    if !can_read_quota(s, id).await? {
+        return Ok(());
+    }
+    record_quota(s, id, attempted, outcome);
+    Ok(())
+}
+
+async fn can_read_quota(s: &Service, id: &str) -> Result<bool> {
+    let Some(account) = s.accounts.find(s, id).await? else {
+        return Ok(false);
+    };
+    Ok(account.is_active()
+        && account.model_provider.as_deref() == Some(GOOGLE)
+        && !s.accounts.busy(s, id).await?)
+}
+
+fn record_quota(s: &Service, id: &str, attempted: i64, outcome: Option<AntigravityQuota>) {
+    let mut quota = s
+        .accounts
+        .antigravity_quota
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(slot) = quota.readings.get_mut(id) else {
+        return;
+    };
+    let mut reading = outcome.unwrap_or_else(|| {
+        let mut previous = slot.take().unwrap_or_default();
+        previous.error = Some(QUOTA_ERROR.into());
+        previous
+    });
+    reading.attempted_at = attempted;
+    *slot = Some(reading);
+}
+
+fn clear_quota(s: &Service, id: &str) {
+    s.accounts
+        .antigravity_quota
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .readings
+        .remove(id);
 }
 
 pub(crate) async fn catalog_credentials(s: &Service, id: &str) -> Result<Option<Value>> {
@@ -536,13 +834,13 @@ impl Driver for Antigravity {
         s.vault
             .set(&secret_id(id), &json!({ "kind": GOOGLE, "token": token }))
             .await?;
+        clear_quota(s, id);
         s.antigravity.invalidate();
         drop(token_guard);
         let _ = remove_file(&home.join(TOKEN_FILE)).await;
         Ok(())
     }
 
-    /// Antigravity exposes no readable quota for these credentials.
     async fn refresh(&self, s: &Service, id: &str, _models: &[String]) -> Result<()> {
         credentials(s, id).await?;
         let mut account = s.accounts.account(s, id).await?;
@@ -636,13 +934,37 @@ impl Driver for Antigravity {
     }
 
     async fn forget(&self, s: &Service, id: &str) -> Result<()> {
-        s.vault.delete(&secret_id(id)).await
+        s.vault.delete(&secret_id(id)).await?;
+        clear_quota(s, id);
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_snapshot_goes_stale_when_a_sampled_reset_passes() {
+        let checked = 1_800_000_000_000;
+        let reset = checked / 1000 + 60;
+        let mut quota = QuotaReads::default();
+        quota.readings.insert(
+            "account".into(),
+            Some(AntigravityQuota {
+                checked_at: Some(checked),
+                windows: vec![AntigravityQuotaWindow {
+                    id: "group-weekly".into(),
+                    label: "Weekly · Group".into(),
+                    remaining_percent: 0.0,
+                    resets_at: Some(reset),
+                }],
+                ..AntigravityQuota::default()
+            }),
+        );
+        assert!(!quota.snapshot("account", reset * 1000 - 1).unwrap().stale);
+        assert!(quota.snapshot("account", reset * 1000).unwrap().stale);
+    }
 
     fn service_account() -> Value {
         json!({

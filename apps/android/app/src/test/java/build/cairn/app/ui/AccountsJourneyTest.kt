@@ -516,7 +516,7 @@ class AccountsJourneyTest {
             }
             waitText("Usage non consulté")
             compose.onNode(hasContentDescription("Gemini, ", substring = true)).performClick()
-            waitText("Antigravity n’indique pas l’usage restant")
+            waitText("Consultez l’usage de votre projet dans le tableau de bord Google.")
             compose.onNodeWithText("Remplacer la clé API").assertExists()
         }
     }
@@ -594,7 +594,7 @@ class AccountsJourneyTest {
                         server.signIn =
                             """{"accountId":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","state":"complete","phase":"verifying"}"""
                         server.accounts[0] =
-                            """{"id":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","name":"Perso","email":"perso@example.test","modelProvider":"google","modelProviderName":"Google account","state":"ready","status":"next"}"""
+                            """{"id":"00000000-0000-4000-8000-00000000a6c1","provider":"antigravity","name":"Perso","email":"perso@example.test","modelProvider":"google","modelProviderName":"Google account","state":"ready","status":"paused","enabled":false,"antigravityQuota":{"stale":true,"windows":[{"id":"weekly","label":"Weekly · Gemini Models","remainingPercent":75}]}}"""
                         """{"kind":"completed","done":true}"""
                     }
                     "POST /api/installations/fixture/api/accounts/00000000-0000-4000-8000-00000000a6c1/sign-in" -> {
@@ -639,6 +639,9 @@ class AccountsJourneyTest {
             }
             // Reconnecting a Google account signs in again, behind the same warning.
             compose.onNode(hasContentDescription("Perso, ", substring = true)).performClick()
+            waitText(
+                "Ces valeurs datent. Activez « Utiliser pour les nouvelles exécutions » pour vérifier le quota."
+            )
             waitText("Reconnecter")
             compose.onNodeWithText("Reconnecter").performScrollTo().performClick()
             waitText("Se connecter avec un compte Google ?")

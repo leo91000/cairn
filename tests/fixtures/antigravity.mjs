@@ -106,7 +106,7 @@ function expired(token) {
 function renewToken(token) {
   if (!expired(token))
     return true
-  if (!token.token.refresh_token)
+  if (!token.token.refresh_token || token.token.refresh_token === 'fixture-renew-unavailable')
     return false
   token.token.access_token = `ya29.fixture-renewed-${randomUUID()}`
   token.token.expiry = hourFromNow()
@@ -170,6 +170,64 @@ function login() {
     process.stderr.write('\nlogin cancelled: no authorization code was entered\n')
     process.exit(1)
   })
+}
+
+async function quota() {
+  const current = credential()
+  if (current?.kind !== 'google' || current.token.token.refresh_token
+    || current.token.token.access_token === 'fixture-quota-unavailable'
+    || option('--output-format') !== 'json') {
+    process.stderr.write('Antigravity quota fixture unavailable\n')
+    process.exit(2)
+  }
+
+  if (current.token.token.access_token === 'fixture-quota-hold') {
+    const parent = path.dirname(home)
+    writeFileSync(path.join(parent, 'fixture-quota-started'), '')
+    while (existsSync(path.join(parent, 'fixture-quota-hold')))
+      await new Promise(resolve => setTimeout(resolve, 10))
+  }
+
+  const reset = new Date(Date.now() + 24 * 3600_000).toISOString()
+  const idleReset = new Date(Date.now() + 5 * 3600_000).toISOString()
+  process.stdout.write(JSON.stringify({
+    status: 'SUCCESS',
+    num_turns: 0,
+    command: {
+      name: 'usage',
+      data: {
+        groups: [{
+          name: 'Gemini Models',
+          buckets: [{
+            id: 'gemini-weekly',
+            window: 'weekly',
+            remaining_fraction: 0.75,
+            reset_time: reset,
+          }, {
+            id: 'gemini-5h',
+            window: '5h',
+            remaining_fraction: 1,
+            reset_time: idleReset,
+          }, {
+            id: 'gemini-preview-weekly',
+            window: 'other',
+            name: 'Preview limit',
+            remaining_fraction: 0.5,
+            reset_time: '0001-01-01T00:00:00Z',
+          }],
+        }, {
+          name: 'Claude and GPT models',
+          buckets: [{
+            id: '3p-5h',
+            window: '5h',
+            remaining_fraction: 0,
+            reset_time: reset,
+          }],
+        }],
+      },
+    },
+  }))
+  process.exit(0)
 }
 
 function option(name) {
@@ -539,6 +597,9 @@ else if (args[0] === 'models') {
 }
 else if (args[0] === 'acp' && args.includes('--login')) {
   login()
+}
+else if (option('-p') === '/usage') {
+  void quota()
 }
 else if (args.includes('-p=') || args.includes('-p')) {
   print()

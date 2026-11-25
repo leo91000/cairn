@@ -3,6 +3,7 @@ import type { AccountState } from './AccountState'
 import type { AccountStatus } from './AccountStatus'
 import type { AccountUsage } from './AccountUsage'
 import type { AgentProvider } from './AgentProvider'
+import type { AntigravityQuota } from './AntigravityQuota'
 
 export interface CodingAgentAccount {
   id: string
@@ -25,6 +26,10 @@ export interface CodingAgentAccount {
   maxConcurrentRuns: number
   activeRunIds: Array<string>
   usage: AccountUsage | null
+  /**
+   * Informational model-group quotas from an explicit Antigravity check.
+   */
+  antigravityQuota?: AntigravityQuota | null
   remainingPercent: number | null
   resetsAt: number | null
   stale: boolean

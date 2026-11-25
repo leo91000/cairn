@@ -218,6 +218,8 @@ fn main() {
     export::<CodingAgentAccounts>(root, &mut generator, Contract::Deserialize);
     export::<AccountUsage>(root, &mut generator, Contract::Deserialize);
     export::<AccountWindow>(root, &mut generator, Contract::Deserialize);
+    export::<AntigravityQuota>(root, &mut generator, Contract::Deserialize);
+    export::<AntigravityQuotaWindow>(root, &mut generator, Contract::Deserialize);
     export::<AccountResets>(root, &mut generator, Contract::Deserialize);
     export::<AccountSignIn>(root, &mut generator, Contract::Deserialize);
     export::<ListAccountsInput>(root, &mut generator, Contract::Deserialize);

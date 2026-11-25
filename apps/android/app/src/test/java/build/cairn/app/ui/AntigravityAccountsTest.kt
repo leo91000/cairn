@@ -7,6 +7,12 @@ import org.junit.Test
 
 class AntigravityAccountsTest {
     @Test
+    fun `quota group labels are displayed verbatim`() {
+        val providerGroup = "Preview 2147483648-hour window"
+        assertEquals("Semaine · $providerGroup", antigravityQuotaLabel("Weekly · $providerGroup"))
+    }
+
+    @Test
     fun `Google Cloud credentials, project and region become one JSON key`() {
         val key =
             Json.parseToJsonElement(

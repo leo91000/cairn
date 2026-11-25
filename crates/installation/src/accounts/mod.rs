@@ -176,6 +176,7 @@ pub struct Accounts {
     initialized: OnceCell<()>,
     attempted: Mutex<HashMap<String, i64>>,
     polling: Mutex<()>,
+    antigravity_quota: std::sync::Mutex<antigravity::QuotaReads>,
     selection: Mutex<()>,
     connecting: Mutex<Option<String>>,
     signing_in: Mutex<Option<SignIn>>,
@@ -831,11 +832,18 @@ impl Accounts {
                 next.push(first.id.clone());
             }
         }
+        let quota = self
+            .antigravity_quota
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let evaluated_at = now();
         Ok(accounts
             .into_iter()
             .map(|account| {
                 let is_next = next.contains(&account.id);
-                view(&account, &leases, is_next)
+                let mut item = view(&account, &leases, is_next);
+                item.antigravity_quota = quota.snapshot(&account.id, evaluated_at);
+                item
             })
             .collect())
     }
@@ -1281,6 +1289,7 @@ fn view(account: &Account, leases: &[Lease], next: bool) -> CodingAgentAccount {
         checked_at: account.checked_at,
         last_used_at: account.last_used_at,
         usage: account.usage.clone(),
+        antigravity_quota: None,
         resets_at: usage.limiting("").and_then(|w| w.resets_at),
         remaining_percent: usage.remaining(""),
         stale: !fresh(account, driver),

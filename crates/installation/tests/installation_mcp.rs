@@ -6035,7 +6035,47 @@ async fn typed_account_management_has_tool_parity_without_human_sign_in_authorit
         provider::Provider,
     };
     let root = TempDir::new().unwrap();
-    let s = service(&root).await;
+    let mut s = service(&root).await;
+    common::reconfigure(&mut s, |config| {
+        config.antigravity_bin = common::fixture("antigravity.mjs");
+    })
+    .await;
+    let mut google = Account::new(Provider::Antigravity, "Google", AccountState::Ready);
+    google.model_provider = Some("google".into());
+    s.store.save_coding_account(&google).await.unwrap();
+    s.vault
+        .set(
+            &format!("antigravity-account:{}", google.id),
+            &json!({
+                "kind": "google",
+                "token": {
+                    "token": {
+                        "access_token": "fixture-google-quota-access",
+                        "expiry": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                    },
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let refreshed = common::owner_api_route(&s, "POST", "/api/accounts/refresh", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(refreshed["kind"], "refreshed");
+    common::eventually(
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_millis(30),
+        async || {
+            s.accounts
+                .list(&s)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|account| account.id == google.id)
+                .and_then(|account| account.antigravity_quota)
+        },
+    )
+    .await;
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
     let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
@@ -6061,8 +6101,21 @@ async fn typed_account_management_has_tool_parity_without_human_sign_in_authorit
         .await;
         assert_eq!(status, StatusCode::OK, "{response}");
         let listed = result(&response);
-        assert_eq!(listed["accounts"][0]["id"], account.id);
-        assert!(listed["accounts"][0].get("identity").is_none());
+        let accounts = listed["accounts"].as_array().unwrap();
+        let codex = accounts
+            .iter()
+            .find(|item| item["id"] == account.id)
+            .unwrap();
+        assert!(codex.get("identity").is_none());
+        let antigravity = accounts
+            .iter()
+            .find(|item| item["id"] == google.id)
+            .unwrap();
+        assert!(antigravity["usage"].is_null());
+        assert_eq!(
+            antigravity["antigravityQuota"]["windows"][0]["remainingPercent"].as_f64(),
+            Some(75.0),
+        );
         assert!(listed["signIn"].is_null());
         let current = s.accounts.account(&s, &account.id).await.unwrap();
         let (_,response)=node_management_call(&app,endpoint,token,"replace_coding_agent_account",json!({"accountId":account.id,"revision":current.revision,"settings":{"name":"Managed","enabled":false,"maxConcurrentRuns":2}})).await;
@@ -6081,6 +6134,10 @@ async fn typed_account_management_has_tool_parity_without_human_sign_in_authorit
         assert_eq!(
             s.accounts.account(&s, &account.id).await.unwrap(),
             unchanged
+        );
+        assert_eq!(
+            s.accounts.account(&s, &google.id).await.unwrap().usage,
+            google.usage,
         );
         let before = s.store.coding_accounts().await.unwrap().len();
         let (_, response) = node_management_call(

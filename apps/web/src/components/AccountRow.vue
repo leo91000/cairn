@@ -20,6 +20,13 @@ const note = computed(() => {
   const { state, usage } = props.account
   if (state !== 'ready')
     return ''
+  if (props.account.provider === 'antigravity' && props.account.modelProvider === 'google') {
+    const quota = props.account.antigravityQuota
+    if (quota?.error)
+      return 'Usage unavailable'
+    return quota?.windows.length ? 'See quotas in account details' : 'Usage not checked'
+  }
+
   if (usage?.error)
     return 'Usage unavailable'
   if (props.account.provider === 'antigravity')

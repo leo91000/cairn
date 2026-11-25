@@ -121,9 +121,24 @@ l'étape échoue (`token expired and refresh token is not set`). L'adaptateur ob
 alors un nouveau jeton du courtier et relance la même conversation avec une consigne
 de reprise, au plus 48 fois par tour.
 
-L'usage est indisponible : `agy` n'expose le quota qu'en texte interactif, et pas
-du tout avec une clé API. Une erreur 429 utilise l'épuisement
-partagé ; le compte redevient éligible après cinq minutes.
+Le propriétaire peut lire les quotas d'un compte Google actif avec le bouton de
+vérification dans Connexions. Le manager utilise `agy -p /usage --output-format json`
+dans un HOME temporaire privé avec le seul jeton d'accès. La requête ne dépend
+pas de la durée du relevé et l'actualisation habituelle de Connexions affiche
+les résultats, gardés en mémoire jusqu'au redémarrage du manager ou à une
+reconnexion. Google ne prend pas en
+charge cet usage du mode non interactif par une application tierce pour les comptes
+grand public. Les outils exposent le dernier relevé aux agents autorisés et la
+vérification reste une action du propriétaire. Une clé API Gemini et un projet
+Google Cloud gardent leurs tableaux de bord Google.
+
+Le relevé indique les groupes de modèles, le quota restant et l'heure de
+réinitialisation quand elle est connue. La CLI peut signaler un horaire fictif
+pour les fenêtres encore inutilisées. Le relevé omet ces horaires et marque les
+fenêtres dans le champ informatif `antigravityQuota`. Ce champ garde les groupes
+distincts de l'usage qui gouverne l'admission. Une erreur 429 utilise
+l'épuisement partagé et le compte redevient
+éligible après cinq minutes.
 
 **Catalogue.** `agy models` liste des identifiants qui incluent le niveau
 (`gemini-4-neon-high`). Cairn les regroupe en un modèle et ses niveaux de
