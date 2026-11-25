@@ -11,9 +11,9 @@ use std::{
 };
 
 #[derive(Clone)]
-pub(crate) struct BackendNamespace(Arc<File>);
+pub struct BackendNamespace(Arc<File>);
 
-pub(crate) struct Entry {
+pub struct Entry {
     namespace: BackendNamespace,
     directories: Vec<(PathBuf, u64, u64)>,
     state: PathBuf,
@@ -81,20 +81,17 @@ fn backing_mounts(state: &Path, mounts: &str) -> io::Result<Vec<String>> {
 
 impl BackendNamespace {
     #[cfg(test)]
-    pub(crate) fn unavailable_for_test() -> Self {
+    pub fn unavailable_for_test() -> Self {
         Self(Arc::new(File::open("/dev/null").unwrap()))
     }
 
-    pub(crate) fn create(state: &Path) -> io::Result<Self> {
+    pub fn create(state: &Path) -> io::Result<Self> {
         Self::create_recovering(state, &[])
     }
 
     /// Detach only previously attested native copies in this private template.
     /// Host mounts and their physical owners are untouched.
-    pub(crate) fn create_recovering(
-        state: &Path,
-        recoverable: &[(PathBuf, String)],
-    ) -> io::Result<Self> {
+    pub fn create_recovering(state: &Path, recoverable: &[(PathBuf, String)]) -> io::Result<Self> {
         let state = state.to_owned();
         let recoverable = recoverable.to_vec();
         std::thread::spawn(move || {
@@ -133,7 +130,7 @@ impl BackendNamespace {
         .map_err(|_| io::Error::other("Backend namespace preparation panicked"))?
     }
 
-    pub(crate) fn prepare(&self, state: &Path, directories: &[&Path]) -> io::Result<Entry> {
+    pub fn prepare(&self, state: &Path, directories: &[&Path]) -> io::Result<Entry> {
         let mut identities = Vec::new();
         for path in directories {
             let metadata = std::fs::symlink_metadata(path)?;
@@ -158,7 +155,7 @@ impl BackendNamespace {
 
 impl Entry {
     /// Dedicated backend OS thread only, before ADD and before queue threads.
-    pub(crate) fn enter(&self) -> io::Result<()> {
+    pub fn enter(&self) -> io::Result<()> {
         checked(unsafe { libc::unshare(libc::CLONE_FS) })?;
         checked(unsafe { libc::setns(self.namespace.0.as_raw_fd(), libc::CLONE_NEWNS) })?;
         // Backend-local changes can never mutate the reusable clean template.

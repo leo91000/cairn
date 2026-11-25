@@ -50,7 +50,7 @@ pub trait Disk: Send + Sync {
     fn sync(&self) -> io::Result<()>;
 }
 
-pub(crate) fn range(size: u64, offset: u64, length: usize) -> io::Result<()> {
+pub fn range(size: u64, offset: u64, length: usize) -> io::Result<()> {
     if offset
         .checked_add(length as u64)
         .is_none_or(|end| end > size)
@@ -112,7 +112,7 @@ pub fn export(disk: &dyn Disk, target: &Path) -> io::Result<()> {
     export_checked(disk, target, |_| Ok(()))
 }
 
-pub(super) fn export_checked<E: From<io::Error>>(
+pub fn export_checked<E: From<io::Error>>(
     disk: &dyn Disk,
     target: &Path,
     mut check: impl FnMut(u64) -> Result<(), E>,

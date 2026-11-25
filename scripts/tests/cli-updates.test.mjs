@@ -70,7 +70,7 @@ describe('application image tool versions', () => {
   })
 
   it('shares the oldest Antigravity release its adapter supports', () => {
-    const adapter = readFileSync(new URL('../../crates/installation/src/antigravity/mod.rs', import.meta.url), 'utf8')
+    const adapter = readFileSync(new URL('../../crates/installation/src/coding_agent/antigravity_runtime/mod.rs', import.meta.url), 'utf8')
     expect(adapter).toContain(`pub const MINIMUM: &str = "${engines.antigravity.minimum}";`)
   })
 
@@ -80,7 +80,7 @@ describe('application image tool versions', () => {
   })
 
   it('shares the oldest OpenCode release its adapter supports', () => {
-    const adapter = readFileSync(new URL('../../crates/installation/src/opencode/mod.rs', import.meta.url), 'utf8')
+    const adapter = readFileSync(new URL('../../crates/installation/src/coding_agent/opencode_runtime/mod.rs', import.meta.url), 'utf8')
     expect(adapter).toContain(`pub const MINIMUM: &str = "${engines.opencode.minimum}";`)
   })
 

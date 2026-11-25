@@ -6,7 +6,7 @@ use std::{
 };
 
 #[derive(Default)]
-pub(crate) struct Counter {
+pub struct Counter {
     count: AtomicU64,
     bytes: AtomicU64,
     micros: AtomicU64,
@@ -20,7 +20,7 @@ pub(crate) struct Counter {
     concurrent_starts: AtomicU64,
 }
 
-pub(crate) struct Sample<'a> {
+pub struct Sample<'a> {
     counter: &'a Counter,
     started: Instant,
     bytes: u64,
@@ -28,7 +28,7 @@ pub(crate) struct Sample<'a> {
 }
 
 impl Counter {
-    pub(crate) fn start(&self) -> Sample<'_> {
+    pub fn start(&self) -> Sample<'_> {
         let in_flight = self.in_flight.fetch_add(1, Relaxed) + 1;
         self.max_in_flight.fetch_max(in_flight, Relaxed);
         self.concurrent_starts
@@ -41,7 +41,7 @@ impl Counter {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> Value {
+    pub fn snapshot(&self) -> Value {
         json!({
             "count": self.count.load(Relaxed),
             "bytes": self.bytes.load(Relaxed),
@@ -59,7 +59,7 @@ impl Counter {
 }
 
 impl Sample<'_> {
-    pub(crate) fn finish(mut self, bytes: usize) {
+    pub fn finish(mut self, bytes: usize) {
         self.bytes = bytes as u64;
         self.success = true;
     }
@@ -88,7 +88,7 @@ impl Drop for Sample<'_> {
 }
 
 #[derive(Default)]
-pub(super) struct Metrics {
+pub struct Metrics {
     pub write_admission: Counter,
     pub reads: Counter,
     pub writes: Counter,

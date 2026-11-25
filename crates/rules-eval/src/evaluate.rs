@@ -18,11 +18,11 @@ use serde_json::Value as Json;
 use std::{cell::Cell, collections::BTreeMap, sync::Arc};
 
 /// Items that the macros of one evaluation may iterate, nested ones included.
-pub(crate) const MAX_ITERATIONS: usize = 20_000;
+pub const MAX_ITERATIONS: usize = 20_000;
 /// The largest intermediate or final value, measured as JSON text.
-pub(crate) const MAX_BYTES: usize = 256 * 1024;
+pub const MAX_BYTES: usize = 256 * 1024;
 /// All the values one evaluation produces, added up.
-pub(crate) const MAX_PRODUCED: usize = 16 * 1024 * 1024;
+pub const MAX_PRODUCED: usize = 16 * 1024 * 1024;
 
 const RANGE: &str = "__cairn_range";
 const BOUND: &str = "__cairn_bound";
@@ -36,7 +36,7 @@ thread_local! {
 /// The whole pure planning step shares a deadline, including successive formulas.
 /// Checking it inside the interpreter and CEL callbacks also retires a blocking job
 /// if its async caller has already reached the timeout.
-pub(crate) fn with_deadline<T>(deadline: std::time::Instant, run: impl FnOnce() -> T) -> T {
+pub fn with_deadline<T>(deadline: std::time::Instant, run: impl FnOnce() -> T) -> T {
     struct Restore(Option<std::time::Instant>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -47,7 +47,7 @@ pub(crate) fn with_deadline<T>(deadline: std::time::Instant, run: impl FnOnce() 
     run()
 }
 
-pub(crate) fn check_deadline() -> Outcome<()> {
+pub fn check_deadline() -> Outcome<()> {
     let expired = DEADLINE.with(|deadline| {
         deadline
             .get()
@@ -62,10 +62,10 @@ pub(crate) fn check_deadline() -> Outcome<()> {
 
 /// The variables of one place in a triggering, as JSON.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Variables(pub BTreeMap<String, Json>);
+pub struct Variables(pub BTreeMap<String, Json>);
 
 impl Variables {
-    pub(crate) fn insert(&mut self, name: &str, value: Json) {
+    pub fn insert(&mut self, name: &str, value: Json) {
         self.0.insert(name.to_owned(), value);
     }
 }
@@ -749,13 +749,13 @@ fn step(node: IdedExpr) -> IdedExpr {
 
 /// Evaluates the values of one place of a triggering. Its variables are converted
 /// once; loop items join them in a child scope for each evaluation.
-pub(crate) struct Evaluator {
+pub struct Evaluator {
     context: Context<'static, 'static>,
     scope: formula::Scope,
 }
 
 impl Evaluator {
-    pub(crate) fn new(variables: &Variables) -> Outcome<Self> {
+    pub fn new(variables: &Variables) -> Outcome<Self> {
         Ok(Self {
             context: context(variables)?,
             scope: formula::Scope {
@@ -772,7 +772,7 @@ impl Evaluator {
 
     /// Evaluates one formula. Checking it again guards against a version saved under
     /// earlier, looser limits.
-    pub(crate) fn formula(&self, source: &str, items: &Map<String, Json>) -> Outcome<Json> {
+    pub fn formula(&self, source: &str, items: &Map<String, Json>) -> Outcome<Json> {
         check_deadline()?;
         let mut scope = self.scope.clone();
         scope.names.extend(items.keys().cloned());
@@ -793,7 +793,7 @@ impl Evaluator {
     }
 
     /// The text of a template, each `{{expression}}` replaced by its result.
-    pub(crate) fn template(&self, text: &str, items: &Map<String, Json>) -> Outcome<Json> {
+    pub fn template(&self, text: &str, items: &Map<String, Json>) -> Outcome<Json> {
         let mut rendered = String::new();
         for part in formula::template(text)? {
             check_deadline()?;
@@ -815,7 +815,7 @@ impl Evaluator {
         Ok(Json::String(rendered))
     }
 
-    pub(crate) fn value(&self, value: &RuleValue, items: &Map<String, Json>) -> Outcome<Json> {
+    pub fn value(&self, value: &RuleValue, items: &Map<String, Json>) -> Outcome<Json> {
         check_deadline()?;
         match value {
             RuleValue::Literal { value } => Ok(value.clone()),

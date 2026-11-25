@@ -5,7 +5,7 @@ mod io;
 mod namespace;
 mod observation;
 
-pub(crate) use namespace::BackendNamespace;
+pub use namespace::BackendNamespace;
 
 use super::Disk;
 use libublk::{UblkError, UblkFlags, ctrl::UblkCtrlBuilder};
@@ -446,13 +446,13 @@ fn records(state: &Path) -> stdio::Result<Vec<Record>> {
 /// Verify a native stale attachment before holder cleanup changes a process.
 /// The durable nonce, boot and dead-owner checks also apply without a host mount.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HostDiskIdentity {
+pub enum HostDiskIdentity {
     Current,
     PreviousBoot,
     Absent,
 }
 
-pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<HostDiskIdentity> {
+pub fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<HostDiskIdentity> {
     let current_boot = boot_id()?;
     let records = records(state)?;
     let previous_boot = records.iter().any(|record| record.vm_id == run)
@@ -553,7 +553,7 @@ pub(crate) fn verify_stale_host_disk(state: &Path, run: &str) -> stdio::Result<H
 /// A root-overmounted namespace can hide a retained filesystem from mountinfo.
 /// ext4 keeps this registration until put_super starts, independently of task roots.
 /// Absence is not proof that journal destruction or kernel retirement has completed.
-pub(crate) fn require_host_filesystems_unmounted(state: &Path, run: &str) -> stdio::Result<()> {
+pub fn require_host_filesystems_unmounted(state: &Path, run: &str) -> stdio::Result<()> {
     let boot = boot_id()?;
     let ids = records(state)?
         .into_iter()
@@ -624,7 +624,7 @@ fn retained_device_address(
 /// Native recovery owns both disk leases and has requested workload termination.
 /// Abort only dead, nonce-verified backends so blocked consumers can finish exiting;
 /// keep kernel devices and receipts until fencing and unmount are confirmed.
-pub(crate) fn quiesce_stale_host_disk(state: &Path, run: &str) -> stdio::Result<()> {
+pub fn quiesce_stale_host_disk(state: &Path, run: &str) -> stdio::Result<()> {
     let current_boot = boot_id()?;
     let mut owned = false;
     for record in records(state)? {
@@ -664,7 +664,7 @@ pub(crate) fn quiesce_stale_host_disk(state: &Path, run: &str) -> stdio::Result<
 
 /// Inventory without kernel control operations. Native recovery schedules each
 /// run independently and keeps its durable quarantine until all receipts retire.
-pub(crate) fn stale_runs(state: &Path) -> stdio::Result<Vec<String>> {
+pub fn stale_runs(state: &Path) -> stdio::Result<Vec<String>> {
     let mut runs = records(state)?
         .into_iter()
         .map(|record| record.vm_id)
@@ -674,7 +674,7 @@ pub(crate) fn stale_runs(state: &Path) -> stdio::Result<Vec<String>> {
     Ok(runs)
 }
 
-pub(crate) fn cleanup_native_run(state: &Path, run: &str) -> stdio::Result<()> {
+pub fn cleanup_native_run(state: &Path, run: &str) -> stdio::Result<()> {
     let records = records(state)?
         .into_iter()
         .filter(|record| record.vm_id == run)
@@ -731,7 +731,7 @@ impl MountedDisk {
 
     /// Abort only this nonce-verified device to release blocked I/O after a
     /// failed consumer fence. Registration stays owned until normal retirement.
-    pub(crate) fn abort_io(&self) -> stdio::Result<()> {
+    pub fn abort_io(&self) -> stdio::Result<()> {
         self.stop()
     }
 
@@ -742,11 +742,11 @@ impl MountedDisk {
 
     /// The caller has fenced all consumers and unmounted any host filesystem.
     /// Retaining the handle on error permits safe retry of kernel retirement.
-    pub(crate) fn close_in_place(&mut self) -> stdio::Result<()> {
+    pub fn close_in_place(&mut self) -> stdio::Result<()> {
         self.close_with_mode(false)
     }
 
-    pub(crate) fn close_native(&mut self) -> stdio::Result<()> {
+    pub fn close_native(&mut self) -> stdio::Result<()> {
         self.close_with_mode(true)
     }
 
@@ -790,7 +790,7 @@ pub fn mount_disk(
 /// could otherwise flush a filesystem through the very backend that is exiting.
 /// Every backend enters the clean startup namespace before adding its device;
 /// it never copies an existing or concurrently closing host consumer.
-pub(crate) fn mount_host_disk(
+pub fn mount_host_disk(
     disk: Arc<dyn Disk>,
     state: &Path,
     jail: &Path,
@@ -802,7 +802,7 @@ pub(crate) fn mount_host_disk(
 }
 
 #[cfg(test)]
-pub(crate) fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Result<()> {
+pub fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Result<()> {
     if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
         return Err(stdio::Error::last_os_error());
     }

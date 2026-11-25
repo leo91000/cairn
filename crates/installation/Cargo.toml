@@ -17,12 +17,14 @@ path = "src/main.rs"
 name = "native_storage_qualifier"
 
 [dependencies]
+cairn-block-storage = { workspace = true }
+cairn-code-mode = { workspace = true }
 cairn-contracts = { workspace = true }
-rquickjs = "=0.14.0"
 cairn-protocol = { workspace = true }
 cairn-plugin-api = { workspace = true }
 cairn-plugin-host = { workspace = true }
 cairn-plugin-runtime = { workspace = true }
+cairn-rules-eval = { workspace = true }
 axum = { workspace = true, features = [
   "macros",
   "form"
@@ -82,12 +84,6 @@ regex = { workspace = true }
 chrono = { version = "0.4", features = [ "serde" ] }
 chrono-tz = "0.10"
 croner = "4"
-# Rule formulas (ADR-0075). Only the CEL standard library, strings and lists extensions.
-cel = { version = "0.15", default-features = false, features = [
-  "regex",
-  "chrono",
-  "json"
-] }
 libc = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = [
@@ -104,8 +100,6 @@ async-trait = { workspace = true }
 blake3 = "1.8.7"
 flate2 = { workspace = true }
 lru = "0.18.5"
-vmm-sys-util = "=0.15.0"
-libublk = { git = "https://github.com/ublk-org/libublk-rs", rev = "0d172817b3737079477337b39538ccdc91766e6e" }
 tokio-tungstenite = { workspace = true, features = [ "rustls-tls-webpki-roots" ] }
 tower = { workspace = true, features = [ "util" ] }
 webrtc = { workspace = true, features = [

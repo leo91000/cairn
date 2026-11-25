@@ -2,7 +2,7 @@
 use serde_json::Value;
 use std::io;
 
-pub(crate) fn validate(manifest: &Value) -> io::Result<()> {
+pub fn validate(manifest: &Value) -> io::Result<()> {
     if let Some(layout) = manifest.get("layout")
         && *layout != serde_json::json!({ "kind": "flat-ext4-v1" })
     {

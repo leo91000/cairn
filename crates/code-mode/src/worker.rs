@@ -1,7 +1,7 @@
 //! No manager state is linked into the script: only framed JSON host calls.
 mod isolation;
 
-use super::{Completed, Frame, MAX_FRAME, model_result};
+use super::{Completed, Frame, MAX_FRAME, MODEL_RESULT_LIMIT};
 use rquickjs::{Context, Function, Promise, Runtime};
 use serde::Deserialize;
 use serde_json::{Value, json, value::RawValue};
@@ -139,7 +139,7 @@ fn evaluate(code: &str, input: &Value, names: &[String]) -> Result<Completed, St
         }
 
         let value = envelope.value.ok_or("Code must return a JSON value.")?;
-        if value.get().len() > model_result::LIMIT {
+        if value.get().len() > MODEL_RESULT_LIMIT {
             return Ok(Completed::Truncated {
                 value_bytes: value.get().len(),
             });

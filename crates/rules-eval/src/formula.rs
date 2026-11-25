@@ -8,30 +8,30 @@ use cel::common::ast::{EntryExpr, Expr, IdedExpr, operators};
 use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
 
-pub(crate) const MAX_SOURCE: usize = 2000;
-pub(crate) const MAX_NODES: usize = 300;
+pub const MAX_SOURCE: usize = 2000;
+pub const MAX_NODES: usize = 300;
 /// `items.map(x, x.tags.exists(t, …))` nests two macros; a third is refused.
-pub(crate) const MAX_MACRO_DEPTH: usize = 2;
-pub(crate) const MAX_PLACEHOLDERS: usize = 20;
-pub(crate) const MAX_TEMPLATE: usize = 10_000;
+pub const MAX_MACRO_DEPTH: usize = 2;
+pub const MAX_PLACEHOLDERS: usize = 20;
+pub const MAX_TEMPLATE: usize = 10_000;
 
 /// The variables readable at one place of a rule.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Scope {
+pub struct Scope {
     pub names: BTreeSet<String>,
     /// Actions that run before this place, readable as `steps.<id>`.
     pub steps: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CallStyle {
+pub enum CallStyle {
     /// `truncate(text, 10)`.
     Global,
     /// `text.truncate(10)`, or the global form.
     Either,
 }
 
-pub(crate) struct Function {
+pub struct Function {
     pub name: &'static str,
     /// Arguments, the receiver of a member call included.
     pub arity: std::ops::RangeInclusive<usize>,
@@ -43,7 +43,7 @@ pub(crate) struct Function {
 
 /// The Cairn function library. Evaluation lives with the rule engine; the signatures
 /// here are what the editor offers and what saving checks.
-pub(crate) const FUNCTIONS: &[Function] = &[
+pub const FUNCTIONS: &[Function] = &[
     Function {
         name: "truncate",
         arity: 2..=2,
@@ -189,7 +189,7 @@ const TYPES: &[&str] = &[
 ];
 
 /// The environment shared by checking and evaluation.
-pub(crate) fn environment() -> Arc<cel::Env> {
+pub fn environment() -> Arc<cel::Env> {
     static ENVIRONMENT: OnceLock<Arc<cel::Env>> = OnceLock::new();
     ENVIRONMENT
         .get_or_init(|| {
@@ -202,12 +202,12 @@ pub(crate) fn environment() -> Arc<cel::Env> {
         .clone()
 }
 
-pub(crate) fn function(name: &str) -> Option<&'static Function> {
+pub fn function(name: &str) -> Option<&'static Function> {
     FUNCTIONS.iter().find(|function| function.name == name)
 }
 
 /// Parses a formula without checking what it reads.
-pub(crate) fn parse(source: &str) -> Result<IdedExpr, String> {
+pub fn parse(source: &str) -> Result<IdedExpr, String> {
     if source.trim().is_empty() {
         return Err("Enter a formula.".into());
     }
@@ -221,7 +221,7 @@ pub(crate) fn parse(source: &str) -> Result<IdedExpr, String> {
 }
 
 /// Parses a formula and checks its cost and everything it calls and reads.
-pub(crate) fn check(source: &str, scope: &Scope) -> Result<IdedExpr, String> {
+pub fn check(source: &str, scope: &Scope) -> Result<IdedExpr, String> {
     let expression = parse(source)?;
     let mut walk = Walk {
         scope,
@@ -361,14 +361,14 @@ impl Walk<'_> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Part {
+pub enum Part {
     Text(String),
     Expression(String),
 }
 
 /// Splits `discord:{{threadId}}` into text and expressions. An expression ends at the
 /// first `}}`; write `{{"{{"}}` for literal braces.
-pub(crate) fn template(text: &str) -> Result<Vec<Part>, String> {
+pub fn template(text: &str) -> Result<Vec<Part>, String> {
     if text.chars().count() > MAX_TEMPLATE {
         return Err(format!("A text has at most {MAX_TEMPLATE} characters."));
     }
@@ -398,7 +398,7 @@ pub(crate) fn template(text: &str) -> Result<Vec<Part>, String> {
     Ok(parts)
 }
 
-pub(crate) fn check_template(text: &str, scope: &Scope) -> Result<(), String> {
+pub fn check_template(text: &str, scope: &Scope) -> Result<(), String> {
     for part in template(text)? {
         if let Part::Expression(source) = part {
             check(&source, scope).map_err(|error| format!("In {{{{{source}}}}}: {error}"))?;
@@ -409,7 +409,7 @@ pub(crate) fn check_template(text: &str, scope: &Scope) -> Result<(), String> {
 
 /// Whether a formula reads a variable or field whose name contains `word`, such as
 /// `payload.author.id` or `authorId`. Text inside string literals does not count.
-pub(crate) fn reads(source: &str, word: &str) -> bool {
+pub fn reads(source: &str, word: &str) -> bool {
     fn walk(node: &IdedExpr, word: &str) -> bool {
         let named = |name: &str| name.to_lowercase().contains(word);
         match &node.expr {

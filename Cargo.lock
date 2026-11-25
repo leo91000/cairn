@@ -785,6 +785,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-block-storage"
+version = "0.52.3"
+dependencies = [
+ "blake3",
+ "libc",
+ "libublk",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+ "vmm-sys-util",
+]
+
+[[package]]
+name = "cairn-code-mode"
+version = "0.52.3"
+dependencies = [
+ "libc",
+ "rquickjs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cairn-contracts"
 version = "0.52.3"
 dependencies = [
@@ -807,12 +833,14 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "bytes",
+ "cairn-block-storage",
+ "cairn-code-mode",
  "cairn-contracts",
  "cairn-plugin-api",
  "cairn-plugin-host",
  "cairn-plugin-runtime",
  "cairn-protocol",
- "cel",
+ "cairn-rules-eval",
  "chrono",
  "chrono-tz",
  "croner",
@@ -826,7 +854,6 @@ dependencies = [
  "jsonc-parser",
  "jsonschema",
  "libc",
- "libublk",
  "lru",
  "mail-builder",
  "mime_guess",
@@ -834,7 +861,6 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest",
- "rquickjs",
  "rtc",
  "rusqlite",
  "rustls",
@@ -859,7 +885,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "vmm-sys-util",
  "webrtc",
  "zip",
 ]
@@ -929,6 +954,18 @@ version = "0.52.3"
 dependencies = [
  "base64 0.22.1",
  "ring",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cairn-rules-eval"
+version = "0.52.3"
+dependencies = [
+ "cairn-contracts",
+ "cel",
+ "chrono",
+ "chrono-tz",
  "serde",
  "serde_json",
 ]

@@ -1,5 +1,7 @@
 [workspace]
 members = [
+  "crates/block-storage",
+  "crates/code-mode",
   "crates/contracts",
   "crates/installation",
   "crates/beacon",
@@ -7,7 +9,8 @@ members = [
   "crates/protocol",
   "crates/plugin-api",
   "crates/plugin-host",
-  "crates/plugin-runtime"
+  "crates/plugin-runtime",
+  "crates/rules-eval"
 ]
 resolver = "3"
 exclude = [
@@ -24,6 +27,8 @@ rust-version = "1.97"
 publish = false
 
 [workspace.dependencies]
+cairn-block-storage = { path = "crates/block-storage" }
+cairn-code-mode = { path = "crates/code-mode" }
 cairn-contracts = { path = "crates/contracts" }
 cairn-installation = { path = "crates/installation" }
 cairn-node-gateway = { path = "crates/node-gateway" }
@@ -31,6 +36,7 @@ cairn-plugin-api = { path = "crates/plugin-api" }
 cairn-plugin-host = { path = "crates/plugin-host" }
 cairn-plugin-runtime = { path = "crates/plugin-runtime" }
 cairn-protocol = { path = "crates/protocol" }
+cairn-rules-eval = { path = "crates/rules-eval" }
 async-trait = "0.1.92"
 axum = "0.8.9"
 base64 = "0.22"
