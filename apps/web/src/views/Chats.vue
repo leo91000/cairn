@@ -93,6 +93,7 @@ import NodeExecution from '../components/NodeExecution.vue'
 import PlanBar from '../components/PlanBar.vue'
 import QueueStrip from '../components/QueueStrip.vue'
 import RecoveryNotice from '../components/RecoveryNotice.vue'
+import SideQuestionButton from '../components/SideQuestionButton.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import SubagentBar from '../components/SubagentBar.vue'
 import SubagentPanel from '../components/SubagentPanel.vue'
@@ -318,6 +319,7 @@ const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
 const sideQuestions = ref<InstanceType<typeof ChatSideQuestions>>()
+const sideQuestionIndicator = computed(() => sideQuestions.value?.indicator ?? null)
 // How many side questions each reply has, for its badge in the conversation.
 const sideQuestionCounts = computed(() => {
   const counts: Record<string, number> = {}
@@ -1699,6 +1701,12 @@ function key(event: KeyboardEvent) {
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-1">
+          <SideQuestionButton
+            v-if="sideQuestionIndicator && !activity?.showsWorkingIndicator"
+            :indicator="sideQuestionIndicator"
+            header
+            @click="sideQuestions?.openDefault()"
+          />
           <button
             v-if="detail?.run && fileCount"
             :class="iconButton"
@@ -1961,7 +1969,14 @@ function key(event: KeyboardEvent) {
             @position="live.savePosition"
             @implement="implementPlan"
             @pause-wait="busy || action('pause', { paused: true })"
-          />
+          >
+            <template v-if="sideQuestionIndicator" #working-action>
+              <SideQuestionButton
+                :indicator="sideQuestionIndicator"
+                @click="sideQuestions?.openDefault()"
+              />
+            </template>
+          </ActivityFeed>
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
             <UiNotice
               v-if="detail?.environmentState"

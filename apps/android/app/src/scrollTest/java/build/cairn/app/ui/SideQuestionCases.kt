@@ -8,6 +8,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
@@ -386,7 +387,7 @@ abstract class SideQuestionCases {
     }
 
     @Test
-    fun theCardSaysWhenAQuestionWasNotAnswered() {
+    fun theButtonAnnouncesUnansweredAndReadyStates() {
         val failed =
             answered.copy(
                 id = "a1b2c3d4-0000-4000-8000-000000000009",
@@ -398,26 +399,35 @@ abstract class SideQuestionCases {
         var questions by mutableStateOf(listOf(failed))
         compose.setContent {
             CairnTheme {
-                SideQuestionCard(
+                SideQuestionButton(
                     chat(canAsk = true).copy(status = "idle", sideQuestions = questions),
                     side,
                 )
             }
         }
-        compose.onNodeWithText("Question à côté · Sans réponse").assertExists()
+        compose.onNodeWithContentDescription("Question à côté · Sans réponse").assertExists()
         questions = listOf(failed, answered)
-        compose.onNodeWithText("Question à côté · Réponse prête").assertExists()
+        compose.onNodeWithContentDescription("Question à côté · Réponse prête").assertExists()
     }
 
     @Test
-    fun theCardOffersAGeneralQuestionBeforeAnyReplyOrQuestion() {
+    fun theButtonOffersAGeneralQuestionOnTheWorkingRowBeforeAnyReply() {
         val side = SideQuestionState()
         compose.setContent {
             CairnTheme {
-                SideQuestionCard(chat(canAsk = true).copy(sideQuestions = emptyList()), side)
+                WorkingIndicator(
+                    WorkingStep("Omni travaille", "Dernière étape : Exécuter une commande", 1000L),
+                    action = {
+                        SideQuestionButton(
+                            chat(canAsk = true).copy(sideQuestions = emptyList()),
+                            side,
+                        )
+                    },
+                )
             }
         }
-        compose.onNodeWithText("Poser une question à côté").performClick()
+        compose.onNodeWithTag("agent-working").assertExists()
+        compose.onNodeWithContentDescription("Poser une question à côté").performClick()
         assertTrue(side.open)
         assertEquals("", side.itemId)
     }
@@ -428,11 +438,15 @@ abstract class SideQuestionCases {
         val side = SideQuestionState().apply { observe(listOf(general)) }
         compose.setContent {
             CairnTheme {
-                SideQuestionCard(chat(canAsk = true).copy(sideQuestions = listOf(general)), side)
+                SideQuestionButton(
+                    chat(canAsk = false).copy(sideQuestions = listOf(general)),
+                    side,
+                    size = 40.dp,
+                )
             }
         }
-        compose.onNodeWithText("Questions à côté · Enregistrées").assertExists()
-        compose.onNodeWithTag("side-question-card").performClick()
+        compose.onNodeWithContentDescription("Questions à côté · Enregistrées").assertExists()
+        compose.onNodeWithTag("side-question-button").performClick()
         assertTrue(side.open)
     }
 

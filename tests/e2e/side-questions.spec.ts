@@ -374,7 +374,7 @@ test('a pending side question can be withdrawn while the reply continues', async
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  // The card's button is named by its visible text.
+  // The icon-only trigger carries its status as its accessible name.
   await page.getByRole('button', { name: /^Side question · Claude Code is answering/ }).click()
   const panel = page.getByRole('dialog', { name: 'Side questions' })
   await expect(panel.getByText('Answering…')).toBeVisible()

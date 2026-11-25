@@ -666,6 +666,14 @@ internal fun ChatPage(
                         .copy(subagents = waitingForSubagents(it.taskIds, currentSubagents))
                 } ?: workingStep(live.events, chat?.agentName.orEmpty(), chat?.run?.startedAt)
         }
+    val sideChat = chat?.let { if (readOnly) it.copy(canAskSideQuestion = false) else it }
+    val hasSideAction = hasSideQuestionAction(sideChat)
+    val showWorkingIndicator =
+        chat?.exclusiveSuspended != true &&
+            working != null &&
+            !live.catchingUp &&
+            // The bar already shows the subagents it waits for.
+            !(subagentBar && working.subagents)
     val conversationError = conversationError(chat, readOnly)
     val error = conversationError?.takeUnless {
         quota != null && (isQuotaMessage(it) || it == quota.message)
@@ -1190,6 +1198,8 @@ internal fun ChatPage(
                             choosing = true
                         },
                     ) {
+                        if (sideChat != null && hasSideAction && !showWorkingIndicator)
+                            SideQuestionButton(sideChat, side, size = 40.dp)
                         val files = live.state?.artifacts?.size ?: 0
                         if (id != null) {
                             Box {
@@ -1967,13 +1977,22 @@ internal fun ChatPage(
                                                 color = signal.warning,
                                             )
                                         }
-                                    else if (
-                                        working != null &&
-                                            !live.catchingUp &&
-                                            // The bar already shows the subagents it waits for.
-                                            !(subagentBar && working.subagents)
-                                    )
-                                        item(key = "agent-working") { WorkingIndicator(working) }
+                                    else if (showWorkingIndicator && working != null)
+                                        item(key = "agent-working") {
+                                            WorkingIndicator(
+                                                working,
+                                                action =
+                                                    if (sideChat != null && hasSideAction) {
+                                                        {
+                                                            SideQuestionButton(
+                                                                sideChat,
+                                                                side,
+                                                                size = 36.dp,
+                                                            )
+                                                        }
+                                                    } else null,
+                                            )
+                                        }
                                 }
                                 HistoryStatus(
                                     live,
@@ -2049,11 +2068,6 @@ internal fun ChatPage(
                                 title = "Vous pouvez suivre cette conversation",
                                 icon = CairnIcons.Shield,
                                 maxLines = 4,
-                            )
-                        if (chat != null)
-                            SideQuestionCard(
-                                if (readOnly) chat.copy(canAskSideQuestion = false) else chat,
-                                side,
                             )
                         if (!fullscreen)
                             Surface(

@@ -20,52 +20,62 @@ const hiddenTasks = computed(() => Math.max(0, (props.step.waiting?.length ?? 0)
 </script>
 
 <template>
-  <div
-    v-if="step.waiting"
-    class="agent-waiting flex min-w-0 items-start gap-3"
-    role="status"
-    aria-live="polite"
-    :aria-label="`${step.title}: ${step.detail}. The agent resumes when it finishes.`"
-  >
-    <span class="veille-ring size-9 shrink-0">
-      <span class="veille-core grid size-5 place-items-center rounded-full">
-        <Icon :name="Terminal" :size="10" />
-      </span>
-    </span>
-    <span class="min-w-0 flex-1 pt-0.5" aria-hidden="true">
-      <span class="block truncate font-heading text-[14.5px] font-semibold">{{ step.title }}</span>
-      <span class="mt-1.5 flex min-w-0 flex-wrap gap-1.5">
-        <span
-          v-for="(task, index) in shownTasks"
-          :key="index"
-          class="veille-task inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full px-2 py-0.5 text-[11.5px]"
-          :title="task"
-        >
-          <span class="veille-dot size-1.5 shrink-0 rounded-full" />
-          <span class="truncate">{{ task }}</span>
+  <div v-if="step.waiting" class="agent-waiting flex min-w-0 items-start gap-3">
+    <div
+      class="flex min-w-0 flex-1 items-start gap-3"
+      role="status"
+      aria-live="polite"
+      :aria-label="`${step.title}: ${step.detail}. The agent resumes when it finishes.`"
+    >
+      <span class="veille-ring size-9 shrink-0">
+        <span class="veille-core grid size-5 place-items-center rounded-full">
+          <Icon :name="Terminal" :size="10" />
         </span>
-        <span v-if="hiddenTasks" class="veille-task inline-flex items-center rounded-full px-2 py-0.5 text-[11.5px]">+{{ hiddenTasks }}</span>
       </span>
-      <span class="mt-1.5 block text-[11.5px] text-muted">The agent resumes when it finishes.</span>
-    </span>
-    <span v-if="step.since" class="shrink-0 pt-0.5 text-xs font-medium tabular-nums text-muted" aria-hidden="true">{{ liveElapsed(step.since, now) }}</span>
+      <span class="min-w-0 flex-1 pt-0.5" aria-hidden="true">
+        <span class="flex min-w-0 items-baseline gap-1.5">
+          <span class="min-w-0 truncate font-heading text-[14.5px] font-semibold">{{ step.title }}</span>
+          <span v-if="step.since && $slots.action" class="shrink-0 text-xs font-medium tabular-nums text-muted">· {{ liveElapsed(step.since, now) }}</span>
+        </span>
+        <span class="mt-1.5 flex min-w-0 flex-wrap gap-1.5">
+          <span
+            v-for="(task, index) in shownTasks"
+            :key="index"
+            class="veille-task inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full px-2 py-0.5 text-[11.5px]"
+            :title="task"
+          >
+            <span class="veille-dot size-1.5 shrink-0 rounded-full" />
+            <span class="truncate">{{ task }}</span>
+          </span>
+          <span v-if="hiddenTasks" class="veille-task inline-flex items-center rounded-full px-2 py-0.5 text-[11.5px]">+{{ hiddenTasks }}</span>
+        </span>
+        <span class="mt-1.5 block text-[11.5px] text-muted">The agent resumes when it finishes.</span>
+      </span>
+      <span v-if="step.since && !$slots.action" class="shrink-0 pt-0.5 text-xs font-medium tabular-nums text-muted" aria-hidden="true">{{ liveElapsed(step.since, now) }}</span>
+    </div>
+    <slot name="action" />
   </div>
-  <div
-    v-else
-    class="agent-working flex min-w-0 items-center gap-3"
-    role="status"
-    aria-live="polite"
-    :aria-label="[step.title, step.detail].filter(Boolean).join(': ')"
-  >
-    <span class="souffle-halo size-9 shrink-0">
-      <span class="souffle-core grid size-5 place-items-center rounded-full bg-accent text-surface">
-        <Icon :name="Zap" :size="10" />
+  <div v-else class="agent-working flex min-w-0 items-center gap-3">
+    <div
+      class="flex min-w-0 flex-1 items-center gap-3"
+      role="status"
+      aria-live="polite"
+      :aria-label="[step.title, step.detail].filter(Boolean).join(': ')"
+    >
+      <span class="souffle-halo size-9 shrink-0">
+        <span class="souffle-core grid size-5 place-items-center rounded-full bg-accent text-surface">
+          <Icon :name="Zap" :size="10" />
+        </span>
       </span>
-    </span>
-    <span class="min-w-0 flex-1" aria-hidden="true">
-      <span class="souffle-sweep block truncate font-heading text-[14.5px] font-semibold">{{ step.title }}…</span>
-      <span v-if="step.detail" class="mt-0.5 block truncate text-[11.5px] text-muted" :class="{ 'font-mono': !step.detail.startsWith('Last step') }">{{ step.detail }}</span>
-    </span>
-    <span v-if="step.since" class="shrink-0 text-xs font-medium tabular-nums text-muted" aria-hidden="true">{{ liveElapsed(step.since, now) }}</span>
+      <span class="min-w-0 flex-1" aria-hidden="true">
+        <span class="flex min-w-0 items-baseline gap-1.5">
+          <span class="souffle-sweep min-w-0 truncate font-heading text-[14.5px] font-semibold">{{ step.title }}…</span>
+          <span v-if="step.since && $slots.action" class="shrink-0 text-xs font-medium tabular-nums text-muted">· {{ liveElapsed(step.since, now) }}</span>
+        </span>
+        <span v-if="step.detail" class="mt-0.5 block truncate text-[11.5px] text-muted" :class="{ 'font-mono': !step.detail.startsWith('Last step') }">{{ step.detail }}</span>
+      </span>
+      <span v-if="step.since && !$slots.action" class="shrink-0 text-xs font-medium tabular-nums text-muted" aria-hidden="true">{{ liveElapsed(step.since, now) }}</span>
+    </div>
+    <slot name="action" />
   </div>
 </template>

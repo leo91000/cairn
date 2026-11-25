@@ -52,7 +52,7 @@ abstract class ChatSwipeCases {
                     .fetchSemanticsNode()
                     .config[SemanticsProperties.VerticalScrollAxisRange]
                     .value()
-            compose.onNodeWithTag("side-question-card").performClick()
+            compose.onNodeWithTag("side-question-button").performClick()
             compose.onNodeWithText("Voir la réponse").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 history

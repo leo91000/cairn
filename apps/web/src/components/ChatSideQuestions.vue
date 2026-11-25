@@ -13,6 +13,7 @@ import { askChatSideQuestion } from '../../../../packages/contracts/generated/as
 import { cancelChatSideQuestion } from '../../../../packages/contracts/generated/cancelChatSideQuestion'
 import { api } from '../api'
 import { MessageSquareQuote, Send, X } from '../icons'
+import { sideQuestionIndicator } from '../side-questions'
 import Icon from './Icon.vue'
 import Markdown from './Markdown.vue'
 import Modal from './Modal.vue'
@@ -114,6 +115,19 @@ const status = computed(() => {
     return 'Saved'
   return unread.value.some(question => question.status === 'answered') ? 'Answer ready' : 'Not answered'
 })
+const indicator = computed(() => sideQuestionIndicator({
+  questions: props.questions,
+  seen: seen.value,
+  canAsk: props.canAsk,
+  provider: props.provider,
+}))
+
+function openDefault() {
+  if (props.questions.length)
+    show()
+  else
+    ask({ itemId: '', replyEventId: null, quote: '' })
+}
 
 function ask(about: { itemId: string, replyEventId: number | null, quote: string }) {
   draftRevision++
@@ -225,23 +239,19 @@ function reveal(question: ChatSideQuestion) {
   emit('reveal', { itemId: question.itemId, replyEventId: Number(question.replyEventId) || null })
 }
 
-defineExpose({ ask, show, unreachable })
+defineExpose({
+  ask,
+  show,
+  unreachable,
+  indicator,
+  openDefault,
+})
 </script>
 
 <template>
   <p class="sr-only" role="status">
     {{ pending.length || unread.length ? `Side ${pending.length + unread.length > 1 ? 'questions' : 'question'} · ${status}` : '' }}
   </p>
-  <div v-if="questions.length || canAsk" class="mb-3 flex items-center gap-3 rounded-xl border border-line bg-surface px-3 py-2.5">
-    <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-accent/10 text-accent"><Icon :name="MessageSquareQuote" :size="16" /></span>
-    <button class="min-w-0 flex-1 text-left" @click="questions.length ? show() : ask({ itemId: '', replyEventId: null, quote: '' })">
-      <span class="mb-0.5 block text-[10px] font-semibold text-accent">{{ questions.length ? `Side ${questions.length > 1 ? 'questions' : 'question'} · ${status}` : 'Ask a side question' }}</span>
-      <span v-if="questions.length" class="block truncate text-xs font-medium">{{ (pending[0] ?? unread[0] ?? questions.at(-1))!.text }}</span>
-    </button>
-    <UiButton size="small" @click="questions.length ? show() : ask({ itemId: '', replyEventId: null, quote: '' })">
-      {{ questions.length ? 'Open' : 'Ask' }}
-    </UiButton>
-  </div>
   <Modal
     v-if="open"
     title="Side questions"
