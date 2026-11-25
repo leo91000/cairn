@@ -36,7 +36,7 @@ const MAX_TOOLS: usize = 1000;
 const UPSTREAM_ACCESS_DENIED: &str = "mcp-upstream-access-denied";
 
 pub(crate) fn upstream_access_denied(error: &Error) -> bool {
-    error.is_unauthorized() || error.code.as_deref() == Some(UPSTREAM_ACCESS_DENIED)
+    error.code.as_deref() == Some(UPSTREAM_ACCESS_DENIED)
 }
 
 pub fn client_info() -> Value {
@@ -89,6 +89,7 @@ struct HttpTransport {
     allow_private: bool,
     bearer: String,
     session: Option<String>,
+    response_budget: Option<usize>,
 }
 
 impl Client {
@@ -119,39 +120,35 @@ impl Client {
 
     /// Background discovery owns a credential snapshot. Refreshing OAuth is
     /// left to live requests, which serialize the exchange and its commit.
-    pub(crate) async fn connect_for_catalog_refresh(
+    pub(crate) async fn begin_catalog_refresh(
         s: &Service,
         server: &McpServer,
         authorize: Authorization,
         deadline: Instant,
+        response_budget: usize,
     ) -> Result<Self> {
         if !server.is_http() {
             return Err(Error::bad("Background catalogue discovery requires HTTP."));
         }
-        let timeout = || Error::timeout("MCP catalogue connection timed out.");
-        let mut client = timeout_at(deadline, async {
+        timeout_at(deadline, async {
             authorize.recheck().await?;
             let secrets = s.mcps.server_secrets(s, &server.id).await?;
             let authorize = Some(authorize);
-            let transport = Self::transport(s, server, &secrets, &authorize).await?;
+            let mut transport = Self::transport(s, server, &secrets, &authorize).await?;
+            if let Transport::Http(http) = &mut transport {
+                http.response_budget = Some(response_budget);
+            }
             Ok::<_, Error>(Self::new(transport, MODERN, authorize))
         })
         .await
-        .map_err(|_| timeout())??;
+        .map_err(|_| Error::timeout("MCP catalogue connection timed out."))?
+    }
 
-        let handshake = timeout_at(deadline, async {
-            if !client.probe_modern().await? {
-                client.open_legacy_session().await?;
-            }
-            Ok(())
-        })
-        .await
-        .unwrap_or_else(|_| Err(timeout()));
-        if let Err(error) = handshake {
-            client.close_catalog_refresh().await;
-            return Err(error);
+    pub(crate) async fn negotiate_catalog_refresh(&mut self) -> Result<()> {
+        if !self.probe_modern().await? {
+            self.open_legacy_session().await?;
         }
-        Ok(client)
+        Ok(())
     }
 
     pub(crate) async fn connect_authorized(
@@ -261,7 +258,9 @@ impl Client {
                 self.capabilities = discovery["capabilities"].clone();
                 Ok(true)
             }
-            Err(error) if upstream_access_denied(&error) => Err(error),
+            Err(error) if [401, 403].contains(&error.status) || upstream_access_denied(&error) => {
+                Err(error)
+            }
             Err(error) if [400, 405, 501].contains(&error.status) || self.is_stdio() => Ok(false),
             Err(error) => Err(error),
         }
@@ -326,6 +325,7 @@ impl Client {
                 allow_private: server.allow_private_network,
                 bearer: bearer.into(),
                 session: None,
+                response_budget: None,
             }));
         }
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
@@ -476,7 +476,11 @@ impl Client {
 fn check_status(status: u16) -> Result<()> {
     match status {
         200..=299 => Ok(()),
-        401 => Err(Error::unauthorized("Sign in to connect this server.")),
+        401 => Err(Error::coded(
+            401,
+            UPSTREAM_ACCESS_DENIED,
+            "Sign in to connect this server.",
+        )),
         403 => Err(Error::coded(
             502,
             UPSTREAM_ACCESS_DENIED,
@@ -510,16 +514,21 @@ impl HttpTransport {
         headers(&self.bearer, protocol, self.session.as_deref())
     }
 
-    async fn post(&self, headers: HeaderMap, frame: &Frame) -> Result<network::Response> {
+    async fn post(&mut self, headers: HeaderMap, frame: &Frame) -> Result<network::Response> {
         let body = serde_json::to_vec(frame)?;
-        network::fetch(
+        let response = network::fetch_with_response_limit(
             &self.url,
             Method::POST,
             headers,
             Some(body),
             self.allow_private,
+            self.response_budget,
         )
-        .await
+        .await?;
+        if let Some(remaining) = &mut self.response_budget {
+            *remaining = remaining.saturating_sub(response.bytes.len());
+        }
+        Ok(response)
     }
 
     async fn request(
@@ -561,7 +570,7 @@ impl HttpTransport {
         response_result(&reply, id)
     }
 
-    async fn notify(&self, protocol: &str, method: &str, params: Value) -> Result<()> {
+    async fn notify(&mut self, protocol: &str, method: &str, params: Value) -> Result<()> {
         let method = method.to_owned();
         let frame = Frame::strict(Message::Notification { method, params });
         let response = self.post(self.headers(protocol)?, &frame).await?;
@@ -586,7 +595,14 @@ impl HttpTransport {
         };
         let _ = tokio::time::timeout(
             Duration::from_secs(5),
-            network::fetch(&self.url, Method::DELETE, headers, None, self.allow_private),
+            network::fetch_with_response_limit(
+                &self.url,
+                Method::DELETE,
+                headers,
+                None,
+                self.allow_private,
+                self.response_budget.map(|_| 4096),
+            ),
         )
         .await;
     }

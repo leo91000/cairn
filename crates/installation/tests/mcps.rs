@@ -846,10 +846,13 @@ async fn gateway_catalog_reuses_validated_tools_without_waiting_for_upstream_or_
         .post(&endpoint)
         .bearer_auth(&tokens[0])
         .header("mcp-protocol-version", "2025-11-25")
-        .json(&tool_call(
-            "bounded_fixture",
-            &json!({ "mode": "forbidden" }),
-        ))
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "bounded_fixture",
+                "arguments": { "mode": "forbidden" },
+            },
+        }))
         .send()
         .await
         .unwrap()

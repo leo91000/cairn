@@ -118,6 +118,18 @@ pub async fn fetch(
     body: Option<Vec<u8>>,
     allow_private: bool,
 ) -> Result<Response> {
+    fetch_with_response_limit(url, method, headers, body, allow_private, None).await
+}
+
+pub(crate) async fn fetch_with_response_limit(
+    url: &str,
+    method: reqwest::Method,
+    headers: reqwest::header::HeaderMap,
+    body: Option<Vec<u8>>,
+    allow_private: bool,
+    response_limit: Option<usize>,
+) -> Result<Response> {
+    const MAX_RESPONSE: usize = 8 * 1024 * 1024;
     let url = url::Url::parse(url).map_err(|_| Error::bad("Unsupported MCP endpoint."))?;
     if !["https", "http"].contains(&url.scheme())
         || !url.username().is_empty()
@@ -174,13 +186,31 @@ pub async fn fetch(
         }
         let status = response.status().as_u16();
         let headers = response.headers().clone();
+        if response_limit.is_some() && matches!(status, 401 | 403) {
+            // Discovery uses the status and does not need an error document.
+            return Ok(Response {
+                status,
+                headers,
+                bytes: Vec::new(),
+            });
+        }
         let event_stream = is_event_stream(&headers);
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk =
                 chunk.map_err(|_| Error::bad_gateway("MCP response ended unexpectedly."))?;
-            if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
+            if chunk.len()
+                > response_limit
+                    .unwrap_or(MAX_RESPONSE)
+                    .min(MAX_RESPONSE)
+                    .saturating_sub(bytes.len())
+            {
+                if response_limit.is_some() {
+                    return Err(Error::too_large(
+                        "MCP response exceeds the background byte limit.",
+                    ));
+                }
                 return Err(Error::bad_gateway("MCP response exceeds 8 MB."));
             }
             bytes.extend_from_slice(&chunk);

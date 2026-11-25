@@ -607,7 +607,9 @@ impl Mcps {
         let revoked = result
             .as_ref()
             .err()
-            .filter(|error| crate::mcp_client::upstream_access_denied(error))
+            .filter(|error| {
+                error.is_unauthorized() || crate::mcp_client::upstream_access_denied(error)
+            })
             .map(|_| server.id.clone());
         match result {
             Ok(tools) => server.record_success(tools.clone(), now()),

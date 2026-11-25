@@ -288,48 +288,50 @@ fn refresh_in_background(
 
             let mut timing =
                 crate::performance::Operation::new("mcp_gateway_refresh", id, "connect");
-            let session = Client::connect_for_catalog_refresh(
+            let session = Client::begin_catalog_refresh(
                 &s,
                 &access.server,
                 authorize.clone(),
                 deadline,
+                MAX_CATALOG_BYTES,
             )
             .await;
             let (client, result) = match session {
                 Ok(mut client) => {
-                    timing.next("list");
-                    let tools = match timeout_at(
-                        deadline,
-                        client.discover_catalog(MAX_CATALOG_BYTES, MAX_REFRESH_PAGES),
-                    )
+                    let tools = timeout_at(deadline, async {
+                        client.negotiate_catalog_refresh().await?;
+                        timing.next("list");
+                        client
+                            .discover_catalog(MAX_CATALOG_BYTES, MAX_REFRESH_PAGES)
+                            .await
+                    })
                     .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => Err(Error::timeout("MCP catalogue refresh timed out.")),
-                    };
+                    .unwrap_or_else(|_| Err(Error::timeout("MCP catalogue refresh timed out.")));
                     (Some(client), tools)
                 }
                 Err(error) => (None, Err(error)),
             };
 
             timing.next("publish");
-            if timeout_at(deadline, authorize.recheck())
-                .await
-                .is_ok_and(|result| result.is_ok())
-            {
-                match result {
-                    Ok(tools) if validate(&tools).is_ok() => {
-                        s.mcps
-                            .gateway_catalogs
-                            .apply_refresh(id, expected, &previous, Some(tools));
-                    }
-                    Err(error) if crate::mcp_client::upstream_access_denied(&error) => {
-                        s.mcps
-                            .gateway_catalogs
-                            .apply_refresh(id, expected, &previous, None);
-                    }
-                    _ => {}
+            match result {
+                Ok(tools)
+                    if validate(&tools).is_ok()
+                        && timeout_at(deadline, authorize.recheck())
+                            .await
+                            .is_ok_and(|result| result.is_ok()) =>
+                {
+                    s.mcps
+                        .gateway_catalogs
+                        .apply_refresh(id, expected, &previous, Some(tools));
                 }
+                Err(error) if crate::mcp_client::upstream_access_denied(&error) => {
+                    // An authenticated upstream denial retires only the exact
+                    // catalogue that started this refresh, before session close.
+                    s.mcps
+                        .gateway_catalogs
+                        .apply_refresh(id, expected, &previous, None);
+                }
+                _ => {}
             }
             timing.next("close");
             if let Some(client) = client {
@@ -430,16 +432,17 @@ mod tests {
 
     #[tokio::test]
     async fn background_catalogue_stops_at_cumulative_page_and_byte_limits() {
-        use axum::{Json, Router, routing::post};
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use axum::{Json, Router, response::IntoResponse, routing::post};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         let calls = Arc::new(AtomicUsize::new(0));
+        let padded = Arc::new(AtomicBool::new(false));
         let router = Router::new().route(
             "/mcp",
             post({
-                let calls = calls.clone();
+                let (calls, padded) = (calls.clone(), padded.clone());
                 move |Json(request): Json<Value>| {
-                    let calls = calls.clone();
+                    let (calls, padded) = (calls.clone(), padded.clone());
                     async move {
                         let result = match text(&request, "method") {
                             "server/discover" => json!({
@@ -459,7 +462,12 @@ mod tests {
                             }
                             method => panic!("unexpected MCP method {method}"),
                         };
-                        Json(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }))
+                        let body =
+                            json!({ "jsonrpc": "2.0", "id": request["id"], "result": result });
+                        if padded.load(Ordering::Relaxed) && request["method"] == "tools/list" {
+                            return format!("{}{body}", " ".repeat(512)).into_response();
+                        }
+                        Json(body).into_response()
                     }
                 }
             }),
@@ -485,7 +493,35 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 3);
 
         client.close().await;
+        padded.store(true, Ordering::Relaxed);
+        let mut bounded = Client::begin_catalog_refresh(
+            &s,
+            &server,
+            Authorization::default(),
+            Instant::now() + Duration::from_secs(3),
+            400,
+        )
+        .await
+        .unwrap();
+        bounded.negotiate_catalog_refresh().await.unwrap();
+        let wire_limit = bounded.discover_catalog(4096, 4).await.unwrap_err();
+        assert_eq!(
+            wire_limit.message,
+            "MCP response exceeds the background byte limit."
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+        bounded.close_catalog_refresh().await;
         upstream.abort();
+    }
+
+    async fn wait_for_refresh_release(catalogs: &Catalogs, id: &str) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while catalogs.refreshing.lock().unwrap().contains(id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the completed refresh must release its permit");
     }
 
     #[test]
@@ -565,7 +601,7 @@ mod tests {
             "/mcp",
             post({
                 let (entered, release) = (entered.clone(), release.clone());
-                move |Json(request): Json<Value>| {
+                move |incoming: HeaderMap, Json(request): Json<Value>| {
                     let (entered, release, listings, sessions) =
                         (entered.clone(), release.clone(), listings.clone(), sessions.clone());
                     async move {
@@ -580,7 +616,12 @@ mod tests {
                                     "capabilities": { "tools": {} },
                                 })
                             }
-                            "notifications/initialized" => return StatusCode::ACCEPTED.into_response(),
+                            "notifications/initialized" => {
+                                if incoming.get("mcp-session-id").is_some_and(|id| id == "5") {
+                                    return StatusCode::FORBIDDEN.into_response();
+                                }
+                                return StatusCode::ACCEPTED.into_response();
+                            }
                             "tools/list" => {
                                 let name = if listings.fetch_add(1, Ordering::Relaxed) > 0 {
                                     entered.notify_one();
@@ -604,7 +645,7 @@ mod tests {
                 move |headers: HeaderMap| {
                     let (entered, release) = (entered.clone(), release.clone());
                     async move {
-                        if headers.get("mcp-session-id").is_some_and(|id| id == "2" || id == "4") {
+                        if headers.get("mcp-session-id").is_some_and(|id| id == "2" || id == "4" || id == "5") {
                             entered.notify_one();
                             release.notified().await;
                         }
@@ -696,6 +737,7 @@ mod tests {
             "updated_fixture"
         );
         close_release.notify_one();
+        wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
 
         let access = Access::for_grant(&s, id, bearer).await.unwrap();
         let identity = access.identity(&s).await.unwrap();
@@ -719,6 +761,23 @@ mod tests {
         );
         close_release.notify_one();
         release.notify_one();
+        wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
+
+        let access = Access::for_grant(&s, id, bearer).await.unwrap();
+        let identity = access.identity(&s).await.unwrap();
+        let (previous, _) = s.mcps.gateway_catalogs.get(id, identity).unwrap();
+        refresh_in_background(
+            s.clone(),
+            access,
+            identity,
+            previous,
+            Duration::from_secs(3),
+        );
+        tokio::time::timeout(Duration::from_secs(3), close_entered.notified())
+            .await
+            .expect("the denied initialization must close its legacy session");
+        assert!(s.mcps.gateway_catalogs.get(id, identity).is_none());
+        close_release.notify_one();
         upstream.abort();
     }
 }

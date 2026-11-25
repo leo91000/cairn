@@ -120,8 +120,8 @@ The gateway can serve `tools/list` from a validated catalogue held in manager
 memory for up to five minutes. A cached listing becomes eligible for a
 background refresh after one minute. The refresh uses the current credential
 snapshot and can run while tools are called. Live requests handle OAuth token
-rotation. Background refresh has a fixed request deadline, pagination and byte
-budgets, and up to eight concurrent connections per manager. The connection
+rotation. Background refresh has a fixed request deadline, page and HTTP
+response-byte budgets, and up to eight concurrent connections per manager. The connection
 revision and encrypted credential record identify the
 catalogue, and each listing checks the live run grant and filters the
 descriptors to its allowed tools. A cold or expired catalogue is fetched live.
