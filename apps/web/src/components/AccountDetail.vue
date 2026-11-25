@@ -37,6 +37,16 @@ const quotaPrerequisite = computed(() => {
     return 'Turn on Use for new runs to check this account’s quota.'
   return ''
 })
+const quotaNotice = computed(() => {
+  const messages: string[] = []
+  if (quota.value?.error)
+    messages.push('Antigravity quota is unavailable.')
+  if (quota.value?.stale && quota.value.windows.length)
+    messages.push('These values are out of date.')
+  if (messages.length)
+    messages.push(quotaPrerequisite.value || 'Use Check usage now in Connections to check again.')
+  return messages.join(' ')
+})
 const general = computed(() => generalWindows(props.account.usage))
 const others = computed(() => (props.account.usage?.windows ?? []).filter(window => window.models.length))
 const paused = computed(() => props.account.status === 'paused')
@@ -72,7 +82,7 @@ const note = computed(() => {
     return 'Finish signing in to see this account’s usage.'
   if (props.account.provider === 'antigravity') {
     if (props.account.modelProvider === 'google')
-      return quotaPrerequisite.value || quota.value?.error || 'Use Check usage now in Connections to check this Google account’s quota.'
+      return quotaNotice.value || quotaPrerequisite.value || 'Use Check usage now in Connections to check this Google account’s quota.'
     return 'Usage is available in the Google dashboard for your project.'
   }
 
@@ -123,8 +133,8 @@ const note = computed(() => {
               </p>
             </div>
           </div>
-          <p v-if="quota.error || quota.stale" class="mt-3 text-xs text-muted" role="status">
-            {{ quotaPrerequisite || quota.error || 'These values are out of date. Use Check usage now in Connections to check again.' }}
+          <p v-if="quotaNotice" class="mt-3 text-xs text-muted" role="status">
+            {{ quotaNotice }}
           </p>
         </template>
         <div v-else-if="general.length" class="flex items-center gap-5">

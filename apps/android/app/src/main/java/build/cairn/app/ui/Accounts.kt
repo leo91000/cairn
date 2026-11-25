@@ -510,10 +510,16 @@ internal fun AccountSheet(
                 "Activez « Utiliser pour les nouvelles exécutions » pour vérifier le quota."
             else -> null
         }
-    val quotaError =
-        quota?.error?.let {
-            "Impossible de lire le quota Antigravity. Relancez la vérification dans Connexions."
-        }
+    val quotaNotice = buildList {
+        if (quota?.error != null) add("Impossible de lire le quota Antigravity.")
+        if (quota?.stale == true && quotaWindows.isNotEmpty()) add("Ces valeurs datent.")
+        if (isNotEmpty())
+            add(
+                quotaPrerequisite
+                    ?: "Utilisez Vérifier l’usage maintenant dans Connexions pour les mettre à jour."
+            )
+    }
+        .joinToString(" ")
     val general = account.usage?.general.orEmpty()
     val others = account.usage?.windows.orEmpty().filter { it.models.isNotEmpty() }
     val muted = account.status == "paused" || account.stale
@@ -600,11 +606,9 @@ internal fun AccountSheet(
                         }
                     }
                 }
-                if (quotaError != null || quota?.stale == true)
+                if (quotaNotice.isNotEmpty())
                     Text(
-                        quotaPrerequisite
-                            ?: quotaError
-                            ?: "Ces valeurs datent. Utilisez Vérifier l’usage maintenant dans Connexions pour les mettre à jour.",
+                        quotaNotice,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -641,8 +645,7 @@ internal fun AccountSheet(
                         account.usage?.error != null -> account.usage.error
                         account.provider == "antigravity" ->
                             if (account.modelProvider == "google")
-                                quotaPrerequisite
-                                    ?: quotaError
+                                quotaNotice.ifEmpty { quotaPrerequisite }
                                     ?: "Utilisez Vérifier l’usage maintenant dans Connexions pour consulter le quota de ce compte Google."
                             else "Consultez l’usage de votre projet dans le tableau de bord Google."
                         account.status == "unavailable" ->

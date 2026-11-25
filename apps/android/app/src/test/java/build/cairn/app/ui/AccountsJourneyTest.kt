@@ -639,7 +639,9 @@ class AccountsJourneyTest {
             }
             // Reconnecting a Google account signs in again, behind the same warning.
             compose.onNode(hasContentDescription("Perso, ", substring = true)).performClick()
-            waitText("Activez « Utiliser pour les nouvelles exécutions » pour vérifier le quota.")
+            waitText(
+                "Ces valeurs datent. Activez « Utiliser pour les nouvelles exécutions » pour vérifier le quota."
+            )
             waitText("Reconnecter")
             compose.onNodeWithText("Reconnecter").performScrollTo().performClick()
             waitText("Se connecter avec un compte Google ?")
