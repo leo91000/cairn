@@ -117,12 +117,13 @@ calls and other forwarded operations open an upstream session with bounded
 requests and an 8 MB response limit. Calls time out after 60 seconds.
 
 The gateway can serve `tools/list` from a validated catalogue held in manager
-memory for up to five minutes. During agent preparation the manager can begin
-discovery with that turn's grant. A cached listing becomes eligible for a
-background refresh after one minute. The connection revision and encrypted
-credential record identify the catalogue, and each listing checks the live run
-grant and filters the descriptors to its allowed tools. A cold or expired
-catalogue is fetched live. **Test** still probes the upstream server directly.
+memory for up to five minutes. A cached listing becomes eligible for a
+background refresh after one minute. The refresh uses the current credential
+snapshot and can run while tools are called. Live requests handle OAuth token
+rotation. The connection revision and encrypted credential record identify the
+catalogue, and each listing checks the live run grant and filters the
+descriptors to its allowed tools. A cold or expired catalogue is fetched live.
+**Test** still probes the upstream directly and can populate the catalogue.
 
 ## Credentials and backups
 

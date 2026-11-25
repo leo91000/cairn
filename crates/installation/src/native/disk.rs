@@ -724,11 +724,16 @@ impl StorageOwnership {
         started: Instant,
     ) -> Self {
         let acquired = Instant::now();
+        let safe_id = if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            id
+        } else {
+            crate::performance::identity(id)
+        };
         Self {
             _lock: lock,
             _observation: crate::performance::enabled().then(|| StorageObservation {
                 operation,
-                id: id.to_owned(),
+                id: safe_id.to_owned(),
                 acquired,
                 acquired_at_ms: crate::config::now(),
                 wait_ms: acquired.duration_since(started).as_millis() as u64,

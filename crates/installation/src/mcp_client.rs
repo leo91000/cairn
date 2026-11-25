@@ -111,6 +111,19 @@ impl Client {
         Self::connect_authorized(s, server, Authorization::live(s, authority)).await
     }
 
+    /// Background discovery owns a credential snapshot. Refreshing OAuth is
+    /// left to live requests, which serialize the exchange and its commit.
+    pub(crate) async fn connect_for_catalog_refresh(
+        s: &Service,
+        server: &McpServer,
+        authorize: Authorization,
+    ) -> Result<Self> {
+        authorize.recheck().await?;
+        let secrets = s.mcps.server_secrets(s, &server.id).await?;
+        authorize.recheck().await?;
+        Self::open(s, server, &secrets, authorize).await
+    }
+
     pub(crate) async fn connect_authorized(
         s: &Service,
         server: &McpServer,

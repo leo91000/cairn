@@ -1,6 +1,6 @@
 //! Master-owned run scope for remote seed files, inboxes, results, access-token
 //! relay and run-scoped MCP.
-mod seed_observation;
+pub(super) mod seed_observation;
 mod skill_cache;
 
 use crate::{
@@ -771,7 +771,6 @@ pub(super) async fn seed_with_stop(
     .await;
     drop(reader);
     timing.received(received_bytes);
-    timing.next("apply_skills");
     check_preparing(stop)?;
     if transport_interrupted {
         return Err(Error::bad_gateway(
@@ -799,6 +798,7 @@ pub(super) async fn seed_with_stop(
         }
         return Err(error);
     }
+    timing.next("apply_skills");
     let staged = barrier.is_some();
     if let Some(barrier) = barrier {
         if let Some(key) = skill_key {
@@ -833,6 +833,7 @@ pub(super) async fn seed_with_stop(
                 }
             } else {
                 let _cache_write = if storage_guard.is_none() {
+                    timing.next("skill_cache_storage_wait");
                     Some(
                         await_preparation(
                             stop,
@@ -847,6 +848,7 @@ pub(super) async fn seed_with_stop(
                 } else {
                     None
                 };
+                timing.next("remember_skills");
                 if let Err(error) = skill_cache::remember(&cache, &key, &home, &mut admit).await {
                     tracing::debug!(
                         status = error.status,

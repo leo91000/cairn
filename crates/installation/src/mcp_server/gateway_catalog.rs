@@ -3,13 +3,12 @@
 use crate::{
     authorization::Authorization,
     capabilities::plugin_packages::Authority,
-    error::Result,
+    error::{Error, Result},
     mcp_client::Client,
     mcps::record::{GrantScope, McpServer},
     service::Service,
     validation::{encoded_size, text},
 };
-use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -17,14 +16,12 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 const REFRESH_AFTER: Duration = Duration::from_secs(60);
 const EXPIRES_AFTER: Duration = Duration::from_secs(300);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 32;
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
-const PRELOAD_CONCURRENCY: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Identity {
@@ -91,6 +88,35 @@ impl Catalogs {
 
     pub(crate) fn invalidate(&self, id: &str) {
         self.0.lock().unwrap().remove(id);
+    }
+
+    /// Update the entry that requested refresh. A newer cold or management
+    /// discovery and an invalidated entry both take precedence.
+    fn apply_refresh(
+        &self,
+        id: &str,
+        expected: Identity,
+        previous: &Arc<Vec<Value>>,
+        tools: Option<Vec<Value>>,
+    ) {
+        let tools = tools
+            .filter(|tools| encoded_size(tools).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES));
+        let mut entries = self.0.lock().unwrap();
+        let Some(current) = entries.get_mut(id) else {
+            return;
+        };
+        if current.identity != expected || !Arc::ptr_eq(previous, &current.tools) {
+            return;
+        }
+
+        if let Some(tools) = tools {
+            let now = Instant::now();
+            current.tools = Arc::new(tools);
+            current.discovered_at = now;
+            current.refresh_at = now + REFRESH_AFTER;
+        } else {
+            entries.remove(id);
+        }
     }
 
     pub(crate) fn remember_management_discovery(
@@ -166,23 +192,15 @@ impl Access {
 }
 
 pub(super) async fn list(s: &Arc<Service>, id: &str, bearer: &str) -> Result<Value> {
-    let (access, tools) = authorized_catalog(s, id, bearer).await?;
-    Ok(access.listing(&tools))
-}
-
-async fn authorized_catalog(
-    s: &Arc<Service>,
-    id: &str,
-    bearer: &str,
-) -> Result<(Access, Arc<Vec<Value>>)> {
     let access = Access::for_grant(s, id, bearer).await?;
     let identity = access.identity(s).await?;
     if let Some((tools, refresh)) = s.mcps.gateway_catalogs.get(id, identity) {
         tracing::info!(target: "cairn_performance", operation = "mcp_gateway_catalog", connection_id = id, event = "hit", refresh);
+        let result = access.listing(&tools);
         if refresh {
-            refresh_in_background(s.clone(), id.to_owned(), bearer.to_owned(), identity);
+            refresh_in_background(s.clone(), access, identity, tools);
         }
-        return Ok((access, tools));
+        return Ok(result);
     }
 
     // Retain serialization for a cold discovery and reuse the result if another
@@ -190,63 +208,74 @@ async fn authorized_catalog(
     let _guard = s.mcps.lock(id).await;
     let access = Access::for_grant(s, id, bearer).await?;
     let identity = access.identity(s).await?;
-    let tools = match s.mcps.gateway_catalogs.get(id, identity) {
-        Some((tools, refresh)) => {
-            if refresh {
-                refresh_in_background(s.clone(), id.to_owned(), bearer.to_owned(), identity);
-            }
-            tools
+    if let Some((tools, refresh)) = s.mcps.gateway_catalogs.get(id, identity) {
+        let result = access.listing(&tools);
+        if refresh {
+            refresh_in_background(s.clone(), access, identity, tools);
         }
-        None => discover(s, &access, identity).await?,
-    };
-    Ok((access, tools))
+        return Ok(result);
+    }
+
+    let tools = discover(s, &access, identity).await?;
+    Ok(access.listing(&tools))
 }
 
-/// Start authorized cold discovery while the worker prepares the environment.
-/// The running turn still owns the bearer and all discovery rechecks.
-pub(crate) fn preload(s: &Service, bearer: &str, stop: &CancellationToken) {
-    let s = Arc::new(s.clone());
-    let (bearer, stop) = (bearer.to_owned(), stop.clone());
-    tokio::spawn(async move {
-        let preload = async {
-            let key = crate::mcps::grant_key(&bearer);
-            let Ok(Some(grant)) = s.store.mcp_run_grant(&key).await else {
-                return;
-            };
-            let s = &s;
-            let bearer = &bearer;
-            stream::iter(grant.servers)
-                .for_each_concurrent(PRELOAD_CONCURRENCY, |(id, scope)| async move {
-                    if scope.tools.as_ref().is_none_or(|tools| !tools.is_empty()) {
-                        let _ = authorized_catalog(s, &id, bearer).await;
-                    }
-                })
-                .await;
-        };
-        tokio::select! {
-            () = s.shutdown.cancelled() => {}
-            () = stop.cancelled() => {}
-            _ = tokio::time::timeout(REFRESH_TIMEOUT, preload) => {}
-        }
-    });
-}
-
-fn refresh_in_background(s: Arc<Service>, id: String, bearer: String, expected: Identity) {
+fn refresh_in_background(
+    s: Arc<Service>,
+    access: Access,
+    expected: Identity,
+    previous: Arc<Vec<Value>>,
+) {
     tokio::spawn(async move {
         let refresh = async {
-            let _guard = s.mcps.lock(&id).await;
-            let access = Access::for_grant(&s, &id, &bearer).await?;
-            let identity = access.identity(&s).await?;
-            if identity == expected {
-                discover(&s, &access, identity).await?;
+            let id = access.server.id.clone();
+            let authorize = access.authorize.with_guard(move |db| {
+                let current = db.mcp_credentials(&id)?.map(|bytes| blake3::hash(&bytes));
+                if current != expected.credentials {
+                    return Err(Error::conflict("MCP credentials changed during discovery."));
+                }
+                Ok(())
+            });
+
+            let id = &access.server.id;
+            let mut timing =
+                crate::performance::Operation::new("mcp_gateway_refresh", id, "connect");
+            let result = async {
+                let client = Client::connect_for_catalog_refresh(
+                    &s, &access.server, authorize.clone(),
+                ).await?;
+                read_tools(client, &mut timing).await
+            }.await;
+            authorize.recheck().await?;
+            match result {
+                Ok(tools) => {
+                    s.mcps.gateway_catalogs.apply_refresh(id, expected, &previous, Some(tools));
+                    timing.finish();
+                }
+                Err(error) if matches!(error.status, 401 | 403) => {
+                    s.mcps.gateway_catalogs.apply_refresh(id, expected, &previous, None);
+                }
+                Err(_) => {}
             }
-            Ok::<_, crate::error::Error>(())
+            Ok::<_, Error>(())
         };
         tokio::select! {
             () = s.shutdown.cancelled() => {}
             _ = tokio::time::timeout(REFRESH_TIMEOUT, refresh) => {}
         }
     });
+}
+
+async fn read_tools(mut client: Client, timing: &mut crate::performance::Operation) -> Result<Vec<Value>> {
+    timing.next("list");
+    let tools = client.discover().await;
+    timing.next("close");
+    client.close().await;
+
+    timing.next("validate");
+    let tools = tools?;
+    validate(&tools)?;
+    Ok(tools)
 }
 
 async fn discover(
@@ -257,17 +286,9 @@ async fn discover(
     let mut timing =
         crate::performance::Operation::new("mcp_gateway_discovery", &access.server.id, "connect");
     let result = async {
-        let mut client =
+        let client =
             Client::connect_server_live(s, &access.server, access.authority.clone()).await?;
-        timing.next("list");
-        let tools = client.discover().await;
-        timing.next("close");
-        client.close().await;
-
-        timing.next("validate");
-        let tools = tools?;
-        validate(&tools)?;
-        Ok::<_, crate::error::Error>(tools)
+        read_tools(client, &mut timing).await
     }
     .await;
     timing.next("recheck");
@@ -300,6 +321,12 @@ async fn discover(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        common::{McpFixture, MissionFixture},
+        config::MAIN_AGENT_ID,
+        run_status::RunStatus,
+        runs::RunChanges,
+    };
 
     #[test]
     fn refresh_is_coalesced_and_expiry_never_serves_an_old_credential() {
@@ -355,5 +382,102 @@ mod tests {
             .unwrap()
             .discovered_at -= EXPIRES_AFTER;
         assert!(catalogs.get("fixture", identity).is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_catalogue_refresh_does_not_block_a_tool_call() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let listings = Arc::new(AtomicUsize::new(0));
+        let router = Router::new().route(
+            "/mcp",
+            post({
+                let (entered, release) = (entered.clone(), release.clone());
+                move |Json(request): Json<Value>| {
+                    let (entered, release, listings) =
+                        (entered.clone(), release.clone(), listings.clone());
+                    async move {
+                        let result = match text(&request, "method") {
+                            "server/discover" => json!({
+                                "supportedVersions": [crate::mcp_client::MODERN],
+                                "capabilities": { "tools": {} },
+                            }),
+                            "tools/list" => {
+                                if listings.fetch_add(1, Ordering::Relaxed) > 0 {
+                                    entered.notify_one();
+                                    release.notified().await;
+                                }
+                                json!({
+                                    "tools": [{ "name": "fixture", "inputSchema": { "type": "object" } }],
+                                })
+                            }
+                            "tools/call" => json!({ "content": [{ "type": "text", "text": "live" }] }),
+                            method => panic!("unexpected MCP method {method}"),
+                        };
+                        Json(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }))
+                    }
+                }
+            }),
+        );
+        let (listener, address) = crate::common::bind().await;
+        let upstream = crate::common::serve(listener, router);
+        let root = tempfile::tempdir().unwrap();
+        let s = Service::new(crate::common::config(root.path())).await.unwrap();
+        let connection = s
+            .mcp_fixture(
+                json!({
+                    "name": "Gated discovery fixture",
+                    "url": format!("http://{address}/mcp"),
+                    "allowPrivateNetwork": true,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let id = text(&connection, "id");
+        let task = s.task_fixture(
+            json!({
+                "name": "Live gateway fixture",
+                "agentId": MAIN_AGENT_ID,
+                "prompt": "Fixture only",
+                "worktree": false,
+            }),
+            None,
+        ).await.unwrap();
+        let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
+        s.store.change_run(
+            text(&run, "id"),
+            RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        ).await.unwrap();
+        let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+        let bearer = text(&configuration["env"], crate::mcps::RUN_TOKEN_ENV);
+        list(&s, id, bearer).await.unwrap();
+        s.mcps.gateway_catalogs.0.lock().unwrap().get_mut(id).unwrap().refresh_at = Instant::now();
+        assert_eq!(list(&s, id, bearer).await.unwrap()["tools"][0]["name"], "fixture");
+        tokio::time::timeout(Duration::from_secs(3), entered.notified()).await.unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::super::proxy(
+                &s,
+                id,
+                bearer,
+                "tools/call",
+                json!({ "name": "fixture", "arguments": {} }),
+            ),
+        )
+        .await
+        .expect("background discovery must not own the live connection lock")
+        .unwrap();
+        assert_eq!(result["content"][0]["text"], "live");
+        release.notify_one();
+        upstream.abort();
     }
 }

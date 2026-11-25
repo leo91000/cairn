@@ -238,14 +238,14 @@ fn record_failure(server: &mut McpServer, error: &Error) {
 
 impl Mcps {
     pub async fn lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        self.locks
+        let connection = self
+            .locks
             .lock()
             .await
             .entry(id.into())
             .or_default()
-            .clone()
-            .lock_owned()
-            .await
+            .clone();
+        connection.lock_owned().await
     }
 
     pub async fn server(&self, s: &Service, id: &str) -> Result<McpServer> {
@@ -890,6 +890,19 @@ mod management_authorization_tests {
         plugin_grant_fixture::{Fixture, contribution, support},
     };
     use std::sync::{Arc, atomic::Ordering};
+
+    #[tokio::test]
+    async fn queued_work_for_one_connection_does_not_hold_the_lock_map() {
+        let mcps = Mcps::default();
+        let _first = mcps.lock("first").await;
+        let mut waiting = std::pin::pin!(mcps.lock("first"));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+
+        let other = tokio::time::timeout(std::time::Duration::from_secs(1), mcps.lock("other"))
+            .await
+            .expect("a different connection must remain available");
+        drop(other);
+    }
 
     #[tokio::test]
     async fn connection_updates_recheck_delegation_after_waiting_for_the_lock() {

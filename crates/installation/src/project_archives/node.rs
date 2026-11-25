@@ -407,7 +407,14 @@ async fn prefetch_into(
             },
         }
     }
-    Ok(available)
+    // A later download can evict an earlier hit while pruning the cache.
+    let mut retained = Vec::with_capacity(available.len());
+    for descriptor in available {
+        if cached(&root, &descriptor).await?.is_some() {
+            retained.push(descriptor);
+        }
+    }
+    Ok(retained)
 }
 
 /// OS locks make the foreground priority visible to the controller process as
@@ -474,6 +481,17 @@ mod tests {
             project_id: crate::config::id(),
             ..first.clone()
         };
+        let evicted = Archive {
+            project_id: crate::config::id(),
+            hash: "c".repeat(64),
+            bytes: CACHE_BYTES,
+            ..first.clone()
+        };
+        std::fs::create_dir(root.path().join("project-archives")).unwrap();
+        std::fs::File::create(evicted.path(root.path()))
+            .unwrap()
+            .set_len(CACHE_BYTES)
+            .unwrap();
         let first_id = first.project_id.clone();
         let expected_requests = [first.project_id.clone(), second.project_id.clone()];
         let (requests, mut received_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -501,17 +519,17 @@ mod tests {
             reqwest::Client::new(),
             master,
             "fixture".into(),
-            vec![first, second.clone()],
+            vec![evicted.clone(), first, second.clone()],
             CancellationToken::new(),
         )
         .await
         .unwrap();
         assert_eq!(
             available
-                .into_iter()
-                .map(|archive| archive.project_id)
+                .iter()
+                .map(|archive| archive.project_id.as_str())
                 .collect::<Vec<_>>(),
-            [second.project_id.clone()]
+            [second.project_id.as_str()]
         );
         for project in expected_requests {
             assert_eq!(received_requests.try_recv().unwrap(), project);
@@ -520,6 +538,7 @@ mod tests {
             tokio::fs::read(second.path(root.path())).await.unwrap(),
             payload
         );
+        assert!(!evicted.path(root.path()).exists());
         server.abort();
     }
 

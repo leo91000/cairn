@@ -538,7 +538,13 @@ async fn stage_plan(
     };
     let mut seed_workspace =
         (crate::native::enabled() || plan["resumeWorkspace"] != true) && archives.is_none();
-    let mut timing = Operation::new("node_stage_plan", &session.attempt, "initial_seed");
+    let mut timing = super::workspace::seed_observation::Seed::new(
+        crate::native::enabled(),
+        "node_stage_plan",
+        &session.attempt,
+        "initial_seed",
+        std::time::Instant::now(),
+    );
     session
         .seed_preparation(
             json!({ "kind": "initial", "workspace": seed_workspace, "projectArchives": archives.is_some(),
@@ -567,7 +573,7 @@ async fn stage_plan(
         }
     }
     timing.next("publish_plan");
-    let _publish = match publication {
+    let publish = match publication {
         Some(fence) => Some(fence.lock().await),
         None => None,
     };
@@ -585,6 +591,7 @@ async fn stage_plan(
         &serde_json::to_vec(&plan)?,
     )
     .await?;
+    drop(publish);
     timing.finish();
     Ok(plan)
 }

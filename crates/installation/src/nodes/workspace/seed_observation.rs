@@ -1,7 +1,7 @@
 //! Time an initial native seed without logging from inside its storage guard.
 use std::time::Instant;
 
-pub(super) struct Seed(Option<Report>);
+pub(in crate::nodes) struct Seed(Option<Report>);
 
 struct Report {
     operation: &'static str,
@@ -18,7 +18,7 @@ struct Report {
 }
 
 impl Seed {
-    pub(super) fn new(
+    pub(in crate::nodes) fn new(
         enabled: bool,
         operation: &'static str,
         attempt: &str,
@@ -40,7 +40,7 @@ impl Seed {
         }))
     }
 
-    pub(super) fn next(&mut self, phase: &'static str) {
+    pub(in crate::nodes) fn next(&mut self, phase: &'static str) {
         if let Some(report) = &mut self.0 {
             report.completed_phases.push((
                 report.phase,
@@ -51,20 +51,20 @@ impl Seed {
         }
     }
 
-    pub(super) fn cache_mode(&mut self, hit: bool, reserved: bool) {
+    pub(in crate::nodes) fn cache_mode(&mut self, hit: bool, reserved: bool) {
         if let Some(report) = &mut self.0 {
             report.cache_hit = hit;
             report.reserved = reserved;
         }
     }
 
-    pub(super) fn received(&mut self, bytes: u64) {
+    pub(in crate::nodes) fn received(&mut self, bytes: u64) {
         if let Some(report) = &mut self.0 {
             report.received_bytes = bytes;
         }
     }
 
-    pub(super) fn finish(&mut self) {
+    pub(in crate::nodes) fn finish(&mut self) {
         if let Some(report) = &mut self.0 {
             report.finished = true;
         }
