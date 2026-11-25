@@ -112,9 +112,17 @@ modes when an OS boundary is required.
 Resources, resource templates, and prompts on an allowed remote connection are
 forwarded too; tool checkboxes do not restrict those capabilities. The gateway
 supports ordinary request/response tool calls, not persistent subscriptions,
-server-initiated sampling/elicitation, or resumable background MCP tasks. Each
-operation opens an upstream session, with bounded requests and an 8 MB response
-limit. Calls time out after 60 seconds.
+server-initiated sampling/elicitation, or resumable background MCP tasks. Tool
+calls and other forwarded operations open an upstream session with bounded
+requests and an 8 MB response limit. Calls time out after 60 seconds.
+
+The gateway can serve `tools/list` from a validated catalogue held in manager
+memory for up to five minutes. During agent preparation the manager can begin
+discovery with that turn's grant. A cached listing becomes eligible for a
+background refresh after one minute. The connection revision and encrypted
+credential record identify the catalogue, and each listing checks the live run
+grant and filters the descriptors to its allowed tools. A cold or expired
+catalogue is fetched live. **Test** still probes the upstream server directly.
 
 ## Credentials and backups
 

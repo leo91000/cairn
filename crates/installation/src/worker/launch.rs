@@ -567,6 +567,9 @@ impl Execution<'_> {
             *self.run = s.store.run(&self.id).await?;
         }
         timing.finish();
+        if let Some(bearer) = mcp["env"][crate::mcps::RUN_TOKEN_ENV].as_str() {
+            crate::mcp_server::gateway_catalog::preload(s, bearer, self.cancel);
+        }
         Ok(Workspace {
             prepared,
             state_home,
@@ -1421,6 +1424,9 @@ impl Execution<'_> {
             workspace
                 .env
                 .insert(key.clone(), value.as_str().unwrap_or("").into());
+        }
+        if let Some(bearer) = workspace.mcp["env"][crate::mcps::RUN_TOKEN_ENV].as_str() {
+            crate::mcp_server::gateway_catalog::preload(s, bearer, self.cancel);
         }
         Ok(())
     }

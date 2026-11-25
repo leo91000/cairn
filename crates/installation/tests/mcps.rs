@@ -655,6 +655,7 @@ const server = createServer(async (incoming, response) => {
     } else if (request.method === 'tools/list') {
         if (process.env.TEST_DISCOVERY_COUNTER) appendFileSync(process.env.TEST_DISCOVERY_COUNTER, 'list\n');
         const mode = process.env.TEST_CATALOG_MODE ? readFileSync(process.env.TEST_CATALOG_MODE, 'utf8') : 'valid';
+        if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 3000));
         const tool = {
             name: 'bounded_fixture',
             inputSchema: { type: 'object' },
@@ -709,6 +710,153 @@ async fn bounded_result_server(root: &TempDir) -> (String, tokio::process::Child
     let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
     let endpoint = output.next_line().await.unwrap().unwrap();
     (endpoint, child)
+}
+
+#[tokio::test]
+async fn gateway_catalog_reuses_validated_tools_without_waiting_for_upstream_or_widening_access() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let (upstream_url, mut upstream) = bounded_result_server(&root).await;
+    let (s, origin, server) = served(&root).await;
+    let connection = s
+        .mcp_fixture(
+            json!({
+                "name": "Startup catalogue fixture",
+                "url": upstream_url,
+                "allowPrivateNetwork": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let connection_id = connection["id"].as_str().unwrap();
+    let agent = s
+        .agent_fixture(
+            json!({
+                "name": "Restricted discovery fixture",
+                "access": {
+                    "mcps": [connection_id],
+                    "mcpTools": { connection_id: ["bounded_fixture"] },
+                },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let task = s
+        .task_fixture(
+            json!({
+                "name": "Restricted discovery",
+                "agentId": agent["id"],
+                "prompt": "Fixture only",
+                "worktree": false,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let restricted = s
+        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+        .await
+        .unwrap();
+    let broad = manual_run(&s, "Broad discovery", "Fixture only").await;
+    let mut tokens = Vec::new();
+    for run in [&broad, &restricted] {
+        s.store
+            .change_run(
+                run["id"].as_str().unwrap(),
+                cairn_installation::runs::RunChanges {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let config = s.mcps.run_configuration(&s, run).await.unwrap();
+        tokens.push(
+            config["env"]["CAIRN_MCP_RUN_TOKEN"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+
+    let http = reqwest::Client::new();
+    let endpoint = format!("{origin}/mcp-gateway/{connection_id}");
+    let list = |token: &str| {
+        http.post(&endpoint)
+            .bearer_auth(token)
+            .header("mcp-protocol-version", "2025-11-25")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": {},
+            }))
+    };
+    let mode = root.path().join("catalog-mode");
+    let discovery = root.path().join("discovery-counter");
+    std::fs::write(&mode, "slow").unwrap();
+    let cold = std::time::Instant::now();
+    let broad_result: Value = list(&tokens[0]).send().await.unwrap().json().await.unwrap();
+    let cold_ms = cold.elapsed().as_millis();
+    assert_eq!(broad_result["result"]["tools"].as_array().unwrap().len(), 2);
+
+    let guard = s.mcps.lock(connection_id).await;
+    let warm = std::time::Instant::now();
+    let restricted_result: Value = tokio::time::timeout(Duration::from_secs(2), async {
+        list(&tokens[1]).send().await.unwrap().json().await.unwrap()
+    })
+    .await
+    .expect("a cached listing must not queue behind work on the gateway");
+    let warm_ms = warm.elapsed().as_millis();
+    assert_eq!(
+        restricted_result["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        restricted_result["result"]["tools"][0]["name"],
+        "bounded_fixture"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&discovery).unwrap().lines().count(),
+        1
+    );
+    drop(guard);
+
+    s.mcps
+        .revoke_run(&s, restricted["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let revoked: Value = list(&tokens[1]).send().await.unwrap().json().await.unwrap();
+    assert!(revoked.get("result").is_none());
+    assert_eq!(
+        std::fs::read_to_string(&discovery).unwrap().lines().count(),
+        1
+    );
+
+    s.mcps
+        .update_secrets(&s, connection_id, |_| {})
+        .await
+        .unwrap();
+    std::fs::write(&mode, "scalar").unwrap();
+    let changed: Value = list(&tokens[0]).send().await.unwrap().json().await.unwrap();
+    assert_eq!(
+        changed["error"]["message"],
+        "MCP server returned an invalid tool catalog."
+    );
+    assert_eq!(
+        std::fs::read_to_string(discovery).unwrap().lines().count(),
+        2
+    );
+    println!("CAIRN_GATEWAY_CATALOG_MEASUREMENT cold_ms={cold_ms} warm_ms={warm_ms}");
+
+    server.abort();
+    upstream.kill().await.unwrap();
+    upstream.wait().await.unwrap();
 }
 
 #[tokio::test]
@@ -1022,6 +1170,11 @@ async fn malformed_advertisement_scope(restricted: bool) {
     let mut calls = std::fs::read_to_string(&discovery).unwrap().lines().count();
     for version in ["2025-11-25", "2026-07-28"] {
         for catalog_mode in ["scalar", "array", "mixed", "invalid_unlisted", "valid"] {
+            // Each case exercises live discovery under a new credential record.
+            s.mcps
+                .update_secrets(&s, connection_id, |_| {})
+                .await
+                .unwrap();
             std::fs::write(&mode, catalog_mode).unwrap();
             let response = http.post(&endpoint).bearer_auth(token)
                 .header("mcp-protocol-version", version)

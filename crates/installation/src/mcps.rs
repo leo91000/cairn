@@ -43,6 +43,7 @@ const KNOWN_FAILURES: [&str; 3] = [
 #[derive(Default)]
 pub struct Mcps {
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(super) gateway_catalogs: crate::mcp_server::gateway_catalog::Catalogs,
 }
 
 pub async fn callback_url(s: &Service) -> Result<String> {
@@ -602,18 +603,38 @@ impl Mcps {
         authorize: crate::authorization::Authorization,
     ) -> Result<()> {
         authorize.recheck().await?;
+        let cache_discovery = result.is_ok() && server.is_http();
+        let revoked = result
+            .as_ref()
+            .err()
+            .filter(|error| matches!(error.status, 401 | 403))
+            .map(|_| server.id.clone());
         match result {
             Ok(tools) => server.record_success(tools.clone(), now()),
             Err(error) => record_failure(&mut server, error),
         }
-        let record = server;
-        s.store
+        let cache = s
+            .store
             .transaction(move |db| {
                 authorize.authorize(db)?;
-                db.save_mcp_server(&record)?;
-                Ok(())
+                db.save_mcp_server(&server)?;
+                if !cache_discovery {
+                    return Ok(None);
+                }
+                let credentials = db
+                    .mcp_credentials(&server.id)?
+                    .map(|bytes| blake3::hash(&bytes));
+                Ok(Some((server, credentials)))
             })
-            .await
+            .await?;
+        if let Some((server, credentials)) = cache {
+            self.gateway_catalogs
+                .remember_management_discovery(server, credentials);
+        }
+        if let Some(id) = revoked {
+            self.gateway_catalogs.invalidate(&id);
+        }
+        Ok(())
     }
 
     pub async fn test(&self, s: &Service, id: &str) -> Result<McpView> {

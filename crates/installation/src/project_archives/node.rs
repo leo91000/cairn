@@ -148,8 +148,15 @@ pub(crate) async fn stage(
         }
         return Ok(None);
     }
-    let _disk =
-        await_preparation(stop, crate::native::disk::lock(&crate::native::state_dir())).await?;
+    let _disk = await_preparation(
+        stop,
+        crate::native::disk::observed_lock(
+            &crate::native::state_dir(),
+            "native_storage_archive_stage",
+            &session.attempt,
+        ),
+    )
+    .await?;
     if let Some(disk_mib) = base_disk_mib {
         let lookup = crate::native::bases::request(
             "lookup",
@@ -268,7 +275,14 @@ pub(crate) async fn stage(
 pub(crate) async fn abandon_stage(root: &Path, pressure: bool, attempt: &str) -> Result<()> {
     crate::native::bases::release_pin(root, attempt).await?;
     let _disk = if crate::native::enabled() {
-        Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
+        Some(
+            crate::native::disk::observed_lock(
+                &crate::native::state_dir(),
+                "native_storage_archive_cleanup",
+                attempt,
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -290,7 +304,7 @@ pub(crate) async fn prefetch(
     token: String,
     descriptors: Vec<Archive>,
     stop: CancellationToken,
-) -> Result<()> {
+) -> Result<Vec<Archive>> {
     prefetch_into(
         crate::nodes::node_data_dir(),
         client,
@@ -309,28 +323,37 @@ async fn prefetch_into(
     token: String,
     descriptors: Vec<Archive>,
     stop: CancellationToken,
-) -> Result<()> {
+) -> Result<Vec<Archive>> {
+    let mut available = Vec::new();
     for descriptor in descriptors {
         if stop.is_cancelled() {
-            return Ok(());
+            break;
         }
         // A best-effort warmer never queues behind active filesystem mutation.
         let state = crate::native::state_dir();
         let _disk = if crate::native::enabled() {
-            match crate::file_lock::exclusive(&state.join("storage.lock"), "Native storage busy.") {
+            match crate::native::disk::try_storage_lock(
+                &state,
+                "native_storage_archive_prefetch",
+                &descriptor.project_id,
+                "Native storage busy.",
+            ) {
                 Ok(guard) => Some(guard),
-                Err(error) if error.status == 409 => return Ok(()),
+                Err(error) if error.status == 409 => break,
                 Err(error) => return Err(error),
             }
         } else {
             None
         };
         let Some(_guard) = lock().try_lock().ok() else {
-            return Ok(());
+            break;
         };
         clean_interrupted_downloads(&root).await?;
         match cached(&root, &descriptor).await {
-            Ok(Some(_)) => continue,
+            Ok(Some(_)) => {
+                available.push(descriptor);
+                continue;
+            }
             Ok(None) => {}
             Err(error) => {
                 tracing::debug!(project_id = %descriptor.project_id, status = error.status, "Project archive preload deferred");
@@ -367,18 +390,24 @@ async fn prefetch_into(
                 // Keep both mutation guards until accepted writes and any
                 // publication already in flight have settled.
                 let _ = fetch.await;
-                return Ok(());
+                break;
             }
             result = &mut fetch => {
-                if let Err(error) = result
-                    && !stop.is_cancelled()
-                {
-                    tracing::debug!(project_id = %descriptor.project_id, status = error.status, "Project archive preload deferred");
+                match result {
+                    Ok(()) => available.push(descriptor.clone()),
+                    Err(error) if !stop.is_cancelled() => {
+                        tracing::debug!(
+                            project_id = %descriptor.project_id,
+                            status = error.status,
+                            "Project archive preload deferred"
+                        );
+                    }
+                    Err(_) => break,
                 }
             },
         }
     }
-    Ok(())
+    Ok(available)
 }
 
 /// OS locks make the foreground priority visible to the controller process as
@@ -467,7 +496,7 @@ mod tests {
             .parse()
             .unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        prefetch_into(
+        let available = prefetch_into(
             root.path().to_owned(),
             reqwest::Client::new(),
             master,
@@ -477,6 +506,13 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(
+            available
+                .into_iter()
+                .map(|archive| archive.project_id)
+                .collect::<Vec<_>>(),
+            [second.project_id.clone()]
+        );
         for project in expected_requests {
             assert_eq!(received_requests.try_recv().unwrap(), project);
         }

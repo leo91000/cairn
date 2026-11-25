@@ -138,8 +138,10 @@ impl Warmer {
                 }
                 Err(_) => continue,
             };
-            let owner = match crate::file_lock::exclusive(
-                &bases.state.join("storage.lock"),
+            let owner = match super::disk::try_storage_lock(
+                &bases.state,
+                "native_storage_base_warmer",
+                &job.key,
                 "Native storage is busy.",
             ) {
                 Ok(owner) => owner,

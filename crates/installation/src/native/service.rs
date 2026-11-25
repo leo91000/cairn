@@ -725,7 +725,7 @@ impl Controller {
     /// wait bounded too, and observe stop markers without blocking DELETE.
     async fn start_storage(&self, id: &str, plan: &Value) -> Result<disk::StorageGuard> {
         let (deadline, time_limited) = disk_admission_deadline(plan, DISK_RELEASE_WAIT);
-        let waiting = disk::lock(&self.state);
+        let waiting = disk::observed_lock(&self.state, "native_storage_admission", id);
         tokio::pin!(waiting);
         let mut acquired = None;
         loop {
@@ -1280,7 +1280,7 @@ impl Controller {
                     () = stop.cancelled() => {
                         return Err(self.preparation_stopped(id, plan).await);
                     }
-                    result = tokio::time::timeout_at(deadline, disk::lock(&self.state)) => {
+                    result = tokio::time::timeout_at(deadline, disk::observed_lock(&self.state, "native_storage_mount", id)) => {
                         match result {
                             Ok(result) => result?,
                             Err(_) => return Err(self.disk_admission_timeout(id, time_limited).await),
@@ -1701,7 +1701,9 @@ impl Controller {
             tokio::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755)).await?;
         }
         {
-            let _pool = disk::lock(&self.state).await?;
+            let _pool =
+                disk::observed_lock(&self.state, "native_storage_release_base", text(plan, "id"))
+                    .await?;
             super::bases::release_pin(
                 &self.data.join("runs").join(text(plan, "runId")),
                 text(plan, "id"),
@@ -2378,7 +2380,7 @@ impl Controller {
         Fut: std::future::Future<Output = Result<T>> + Send + 'static,
     {
         uuid(id)?;
-        let pool = disk::lock(&self.state).await?;
+        let pool = disk::observed_lock(&self.state, "native_storage_live_access", id).await?;
         let live_access = {
             let active = self.active.lock().await;
             let attempt = active
@@ -2418,7 +2420,7 @@ impl Controller {
         filesystem: &Path,
         policy: &storage::policy::Policy,
     ) -> Result<(disk::Preparation, u64)> {
-        let _pool = disk::lock(&self.state).await?;
+        let _pool = disk::observed_lock(&self.state, "native_storage_reserve_copy", "").await?;
         let physical = disk::physical_headroom(&self.state, filesystem, policy, None)?;
         let budget = maximum
             .min(self.disk_growth().await?)
@@ -2949,7 +2951,9 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             if value != previous {
                 // Do not hold the budget mutex while waiting for storage:
                 // foreground transfers query health with their disk lease held.
-                let _disk = disk::lock(&controller.state).await?;
+                let _disk =
+                    disk::observed_lock(&controller.state, "native_storage_node_budget", "")
+                        .await?;
                 super::spares::discard_unclaimed(&controller.state, None).await?;
                 let limit = budget.limits.disk_mi_b.saturating_mul(disk::MIB);
                 let used = disk::used(&controller.data, &controller.state).await?;
@@ -2993,7 +2997,8 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 .apply_relief(&controller.state, &configuration)
                 .await?
             {
-                let _disk = disk::lock(&controller.state).await?;
+                let _disk =
+                    disk::observed_lock(&controller.state, "native_storage_policy", "").await?;
                 controller
                     .storage_policy
                     .apply(&controller.state, configuration)
@@ -3149,8 +3154,13 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             status
         }
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
-            let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
+            let operation = if *action == "delete" {
+                "native_storage_delete"
+            } else {
+                "native_storage_prune"
+            };
+            let _disk = disk::observed_lock(&controller.state, operation, run).await?;
             let _staging = if *action == "delete" {
                 Some(disk::lock_staging(&controller.state, run).await?)
             } else {

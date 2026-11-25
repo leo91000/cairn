@@ -661,8 +661,7 @@ async fn warm_archives(
                 .json::<Vec<crate::project_archives::Archive>>()
                 .await
                 .map_err(|_| Error::bad("Invalid project archive catalogue."))?;
-            let warming = catalog.clone();
-            crate::project_archives::prefetch(
+            let warming = crate::project_archives::prefetch(
                 client.clone(),
                 origin.clone(),
                 token.clone(),
@@ -670,7 +669,9 @@ async fn warm_archives(
                 stop.clone(),
             )
             .await?;
-            if std::env::var("CAIRN_NODE_BACKEND").is_ok_and(|backend| backend == "native") {
+            if !warming.is_empty()
+                && std::env::var("CAIRN_NODE_BACKEND").is_ok_and(|backend| backend == "native")
+            {
                 crate::native::bases::request(
                     "warm",
                     &json!({ "archives": warming, "diskMiB": 32768, "individual": true }),

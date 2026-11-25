@@ -83,6 +83,32 @@ the value is an upper bound for this bootstrap and exact only when it ran alone.
 It freezes with the final report. Regression tests bound the scans of the
 storage admission check separately, per controller state.
 
+## Before bootstrap
+
+Match the connector's `node_prepare` operation to the controller's bootstrap
+using the attempt ID. A slow `seed` phase can occur before the controller
+receives a workload. `native_seed_manager` measures the request through
+authorization, archive selection and computation of the response offer.
+`native_seed_connector` breaks out response headers, storage admission,
+encoded bytes received, skill installation, the writeback barrier and
+publication. Failed and retried transfers can contain partial measurements.
+The enclosing `node_stage_plan` also times project archive staging and plan
+publication.
+
+On the node, `native_storage_lock` reports the operation that held the
+shared pool lock, its acquisition timestamp and its hold duration. Compare
+those intervals with the connector's `storage_wait` phase. The records are
+best-effort and bounded. An absent or delayed record does not rule out
+contention. Background archive warming is queued only for archives that
+prefetch actually found or downloaded.
+
+For end-to-end latency, measure from the stored first message to the
+`thread.started` event. The `submitted` bootstrap milestone ends earlier.
+Observe new and resumed sessions separately, with the provider, node, project
+size and cache conditions. The manager's `mcp_startup` and
+`mcp_gateway_discovery` operations show how much of the remaining time is
+spent preparing the tool catalogue.
+
 ## Export and privacy
 
 Memory observation remains available independently of logging. Export is enabled
