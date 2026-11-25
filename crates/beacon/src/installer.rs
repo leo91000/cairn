@@ -8,9 +8,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 /// Public installer assets contain no credentials; the launcher supplies the claim code.
-pub fn router(origin: String) -> Router {
+pub fn router(origin: &str) -> Router {
     let script = include_str!("../../../deploy/installations/install.sh")
-        .replace("__CAIRN_BEACON_ORIGIN__", &shell_quote(&origin))
+        .replace("__CAIRN_BEACON_ORIGIN__", &shell_quote(origin))
         .replace(
             "__CAIRN_HOST_SHA256__",
             &hex::encode(Sha256::digest(include_bytes!(

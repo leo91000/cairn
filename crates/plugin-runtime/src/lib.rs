@@ -258,13 +258,10 @@ impl Runtime {
             loaded: RefCell::default(),
             loading: RefCell::default(),
         });
-        let handlers = match evaluate(&lua, &modules, "main.luau", &main)? {
-            mlua::Value::Table(handlers) => handlers,
-            _ => {
-                return Err(mlua::Error::runtime(
-                    "main.luau must return a table of handlers.",
-                ));
-            }
+        let mlua::Value::Table(handlers) = evaluate(&lua, &modules, "main.luau", &main)? else {
+            return Err(mlua::Error::runtime(
+                "main.luau must return a table of handlers.",
+            ));
         };
         Ok(Self {
             lua,
@@ -277,7 +274,7 @@ impl Runtime {
     }
 
     /// Runs the handler named `event`; packages without one ignore the event.
-    pub fn dispatch<F>(&self, event: &str, payload: Value, call: F) -> mlua::Result<Value>
+    pub fn dispatch<F>(&self, event: &str, payload: &Value, call: F) -> mlua::Result<Value>
     where
         F: FnMut(&str, Value) -> Result<Value, CallError> + 'static,
     {
@@ -289,7 +286,7 @@ impl Runtime {
     }
 
     /// Like [`Runtime::dispatch`], telling a package's `cairn.fail` apart from errors.
-    pub fn run<F>(&self, event: &str, payload: Value, call: F) -> Result<Value, Failed>
+    pub fn run<F>(&self, event: &str, payload: &Value, call: F) -> Result<Value, Failed>
     where
         F: FnMut(&str, Value) -> Result<Value, CallError> + 'static,
     {
@@ -302,7 +299,7 @@ impl Runtime {
                 return Ok(Value::Null);
             };
             let output =
-                handler.call::<mlua::Value>(self.lua.to_value_with(&payload, options())?)?;
+                handler.call::<mlua::Value>(self.lua.to_value_with(payload, options())?)?;
             self.lua.from_value(output)
         })();
         result.map_err(|error| match self.failure.borrow_mut().take() {
@@ -388,7 +385,7 @@ pub fn worker() -> Result<(), String> {
         let Some(Frame::Event { name, payload }) = frame else {
             return Ok(());
         };
-        let frame = match runtime.run(&name, payload, host_call) {
+        let frame = match runtime.run(&name, &payload, host_call) {
             Ok(value) => Frame::Done { value },
             Err(Failed::Rejected(message)) => Frame::Rejected { message },
             Err(Failed::Error(_)) => Frame::Failure,
@@ -457,7 +454,7 @@ mod tests {
         )
         .unwrap_or_else(|_| panic!("load"));
         let output = runtime
-            .dispatch("probe", Value::Null, |_, _| {
+            .dispatch("probe", &Value::Null, |_, _| {
                 Err(CallError::Denied("denied".into()))
             })
             .unwrap();
@@ -489,7 +486,7 @@ mod tests {
             "return { probe = function(input) return {io = io == nil, package = package == nil, execute = os.execute == nil, env = os.getenv == nil, print = print == nil} end }",
         );
         let output = runtime
-            .dispatch("probe", Value::Null, |_, _| {
+            .dispatch("probe", &Value::Null, |_, _| {
                 Err(CallError::Denied("denied".into()))
             })
             .unwrap();
@@ -499,7 +496,7 @@ mod tests {
         let runtime =
             load("return { message = function(input) return cairn.storage.get(input.key) end }");
         let output = runtime
-            .dispatch("message", json!({"key": "seen"}), |method, args| {
+            .dispatch("message", &json!({"key": "seen"}), |method, args| {
                 assert_eq!(method, "storage.get");
                 assert_eq!(args["key"], "seen");
                 Ok(json!(42))
@@ -508,7 +505,7 @@ mod tests {
         assert_eq!(output, 42);
         assert_eq!(
             runtime
-                .dispatch("unknown", Value::Null, |_, _| unreachable!())
+                .dispatch("unknown", &Value::Null, |_, _| unreachable!())
                 .unwrap(),
             Value::Null
         );
@@ -521,13 +518,13 @@ mod tests {
         );
         for expected in 1..=3 {
             let value = runtime
-                .dispatch("tick", Value::Null, |_, _| unreachable!())
+                .dispatch("tick", &Value::Null, |_, _| unreachable!())
                 .unwrap();
             assert_eq!(value, expected);
         }
         assert!(
             runtime
-                .dispatch("replace", Value::Null, |_, _| unreachable!())
+                .dispatch("replace", &Value::Null, |_, _| unreachable!())
                 .is_err()
         );
     }
@@ -538,13 +535,13 @@ mod tests {
             "return { probe = function(input) return { missing = input.state == nil, stored = cairn.storage.get('x') == nil } end }",
         );
         let output = runtime
-            .dispatch("probe", json!({ "state": null }), |_, _| Ok(Value::Null))
+            .dispatch("probe", &json!({ "state": null }), |_, _| Ok(Value::Null))
             .unwrap();
         assert_eq!(output, json!({ "missing": true, "stored": true }));
         let runtime =
             load("return { probe = function() return { empty = cairn.array(), map = {} } end }");
         let output = runtime
-            .dispatch("probe", Value::Null, |_, _| unreachable!())
+            .dispatch("probe", &Value::Null, |_, _| unreachable!())
             .unwrap();
         assert_eq!(output, json!({ "empty": [], "map": {} }));
     }
@@ -555,7 +552,7 @@ mod tests {
             "return { message = function() local ok, error = pcall(cairn.http.request, {}) return { ok = ok, error = tostring(error) } end }",
         );
         let output = runtime
-            .dispatch("message", Value::Null, |_, _| {
+            .dispatch("message", &Value::Null, |_, _| {
                 Err(CallError::Denied("forbidden".into()))
             })
             .unwrap();
@@ -570,7 +567,7 @@ mod tests {
         );
         assert!(
             runtime
-                .dispatch("big", Value::Null, |_, _| unreachable!())
+                .dispatch("big", &Value::Null, |_, _| unreachable!())
                 .is_err()
         );
         let fast = Runtime::load(
@@ -579,12 +576,12 @@ mod tests {
         )
         .unwrap_or_else(|_| panic!("load"));
         assert!(
-            fast.dispatch("spin", Value::Null, |_, _| unreachable!())
+            fast.dispatch("spin", &Value::Null, |_, _| unreachable!())
                 .is_err()
         );
         // The next event gets a fresh budget.
         assert_eq!(
-            fast.dispatch("ok", Value::Null, |_, _| unreachable!())
+            fast.dispatch("ok", &Value::Null, |_, _| unreachable!())
                 .unwrap(),
             true
         );
@@ -603,7 +600,7 @@ mod tests {
         runtime
             .dispatch(
                 "message",
-                json!({
+                &json!({
                     "id": "500", "author": { "id": "300", "name": "Sarah" },
                     "channelId": "200", "botId": "400", "content": title,
                 }),
@@ -627,7 +624,7 @@ mod tests {
             .collect::<Vec<_>>();
         let deleted = Rc::new(Cell::new(false));
         let cleaned = deleted.clone();
-        runtime.dispatch("reply", json!({
+        runtime.dispatch("reply", &json!({
             "deliveryId": "12345678-0000-4000-8000-000000000001", "text": "Done", "status": "completed", "files": files,
             "reply": { "channel": "200", "source": "200", "message": "500", "deferred": true },
         }), move |method, args| {
@@ -704,7 +701,7 @@ mod tests {
         };
         let ids = ["a".repeat(64), "b".repeat(64)];
         for (index, id) in ids.iter().enumerate() {
-            runtime.dispatch("question", json!({
+            runtime.dispatch("question", &json!({
                 "question": { "id": id, "fields": [{ "id": "0", "title": "Choose?", "options": [{ "label": "Yes" }] }] },
                 "conversation": format!("chat{index}"), "userId": "300", "deliveryId": format!("delivery{index}"),
                 "reply": { "channel": "200", "message": "500", "threaded": false },
@@ -715,10 +712,10 @@ mod tests {
             2,
             "neither question overwrites the other"
         );
-        runtime.dispatch("interaction", json!({
+        runtime.dispatch("interaction", &json!({
             "channelId": "200", "author": { "id": "300", "name": "Sarah" }, "customId": format!("a:{}:0:0", ids[0]),
         }), bridge()).unwrap();
-        runtime.dispatch("message", json!({
+        runtime.dispatch("message", &json!({
             "channelId": "200", "botId": "400", "id": "501", "author": { "id": "300", "name": "Sarah" },
             "content": "No", "replyToId": "9002",
         }), bridge()).unwrap();

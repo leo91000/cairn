@@ -505,8 +505,7 @@ pub fn usable_candidate_address(ip: std::net::IpAddr) -> bool {
     let ip = match ip {
         std::net::IpAddr::V6(ip) => ip
             .to_ipv4_mapped()
-            .map(std::net::IpAddr::V4)
-            .unwrap_or(std::net::IpAddr::V6(ip)),
+            .map_or(std::net::IpAddr::V6(ip), std::net::IpAddr::V4),
         ip => ip,
     };
     match ip {

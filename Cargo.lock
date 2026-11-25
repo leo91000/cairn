@@ -737,7 +737,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cairn-beacon"
-version = "0.1.0"
+version = "0.52.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-node-gateway"
-version = "0.1.0"
+version = "0.52.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-plugin-api"
-version = "0.1.0"
+version = "0.52.3"
 dependencies = [
  "regex",
  "schemars",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-plugin-host"
-version = "0.1.0"
+version = "0.52.3"
 dependencies = [
  "cairn-plugin-api",
  "serde_json",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-plugin-runtime"
-version = "0.1.0"
+version = "0.52.3"
 dependencies = [
  "cairn-plugin-api",
  "mlua",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-protocol"
-version = "0.1.0"
+version = "0.52.3"
 dependencies = [
  "base64 0.22.1",
  "ring",

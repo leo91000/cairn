@@ -1,9 +1,9 @@
 [package]
 name = "cairn-installation"
-version = "0.52.3"
-edition = "2024"
-rust-version = "1.97"
-publish = false
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+publish = { workspace = true }
 
 [features]
 # Built only into the disposable worker test fixture by the backend launcher.
@@ -17,29 +17,29 @@ path = "src/main.rs"
 name = "native_storage_qualifier"
 
 [dependencies]
-cairn-contracts = { path = "../contracts" }
+cairn-contracts = { workspace = true }
 rquickjs = "=0.14.0"
-cairn-protocol = { path = "../protocol" }
-cairn-plugin-api = { path = "../plugin-api" }
-cairn-plugin-host = { path = "../plugin-host" }
-cairn-plugin-runtime = { path = "../plugin-runtime" }
-axum = { version = "0.8.9", features = [
+cairn-protocol = { workspace = true }
+cairn-plugin-api = { workspace = true }
+cairn-plugin-host = { workspace = true }
+cairn-plugin-runtime = { workspace = true }
+axum = { workspace = true, features = [
   "macros",
   "form"
 ] }
-tokio = { version = "1", features = [ "full" ] }
-tokio-util = { version = "0.7", features = [
+tokio = { workspace = true, features = [ "full" ] }
+tokio-util = { workspace = true, features = [
   "rt",
   "io"
 ] }
-tower-http = { version = "0.6", features = [
+tower-http = { workspace = true, features = [
   "fs",
   "compression-br",
   "compression-gzip",
   "trace"
 ] }
-serde = { version = "1", features = [ "derive" ] }
-serde_json = { version = "1", features = [ "raw_value" ] }
+serde = { workspace = true }
+serde_json = { workspace = true, features = [ "raw_value" ] }
 serde_urlencoded = "0.7"
 serde_yaml_ng = "0.10"
 jsonschema = { version = "0.56", default-features = false }
@@ -48,37 +48,37 @@ rusqlite = { version = "0.40", features = [
   "functions",
   "serde_json"
 ] }
-rustls = { version = "0.23", default-features = false, features = [ "aws_lc_rs" ] }
-reqwest = { version = "0.13", default-features = false, features = [
+rustls = { workspace = true, features = [ "aws_lc_rs" ] }
+reqwest = { workspace = true, features = [
   "json",
   "stream",
   "rustls"
 ] }
-futures-util = "0.3"
+futures-util = { workspace = true }
 http-body-util = "0.1"
-hyper = { version = "1", features = [
+hyper = { workspace = true, features = [
   "client",
   "http1",
   "server"
 ] }
-hyper-util = { version = "0.1", features = [
+hyper-util = { workspace = true, features = [
   "service",
   "tokio"
 ] }
-bytes = "1"
-tempfile = "3"
-uuid = { version = "1", features = [
+bytes = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true, features = [
   "v4",
   "serde"
 ] }
-rand = "0.9"
-sha2 = "0.10"
-subtle = "2"
-base64 = "0.22"
+rand = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+base64 = { workspace = true }
 aes-gcm = "0.10"
-hex = "0.4"
-url = "2"
-regex = "1"
+hex = { workspace = true }
+url = { workspace = true }
+regex = { workspace = true }
 chrono = { version = "0.4", features = [ "serde" ] }
 chrono-tz = "0.10"
 croner = "4"
@@ -88,9 +88,9 @@ cel = { version = "0.15", default-features = false, features = [
   "chrono",
   "json"
 ] }
-libc = "0.2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = [
+libc = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = [
   "env-filter",
   "json"
 ] }
@@ -100,25 +100,25 @@ image = { version = "0.25", default-features = false, features = [
   "jpeg",
   "webp"
 ] }
-async-trait = "0.1.92"
+async-trait = { workspace = true }
 blake3 = "1.8.7"
-flate2 = "1"
+flate2 = { workspace = true }
 lru = "0.18.5"
 vmm-sys-util = "=0.15.0"
 libublk = { git = "https://github.com/ublk-org/libublk-rs", rev = "0d172817b3737079477337b39538ccdc91766e6e" }
-tokio-tungstenite = { version = "0.29", features = [ "rustls-tls-webpki-roots" ] }
-tower = { version = "0.5", features = [ "util" ] }
-webrtc = { version = "=0.21.0", default-features = false, features = [
+tokio-tungstenite = { workspace = true, features = [ "rustls-tls-webpki-roots" ] }
+tower = { workspace = true, features = [ "util" ] }
+webrtc = { workspace = true, features = [
   "runtime-tokio",
   "crypto-aws-lc-rs"
 ] }
-rtc = { version = "=0.21.0", default-features = false, features = [ "crypto-aws-lc-rs" ] }
+rtc = { workspace = true, features = [ "crypto-aws-lc-rs" ] }
 rcgen = { version = "0.14", default-features = false, features = [ "aws_lc_rs" ] }
-tokio-rustls = { version = "0.26", default-features = false, features = [ "aws_lc_rs" ] }
+tokio-rustls = { workspace = true, features = [ "aws_lc_rs" ] }
 zip = { version = "6", default-features = false, features = [ "deflate-flate2" ] }
 mail-builder = { version = "=0.4.4", default-features = false }
 mime_guess = "=2.0.5"
-toml = "0.9"
+toml = { workspace = true }
 toml_edit = { version = "0.25", features = [ "serde" ] }
 jsonc-parser = { version = "0.34", features = [
   "cst",
@@ -126,17 +126,8 @@ jsonc-parser = { version = "0.34", features = [
 ] }
 
 [dev-dependencies]
-tempfile = "3"
 tracing-core = "0.1"
-tower = { version = "0.5", features = [ "util" ] }
-tokio = { version = "1", features = [ "test-util" ] }
+tokio = { workspace = true, features = [ "test-util" ] }
 
-[lints.clippy]
-default_trait_access = "warn"
-ignored_unit_patterns = "warn"
-items_after_statements = "warn"
-manual_let_else = "warn"
-map_unwrap_or = "warn"
-needless_pass_by_value = "warn"
-redundant_closure_for_method_calls = "warn"
-semicolon_if_nothing_returned = "warn"
+[lints]
+workspace = true

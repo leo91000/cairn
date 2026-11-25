@@ -87,7 +87,7 @@ fn artifact_call(
     relay: &RelayedInstallation,
     token: &str,
     operation: &str,
-    input: Value,
+    input: &Value,
 ) -> reqwest::RequestBuilder {
     relay
         .app
@@ -333,7 +333,7 @@ async fn admitted_artifact_reads_recheck_public_authorization() {
                     "artifactId": artifact,
                 })
             };
-            let request = artifact_call(&relay, token, operation, input);
+            let request = artifact_call(&relay, token, operation, &input);
             let pending = tokio::spawn(async move { request.send().await.unwrap() });
             tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 while !ready.exists() {
@@ -490,11 +490,12 @@ async fn artifact_reads_recheck_public_authorization_after_preparation() {
                     "artifactId": artifact,
                 })
             };
-            let request = artifact_call(&relay, grant["token"].as_str().unwrap(), operation, input);
+            let request =
+                artifact_call(&relay, grant["token"].as_str().unwrap(), operation, &input);
             let mut pending = tokio::spawn(async move { request.send().await.unwrap() });
             let finished_early = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 tokio::select! {
-                    _ = reached.notified() => false,
+                    () = reached.notified() => false,
                     _ = &mut pending => true,
                 }
             })

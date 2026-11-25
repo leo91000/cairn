@@ -157,7 +157,7 @@ impl Retry {
     /// The planned timestamp is stored once, so restarting does not resample the
     /// delay or reset the attempt budget. Jitter spreads simultaneous failures.
     pub fn next(previous: Option<&Self>, cause: Cause, at: i64) -> Option<Self> {
-        let attempt = previous.map(|retry| retry.attempt).unwrap_or(0);
+        let attempt = previous.map_or(0, |retry| retry.attempt);
         if attempt >= MAX_ATTEMPTS {
             return None;
         }

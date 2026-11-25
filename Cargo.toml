@@ -17,6 +17,66 @@ exclude = [
   "vendor/webrtc"
 ]
 
+[workspace.package]
+version = "0.52.3"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace.dependencies]
+cairn-contracts = { path = "crates/contracts" }
+cairn-installation = { path = "crates/installation" }
+cairn-node-gateway = { path = "crates/node-gateway" }
+cairn-plugin-api = { path = "crates/plugin-api" }
+cairn-plugin-host = { path = "crates/plugin-host" }
+cairn-plugin-runtime = { path = "crates/plugin-runtime" }
+cairn-protocol = { path = "crates/protocol" }
+async-trait = "0.1.92"
+axum = "0.8.9"
+base64 = "0.22"
+bytes = "1"
+flate2 = "1"
+futures-util = "0.3"
+hex = "0.4"
+hyper = "1"
+hyper-util = "0.1"
+libc = "0.2"
+rand = "0.9"
+regex = "1"
+reqwest = { version = "0.13", default-features = false }
+ring = "0.17"
+rtc = { version = "=0.21.0", default-features = false }
+rustls = { version = "0.23", default-features = false }
+schemars = "=1.2.3"
+serde = { version = "1", features = [ "derive" ] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+tempfile = "3"
+tokio = "1"
+tokio-rustls = { version = "0.26", default-features = false }
+tokio-tungstenite = "0.29"
+tokio-util = "0.7"
+toml = "0.9"
+tower = "0.5"
+tower-http = "0.6"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+ts-rs = "=12.0.1"
+url = "2"
+uuid = "1"
+webrtc = { version = "=0.21.0", default-features = false }
+
+[workspace.lints.clippy]
+default_trait_access = "warn"
+ignored_unit_patterns = "warn"
+items_after_statements = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+
 [patch.crates-io]
 # Register local channel event receivers before the driver can announce them.
 webrtc = { path = "vendor/webrtc" }

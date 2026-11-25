@@ -10,13 +10,13 @@ fn rejected() -> ApiError {
 }
 
 fn webauthn(service: &Service) -> Result<Webauthn, ApiError> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let origin = Url::parse(&service.origin).map_err(|_| rejected())?;
     let host = origin.domain().ok_or(ApiError::Http(
         StatusCode::BAD_REQUEST,
         "Passkeys require a hostname or localhost",
     ))?;
     let mut builder = WebauthnBuilder::new(host, &origin).map_err(|_| rejected())?;
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     for certificate in &service.oauth.android_certificates {
         let native_origin = Url::parse(&format!(
             "android:apk-key-hash:{}",

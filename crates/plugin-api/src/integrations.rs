@@ -515,11 +515,14 @@ mod tests {
             "credential": { "label": "Token", "header": "authorization", "prefix": "Bearer " },
             "agentAccess": {},
         });
-        for (key, item) in extra.as_object().unwrap() {
+        let Value::Object(extra) = extra else {
+            panic!("extra must be a JSON object");
+        };
+        for (key, item) in extra {
             if key == "deviceFlow" {
-                value["credential"]["deviceFlow"] = item.clone();
+                value["credential"]["deviceFlow"] = item;
             } else {
-                value[key] = item.clone();
+                value[key] = item;
             }
         }
         let manifest: Manifest = serde_json::from_value(value).map_err(|_| "parse")?;
