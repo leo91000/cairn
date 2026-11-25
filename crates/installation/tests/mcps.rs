@@ -669,6 +669,10 @@ const server = createServer(async (incoming, response) => {
     } else if (request.method === 'tools/call') {
         appendFileSync(process.env.TEST_COUNTER, 'call\n');
         const mode = request.params.arguments.mode;
+        if (mode === 'forbidden') {
+            response.writeHead(403).end();
+            return;
+        }
         if (mode === 'scalar') {
             result = 42;
         } else if (mode === 'array') {
@@ -838,6 +842,29 @@ async fn gateway_catalog_reuses_validated_tools_without_waiting_for_upstream_or_
         1
     );
 
+    let denied: Value = http
+        .post(&endpoint)
+        .bearer_auth(&tokens[0])
+        .header("mcp-protocol-version", "2025-11-25")
+        .json(&tool_call(
+            "bounded_fixture",
+            &json!({ "mode": "forbidden" }),
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(denied["error"]["message"], "MCP request failed.");
+    std::fs::write(&mode, "valid").unwrap();
+    let live: Value = list(&tokens[0]).send().await.unwrap().json().await.unwrap();
+    assert_eq!(live["result"]["tools"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(&discovery).unwrap().lines().count(),
+        2
+    );
+
     s.mcps
         .update_secrets(&s, connection_id, |_| {})
         .await
@@ -850,7 +877,7 @@ async fn gateway_catalog_reuses_validated_tools_without_waiting_for_upstream_or_
     );
     assert_eq!(
         std::fs::read_to_string(discovery).unwrap().lines().count(),
-        2
+        3
     );
     println!("CAIRN_GATEWAY_CATALOG_MEASUREMENT cold_ms={cold_ms} warm_ms={warm_ms}");
 

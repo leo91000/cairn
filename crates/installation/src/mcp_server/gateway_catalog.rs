@@ -99,8 +99,8 @@ impl Catalogs {
         previous: &Arc<Vec<Value>>,
         tools: Option<Vec<Value>>,
     ) {
-        let tools = tools
-            .filter(|tools| encoded_size(tools).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES));
+        let tools =
+            tools.filter(|tools| encoded_size(tools).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES));
         let mut entries = self.0.lock().unwrap();
         let Some(current) = entries.get_mut(id) else {
             return;
@@ -240,33 +240,55 @@ fn refresh_in_background(
             let id = &access.server.id;
             let mut timing =
                 crate::performance::Operation::new("mcp_gateway_refresh", id, "connect");
-            let result = async {
-                let client = Client::connect_for_catalog_refresh(
-                    &s, &access.server, authorize.clone(),
-                ).await?;
-                read_tools(client, &mut timing).await
-            }.await;
+            let discovery = tokio::time::timeout(REFRESH_TIMEOUT, async {
+                let mut client =
+                    Client::connect_for_catalog_refresh(&s, &access.server, authorize.clone())
+                        .await?;
+                timing.next("list");
+                let tools = client.discover().await;
+                Ok::<_, Error>((client, tools))
+            })
+            .await;
+            let (client, result) = match discovery {
+                Ok(Ok((client, tools))) => (Some(client), tools),
+                Ok(Err(error)) => (None, Err(error)),
+                Err(_) => return Ok(()),
+            };
+
+            timing.next("publish");
             authorize.recheck().await?;
             match result {
-                Ok(tools) => {
-                    s.mcps.gateway_catalogs.apply_refresh(id, expected, &previous, Some(tools));
-                    timing.finish();
+                Ok(tools) if validate(&tools).is_ok() => {
+                    s.mcps
+                        .gateway_catalogs
+                        .apply_refresh(id, expected, &previous, Some(tools));
                 }
-                Err(error) if matches!(error.status, 401 | 403) => {
-                    s.mcps.gateway_catalogs.apply_refresh(id, expected, &previous, None);
+                Err(error) if crate::mcp_client::upstream_access_denied(&error) => {
+                    s.mcps
+                        .gateway_catalogs
+                        .apply_refresh(id, expected, &previous, None);
                 }
-                Err(_) => {}
+                _ => {}
             }
+            timing.next("close");
+            if let Some(client) = client {
+                // The client bounds legacy DELETE separately from discovery.
+                client.close().await;
+            }
+            timing.finish();
             Ok::<_, Error>(())
         };
         tokio::select! {
             () = s.shutdown.cancelled() => {}
-            _ = tokio::time::timeout(REFRESH_TIMEOUT, refresh) => {}
+            _ = refresh => {}
         }
     });
 }
 
-async fn read_tools(mut client: Client, timing: &mut crate::performance::Operation) -> Result<Vec<Value>> {
+async fn read_tools(
+    mut client: Client,
+    timing: &mut crate::performance::Operation,
+) -> Result<Vec<Value>> {
     timing.next("list");
     let tools = client.discover().await;
     timing.next("close");
@@ -385,40 +407,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_catalogue_refresh_does_not_block_a_tool_call() {
-        use axum::{Json, Router, routing::post};
+    async fn stale_catalogue_refresh_runs_alongside_calls_and_publishes_before_close() {
+        use axum::{
+            Json, Router,
+            http::{HeaderMap, StatusCode},
+            response::IntoResponse,
+            routing::post,
+        };
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::sync::Notify;
 
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
+        let close_entered = Arc::new(Notify::new());
+        let close_release = Arc::new(Notify::new());
         let listings = Arc::new(AtomicUsize::new(0));
+        let sessions = Arc::new(AtomicUsize::new(0));
         let router = Router::new().route(
             "/mcp",
             post({
                 let (entered, release) = (entered.clone(), release.clone());
                 move |Json(request): Json<Value>| {
-                    let (entered, release, listings) =
-                        (entered.clone(), release.clone(), listings.clone());
+                    let (entered, release, listings, sessions) =
+                        (entered.clone(), release.clone(), listings.clone(), sessions.clone());
                     async move {
+                        let mut headers = HeaderMap::new();
                         let result = match text(&request, "method") {
-                            "server/discover" => json!({
-                                "supportedVersions": [crate::mcp_client::MODERN],
-                                "capabilities": { "tools": {} },
-                            }),
+                            "server/discover" => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
+                            "initialize" => {
+                                let session = sessions.fetch_add(1, Ordering::Relaxed) + 1;
+                                headers.insert("mcp-session-id", session.to_string().parse().unwrap());
+                                json!({
+                                    "protocolVersion": crate::mcp_client::LEGACY,
+                                    "capabilities": { "tools": {} },
+                                })
+                            }
+                            "notifications/initialized" => return StatusCode::ACCEPTED.into_response(),
                             "tools/list" => {
-                                if listings.fetch_add(1, Ordering::Relaxed) > 0 {
+                                let name = if listings.fetch_add(1, Ordering::Relaxed) > 0 {
                                     entered.notify_one();
                                     release.notified().await;
-                                }
+                                    "updated_fixture"
+                                } else {
+                                    "fixture"
+                                };
                                 json!({
-                                    "tools": [{ "name": "fixture", "inputSchema": { "type": "object" } }],
+                                    "tools": [{ "name": name, "inputSchema": { "type": "object" } }],
                                 })
                             }
                             "tools/call" => json!({ "content": [{ "type": "text", "text": "live" }] }),
                             method => panic!("unexpected MCP method {method}"),
                         };
-                        Json(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }))
+                        (headers, Json(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }))).into_response()
+                    }
+                }
+            }).delete({
+                let (entered, release) = (close_entered.clone(), close_release.clone());
+                move |headers: HeaderMap| {
+                    let (entered, release) = (entered.clone(), release.clone());
+                    async move {
+                        if headers.get("mcp-session-id").is_some_and(|id| id == "2") {
+                            entered.notify_one();
+                            release.notified().await;
+                        }
+                        StatusCode::NO_CONTENT
                     }
                 }
             }),
@@ -426,7 +478,9 @@ mod tests {
         let (listener, address) = crate::common::bind().await;
         let upstream = crate::common::serve(listener, router);
         let root = tempfile::tempdir().unwrap();
-        let s = Service::new(crate::common::config(root.path())).await.unwrap();
+        let s = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
         let connection = s
             .mcp_fixture(
                 json!({
@@ -439,29 +493,47 @@ mod tests {
             .await
             .unwrap();
         let id = text(&connection, "id");
-        let task = s.task_fixture(
-            json!({
-                "name": "Live gateway fixture",
-                "agentId": MAIN_AGENT_ID,
-                "prompt": "Fixture only",
-                "worktree": false,
-            }),
-            None,
-        ).await.unwrap();
+        let task = s
+            .task_fixture(
+                json!({
+                    "name": "Live gateway fixture",
+                    "agentId": MAIN_AGENT_ID,
+                    "prompt": "Fixture only",
+                    "worktree": false,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
         let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
-        s.store.change_run(
-            text(&run, "id"),
-            RunChanges {
-                status: Some(RunStatus::Running),
-                ..Default::default()
-            },
-        ).await.unwrap();
+        s.store
+            .change_run(
+                text(&run, "id"),
+                RunChanges {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
         let bearer = text(&configuration["env"], crate::mcps::RUN_TOKEN_ENV);
         list(&s, id, bearer).await.unwrap();
-        s.mcps.gateway_catalogs.0.lock().unwrap().get_mut(id).unwrap().refresh_at = Instant::now();
-        assert_eq!(list(&s, id, bearer).await.unwrap()["tools"][0]["name"], "fixture");
-        tokio::time::timeout(Duration::from_secs(3), entered.notified()).await.unwrap();
+        s.mcps
+            .gateway_catalogs
+            .0
+            .lock()
+            .unwrap()
+            .get_mut(id)
+            .unwrap()
+            .refresh_at = Instant::now();
+        assert_eq!(
+            list(&s, id, bearer).await.unwrap()["tools"][0]["name"],
+            "fixture"
+        );
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
 
         let result = tokio::time::timeout(
             Duration::from_secs(2),
@@ -478,6 +550,14 @@ mod tests {
         .unwrap();
         assert_eq!(result["content"][0]["text"], "live");
         release.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), close_entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            list(&s, id, bearer).await.unwrap()["tools"][0]["name"],
+            "updated_fixture"
+        );
+        close_release.notify_one();
         upstream.abort();
     }
 }

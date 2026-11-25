@@ -32,6 +32,11 @@ pub const VERSIONS: &[&str] = &[
 /// Offered to servers without the modern protocol, and chosen for legacy clients.
 pub const LEGACY: &str = "2025-11-25";
 const MAX_TOOLS: usize = 1000;
+const UPSTREAM_ACCESS_DENIED: &str = "mcp-upstream-access-denied";
+
+pub(crate) fn upstream_access_denied(error: &Error) -> bool {
+    error.is_unauthorized() || error.code.as_deref() == Some(UPSTREAM_ACCESS_DENIED)
+}
 
 pub fn client_info() -> Value {
     json!({
@@ -412,6 +417,11 @@ fn check_status(status: u16) -> Result<()> {
     match status {
         200..=299 => Ok(()),
         401 => Err(Error::unauthorized("Sign in to connect this server.")),
+        403 => Err(Error::coded(
+            502,
+            UPSTREAM_ACCESS_DENIED,
+            "MCP request failed.",
+        )),
         400 | 405 => Err(Error::new(status, "MCP protocol negotiation failed.")),
         _ => Err(Error::bad_gateway("MCP request failed.")),
     }
@@ -495,10 +505,15 @@ impl HttpTransport {
         let method = method.to_owned();
         let frame = Frame::strict(Message::Notification { method, params });
         let response = self.post(self.headers(protocol)?, &frame).await?;
-        if !(200..300).contains(&response.status) {
-            return Err(Error::bad_gateway("MCP initialization failed."));
+        match response.status {
+            200..=299 => Ok(()),
+            401 | 403 => Err(Error::coded(
+                502,
+                UPSTREAM_ACCESS_DENIED,
+                "MCP initialization failed.",
+            )),
+            _ => Err(Error::bad_gateway("MCP initialization failed.")),
         }
-        Ok(())
     }
 
     /// Ends a legacy session. Best effort: the server expires abandoned sessions.
