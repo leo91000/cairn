@@ -306,12 +306,22 @@ fn refresh_in_background(
 
             let mut timing =
                 crate::performance::Operation::new("mcp_gateway_refresh", id, "connect");
+            let mcps = Arc::clone(&s.mcps);
+            let denied_id = id.clone();
+            let denied_entry = previous.clone();
+            let on_access_denied = Box::new(move || {
+                // A remote denial is about this credential snapshot, even
+                // when the initiating grant expires before the response.
+                mcps.gateway_catalogs
+                    .apply_refresh(&denied_id, expected, &denied_entry, None);
+            });
             let session = Client::begin_catalog_refresh(
                 &s,
                 &access.server,
                 authorize.clone(),
                 deadline,
                 MAX_CATALOG_BYTES,
+                Some(on_access_denied),
             )
             .await;
             let (client, result) = match session {
@@ -341,13 +351,6 @@ fn refresh_in_background(
                     s.mcps
                         .gateway_catalogs
                         .apply_refresh(id, expected, &previous, Some(tools));
-                }
-                Err(error) if crate::mcp_client::upstream_access_denied(&error) => {
-                    // An authenticated upstream denial retires only the exact
-                    // catalogue that started this refresh, before session close.
-                    s.mcps
-                        .gateway_catalogs
-                        .apply_refresh(id, expected, &previous, None);
                 }
                 _ => {}
             }
@@ -518,6 +521,7 @@ mod tests {
             Authorization::default(),
             Instant::now() + Duration::from_secs(3),
             400,
+            None,
         )
         .await
         .unwrap();
@@ -613,14 +617,20 @@ mod tests {
         let release = Arc::new(Notify::new());
         let close_entered = Arc::new(Notify::new());
         let close_release = Arc::new(Notify::new());
+        let revoked_entered = Arc::new(Notify::new());
+        let revoked_release = Arc::new(Notify::new());
         let sessions = Arc::new(AtomicUsize::new(0));
         let router = Router::new().route(
             "/mcp",
             post({
                 let (entered, release) = (entered.clone(), release.clone());
+                let (revoked_entered, revoked_release) =
+                    (revoked_entered.clone(), revoked_release.clone());
                 move |incoming: HeaderMap, Json(request): Json<Value>| {
                     let (entered, release, sessions) =
                         (entered.clone(), release.clone(), sessions.clone());
+                    let (revoked_entered, revoked_release) =
+                        (revoked_entered.clone(), revoked_release.clone());
                     async move {
                         let mut headers = HeaderMap::new();
                         let session_id = incoming.get("mcp-session-id").and_then(|value| value.to_str().ok());
@@ -638,12 +648,17 @@ mod tests {
                                 })
                             }
                             "notifications/initialized" => {
-                                if session_id == Some("6") {
+                                if matches!(session_id, Some("6" | "9")) {
                                     return StatusCode::FORBIDDEN.into_response();
                                 }
                                 return StatusCode::ACCEPTED.into_response();
                             }
                             "tools/list" => {
+                                if session_id == Some("11") {
+                                    revoked_entered.notify_one();
+                                    revoked_release.notified().await;
+                                    return StatusCode::FORBIDDEN.into_response();
+                                }
                                 let name = if matches!(session_id, Some("2" | "4")) {
                                     entered.notify_one();
                                     release.notified().await;
@@ -672,7 +687,7 @@ mod tests {
                     let (entered, release) = (entered.clone(), release.clone());
                     async move {
                         let session = headers.get("mcp-session-id").and_then(|value| value.to_str().ok());
-                        if matches!(session, Some("2" | "4" | "5" | "6" | "8")) {
+                        if matches!(session, Some("2" | "4" | "5" | "6" | "8" | "9")) {
                             entered.notify_one();
                             release.notified().await;
                         }
@@ -847,6 +862,31 @@ mod tests {
             denied_live.await.unwrap_err().message,
             "MCP request failed."
         );
+        let rejected = tokio::time::timeout(Duration::from_secs(3), list(&s, id, bearer))
+            .await
+            .expect("a live initialize rejection must not wait for legacy cleanup");
+        assert_eq!(rejected.unwrap_err().message, "MCP initialization failed.");
+        assert_eq!(
+            list(&s, id, bearer).await.unwrap()["tools"][0]["name"],
+            "fixture"
+        );
+
+        let access = Access::for_grant(&s, id, bearer).await.unwrap();
+        let (previous, _) = s.mcps.gateway_catalogs.get(id, identity).unwrap();
+        refresh_in_background(
+            s.clone(),
+            access,
+            identity,
+            previous,
+            Duration::from_secs(3),
+        );
+        tokio::time::timeout(Duration::from_secs(3), revoked_entered.notified())
+            .await
+            .unwrap();
+        s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
+        revoked_release.notify_one();
+        wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
+        assert!(s.mcps.gateway_catalogs.get(id, identity).is_none());
         upstream.abort();
     }
 }

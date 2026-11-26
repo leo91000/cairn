@@ -90,15 +90,10 @@ struct HttpTransport {
     bearer: String,
     session: Option<String>,
     response_budget: Option<usize>,
-    catalogue: Option<LiveCatalogue>,
+    on_access_denied: Option<DenialCallback>,
 }
 
-struct LiveCatalogue {
-    mcps: Arc<crate::mcps::Mcps>,
-    id: String,
-    revision: u64,
-    credentials: Option<blake3::Hash>,
-}
+type DenialCallback = Box<dyn Fn() + Send + Sync>;
 
 impl Client {
     /// Connects with the stored credentials, refreshing OAuth tokens that expired
@@ -134,6 +129,7 @@ impl Client {
         authorize: Authorization,
         deadline: Instant,
         response_budget: usize,
+        on_access_denied: Option<DenialCallback>,
     ) -> Result<Self> {
         if !server.is_http() {
             return Err(Error::bad("Background catalogue discovery requires HTTP."));
@@ -145,6 +141,7 @@ impl Client {
             let mut transport = Self::transport(s, server, &secrets, &authorize).await?;
             if let Transport::Http(http) = &mut transport {
                 http.response_budget = Some(response_budget);
+                http.on_access_denied = on_access_denied;
             }
             Ok::<_, Error>(Self::new(transport, MODERN, authorize))
         })
@@ -240,12 +237,12 @@ impl Client {
         let authorization = Some(authorize);
         let mut transport = Self::transport(s, server, secrets, &authorization).await?;
         if let Transport::Http(http) = &mut transport {
-            http.catalogue = Some(LiveCatalogue {
-                mcps: s.mcps.clone(),
-                id: server.id.clone(),
-                revision: server.revision,
-                credentials,
-            });
+            let mcps = Arc::clone(&s.mcps);
+            let (id, revision) = (server.id.clone(), server.revision);
+            http.on_access_denied = Some(Box::new(move || {
+                mcps.gateway_catalogs
+                    .invalidate_matching(&id, revision, credentials);
+            }));
         }
         let mut client = Self::new(transport, MODERN, authorization);
         match client.probe_modern().await {
@@ -298,10 +295,7 @@ impl Client {
         } else {
             self
         };
-        if let Err(error) = client.open_legacy_session().await {
-            client.close().await;
-            return Err(error);
-        }
+        client.open_legacy_session().await?;
         Ok(client)
     }
 
@@ -340,7 +334,7 @@ impl Client {
                 bearer: bearer.into(),
                 session: None,
                 response_budget: None,
-                catalogue: None,
+                on_access_denied: None,
             }));
         }
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
@@ -537,7 +531,7 @@ impl HttpTransport {
     ) -> Result<network::Response> {
         let body = serde_json::to_vec(frame)?;
         let session = &mut self.session;
-        let catalogue = &self.catalogue;
+        let on_access_denied = &self.on_access_denied;
         let response = network::fetch_with_response_limit(
             &self.url,
             Method::POST,
@@ -547,13 +541,9 @@ impl HttpTransport {
             self.response_budget,
             |status, headers| {
                 if matches!(status, 401 | 403)
-                    && let Some(catalogue) = catalogue
+                    && let Some(on_access_denied) = on_access_denied
                 {
-                    catalogue.mcps.gateway_catalogs.invalidate_matching(
-                        &catalogue.id,
-                        catalogue.revision,
-                        catalogue.credentials,
-                    );
+                    on_access_denied();
                 }
                 if legacy_initialize
                     && (200..300).contains(&status)
@@ -593,7 +583,7 @@ impl HttpTransport {
                 headers.insert("mcp-name", value);
             }
         }
-        let legacy_initialize = !modern && method == "initialize";
+        let legacy_initialize = self.response_budget.is_some() && !modern && method == "initialize";
         let method = method.to_owned();
         let frame = Frame::strict(Message::Request { id, method, params });
         let response = self.post(headers, &frame, legacy_initialize).await?;
@@ -796,7 +786,14 @@ createInterface({ input: process.stdin }).on('line', async line => {
         };
         let authorization = Authorization::new(&service, authorization);
         let pending = tokio::spawn(async move {
-            Client::open(&service, &server, &McpSecrets::default(), authorization).await
+            Client::open(
+                &service,
+                &server,
+                &McpSecrets::default(),
+                None,
+                authorization,
+            )
+            .await
         });
         tokio::time::timeout(Duration::from_secs(10), async {
             while !tokio::fs::try_exists(&probing).await.unwrap() {
