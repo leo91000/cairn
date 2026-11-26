@@ -71,6 +71,10 @@ it('saves a conversation without the list and the duplicated chat run, and the l
   expect(await readChatList('other')).toBeUndefined()
   await writeChatList('session', { chats: [], planTurnsEnabled: false, savedAt: Date.now() - 8 * 24 * 60 * 60 * 1000 })
   expect(await readChatList('session')).toBeUndefined()
+  // A list too large to save replaces the previous one rather than leaving it.
+  await writeChatList('session', { chats: [{ id: 'c' }] as never, planTurnsEnabled: false, savedAt: Date.now() })
+  await writeChatList('session', { chats: [{ id: 'x'.repeat(3 * 1024 * 1024) }] as never, planTurnsEnabled: false, savedAt: Date.now() })
+  expect(await readChatList('session')).toBeUndefined()
 })
 it('shows a conversation saved in this page without waiting for storage', async () => {
   const scope = await cacheScope('page')

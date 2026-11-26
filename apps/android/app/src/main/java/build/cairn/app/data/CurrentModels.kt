@@ -75,7 +75,7 @@ data class ChatChanges(
     val order: List<String>? = null,
 )
 
-fun List<Chat>.apply(changes: ChatChanges): List<Chat> {
+fun List<Chat>.applyChanges(changes: ChatChanges): List<Chat> {
     val removed = changes.removed.toSet()
     val upserts = changes.upserts.associateBy { it.id }
     val kept = filter { it.id !in removed }
@@ -96,9 +96,22 @@ fun nextLiveState(previous: LiveState?, state: LiveState?, changes: ChatChanges?
         next = next.copy(chats = previous.chats)
     val chats = next?.chats
     if (next != null && chats != null && changes != null)
-        next = next.copy(chats = chats.apply(changes))
+        next = next.copy(chats = chats.applyChanges(changes))
     return next
 }
+
+/**
+ * The saved stream paths of conversations that left the list: deleted, or no longer shared. Their
+ * saved copies go, as on the web.
+ */
+fun leftChatPaths(previous: List<Chat>?, chats: List<Chat>?): List<String> {
+    if (previous == null || chats == null) return emptyList()
+    val listed = chats.mapTo(HashSet()) { it.id }
+    return previous.filter { it.id !in listed }.map { savedChatPath(it.id) }
+}
+
+/** Where a conversation opened by its identifier is saved. */
+fun savedChatPath(id: String) = "/chats/${segment(id)}/stream"
 
 @Serializable
 data class LiveBatch(

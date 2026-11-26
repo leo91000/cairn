@@ -72,9 +72,7 @@ internal fun rememberConversationTrash(
             vm.perform {
                 api.deleteChat(ConfirmChatInput(chatId = id, confirm = true))
                 // Only this conversation's saved copy goes; the others remain valid.
-                historyCache.remove(
-                    historyCache.key(api.cacheScope, api.csrf, "/chats/${segment(id)}/stream")
-                )
+                historyCache.remove(historyCache.key(api.cacheScope, api.csrf, savedChatPath(id)))
                 chatDrafts.remove(id)
                 hidden = hidden + id
                 confirming = null

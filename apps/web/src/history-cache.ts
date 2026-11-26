@@ -239,8 +239,14 @@ export function writeChatList(scope: string, value: SavedChatList) {
   const key = `${scope}:${LIST}`
   const current = epoch
   const text = JSON.stringify(value)
-  if (text.length * 2 > MAX_ENTRY)
-    return Promise.resolve()
+  // A list too large to save must not leave an older one to be restored instead.
+  if (text.length * 2 > MAX_ENTRY) {
+    memory.delete(key)
+    return enqueue(() => transaction<void>('readwrite', (store) => {
+      store.delete(key)
+    }))
+  }
+
   remember(key, text)
   return enqueue(async () => {
     if (current !== epoch)

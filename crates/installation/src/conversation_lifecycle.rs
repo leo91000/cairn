@@ -222,8 +222,14 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<(Value, Vec<String>)>
     chat.trashed_at = Some(trashed_at);
     chat.purge_at = Some(trashed_at);
     chat.paused = true;
-    // The conversation leaves every list, whose clients drop its saved copy: trashing
-    // one no longer invalidates every saved conversation.
+    // Clients predating compact streams drop every saved conversation on this change.
+    // Compact clients drop the copies of conversations that leave their list instead,
+    // and follow a revision that trashing leaves unchanged (see `live::read_page`).
+    db.set(
+        "conversation-cache-revision",
+        &crate::config::id().into(),
+        None,
+    )?;
     db.audit("chat.trashed", &json!({ "id": id }))?;
     Ok((
         serde_json::to_value(db.save_conversation(&chat)?)?,

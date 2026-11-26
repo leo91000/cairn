@@ -22,9 +22,10 @@ never saved opens on an outline until the stream's first snapshot.
   order changed beyond removals, every listed id (`order`); a batch's `state` omits the
   unchanged list. The conversation's `chat` omits `run`, which is the state's own `run`.
   Without `compact=1` streams keep their previous payloads.
-- Trashing a conversation no longer changes `cacheRevision`, so it no longer invalidates
-  every saved conversation. A saved trashed or deleted conversation is corrected when it
-  opens (its lifecycle, or a 404 that removes it); Android removes the deleted one's copy.
+- Trashing a conversation changes `cacheRevision` only on streams without `compact=1`,
+  whose older clients drop every saved conversation on that change. Compact streams carry
+  a separate history revision that trashing leaves unchanged; their clients drop the saved
+  copy of each conversation that leaves the server's list instead.
 - The opening page is sent without the 25 ms coalescing delay meant for live updates.
 - A resume past more than one page of events first reads the newest window. When it
   reaches back to the saved cursor, which a backlog of replaced text snapshots usually does,
@@ -127,7 +128,9 @@ stream delivers the server's list; Android's list stream keeps its own saved cop
 and headroom; web accounts conservatively in UTF-16 bytes, Android in UTF-8 bytes.
 An evicted prefix remains available from server pagination. Evicting a prefix also
 invalidates its reading position. Logout and a changed cache revision still invalidate
-every saved conversation; permanent deletion on Android removes only that copy.
+every saved conversation. A conversation that leaves the server's list (deleted, or no
+longer shared) loses only its own saved copy, on web and Android; the web also compares
+the server's first list with the list it saved last.
 
 Activity groups contain at most 30 visible folded calls. Global event-ID gaps and
 hidden events do not count toward that limit. Existing full groups keep their

@@ -61,3 +61,22 @@ it('forgets the saved copies of conversations that leave the server list', async
   expect(peekHistory(scope, '/chats/gone/stream')).toBeUndefined()
   expect(peekHistory(scope, '/chats/kept/stream')).toBeDefined()
 })
+
+it('forgets what left the list since it was saved when the server list arrives first', async () => {
+  const { publishChats, useChatList } = await import('../src/chat-list')
+  const { effectScope } = await import('vue')
+  const { writeChatList } = await import('../src/history-cache')
+  vi.stubGlobal('window', new EventTarget())
+  vi.stubGlobal('document', Object.assign(new EventTarget(), { hidden: false }))
+  const scope = await cacheScope('test-session')
+  await writeHistory(scope, '/chats/gone/stream', saved())
+  await writeChatList(scope, { chats: [{ id: 'gone', slug: '' }, { id: 'kept', slug: '' }] as ChatView[], planTurnsEnabled: false, savedAt: Date.now() })
+
+  publishChats([{ id: 'kept', slug: '' } as ChatView])
+  const effect = effectScope()
+  const list = effect.run(() => useChatList())!
+  await vi.waitFor(() => expect(peekHistory(scope, '/chats/gone/stream')).toBeUndefined())
+  expect(list.value.map(chat => chat.id)).toEqual(['kept'])
+  effect.stop()
+  vi.unstubAllGlobals()
+})

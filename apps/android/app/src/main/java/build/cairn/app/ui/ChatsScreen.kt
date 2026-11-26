@@ -390,7 +390,7 @@ internal fun ChatPage(
             rememberLive(
                 vm,
                 state,
-                "/chats/${segment(id)}/stream",
+                savedChatPath(id),
                 streaming = selected,
                 current = { savedIsCurrent(it, conversations.state?.chats) },
             )
@@ -615,7 +615,7 @@ internal fun ChatPage(
         rememberHistoryPosition(
             vm,
             state,
-            if (id == null) "/chats/stream" else "/chats/${segment(id)}/stream",
+            if (id == null) "/chats/stream" else savedChatPath(id),
             live,
             listState,
             !gallery,

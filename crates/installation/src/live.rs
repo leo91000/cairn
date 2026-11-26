@@ -536,8 +536,14 @@ fn read_page(
         artifacts: artifacts(db, run_id)?,
         run,
         chat,
+        // Compact clients forget deleted conversations from list changes: only a change
+        // that invalidates saved history itself changes their revision.
         cache_revision: db
-            .kv("conversation-cache-revision")?
+            .kv(if scope.compact {
+                "conversation-history-revision"
+            } else {
+                "conversation-cache-revision"
+            })?
             .unwrap_or_else(|| "initial".into()),
         chats,
     };

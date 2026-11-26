@@ -913,6 +913,9 @@ async fn compact_streams_send_the_list_once_then_only_changed_conversations() {
     assert!(batch["state"]["chat"].get("run").is_none());
     assert!(batch["state"].get("run").is_some());
     let revision = batch["state"]["cacheRevision"].clone();
+    let mut legacy = f.open_path("/api/chats/stream", None).await;
+    let (_, batch) = legacy.batch().await;
+    let legacy_revision = batch["state"]["cacheRevision"].clone();
 
     let mut list = f.open_path("/api/chats/stream?compact=1", None).await;
     let (_, batch) = list.batch().await;
@@ -954,6 +957,10 @@ async fn compact_streams_send_the_list_once_then_only_changed_conversations() {
     let (_, batch) = reopened.batch().await;
     assert_eq!(ids(&batch["state"]["chats"]), [older_id]);
     assert_eq!(batch["state"]["cacheRevision"], revision);
+    // Clients without list changes still drop every saved conversation.
+    let mut legacy = f.open_path("/api/chats/stream", None).await;
+    let (_, batch) = legacy.batch().await;
+    assert_ne!(batch["state"]["cacheRevision"], legacy_revision);
 }
 
 /// Bytes a list-carrying conversation stream receives while other conversations change:

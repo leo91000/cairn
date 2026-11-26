@@ -644,6 +644,18 @@ class LiveTest {
         }
 
     @Test
+    fun `conversations that leave the list name the saved copies to forget`() {
+        val list = listOf(Chat(id = "a"), Chat(id = "b c"), Chat(id = "d"))
+        assertEquals(
+            listOf("/chats/b%20c/stream"),
+            leftChatPaths(list, listOf(Chat(id = "d"), Chat(id = "a"))),
+        )
+        assertEquals(emptyList<String>(), leftChatPaths(null, list))
+        assertEquals(emptyList<String>(), leftChatPaths(list, null))
+        assertEquals("/chats/a/stream", savedChatPath("a"))
+    }
+
+    @Test
     fun `a compact state keeps the previous list and restores the chat run`() {
         val run = Run(id = "r1", status = "succeeded", taskId = "")
         val first =

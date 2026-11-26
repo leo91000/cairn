@@ -248,8 +248,8 @@ function savedIsCurrent(saved: CachedHistory) {
     && known.updatedAt <= chat.updatedAt
 }
 
-// The view shows the selected conversation only. A current saved copy shows at once;
-// otherwise a loader stands in until its first snapshot, which shows in one piece.
+// The view shows the selected conversation only. A saved copy shows at once, saying it is
+// updating when outdated; otherwise an outline stands in until its first snapshot.
 // A conversation the Fil knows opens under the slug the Fil links to, so a link by
 // identifier and one by slug share one saved copy.
 const streamPath = ref<string>()

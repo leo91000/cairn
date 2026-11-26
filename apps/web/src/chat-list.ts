@@ -66,7 +66,12 @@ export function publishChats(chats: ChatView[], options: { saved?: boolean, plan
 async function restoreList() {
   const session = cacheSession()
   const saved = await readChatList(await cacheScope(session)).catch(() => undefined)
-  if (saved && session === cacheSession() && state.authenticated && !state.signingOut)
+  if (!saved || session !== cacheSession() || !state.authenticated || state.signingOut)
+    return
+  // The server's list may have arrived first: what left it since the save goes too.
+  if (known)
+    forgetRemoved(saved.chats, chatList.value)
+  else
     publishChats(saved.chats, { saved: true, planTurnsEnabled: saved.planTurnsEnabled })
 }
 
