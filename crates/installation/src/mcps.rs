@@ -595,6 +595,12 @@ impl Mcps {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        let result = result
+            .clone()
+            .map(|tools| crate::mcp_client::DiscoveredCatalogue {
+                tools,
+                publication: None,
+            });
         self.record_discovery_live(
             s,
             server,
@@ -608,11 +614,10 @@ impl Mcps {
         &self,
         s: &Service,
         mut server: McpServer,
-        result: &Result<Vec<Value>>,
+        result: Result<crate::mcp_client::DiscoveredCatalogue>,
         authorize: crate::authorization::Authorization,
     ) -> Result<()> {
         authorize.recheck().await?;
-        let cache_discovery = result.is_ok() && server.is_http();
         let revoked = result
             .as_ref()
             .err()
@@ -620,39 +625,33 @@ impl Mcps {
                 error.is_unauthorized() && !crate::mcp_client::upstream_access_denied(error)
             })
             .map(|_| server.id.clone());
-        match result {
-            Ok(tools) => server.record_success(tools.clone(), now()),
-            Err(error) => record_failure(&mut server, error),
-        }
+        let publication = match result {
+            Ok(catalogue) => {
+                server.record_success(catalogue.tools, now());
+                catalogue.publication
+            }
+            Err(error) => {
+                record_failure(&mut server, &error);
+                None
+            }
+        };
         let cache = s
             .store
             .transaction(move |db| {
                 authorize.authorize(db)?;
                 db.save_mcp_server(&server)?;
-                if !cache_discovery {
+                let Some(publication) = publication else {
                     return Ok(None);
-                }
+                };
                 let credentials = db.mcp_credentials(&server.id)?;
-                Ok(Some((server, credentials)))
+                Ok(publication
+                    .matches_credentials(credentials.as_deref().map(blake3::hash))
+                    .then_some((server, publication)))
             })
             .await?;
-        if let Some((server, credentials)) = cache {
-            let fingerprint = credentials.as_deref().map(blake3::hash);
-            let expires_at = match credentials {
-                Some(bytes) if server.uses_oauth() => s
-                    .vault
-                    .decrypt_bytes(&server.id, &bytes)
-                    .and_then(|raw| serde_json::from_slice::<McpSecrets>(&raw).map_err(Error::from))
-                    .map(|secrets| secrets.token_expires_at),
-                _ => Ok(None),
-            };
-            if let Ok(expires_at) = expires_at {
-                self.gateway_catalogs.remember_management_discovery(
-                    server,
-                    fingerprint,
-                    expires_at,
-                );
-            }
+        if let Some((server, publication)) = cache {
+            self.gateway_catalogs
+                .remember_management_discovery(server, publication);
         }
         if let Some(id) = revoked {
             self.gateway_catalogs.invalidate(&id);
@@ -694,7 +693,7 @@ impl Mcps {
             })
             .await?;
         let tools = crate::mcp_client::Client::list_tools_live(s, &server, authorize.clone()).await;
-        self.record_discovery_live(s, server, &tools, authorize)
+        self.record_discovery_live(s, server, tools, authorize)
             .await?;
         self.view(s, &self.server(s, id).await?).await
     }

@@ -703,7 +703,8 @@ impl Mcps {
             .ok_or_else(|| Error::bad("Missing authorization code."))?;
         let tools = self.complete(s, &server, parameters, code).await;
         let outcome = if tools.is_ok() { "connected" } else { "failed" };
-        self.record_discovery(s, server, &tools).await?;
+        self.record_discovery_live(s, server, tools, Authorization::new(s, |_| Ok(())))
+            .await?;
         Ok(outcome.into())
     }
 
@@ -714,7 +715,7 @@ impl Mcps {
         server: &McpServer,
         parameters: &HashMap<String, String>,
         code: &str,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<crate::mcp_client::DiscoveredCatalogue> {
         let secrets = self.server_secrets(s, &server.id).await?;
         let discovery = match &secrets.discovery {
             Some(discovery) if !secrets.verifier().is_empty() => discovery,
@@ -757,6 +758,6 @@ impl Mcps {
         .await?;
         self.update_secrets(s, &server.id, |secrets| secrets.verifier = None)
             .await?;
-        Client::list_tools(s, server).await
+        Client::list_tools_live(s, server, Authorization::new(s, |_| Ok(()))).await
     }
 }

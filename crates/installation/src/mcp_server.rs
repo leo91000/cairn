@@ -1241,7 +1241,7 @@ async fn proxy(
     if let Err(error) = &result {
         // Recheck the same gateway grant before publishing a failure after network work.
         s.mcps
-            .record_discovery_live(s, server, &Err(error.clone()), authorize)
+            .record_discovery_live(s, server, Err(error.clone()), authorize)
             .await?;
     }
     result

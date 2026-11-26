@@ -102,10 +102,23 @@ pub(crate) struct CatalogueCredential {
     pub(crate) expires_at: Option<i64>,
 }
 
+pub(crate) struct DiscoveredCatalogue {
+    pub(crate) tools: Vec<Value>,
+    pub(crate) publication: Option<crate::mcp_server::gateway_catalog::CataloguePublication>,
+}
+
 impl Client {
-    pub(crate) fn catalogue_credential(&self) -> Option<CatalogueCredential> {
+    pub(crate) fn catalogue_publication(
+        &self,
+        s: &Service,
+        server: &McpServer,
+    ) -> Option<crate::mcp_server::gateway_catalog::CataloguePublication> {
         match &self.transport {
-            Transport::Http(http) => http.catalogue_credential,
+            Transport::Http(http) => http.catalogue_credential.map(|credential| {
+                s.mcps
+                    .gateway_catalogs
+                    .register(&server.id, server.revision, credential)
+            }),
             Transport::Stdio(_) => None,
         }
     }
@@ -210,21 +223,27 @@ impl Client {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
-        Self::list_tools_live(s, server, Authorization::new(s, authorize)).await
+        Self::list_tools_live(s, server, Authorization::new(s, authorize))
+            .await
+            .map(|catalogue| catalogue.tools)
     }
 
     pub(crate) async fn list_tools_live(
         s: &Service,
         server: &McpServer,
         authorize: Authorization,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<DiscoveredCatalogue> {
         let authorize = authorize.for_service(s);
         let mut client = Self::connect_authorized(s, server, authorize.clone()).await?;
         authorize.recheck().await?;
+        let publication = client.catalogue_publication(s, server);
         let tools = client.discover().await;
         client.close().await;
         authorize.recheck().await?;
-        tools
+        Ok(DiscoveredCatalogue {
+            tools: tools?,
+            publication,
+        })
     }
 
     fn new(transport: Transport, protocol: &str, authorization: Option<Authorization>) -> Self {

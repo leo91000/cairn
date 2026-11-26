@@ -67,7 +67,7 @@ impl Warmer {
                 continue;
             }
             let key = bases.key(&archives, disk_mib)?;
-            if bases.can_warm(&archives, disk_mib).await? {
+            if !matches!(bases.can_warm(&archives, disk_mib).await, Ok(false)) {
                 candidates.push(Job {
                     archives,
                     disk_mib,
@@ -128,7 +128,7 @@ impl Warmer {
                 };
                 job
             };
-            if !matches!(bases.can_warm(&job.archives, job.disk_mib).await, Ok(true)) {
+            if matches!(bases.can_warm(&job.archives, job.disk_mib).await, Ok(false)) {
                 continue;
             }
             let limits = budget.lock().await;

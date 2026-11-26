@@ -12,7 +12,10 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::time::{Instant, timeout_at};
@@ -25,7 +28,7 @@ const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 const MAX_REFRESH_PAGES: usize = 64;
 const MAX_REFRESHES: usize = 8;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Identity {
     revision: u64,
     // Use the authenticated-encryption record, not the decrypted credential.
@@ -45,6 +48,20 @@ struct Entry {
 pub(crate) struct Catalogs {
     entries: Mutex<HashMap<String, Entry>>,
     refreshing: Arc<Mutex<HashSet<String>>>,
+    publications: Mutex<HashMap<(String, Identity), Weak<AtomicBool>>>,
+}
+
+pub(crate) struct CataloguePublication {
+    id: String,
+    identity: Identity,
+    expires_at: Option<i64>,
+    denied: Arc<AtomicBool>,
+}
+
+impl CataloguePublication {
+    pub(crate) fn matches_credentials(&self, fingerprint: Option<blake3::Hash>) -> bool {
+        self.identity.credentials == fingerprint
+    }
 }
 
 struct RefreshLease {
@@ -59,6 +76,32 @@ impl Drop for RefreshLease {
 }
 
 impl Catalogs {
+    pub(crate) fn register(
+        &self,
+        id: &str,
+        revision: u64,
+        credential: crate::mcp_client::CatalogueCredential,
+    ) -> CataloguePublication {
+        let identity = Identity {
+            revision,
+            credentials: credential.fingerprint,
+        };
+        let mut publications = self.publications.lock().unwrap();
+        publications.retain(|_, denied| denied.strong_count() > 0);
+        let slot = publications.entry((id.to_owned(), identity)).or_default();
+        let denied = slot.upgrade().unwrap_or_else(|| {
+            let denied = Arc::new(AtomicBool::new(false));
+            *slot = Arc::downgrade(&denied);
+            denied
+        });
+        CataloguePublication {
+            id: id.to_owned(),
+            identity,
+            expires_at: credential.expires_at,
+            denied,
+        }
+    }
+
     fn begin_refresh(&self, id: &str) -> Option<RefreshLease> {
         let mut active = self.refreshing.lock().unwrap();
         if active.len() >= MAX_REFRESHES || !active.insert(id.to_owned()) {
@@ -92,20 +135,23 @@ impl Catalogs {
         Some((entry.tools.clone(), refresh))
     }
 
-    fn insert(
-        &self,
-        id: String,
-        identity: Identity,
-        tools: Arc<Vec<Value>>,
-        credential_expires_at: Option<i64>,
-    ) {
-        if !encoded_size(tools.as_ref()).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES) {
-            self.invalidate(&id);
-            return;
-        }
-
+    fn insert(&self, publication: CataloguePublication, tools: Arc<Vec<Value>>) {
+        let CataloguePublication {
+            id,
+            identity,
+            expires_at,
+            denied,
+        } = publication;
+        let cacheable = encoded_size(tools.as_ref()).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES);
         let now = Instant::now();
         let mut entries = self.entries.lock().unwrap();
+        if denied.load(Ordering::Relaxed) {
+            return;
+        }
+        if !cacheable {
+            entries.remove(&id);
+            return;
+        }
         if entries.len() >= MAX_CONNECTIONS
             && !entries.contains_key(&id)
             && let Some(oldest) = entries
@@ -122,7 +168,7 @@ impl Catalogs {
                 tools,
                 discovered_at: now,
                 refresh_at: now + REFRESH_AFTER,
-                credential_expires_at,
+                credential_expires_at: expires_at,
             },
         );
     }
@@ -137,14 +183,26 @@ impl Catalogs {
         revision: u64,
         credentials: Option<blake3::Hash>,
     ) {
+        let identity = Identity {
+            revision,
+            credentials,
+        };
+        // Use the same entry lock as insertion so a denial and publication
+        // cannot interleave between checking the registration and inserting.
         let mut entries = self.entries.lock().unwrap();
-        if entries.get(id).is_some_and(|entry| {
-            entry.identity
-                == Identity {
-                    revision,
-                    credentials,
-                }
-        }) {
+        if let Some(denied) = self
+            .publications
+            .lock()
+            .unwrap()
+            .remove(&(id.to_owned(), identity))
+            .and_then(|denied| denied.upgrade())
+        {
+            denied.store(true, Ordering::Relaxed);
+        }
+        if entries
+            .get(id)
+            .is_some_and(|entry| entry.identity == identity)
+        {
             entries.remove(id);
         }
     }
@@ -189,19 +247,10 @@ impl Catalogs {
     pub(crate) fn remember_management_discovery(
         &self,
         server: McpServer,
-        credentials: Option<blake3::Hash>,
-        credential_expires_at: Option<i64>,
+        publication: CataloguePublication,
     ) {
         if validate(&server.tools).is_ok() {
-            self.insert(
-                server.id,
-                Identity {
-                    revision: server.revision,
-                    credentials,
-                },
-                Arc::new(server.tools),
-                credential_expires_at,
-            );
+            self.insert(publication, Arc::new(server.tools));
         } else {
             self.invalidate(&server.id);
         }
@@ -406,26 +455,21 @@ async fn discover(s: &Arc<Service>, access: &Access) -> Result<Arc<Vec<Value>>> 
     let result = async {
         let client =
             Client::connect_server_live(s, &access.server, access.authority.clone()).await?;
-        let credential = client.catalogue_credential();
+        let publication = client.catalogue_publication(s, &access.server);
         read_tools(client, &mut timing)
             .await
-            .map(|tools| (tools, credential))
+            .map(|tools| (tools, publication))
     }
     .await;
     timing.next("recheck");
     let current = access.identity(s).await?;
     match result {
-        Ok((tools, credential)) => {
+        Ok((tools, publication)) => {
             let tools = Arc::new(tools);
-            if let Some(credential) = credential
-                && credential.fingerprint == current.credentials
+            if let Some(publication) = publication
+                && publication.matches_credentials(current.credentials)
             {
-                s.mcps.gateway_catalogs.insert(
-                    access.server.id.clone(),
-                    current,
-                    tools.clone(),
-                    credential.expires_at,
-                );
+                s.mcps.gateway_catalogs.insert(publication, tools.clone());
             }
             timing.finish();
             Ok(tools)
@@ -435,7 +479,7 @@ async fn discover(s: &Arc<Service>, access: &Access) -> Result<Arc<Vec<Value>>> 
                 .record_discovery_live(
                     s,
                     access.server.clone(),
-                    &Err(error.clone()),
+                    Err(error.clone()),
                     access.authorize.clone(),
                 )
                 .await?;
@@ -571,7 +615,15 @@ mod tests {
             credentials: Some(blake3::hash(b"fixture credential record")),
         };
         let tools = Arc::new(vec![json!({ "name": "read" })]);
-        catalogs.insert("fixture".into(), identity, tools.clone(), None);
+        let publication = catalogs.register(
+            "fixture",
+            identity.revision,
+            crate::mcp_client::CatalogueCredential {
+                fingerprint: identity.credentials,
+                expires_at: None,
+            },
+        );
+        catalogs.insert(publication, tools.clone());
 
         let (cached, refresh) = catalogs.get("fixture", identity).unwrap();
         assert!(Arc::ptr_eq(&cached, &tools));
@@ -627,13 +679,43 @@ mod tests {
             credentials: Some(blake3::hash(b"fixture credential record")),
         };
         let tools = Arc::new(vec![json!({ "name": "read" })]);
-        catalogs.insert(
-            "fixture".into(),
-            identity,
-            tools,
-            Some(crate::config::now()),
+        let publication = catalogs.register(
+            "fixture",
+            identity.revision,
+            crate::mcp_client::CatalogueCredential {
+                fingerprint: identity.credentials,
+                expires_at: Some(crate::config::now()),
+            },
         );
+        catalogs.insert(publication, tools);
         assert!(catalogs.get("fixture", identity).is_none());
+    }
+
+    #[test]
+    fn a_denial_fences_pending_publication_even_when_no_catalogue_is_present() {
+        let catalogs = Catalogs::default();
+        let identity = Identity {
+            revision: 1,
+            credentials: Some(blake3::hash(b"fixture credential record")),
+        };
+        let credential = crate::mcp_client::CatalogueCredential {
+            fingerprint: identity.credentials,
+            expires_at: None,
+        };
+        let delayed_test = catalogs.register("fixture", identity.revision, credential);
+        let delayed_cold = catalogs.register("fixture", identity.revision, credential);
+        catalogs.invalidate_matching("fixture", identity.revision, identity.credentials);
+
+        let tools = Arc::new(vec![json!({ "name": "read" })]);
+        catalogs.insert(delayed_test, tools.clone());
+        assert!(catalogs.get("fixture", identity).is_none());
+        let fresh = catalogs.register("fixture", identity.revision, credential);
+        catalogs.insert(fresh, tools);
+        catalogs.insert(delayed_cold, Arc::new(vec![json!({ "name": "older" })]));
+        assert_eq!(
+            catalogs.get("fixture", identity).unwrap().0[0]["name"],
+            "read"
+        );
     }
 
     #[tokio::test]

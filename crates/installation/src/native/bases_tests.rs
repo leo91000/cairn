@@ -296,6 +296,42 @@ async fn background_preparation_discards_missing_and_evicted_archives_while_stor
 }
 
 #[tokio::test]
+async fn one_unreadable_warming_group_does_not_block_later_projects() {
+    use std::{sync::Arc, time::Duration};
+
+    let (_root, bases, archive, _) = fixture().await;
+    let unreadable = Archive {
+        project_id: crate::config::id(),
+        ..archive.clone()
+    };
+    let key = bases.key(std::slice::from_ref(&unreadable), 128).unwrap();
+    std::fs::create_dir_all(
+        bases
+            .state
+            .join("native-bases")
+            .join(key)
+            .join("ready.json"),
+    )
+    .unwrap();
+    let warmer = Arc::new(super::bases_warmer::Warmer::default());
+    warmer
+        .enqueue(
+            bases.clone(),
+            json!({ "archives": [unreadable, archive], "diskMiB": 128, "individual": true }),
+            Arc::new(tokio::sync::Mutex::new(json!({
+                "limits": { "diskMiB": 16384 },
+            }))),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(60), warmer.wait_idle())
+        .await
+        .unwrap();
+    assert!(bases.lookup(&[archive], 128).await.unwrap().is_some());
+}
+
+#[tokio::test]
 #[ignore = "executed by the isolated background preparation wrapper"]
 async fn background_preparation_yields_to_foreground_intent_and_then_finishes_child() {
     use std::{sync::Arc, time::Duration};
