@@ -2131,7 +2131,6 @@ async fn side_questions_are_sampled_from_the_running_turn_without_joining_it() {
         assert_eq!(sample["threadId"], "fixture-chat");
         assert_eq!(sample["expectedTurnId"], turn);
         assert_eq!(sample["allowInProgressTurn"], true);
-        assert_eq!(sample["interruptOnCancel"], true);
         assert!(text(sample, "prompt").starts_with("The user asks you a side question"));
     }
     assert!(text(&samples[0], "prompt").ends_with("Why this order?"));

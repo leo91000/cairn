@@ -153,6 +153,45 @@ fn settled<'a>(events: &'a [Value], id: &str) -> Option<&'a Value> {
     })
 }
 
+/// The saved session files under `directory`.
+fn saved_sessions(directory: &Path) -> Vec<std::path::PathBuf> {
+    let mut sessions = Vec::new();
+    let mut directories = vec![directory.to_owned()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+            {
+                sessions.push(path);
+            }
+        }
+    }
+    sessions
+}
+
+/// The engine saved the turn's session, without any side question.
+fn check_sessions(sessions: &[std::path::PathBuf]) {
+    let transcripts = sessions
+        .iter()
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        transcripts
+            .iter()
+            .any(|transcript| transcript.contains(MAIN_REQUEST)),
+        "no saved session was found: {sessions:?}"
+    );
+    for transcript in &transcripts {
+        for marker in [SIDE_REPLY, TEXT, TOOL, HOLD] {
+            assert!(!transcript.contains(marker), "{marker} entered the session");
+        }
+    }
+}
+
 /// What both engines must show.
 fn check(events: &[Value], workspace: &Path, output: &Path) {
     assert!(
@@ -433,6 +472,8 @@ async fn native_codex_answers_side_questions_without_tools_or_history() {
             assert!(!context.contains(marker), "{marker} entered the history");
         }
     }
+    // Codex's saved rollouts hold no side question either.
+    check_sessions(&saved_sessions(&home));
 }
 
 /// The text of the latest user message of a Messages API request.
@@ -621,25 +662,7 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
     let result = task.await.unwrap().map_err(|error| error.message);
 
     // Claude Code's saved session holds no side question.
-    let mut sessions = Vec::new();
-    let mut directories = vec![config.home.join(".claude")];
-    while let Some(directory) = directories.pop() {
-        for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                directories.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "jsonl")
-            {
-                sessions.push(path);
-            }
-        }
-    }
-    let transcripts = sessions
-        .iter()
-        .map(|path| std::fs::read_to_string(path).unwrap())
-        .collect::<Vec<_>>();
+    let sessions = saved_sessions(&config.home.join(".claude"));
     report(
         "claude-side-questions",
         &json!({
@@ -654,15 +677,5 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
 
     result.unwrap();
     check(&events, &workspace, &root.path().join("result.md"));
-    assert!(
-        transcripts
-            .iter()
-            .any(|transcript| transcript.contains(MAIN_REQUEST)),
-        "no saved session was found"
-    );
-    for transcript in &transcripts {
-        for marker in [TEXT, TOOL, HOLD] {
-            assert!(!transcript.contains(marker), "{marker} entered the session");
-        }
-    }
+    check_sessions(&sessions);
 }

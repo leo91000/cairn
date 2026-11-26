@@ -15,7 +15,10 @@ history. What changes is how Cairn meets it:
   response sampled from a copy of the thread, here with `allowInProgressTurn` while the
   turn runs. Codex reports no text when that response is a tool call, and never runs
   the call. The sample is not written to the thread's history and is cancelled with
-  `thread/sample/cancel`. Its prompt also tells the model that tools are unavailable.
+  `thread/sample/cancel`, with Codex's own interruption behaviour. Its prompt also tells
+  the model that tools are unavailable. Tools the provider runs on its own servers
+  within that response, such as a configured web search, are read-only and outside
+  Codex's tool execution; like Claude Code's managed hooks, they are a disclosed limit.
   The adapter samples only once Codex reports the turn's user message completed: a
   sample taken earlier copies a thread without the request the agent is working on.
   As for Claude Code, new side questions wait while Codex compacts the turn's context,

@@ -7,7 +7,7 @@ use crate::{
     skills::atomic_write,
     validation::text,
 };
-use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::{
@@ -30,6 +30,8 @@ const MAX_MESSAGE: usize = 5_000_000;
 const TEXT_IDLE_FLUSH: Duration = Duration::from_millis(250);
 /// How long Codex may take to answer one side question.
 const SIDE_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long a finished turn collects the side answers Codex already sent before it ended.
+const SIDE_DRAIN: Duration = Duration::from_millis(100);
 /// Precedes each side question, which Codex samples as the next user message of a copy of
 /// the running turn. It cannot run a tool there, so it is asked not to try.
 const SIDE_PROMPT: &str = "The user asks you a side question while you work. Answer it in this one reply from what you already know of the conversation and your work: tools are unavailable here, and this exchange neither changes nor continues your task.";
@@ -276,6 +278,8 @@ struct Chat<'a> {
     turn_recorded: bool,
     /// Codex is compacting the running turn's context: new side questions wait.
     side_compacting: bool,
+    /// The turn ended: samples still failing were cut short by it.
+    closing_sides: bool,
     /// Side questions Codex is answering, with the ID of their `thread/sample` request.
     sides: HashMap<String, u64>,
     /// The `thread/sample` requests in progress. The adapter polls them itself, so a reply
@@ -1185,8 +1189,6 @@ impl Chat<'_> {
             "threadId": self.thread,
             "expectedTurnId": self.turn,
             "allowInProgressTurn": true,
-            // A withdrawn or expired question stops its model request too.
-            "interruptOnCancel": true,
             "prompt": format!("{SIDE_PROMPT}\n\n{}", text(side, "text")),
         });
         self.sides.insert(question.clone(), request);
@@ -1236,6 +1238,12 @@ impl Chat<'_> {
                     )
                     .await;
             }
+            // Codex fails the samples of a turn that ended.
+            Err(_) if self.closing_sides => {
+                return self
+                    .side_failed(&question, crate::chats::side_questions::EXPIRED)
+                    .await;
+            }
             Err(_) => {
                 return self
                     .side_failed(&question, "Codex could not answer this side question.")
@@ -1281,12 +1289,17 @@ impl Chat<'_> {
             return Ok(());
         }
         self.side_available = false;
-        // Codex's replies precede the turn's completion on its output, so each one that
-        // arrived first is ready here, and settles while the reply still takes answers.
-        // Unconstrained: an exhausted cooperative budget must not make a ready reply pending.
-        while let Some(Some((question, result))) =
-            tokio::task::unconstrained(self.samples.next()).now_or_never()
-        {
+        self.closing_sides = true;
+        // Codex's replies precede the turn's completion on its output, so one that arrived
+        // first settles while the reply still takes answers. Reading it can still wait on
+        // the transport's lock, so the remaining samples get a short grace period.
+        let deadline = Instant::now() + SIDE_DRAIN;
+        while !self.samples.is_empty() {
+            let Ok(Some((question, result))) =
+                tokio::time::timeout_at(deadline, self.samples.next()).await
+            else {
+                break;
+            };
             self.side_settled(question, result).await?;
         }
         self.emit(json!({ "type": "chat.side.closed" })).await?;
@@ -1602,6 +1615,7 @@ async fn run_session(
         side_available: false,
         turn_recorded: false,
         side_compacting: false,
+        closing_sides: false,
         sides: HashMap::new(),
         samples: FuturesUnordered::new(),
     };
