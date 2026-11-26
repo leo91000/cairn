@@ -494,6 +494,15 @@ function reveal(reference: { itemId: string, replyEventId: number | null }) {
   return true
 }
 
+function isInViewport(element: HTMLElement) {
+  const viewport = scroller.value?.getBoundingClientRect()
+  if (!viewport || !element.isConnected)
+    return false
+
+  const bounds = element.getBoundingClientRect()
+  return bounds.height > 0 && bounds.top >= viewport.top && bounds.bottom <= viewport.bottom
+}
+
 onBeforeUnmount(() => viewer.value?.close())
 defineExpose({
   reveal,
@@ -502,6 +511,8 @@ defineExpose({
   plan,
   showsWorkingIndicator,
   fullscreen,
+  fullscreenButton,
+  isInViewport,
   openFiles: () => { artifactViewer.value = '' },
   enterFullscreen,
   followLatest,

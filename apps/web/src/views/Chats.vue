@@ -325,18 +325,24 @@ const sideQuestions = ref<InstanceType<typeof ChatSideQuestions>>()
 const headerSideQuestionButton = ref<InstanceType<typeof SideQuestionButton>>()
 const workingSideQuestionButton = ref<InstanceType<typeof SideQuestionButton>>()
 const fullscreenSideQuestionButton = ref<InstanceType<typeof SideQuestionButton>>()
-const sideQuestionTrigger = computed(() =>
-  workingSideQuestionButton.value?.button
-  ?? fullscreenSideQuestionButton.value?.button
-  ?? headerSideQuestionButton.value?.button,
-)
 const sideQuestionIndicator = computed(() => sideQuestions.value?.indicator ?? null)
+
+function sideQuestionFocusTarget() {
+  const workingButton = workingSideQuestionButton.value?.button
+  if (workingButton && activity.value?.isInViewport(workingButton))
+    return workingButton
+
+  if (activity.value?.fullscreen)
+    return fullscreenSideQuestionButton.value?.button ?? activity.value.fullscreenButton
+
+  return headerSideQuestionButton.value?.button ?? visibleMenuTrigger()
+}
 
 async function moveSideQuestionFocus() {
   const conversation = detail.value?.id
   await nextTick()
   if (detail.value?.id === conversation && document.activeElement === document.body)
-    sideQuestionTrigger.value?.focus()
+    sideQuestionFocusTarget()?.focus({ preventScroll: true })
 }
 
 // How many side questions each reply has, for its badge in the conversation.
@@ -2076,7 +2082,7 @@ function key(event: KeyboardEvent) {
               :can-ask="!readOnly && !!detail.canAskSideQuestion"
               :reason="detail.sideQuestionReason"
               :provider="detail.provider"
-              :default-trigger="sideQuestionTrigger"
+              :default-trigger="sideQuestionFocusTarget"
               @reveal="activity?.reveal($event) || sideQuestions?.unreachable($event)"
             />
             <section

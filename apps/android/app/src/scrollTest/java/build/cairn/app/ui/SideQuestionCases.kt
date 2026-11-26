@@ -489,8 +489,12 @@ abstract class SideQuestionCases {
                     if (placement == SideQuestionPlacement.Header) {
                         SideQuestionButton(currentChat, side, focus, size = 40.dp)
                     } else if (workingRowVisible) {
+                        val step =
+                            if (placement == SideQuestionPlacement.Waiting)
+                                working.copy(waiting = listOf("Compilation"))
+                            else working
                         WorkingIndicator(
-                            working,
+                            step,
                             action = {
                                 SideQuestionButton(currentChat, side, focus)
                             },
@@ -504,6 +508,10 @@ abstract class SideQuestionCases {
         button.performSemanticsAction(SemanticsActions.RequestFocus)
         button.assertIsFocused()
         placement = SideQuestionPlacement.Header
+        button.assertIsFocused()
+        placement = SideQuestionPlacement.Working
+        button.assertIsFocused()
+        placement = SideQuestionPlacement.Waiting
         button.assertIsFocused()
         placement = SideQuestionPlacement.Working
         button.assertIsFocused()

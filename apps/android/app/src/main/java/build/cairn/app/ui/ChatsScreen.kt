@@ -687,6 +687,7 @@ internal fun ChatPage(
     val sidePlacement =
         when {
             sideStatus == null -> null
+            showWorkingIndicator && working?.waiting != null -> SideQuestionPlacement.Waiting
             showWorkingIndicator -> SideQuestionPlacement.Working
             fullscreen -> SideQuestionPlacement.FullscreenHeader
             else -> SideQuestionPlacement.Header

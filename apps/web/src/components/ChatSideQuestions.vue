@@ -30,7 +30,7 @@ const props = defineProps<{
   /** Why a side question cannot be asked now, from the server. */
   reason?: string | null
   provider?: Provider | null
-  defaultTrigger?: HTMLButtonElement
+  defaultTrigger?: () => HTMLElement | undefined
 }>()
 const emit = defineEmits<{
   /** Follow a side question back to the reply it is about. */

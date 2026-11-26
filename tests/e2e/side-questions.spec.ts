@@ -364,6 +364,66 @@ test('retained questions without a reply stay accessible after reopening', async
   await fullscreen.getByRole('button', { name: 'Exit fullscreen', exact: true }).click()
 })
 
+test('keyboard focus returns to the chat menu when the ask icon disappears', async ({ page, workspace }) => {
+  for (const openDrawer of [false, true]) {
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const trigger = page.getByTestId('side-question-button')
+    const panel = page.getByRole('dialog', { name: 'Side questions' })
+    await expect(trigger).toHaveAccessibleName('Ask a side question')
+    if (openDrawer) {
+      await trigger.press('Enter')
+      await expect(panel).toBeVisible()
+    }
+    else {
+      await trigger.focus()
+    }
+
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+    await expect(trigger).toHaveCount(0)
+    if (openDrawer) {
+      await page.keyboard.press('Escape')
+      await expect(panel).toBeHidden()
+    }
+
+    await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
+  }
+})
+
+test('moving the side-question icon offscreen preserves the reading position', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const messageId = randomUUID()
+  const text = 'Review. fixture:chat-hang'
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: messageId, text, provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).canAskSideQuestion).toBe(true)
+  try {
+    const { run } = await workspace.api(`/api/chats/${chat.id}`)
+    workspace.service.store.event(run.id, 'item.completed', '', {
+      item: { id: 'long-reply', type: 'agent_message', text: 'A line of earlier history.\n\n'.repeat(85) },
+    })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+
+    const scroller = page.getByRole('region', { name: 'Activity output' })
+    await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBeGreaterThan(500)
+    await scroller.evaluate((element) => {
+      element.scrollTop = 0
+    })
+    await expect(page.getByRole('button', { name: 'Latest messages' })).toBeVisible()
+    await page.locator('.chat-header').getByTestId('side-question-button').focus()
+
+    workspace.service.store.event(run.id, 'chat.user', text, { messageId, text })
+    await expect(page.locator('.activity-working').getByTestId('side-question-button')).toHaveCount(1)
+    await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
+    expect(await scroller.evaluate(element => element.scrollTop)).toBe(0)
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+  }
+})
+
 test('a filtered panel leaves hidden answers unread', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })

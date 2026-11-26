@@ -233,6 +233,7 @@ internal fun hasSideQuestionAction(chat: Chat?): Boolean =
 
 internal enum class SideQuestionPlacement {
     Working,
+    Waiting,
     Header,
     FullscreenHeader,
 }
