@@ -79,6 +79,17 @@ export function publishChats(chats: ChatView[], options: { saved?: boolean, plan
   saveTimer ??= setTimeout(saveList, SAVE_DELAY)
 }
 
+function reset() {
+  chatList.value = []
+  chatPlanEnabled.value = false
+  known = false
+  served = false
+  unsaved = undefined
+  lastSaved = undefined
+  clearTimeout(saveTimer)
+  saveTimer = undefined
+}
+
 // The list saved last shows at once; any list from a stream replaces it.
 async function restoreList() {
   const session = cacheSession()
@@ -103,21 +114,17 @@ export function useChatList() {
     if (value?.chats)
       publishChats(value.chats, { saved: live.restored.value, planTurnsEnabled: value.planTurnsEnabled })
   }, { immediate: true })
-  watch(() => state.authenticated && !state.signingOut && state.csrf ? cacheSession() : undefined, (session) => {
+  watch(() => state.authenticated && !state.signingOut && state.csrf ? cacheSession() : undefined, (session, previous) => {
+    // Another installation or session starts from its own lists: comparing them with the
+    // previous one's would forget conversations that were never removed.
+    if (previous && session !== previous)
+      reset()
     if (session)
       void restoreList()
   }, { immediate: true })
   watch(() => state.authenticated, (signedIn) => {
-    if (signedIn)
-      return
-    chatList.value = []
-    chatPlanEnabled.value = false
-    known = false
-    served = false
-    unsaved = undefined
-    lastSaved = undefined
-    clearTimeout(saveTimer)
-    saveTimer = undefined
+    if (!signedIn)
+      reset()
   })
   const leaving = () => {
     if (saveTimer === undefined)

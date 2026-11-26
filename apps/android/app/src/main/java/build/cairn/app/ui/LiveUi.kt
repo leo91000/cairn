@@ -127,7 +127,9 @@ fun rememberLive(
                             }
                             .collect {
                                 // The saved copy shows until the stream's own state replaces it.
-                                vm.acceptCacheRevision(it.state?.cacheRevision)
+                                // Only the server's revision counts: a saved copy may carry the
+                                // trash revision an earlier version followed.
+                                if (it !== replay) vm.acceptCacheRevision(it.state?.cacheRevision)
                                 cacheGeneration = vm.historyCache.generation
                                 if (!it.catchingUp || it.httpStatus != null) {
                                     if (it.history != value.history || it.epoch != value.epoch)
