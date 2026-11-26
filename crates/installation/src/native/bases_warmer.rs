@@ -56,7 +56,8 @@ impl Warmer {
         let disk_mib = value["diskMiB"]
             .as_u64()
             .ok_or_else(|| Error::bad("Missing native base size."))?;
-        let groups = if value["individual"] == true {
+        let individual = value["individual"] == true;
+        let groups = if individual {
             archives.into_iter().map(|archive| vec![archive]).collect()
         } else {
             vec![archives]
@@ -67,12 +68,25 @@ impl Warmer {
                 continue;
             }
             let key = bases.key(&archives, disk_mib)?;
-            if !matches!(bases.can_warm(&archives, disk_mib).await, Ok(false)) {
-                candidates.push(Job {
+            if individual
+                && self
+                    .queue
+                    .lock()
+                    .await
+                    .failures
+                    .get(&key)
+                    .is_some_and(|failure| failure.retry_at > Instant::now())
+            {
+                continue;
+            }
+            match bases.can_warm(&archives, disk_mib).await {
+                Ok(true) => candidates.push(Job {
                     archives,
                     disk_mib,
                     key,
-                });
+                }),
+                Ok(false) => {}
+                Err(error) => self.warming_failed(&key, &error).await,
             }
         }
         if candidates.is_empty() {
@@ -81,7 +95,7 @@ impl Warmer {
 
         let mut queue = self.queue.lock().await;
         for job in candidates {
-            if value["individual"] != true {
+            if !individual {
                 queue.failures.remove(&job.key);
             }
             if queue
@@ -128,8 +142,13 @@ impl Warmer {
                 };
                 job
             };
-            if matches!(bases.can_warm(&job.archives, job.disk_mib).await, Ok(false)) {
-                continue;
+            match bases.can_warm(&job.archives, job.disk_mib).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    self.warming_failed(&job.key, &error).await;
+                    continue;
+                }
             }
             let limits = budget.lock().await;
             let limit = limits["limits"]["diskMiB"]
@@ -216,43 +235,51 @@ impl Warmer {
             let _ = watcher.await;
             if build_stop.is_cancelled() && !stop.is_cancelled() {
                 self.retry(job).await;
-            } else if !matches!(result, Ok(Ok(()))) {
-                let mut queue = self.queue.lock().await;
-                if queue.failures.len() >= 128 && !queue.failures.contains_key(&job.key) {
-                    let oldest = queue
-                        .failures
-                        .iter()
-                        .min_by_key(|(_, failure)| failure.retry_at)
-                        .map(|(key, _)| key.clone());
-                    if let Some(key) = oldest {
-                        queue.failures.remove(&key);
-                    }
-                }
-                let failure = queue.failures.entry(job.key.clone()).or_insert(Failure {
-                    attempts: 0,
-                    retry_at: Instant::now(),
-                });
-                failure.attempts = failure.attempts.saturating_add(1).min(6);
-                let seconds = if failure.attempts >= 6 {
-                    3600
-                } else {
-                    10u64 << (failure.attempts - 1)
-                };
-                failure.retry_at = Instant::now() + Duration::from_secs(seconds);
-                match &result {
-                    Ok(Err(error)) => {
-                        tracing::warn!(key = %job.key, retry_seconds = seconds, status = error.status, message = %error.message, "Native base warming failed; publication was not completed");
-                    }
+            } else {
+                match result {
+                    Ok(Err(error)) => self.warming_failed(&job.key, &error).await,
                     Err(error) => {
+                        let seconds = self.backoff(&job.key).await;
                         tracing::warn!(key = %job.key, retry_seconds = seconds, %error, "Native base warming worker did not finish");
                     }
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => {
+                        self.queue.lock().await.failures.remove(&job.key);
+                    }
                 }
-            } else {
-                self.queue.lock().await.failures.remove(&job.key);
             }
             drop(cancellation);
         }
+    }
+
+    async fn warming_failed(&self, key: &str, error: &Error) {
+        let seconds = self.backoff(key).await;
+        tracing::warn!(key, retry_seconds = seconds, status = error.status, message = %error.message, "Native base warming failed; publication was not completed");
+    }
+
+    async fn backoff(&self, key: &str) -> u64 {
+        let mut queue = self.queue.lock().await;
+        if queue.failures.len() >= 128 && !queue.failures.contains_key(key) {
+            let oldest = queue
+                .failures
+                .iter()
+                .min_by_key(|(_, failure)| failure.retry_at)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = oldest {
+                queue.failures.remove(&key);
+            }
+        }
+        let failure = queue.failures.entry(key.to_owned()).or_insert(Failure {
+            attempts: 0,
+            retry_at: Instant::now(),
+        });
+        failure.attempts = failure.attempts.saturating_add(1).min(6);
+        let seconds = if failure.attempts >= 6 {
+            3600
+        } else {
+            10u64 << (failure.attempts - 1)
+        };
+        failure.retry_at = Instant::now() + Duration::from_secs(seconds);
+        seconds
     }
 
     async fn retry(&self, job: Job) {

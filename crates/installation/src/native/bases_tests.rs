@@ -299,7 +299,13 @@ async fn background_preparation_discards_missing_and_evicted_archives_while_stor
 async fn one_unreadable_warming_group_does_not_block_later_projects() {
     use std::{sync::Arc, time::Duration};
 
-    let (_root, bases, archive, _) = fixture().await;
+    let (_root, bases, archive, policy) = fixture().await;
+    super::atomic_write(
+        &bases.state.join("storage-policy.json"),
+        &serde_json::to_vec(&policy).unwrap(),
+    )
+    .await
+    .unwrap();
     let unreadable = Archive {
         project_id: crate::config::id(),
         ..archive.clone()
@@ -313,14 +319,36 @@ async fn one_unreadable_warming_group_does_not_block_later_projects() {
             .join("ready.json"),
     )
     .unwrap();
+    let budget = Arc::new(tokio::sync::Mutex::new(json!({
+        "limits": { "diskMiB": 16384 },
+    })));
+
+    let storage =
+        crate::file_lock::exclusive(&bases.state.join("storage.lock"), "fixture storage owner")
+            .unwrap();
+    let warmer = Arc::new(super::bases_warmer::Warmer::default());
+    warmer
+        .enqueue(
+            bases.clone(),
+            json!({ "archives": [&unreadable], "diskMiB": 128, "individual": true }),
+            budget.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), warmer.wait_idle())
+        .await
+        .expect("a readiness error must back off without waiting for storage");
+    drop(storage);
+
+    // A fresh warmer has no backoff record and must still reach the next group
+    // when readiness checking the first one encounters the same I/O error.
     let warmer = Arc::new(super::bases_warmer::Warmer::default());
     warmer
         .enqueue(
             bases.clone(),
             json!({ "archives": [unreadable, archive], "diskMiB": 128, "individual": true }),
-            Arc::new(tokio::sync::Mutex::new(json!({
-                "limits": { "diskMiB": 16384 },
-            }))),
+            budget,
             CancellationToken::new(),
         )
         .await
