@@ -29,12 +29,16 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import build.cairn.app.data.AccountProvider
+
+internal const val EMAIL_CODE_LENGTH = 8
 
 /** « Signal Pur » backdrop: warm paper or obsidian canvas with a subtle blue/amber beacon glow. */
 @Composable
@@ -130,15 +134,35 @@ internal fun OtpCodeField(
     value: String,
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
-    length: Int = 8,
     enabled: Boolean = true,
 ) {
     var focused by remember { mutableStateOf(false) }
-    val activeIndex = value.length.coerceAtMost(length - 1)
+    var field by remember { mutableStateOf(TextFieldValue()) }
+    val input = if (field.text == value) field else TextFieldValue(value, TextRange(value.length))
+    val selection = input.selection
+    val activeIndex = selection.start.coerceAtMost(EMAIL_CODE_LENGTH - 1)
 
     BasicTextField(
-        value = value,
-        onValueChange = { onValueChange(it.take(length)) },
+        value = input,
+        onValueChange = { change ->
+            val digits = change.text.filter { it in '0'..'9' }.take(EMAIL_CODE_LENGTH)
+            if (digits == change.text) {
+                field = change
+            } else {
+                fun digitOffset(index: Int) =
+                    change.text.take(index).count { it in '0'..'9' }.coerceAtMost(digits.length)
+
+                field =
+                    TextFieldValue(
+                        digits,
+                        TextRange(
+                            digitOffset(change.selection.start),
+                            digitOffset(change.selection.end),
+                        ),
+                    )
+            }
+            onValueChange(digits)
+        },
         enabled = enabled,
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -158,19 +182,23 @@ internal fun OtpCodeField(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        repeat(length) { index ->
+                        repeat(EMAIL_CODE_LENGTH) { index ->
                             val char = value.getOrNull(index)?.toString().orEmpty()
-                            val isCurrent = focused && index == activeIndex
+                            val isCurrent = focused && selection.collapsed && index == activeIndex
+                            val isSelected = focused && index in selection.min until selection.max
                             val borderColor =
                                 when {
-                                    isCurrent -> MaterialTheme.colorScheme.primary
+                                    isCurrent || isSelected -> MaterialTheme.colorScheme.primary
                                     char.isNotEmpty() -> MaterialTheme.colorScheme.outlineVariant
                                     else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)
                                 }
                             val fillColor =
-                                if (isCurrent || char.isNotEmpty())
-                                    MaterialTheme.colorScheme.surface
-                                else MaterialTheme.colorScheme.surfaceContainer
+                                when {
+                                    isSelected -> MaterialTheme.colorScheme.primaryContainer
+                                    isCurrent || char.isNotEmpty() ->
+                                        MaterialTheme.colorScheme.surface
+                                    else -> MaterialTheme.colorScheme.surfaceContainer
+                                }
 
                             Box(
                                 Modifier.weight(1f)
@@ -178,7 +206,7 @@ internal fun OtpCodeField(
                                     .clip(RoundedCornerShape(11.dp))
                                     .background(fillColor)
                                     .border(
-                                        width = if (isCurrent) 2.dp else 1.dp,
+                                        width = if (isCurrent || isSelected) 2.dp else 1.dp,
                                         color = borderColor,
                                         shape = RoundedCornerShape(11.dp),
                                     ),
@@ -191,9 +219,19 @@ internal fun OtpCodeField(
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSurface,
                                     )
-                                } else if (isCurrent) {
+                                }
+                                if (isCurrent) {
+                                    val caretAlignment =
+                                        when {
+                                            selection.start == EMAIL_CODE_LENGTH ->
+                                                Alignment.CenterEnd
+                                            char.isNotEmpty() -> Alignment.CenterStart
+                                            else -> Alignment.Center
+                                        }
                                     Box(
-                                        Modifier.width(2.dp)
+                                        Modifier.align(caretAlignment)
+                                            .padding(horizontal = 4.dp)
+                                            .width(2.dp)
                                             .height(20.dp)
                                             .clip(RoundedCornerShape(2.dp))
                                             .background(MaterialTheme.colorScheme.primary)

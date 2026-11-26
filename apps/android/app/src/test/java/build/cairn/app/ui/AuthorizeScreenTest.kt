@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
@@ -50,6 +51,58 @@ class AuthorizeScreenTest {
     }
 
     @Test
+    fun `sending the first email code starts the resend cooldown on the code screen`() {
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse =
+                        when (request.path) {
+                            "/api/account/session" ->
+                                MockResponse().setBody("""{"authenticated":false}""")
+                            "/api/account/options" -> MockResponse().setBody("{}")
+                            "/api/account/email-code" ->
+                                MockResponse()
+                                    .setResponseCode(202)
+                                    .setBody("""{"challenge":"first"}""")
+                            else -> MockResponse().setResponseCode(404)
+                        }
+                }
+            server.start()
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    MemoryVault(),
+                    beaconOrigin = server.url("/").toString(),
+                )
+            val models = ViewModelStore().apply { put("sign-in", vm) }
+            var mounted by mutableStateOf(true)
+            try {
+                compose.setContent { if (mounted) CairnTheme { CairnApp(vm = vm) } }
+                compose.waitUntil(10_000) {
+                    compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNode(hasSetTextAction()).performTextInput("owner@example.test")
+                compose.onNodeWithText("Recevoir un code").performScrollTo().performClick()
+                compose.waitUntil(10_000) {
+                    compose
+                        .onAllNodesWithText("Vérifiez vos e-mails")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Réessayer dans", substring = true).assertIsNotEnabled()
+                compose.onNodeWithText("Se connecter").assertIsNotEnabled()
+            } finally {
+                try {
+                    compose.runOnIdle { mounted = false }
+                    compose.waitForIdle()
+                } finally {
+                    models.clear()
+                }
+            }
+        }
+    }
+
+    @Test
     fun `shared authorization link previews destination scopes confirmation state and records consent`() {
         MockWebServer().use { server ->
             val consents = CopyOnWriteArrayList<String>()
@@ -73,6 +126,12 @@ class AuthorizeScreenTest {
                                     .setBody(
                                         """{"client":{"client_id":"client-1","client_name":"Claude","redirect_uri":"https://claude.ai/cb"},"scopes":["read","manage","run"],"installations":[{"id":"inst-3","name":"Atelier","role":"owner","online":true},{"id":"inst-2","name":"Bureau","role":"owner","online":false}],"confirmationRequired":true}"""
                                     )
+                            "/api/account/email-code" ->
+                                MockResponse().setBody("""{"challenge":"email-challenge"}""")
+                            "/api/account/reauth/email" ->
+                                MockResponse()
+                                    .setResponseCode(401)
+                                    .setBody("""{"error":"Invalid or expired code"}""")
                             "/api/account/passkeys/reauth/start" ->
                                 MockResponse()
                                     .setBody(
@@ -118,7 +177,8 @@ class AuthorizeScreenTest {
             var mounted by mutableStateOf(true)
             try {
                 var consumed = false
-                compose.setContent {
+                val restoration = StateRestorationTester(compose)
+                restoration.setContent {
                     if (mounted)
                         CairnTheme {
                             CairnApp(
@@ -137,8 +197,9 @@ class AuthorizeScreenTest {
                         .isNotEmpty()
                 }
                 assertTrue(consumed)
+                compose.onNodeWithText("Compte Cairn · owner@example.test").assertIsDisplayed()
                 compose.onNodeWithText("Client non vérifié").assertIsDisplayed()
-                compose.onNodeWithText("claude.ai").assertIsDisplayed()
+                compose.onNodeWithText("https://claude.ai/cb").assertIsDisplayed()
                 compose.onNodeWithText("HTTPS").assertIsDisplayed()
                 compose.onNodeWithText("Exécution complète").performScrollTo().assertIsDisplayed()
                 compose.onNodeWithText("Accès élevé").assertIsDisplayed()
@@ -152,14 +213,31 @@ class AuthorizeScreenTest {
                 compose.onNodeWithText("Atelier").performScrollTo().performClick()
                 compose.onNodeWithText("Bureau").performClick()
 
-                // Confirm identity via passkey inline
+                compose
+                    .onNodeWithText("Recevoir un code par e-mail")
+                    .performScrollTo()
+                    .performClick()
+                val codeInput = compose.onNode(hasSetTextAction())
+                codeInput.performTextInput("12")
+                compose.onNodeWithText("Valider la confirmation").assertIsNotEnabled()
+                codeInput.performTextReplacement("12345678")
+                compose.onNodeWithText("Valider la confirmation").performScrollTo().performClick()
+                compose.waitUntil(10_000) {
+                    compose
+                        .onAllNodesWithText("Invalid or expired code")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertTrue(vm.state.value.session.authenticated)
+                compose.onNodeWithText("Autoriser « Claude » ?").assertExists()
+
                 compose
                     .onNodeWithText("Confirmer avec une passkey")
                     .performScrollTo()
                     .performClick()
                 compose.waitUntil(10_000) {
                     compose
-                        .onAllNodesWithText("Identité confirmée récemment — prêt à autoriser")
+                        .onAllNodesWithText("Identité confirmée")
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
@@ -169,6 +247,7 @@ class AuthorizeScreenTest {
                 compose.waitUntil(10_000) {
                     compose.onAllNodesWithText("Accès autorisé").fetchSemanticsNodes().isNotEmpty()
                 }
+                restoration.emulateSavedInstanceStateRestore()
                 compose.onNodeWithText("Retourner au client").performScrollTo().assertIsDisplayed()
                 assertEquals(1, consents.size)
                 val payload = wireJson.parseToJsonElement(consents.first()).jsonObject

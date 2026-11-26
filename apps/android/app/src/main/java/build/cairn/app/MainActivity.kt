@@ -55,7 +55,11 @@ class MainActivity : ComponentActivity() {
                     AppUpdatePrompt(updates)
                     CairnApp(
                         sharedUrl,
-                        consumedShare = { sharedUrl = "" },
+                        consumedShare = {
+                            sharedUrl = ""
+                            if (intent.action == Intent.ACTION_SEND)
+                                intent.removeExtra(Intent.EXTRA_TEXT)
+                        },
                         vm = vm,
                         targetChat = targetChat,
                         targetAccount = targetAccount,
@@ -69,6 +73,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        if (intent.action == Intent.ACTION_SEND) setIntent(intent)
         receive(intent)
     }
 

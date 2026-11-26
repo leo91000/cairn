@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -24,6 +25,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
 import build.cairn.app.data.*
 import kotlinx.coroutines.flow.first
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -68,23 +71,38 @@ private fun presentScope(scope: String): ScopePresentation =
             )
     }
 
-private fun redirectHostLabel(redirectUri: String): Pair<String, Boolean> {
-    val parsed = redirectUri.toHttpUrlOrNull() ?: return redirectUri to false
-    val isDefaultPort =
-        (parsed.scheme == "https" && parsed.port == 443) ||
-            (parsed.scheme == "http" && parsed.port == 80)
-    val hostname = if (':' in parsed.host) "[${parsed.host}]" else parsed.host
-    val host = if (isDefaultPort) hostname else "$hostname:${parsed.port}"
-    val local = parsed.host in setOf("localhost", "127.0.0.1", "::1")
-    return host to local
+private fun isLocalMcpRedirect(uri: String): Boolean {
+    val parsed = uri.toHttpUrlOrNull() ?: return false
+    return parsed.scheme == "http" && parsed.host in setOf("localhost", "127.0.0.1", "::1")
+}
+
+internal data class CompletedMcpConsent(
+    val url: String,
+    val accountId: String?,
+    val preview: ConsentPreview,
+    val installationId: String,
+    val approved: Boolean,
+    val redirect: String,
+)
+
+internal class McpConsentState : ViewModel() {
+    // Keep the single-use callback in memory through rotation.
+    var completed by mutableStateOf<CompletedMcpConsent?>(null)
 }
 
 @Composable
-fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = "") {
+internal fun AuthorizeScreen(
+    vm: CairnViewModel,
+    state: Workspace,
+    sharedUrl: String = "",
+    consentState: McpConsentState = viewModel(),
+    close: (() -> Unit)? = null,
+) {
     val credentials = accountCredentials()
     val context = LocalContext.current
-    var url by rememberSaveable { mutableStateOf(sharedUrl) }
+    var url by rememberSaveable(sharedUrl) { mutableStateOf(sharedUrl) }
     var preview by remember { mutableStateOf<ConsentPreview?>(null) }
+    var previewUrl by remember { mutableStateOf("") }
     var parameters by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var selectedInstallationId by rememberSaveable {
         mutableStateOf(state.installation?.id.orEmpty())
@@ -93,16 +111,19 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
     var confirmationChallenge by remember { mutableStateOf<String?>(null) }
     var confirmationCode by remember { mutableStateOf("") }
     var editingUrl by remember { mutableStateOf(false) }
-    var redirect by remember { mutableStateOf("") }
-    var approvedDecision by remember { mutableStateOf(true) }
+    val completed =
+        consentState.completed?.takeIf {
+            it.url == url && it.accountId == state.session.account?.id
+        }
 
     fun loadPreview(targetUrl: String) {
         vm.perform {
             val (parsed, loaded) = previewMcpConsent(targetUrl)
             parameters = parsed
             preview = loaded
+            previewUrl = targetUrl
             editingUrl = false
-            redirect = ""
+            consentState.completed = null
             confirmationRequired = loaded.confirmationRequired
             confirmationChallenge = null
             confirmationCode = ""
@@ -116,19 +137,25 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
     }
 
     LaunchedEffect(sharedUrl) {
-        if (sharedUrl.isNotBlank()) {
+        if (sharedUrl.isNotBlank() && completed == null) {
             vm.state.first { !it.busy }
-            url = sharedUrl
-            preview = null
-            redirect = ""
-            loadPreview(sharedUrl)
+            loadPreview(url)
         }
     }
 
     fun decide(approved: Boolean, installationId: String) {
+        val details = preview ?: return
         vm.perform {
-            redirect = recordMcpConsent(parameters, approved, installationId).redirect
-            approvedDecision = approved
+            val result = recordMcpConsent(parameters, approved, installationId)
+            consentState.completed =
+                CompletedMcpConsent(
+                    previewUrl,
+                    state.session.account?.id,
+                    details,
+                    installationId,
+                    approved,
+                    result.redirect,
+                )
         }
     }
 
@@ -154,7 +181,26 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                 Modifier.widthIn(max = 520.dp).fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                val details = preview
+                if (close != null) {
+                    TextButton(
+                        onClick = close,
+                        enabled = !state.busy,
+                        modifier = Modifier.align(Alignment.End),
+                    ) {
+                        Text("Fermer")
+                    }
+                }
+                state.session.account?.email?.let {
+                    Text(
+                        "Compte Cairn · $it",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                state.error?.let { ErrorNotice(it, vm::clearMessage) }
+
+                val details = completed?.preview ?: preview
                 if (details == null || editingUrl) {
                     AuthCard {
                         Heading(
@@ -169,13 +215,7 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                         Field(
                             "Lien d’autorisation",
                             url,
-                            {
-                                url = it
-                                if (details == null) {
-                                    preview = null
-                                    redirect = ""
-                                }
-                            },
+                            { url = it },
                             keyboardOptions = InputKeyboards.Uri,
                         )
                         Row(
@@ -184,7 +224,10 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                         ) {
                             if (details != null) {
                                 OutlinedButton(
-                                    onClick = { editingUrl = false },
+                                    onClick = {
+                                        url = previewUrl
+                                        editingUrl = false
+                                    },
                                     shape = RoundedCornerShape(12.dp),
                                     modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                                 ) {
@@ -201,10 +244,10 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                             }
                         }
                     }
-                } else if (redirect.isNotEmpty()) {
+                } else if (completed != null) {
+                    val approvedDecision = completed.approved
                     val installations = details.installations
-                    val chosen = installations.firstOrNull { it.id == selectedInstallationId }
-                    val (redirectHost, _) = redirectHostLabel(details.client.redirect_uri)
+                    val chosen = installations.firstOrNull { it.id == completed.installationId }
 
                     AuthCard(padding = PaddingValues(24.dp)) {
                         Column(
@@ -254,8 +297,6 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                                 ) {
                                     SummaryRow("Client", details.client.client_name)
                                     if (chosen != null) SummaryRow("Installation", chosen.name)
-                                    if (redirectHost.isNotBlank())
-                                        SummaryRow("Destination", redirectHost, monospace = true)
                                     SummaryRow(
                                         "Permissions",
                                         details.scopes.joinToString(" · ") {
@@ -264,8 +305,14 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                                     )
                                 }
                             }
+                            if (details.client.redirect_uri.isNotBlank()) {
+                                RedirectDestination(
+                                    details.client.redirect_uri,
+                                    isLocalMcpRedirect(details.client.redirect_uri),
+                                )
+                            }
                             Button(
-                                onClick = { browse(context, redirect) },
+                                onClick = { browse(context, completed.redirect) },
                                 shape = RoundedCornerShape(12.dp),
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                             ) {
@@ -284,8 +331,7 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                     val chosen =
                         installations.firstOrNull { it.id == selectedInstallationId }
                             ?: installations.firstOrNull()
-                    val (redirectHost, isLocalRedirect) =
-                        redirectHostLabel(details.client.redirect_uri)
+                    val isLocalRedirect = isLocalMcpRedirect(details.client.redirect_uri)
 
                     AuthCard {
                         // Connection bridge: [Client monogram] <-> [Cairn mark]
@@ -388,78 +434,11 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                                         color = signal.warning,
                                     )
                                 }
-                                if (redirectHost.isNotBlank()) {
-                                    Surface(
-                                        Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(10.dp),
-                                        color = MaterialTheme.colorScheme.surface,
-                                        border =
-                                            BorderStroke(
-                                                1.dp,
-                                                MaterialTheme.colorScheme.outlineVariant,
-                                            ),
-                                    ) {
-                                        Row(
-                                            Modifier.fillMaxWidth()
-                                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                        ) {
-                                            Text(
-                                                "Destination",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                            Spacer(Modifier.width(8.dp))
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                            ) {
-                                                Icon(
-                                                    if (isLocalRedirect) AuthIcons.Laptop
-                                                    else AuthIcons.Lock,
-                                                    null,
-                                                    Modifier.size(14.dp),
-                                                    tint =
-                                                        if (isLocalRedirect)
-                                                            MaterialTheme.colorScheme.primary
-                                                        else signal.success,
-                                                )
-                                                Text(
-                                                    redirectHost,
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                )
-                                                Surface(
-                                                    shape = CircleShape,
-                                                    color =
-                                                        MaterialTheme.colorScheme.surfaceContainer,
-                                                    border =
-                                                        BorderStroke(
-                                                            1.dp,
-                                                            MaterialTheme.colorScheme
-                                                                .outlineVariant,
-                                                        ),
-                                                ) {
-                                                    Text(
-                                                        if (isLocalRedirect) "App locale"
-                                                        else "HTTPS",
-                                                        Modifier.padding(
-                                                            horizontal = 6.dp,
-                                                            vertical = 2.dp,
-                                                        ),
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color =
-                                                            MaterialTheme.colorScheme
-                                                                .onSurfaceVariant,
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
+                                if (details.client.redirect_uri.isNotBlank()) {
+                                    RedirectDestination(
+                                        details.client.redirect_uri,
+                                        isLocalRedirect,
+                                    )
                                 }
                                 Text(
                                     "Ce nom est déclaré par le client et n’est pas vérifié par Cairn. Continuez uniquement si vous faites confiance à cette destination.",
@@ -753,10 +732,15 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                                         Text(
                                             if (confirmationChallenge == null)
                                                 "Recevoir un code par e-mail"
-                                            else "Renvoyer un code par e-mail"
+                                            else "Demander un code par e-mail"
                                         )
                                     }
                                     if (confirmationChallenge != null) {
+                                        Text(
+                                            "Utilisez le code du dernier e-mail. Cairn en envoie un nouveau après l’expiration du précédent.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
                                         OtpCodeField(
                                             label = "Code de confirmation",
                                             value = confirmationCode,
@@ -776,7 +760,9 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                                                     notify("Identité confirmée.")
                                                 }
                                             },
-                                            enabled = !state.busy && confirmationCode.isNotBlank(),
+                                            enabled =
+                                                !state.busy &&
+                                                    confirmationCode.length == EMAIL_CODE_LENGTH,
                                             shape = RoundedCornerShape(10.dp),
                                             modifier = Modifier.fillMaxWidth(),
                                         ) {
@@ -804,7 +790,7 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
                                         tint = signal.success,
                                     )
                                     Text(
-                                        "Identité confirmée récemment — prêt à autoriser",
+                                        "Identité confirmée",
                                         style = MaterialTheme.typography.labelMedium,
                                         fontWeight = FontWeight.SemiBold,
                                         color = signal.success,
@@ -862,7 +848,48 @@ fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = ""
 }
 
 @Composable
-private fun SummaryRow(label: String, value: String, monospace: Boolean = false) {
+private fun RedirectDestination(uri: String, isLocal: Boolean) {
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    if (isLocal) AuthIcons.Laptop else AuthIcons.Lock,
+                    null,
+                    Modifier.size(14.dp),
+                    tint = if (isLocal) MaterialTheme.colorScheme.primary else signal.success,
+                )
+                Text("Destination", style = MaterialTheme.typography.labelMedium)
+                Text(
+                    if (isLocal) "App locale" else "HTTPS",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            SelectionContainer {
+                Text(
+                    uri,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SummaryRow(label: String, value: String) {
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -877,7 +904,6 @@ private fun SummaryRow(label: String, value: String, monospace: Boolean = false)
         Text(
             value,
             style = MaterialTheme.typography.bodySmall,
-            fontFamily = if (monospace) FontFamily.Monospace else null,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

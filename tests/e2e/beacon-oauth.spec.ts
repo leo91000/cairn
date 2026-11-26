@@ -282,7 +282,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     await page.goto(`${url}/oauth/authorize?${unverifiedParameters}`)
     await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
     await expect(page.getByText('Claude Desktop', { exact: true })).toBeVisible()
-    await expect(page.getByText('evil.example', { exact: true })).toBeVisible()
+    await expect(page.getByText('https://evil.example/cb', { exact: true })).toBeVisible()
     await expect(page.getByRole('alert')).toContainText('Unverified client')
 
     // A separate initiator receives the URL and polling secret, but opening it

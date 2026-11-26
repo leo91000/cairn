@@ -5,7 +5,6 @@
 
 package build.cairn.app.ui
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleOut
@@ -24,6 +23,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -184,6 +185,7 @@ private fun CairnAppContent(
         return
     }
     var authorizationUrl by rememberSaveable(state.session.account?.id) { mutableStateOf("") }
+    val sharedConsent: McpConsentState = viewModel(key = "shared-mcp-consent")
     LaunchedEffect(sharedUrl) {
         if (sharedUrl.isNotBlank()) {
             authorizationUrl = sharedUrl
@@ -191,12 +193,30 @@ private fun CairnAppContent(
         }
     }
     if (authorizationUrl.isNotBlank()) {
-        BackHandler { authorizationUrl = "" }
-        Box(Modifier.fillMaxSize().systemBarsPadding()) {
-            AuthorizeScreen(vm, state, authorizationUrl)
-            SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
+        val dismissAuthorization = {
+            if (!state.busy) {
+                sharedConsent.completed = null
+                authorizationUrl = ""
+            }
         }
-        return
+        Dialog(
+            onDismissRequest = dismissAuthorization,
+            properties =
+                DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+        ) {
+            Surface(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
+                    AuthorizeScreen(
+                        vm,
+                        state,
+                        authorizationUrl,
+                        sharedConsent,
+                        dismissAuthorization,
+                    )
+                    SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
+                }
+            }
+        }
     }
     var approvedTarget by
         remember(targetChat, targetCacheScope, targetAccount) { mutableStateOf(false) }
@@ -460,7 +480,8 @@ private fun WorkspaceApp(
                         if (pushReenrollmentRequired) PushReenrollmentNotice()
                         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                         ConnectionLostNotice(state.connectionLost)
-                        state.error?.let { ErrorNotice(it, vm::clearMessage) }
+                        if (route != "authorize")
+                            state.error?.let { ErrorNotice(it, vm::clearMessage) }
                         NavHost(
                             nav,
                             "fil",
@@ -724,7 +745,11 @@ private fun LoginScreen(vm: CairnViewModel, state: Workspace) {
     // Verification codes never enter saved instance state.
     var code by remember(state.emailForCode) { mutableStateOf("") }
     var hasProviders by remember(state.origin) { mutableStateOf(false) }
-    var resendCooldown by remember(state.emailForCode) { mutableIntStateOf(0) }
+    var resendCooldown by rememberSaveable(state.origin) { mutableIntStateOf(0) }
+    fun changeEmail() {
+        resendCooldown = 0
+        vm.changeEmail()
+    }
     LaunchedEffect(state.emailForCode, resendCooldown) {
         if (state.emailForCode != null && resendCooldown > 0) {
             delay(1000)
@@ -791,7 +816,7 @@ private fun LoginScreen(vm: CairnViewModel, state: Workspace) {
                             "Saisissez le code à 8 chiffres envoyé à :",
                         )
                         Surface(
-                            onClick = vm::changeEmail,
+                            onClick = ::changeEmail,
                             enabled = !state.busy,
                             shape = androidx.compose.foundation.shape.CircleShape,
                             color = MaterialTheme.colorScheme.surfaceContainer,
@@ -828,7 +853,7 @@ private fun LoginScreen(vm: CairnViewModel, state: Workspace) {
                             enabled = !state.busy,
                         )
                         Text(
-                            "Valable 10 minutes.",
+                            "Un code est valable jusqu’à 10 minutes après son envoi. Cairn en envoie un nouveau après l’expiration du précédent.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -839,7 +864,7 @@ private fun LoginScreen(vm: CairnViewModel, state: Workspace) {
                                     code = ""
                                 }
                             },
-                            enabled = code.isNotBlank() && !state.busy,
+                            enabled = code.length == EMAIL_CODE_LENGTH && !state.busy,
                             shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         ) {
@@ -860,11 +885,11 @@ private fun LoginScreen(vm: CairnViewModel, state: Workspace) {
                                 enabled = !state.busy && resendCooldown == 0,
                             ) {
                                 Text(
-                                    if (resendCooldown > 0) "Renvoyer dans ${resendCooldown} s"
-                                    else "Renvoyer un code"
+                                    if (resendCooldown > 0) "Réessayer dans ${resendCooldown} s"
+                                    else "Demander un code"
                                 )
                             }
-                            TextButton(onClick = vm::changeEmail, enabled = !state.busy) {
+                            TextButton(onClick = ::changeEmail, enabled = !state.busy) {
                                 Text("Changer d’adresse e-mail")
                             }
                         }

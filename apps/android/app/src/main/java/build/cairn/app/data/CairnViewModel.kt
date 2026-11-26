@@ -579,8 +579,9 @@ constructor(
     suspend fun createAccountPasskey(label: String, credentials: CairnCredentials) =
         CairnAccountSignIn(checkNotNull(accountConnection), credentials).createPasskey(label)
 
-    suspend fun confirmAccountPasskey(credentials: CairnCredentials) =
-        CairnAccountSignIn(checkNotNull(accountConnection), credentials).confirmPasskey()
+    suspend fun confirmAccountPasskey(credentials: CairnCredentials) = confirmAccountIdentity {
+        CairnAccountSignIn(it, credentials).confirmPasskey()
+    }
 
     suspend fun previewMcpConsent(url: String): Pair<Map<String, String>, ConsentPreview> {
         val account = checkNotNull(accountConnection)
@@ -618,13 +619,34 @@ constructor(
                 body("email" to checkNotNull(state.value.session.account).email),
             )
 
-    suspend fun confirmAccountEmail(challenge: String, code: String) {
-        checkNotNull(accountConnection)
-            .request(
+    suspend fun confirmAccountEmail(challenge: String, code: String) =
+        confirmAccountIdentity { account ->
+            account.request(
                 "POST",
                 "/account/reauth/email",
                 body("challenge" to challenge, "code" to code.trim()),
             )
+        }
+
+    private suspend fun confirmAccountIdentity(prove: suspend (CairnApi) -> Unit) {
+        val account = checkNotNull(accountConnection)
+        try {
+            prove(account)
+        } catch (error: ApiException) {
+            if (error.status != 401) throw error
+
+            // Beacon uses 401 both for rejected proofs and for missing sessions.
+            val expired =
+                try {
+                    !account.get<Session>("/account/session").authenticated
+                } catch (probe: ApiException) {
+                    probe.status == 401
+                } catch (_: IOException) {
+                    false
+                }
+            if (expired) throw error
+            throw IllegalArgumentException(error.message, error)
+        }
     }
 
     suspend fun removeAccountMethod(id: String) {

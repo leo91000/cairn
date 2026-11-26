@@ -266,6 +266,9 @@ async function loadSession() {
 }
 
 async function submit() {
+  if (busy.value || (challenge.value && !/^\d{8}$/.test(code.value)))
+    return
+
   busy.value = true
   error.value = ''
   try {
@@ -297,7 +300,6 @@ async function resendCode() {
   try {
     const value = await accountRequest('email-code', { email: email.value })
     challenge.value = value.challenge
-    code.value = ''
     startResendCooldown()
   }
   catch (cause) {
@@ -1280,6 +1282,7 @@ onMounted(async () => {
       <button
         type="button"
         class="mb-5 inline-flex max-w-full items-center gap-2 rounded-full border border-line bg-inset px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-hover disabled:opacity-50"
+        :aria-label="`Change email address (${email})`"
         :disabled="busy"
         @click="changeEmail"
       >
@@ -1295,7 +1298,7 @@ onMounted(async () => {
           :disabled="busy"
         />
         <p class="-mt-2 text-xs text-subtle">
-          Expires in 10 minutes.
+          Codes are valid for up to 10 minutes after sending. Cairn sends a new code after the previous one expires.
         </p>
         <UiAlert v-if="error" class="my-0!">
           {{ error }}
@@ -1304,7 +1307,7 @@ onMounted(async () => {
           type="submit"
           variant="primary"
           class="h-11 w-full rounded-[11px]"
-          :disabled="busy"
+          :disabled="busy || !/^\d{8}$/.test(code)"
         >
           {{ busy ? 'Please wait…' : 'Sign in' }}
         </UiButton>
@@ -1317,7 +1320,7 @@ onMounted(async () => {
           :disabled="busy || resendCooldown > 0"
           @click="resendCode"
         >
-          {{ resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : 'Resend code' }}
+          {{ resendCooldown > 0 ? `Try again in ${resendCooldown}s` : 'Request a code' }}
         </button>
         <button
           type="button"
