@@ -27,7 +27,7 @@ jobs:
           node --input-type=module <<'JS'
           import { execFileSync } from 'node:child_process'
           import { appendFileSync } from 'node:fs'
-          import { validationScope } from './scripts/pr-validation-scope.mjs'
+          import { validationScope } from './scripts/ci/pr-validation-scope.mjs'
           const args = !process.env.BASE || /^0+$/.test(process.env.BASE)
             ? ['ls-tree', '-r', '--name-only', '-z', process.env.HEAD]
             : ['diff', '--name-only', '-z', process.env.BASE, process.env.HEAD]
@@ -77,15 +77,7 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-      - uses: gradle/actions/setup-gradle@v5
-      - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - uses: ./.github/actions/setup-android-sdk
       - uses: ./.github/actions/setup-robolectric
       - run: pnpm validate:pr android
   browser:
@@ -121,18 +113,10 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
-      - name: Check browser image version
-        run: |
-          node --input-type=module <<'JS'
-          import { readFileSync } from 'node:fs'
-          const installed = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
-          const preinstalled = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
-          if (installed !== preinstalled)
-            throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
-          JS
+      - uses: ./.github/actions/check-playwright-image
       - name: Install the pinned Rust toolchain and build dependencies
         run: |
-          node scripts/prepare-browser-build-dependencies.mjs
+          node scripts/ci/prepare-browser-build-dependencies.mjs
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build the manager fixtures and web assets
@@ -141,7 +125,7 @@ jobs:
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture
           VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts
       - name: Qualify the isolated Postgres fixture
-        run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
+        run: pnpm exec tsx scripts/ci/qualify-beacon-sql-fixture.ts
       - name: Run the saved-chat resume journey
         timeout-minutes: 10
         run: pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --workers=1 --fail-on-flaky-tests
@@ -185,4 +169,4 @@ jobs:
       - name: Require every selected check to pass
         env:
           RESULTS: ${{ toJSON(needs) }}
-        run: node scripts/pr-validation-required.mjs
+        run: node scripts/ci/pr-validation-required.mjs

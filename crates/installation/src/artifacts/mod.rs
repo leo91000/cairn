@@ -2,7 +2,6 @@
 use cairn_contracts::EventKind;
 
 pub mod file;
-pub(crate) mod migration;
 pub mod sharing;
 pub mod sql;
 

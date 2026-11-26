@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { measureComposeStability, stabilityTests } from '../android-compose-stability.mjs'
+import { measureComposeStability, stabilityTests } from '../android/android-compose-stability.mjs'
 
 function result({ failed = false, skipped = false, missing = false } = {}) {
   const tests = missing ? stabilityTests.slice(0, 2) : stabilityTests

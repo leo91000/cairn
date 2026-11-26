@@ -60,7 +60,12 @@ async fn recipient_can_use_the_emailed_code_when_someone_else_requested_it_first
 
 #[tokio::test]
 async fn exhausting_an_attackers_challenge_preserves_the_recipients_attempts() {
-    let app = Fixture::with_network(Default::default(), 5, "127.0.0.1".parse().unwrap()).await;
+    let app = Fixture::with_network(
+        cairn_beacon::OAuthProviders::default(),
+        5,
+        "127.0.0.1".parse().unwrap(),
+    )
+    .await;
     let attacker: Value = app
         .post(
             "/api/account/email-code",
@@ -141,7 +146,12 @@ async fn exhausting_an_attackers_challenge_preserves_the_recipients_attempts() {
 
 #[tokio::test]
 async fn a_globally_exhausted_code_is_replaced_within_the_address_delivery_caps() {
-    let app = Fixture::with_network(Default::default(), 5, "127.0.0.1".parse().unwrap()).await;
+    let app = Fixture::with_network(
+        cairn_beacon::OAuthProviders::default(),
+        5,
+        "127.0.0.1".parse().unwrap(),
+    )
+    .await;
     let email = "global-budget@example.test";
     let recipient: Value = app
         .post("/api/account/email-code", json!({ "email": email }))
@@ -394,7 +404,7 @@ async fn an_address_has_hourly_and_daily_delivery_caps_beyond_the_minute_cooldow
 #[tokio::test]
 async fn trusted_proxies_use_the_rightmost_untrusted_address_for_each_clients_quota() {
     let app = Fixture::with_network(
-        Default::default(),
+        cairn_beacon::OAuthProviders::default(),
         5,
         "127.0.0.1,10.0.0.0/8,::1/128".parse().unwrap(),
     )

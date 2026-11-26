@@ -434,7 +434,7 @@ async fn logout_revokes_only_that_sessions_direct_lease_and_preserves_the_relay(
         .unwrap();
     match events.recv().await.unwrap() {
         DirectEvent::Revoked(DirectRevocation::Session { session_id }) => {
-            assert_eq!(session_id, grant.claims.session_id)
+            assert_eq!(session_id, grant.claims.session_id);
         }
         _ => panic!("logout must revoke only its public session identifier"),
     }
@@ -649,7 +649,7 @@ async fn session_expiration_closes_the_lease_and_sends_only_session_revocation()
         .unwrap();
     match event {
         DirectEvent::Revoked(DirectRevocation::Session { session_id }) => {
-            assert_eq!(session_id, grant.claims.session_id)
+            assert_eq!(session_id, grant.claims.session_id);
         }
         _ => panic!("expiry must send only the expired session scope"),
     }
@@ -728,7 +728,7 @@ async fn session_revocation_preserves_other_devices_and_denies_further_grants_or
             .unwrap();
         match event {
             DirectEvent::Revoked(DirectRevocation::Session { session_id }) => {
-                assert_eq!(session_id, grant.claims.session_id)
+                assert_eq!(session_id, grant.claims.session_id);
             }
             _ => panic!("session revocation must send only the targeted public session"),
         }
@@ -1436,7 +1436,7 @@ async fn a_lost_renewal_acknowledgement_does_not_hide_the_peer_from_logout() {
         .unwrap();
     match event {
         DirectEvent::Revoked(DirectRevocation::Session { session_id }) => {
-            assert_eq!(session_id, grant.claims.session_id)
+            assert_eq!(session_id, grant.claims.session_id);
         }
         _ => panic!("lost renewal acknowledgement must preserve session-scoped revocation"),
     }

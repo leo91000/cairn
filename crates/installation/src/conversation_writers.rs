@@ -17,7 +17,7 @@ use crate::{
     validation::text,
 };
 use cairn_protocol::TaskAuthorPolicy;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -104,26 +104,6 @@ CREATE TABLE IF NOT EXISTS skill_writers(
 CREATE INDEX IF NOT EXISTS skill_writers_scope_name ON skill_writers(scope,name,key);
 CREATE INDEX IF NOT EXISTS skill_writers_root_name ON skill_writers(root,name,key);
 ";
-
-/// Version 33 to 34. Nothing written before has a recorded writer, so nothing is
-/// converted: earlier conversations, instructions and skills never qualify.
-pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Recheck under the write lock: another startup may have completed the upgrade.
-    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if (34..=crate::store::DATABASE_VERSION).contains(&version) {
-        return Ok(());
-    }
-    if version != 33 {
-        return Err(Error::bad(
-            "Unexpected installation database version during upgrade.",
-        ));
-    }
-    tx.execute_batch(SCHEMA)?;
-    tx.pragma_update(None, "user_version", 34)?;
-    tx.commit()?;
-    Ok(())
-}
 
 /// Who wrote an entry of a conversation, an agent's instructions or a skill.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1232,16 +1212,6 @@ mod tests {
     use super::*;
     use crate::store::Store;
 
-    const TABLES: [&str; 7] = [
-        "agent_instruction_writers",
-        "conversation_entry_writers",
-        "conversation_skill_sources",
-        "conversation_turn_entries",
-        "conversation_writers",
-        "native_instruction_writers",
-        "skill_writers",
-    ];
-
     #[tokio::test]
     async fn public_account_provenance_never_confers_native_authority() {
         let root = tempfile::tempdir().unwrap();
@@ -1309,52 +1279,6 @@ mod tests {
             })
             .await
             .unwrap();
-    }
-
-    fn tables(connection: &Connection) -> Vec<String> {
-        let names = TABLES.map(|name| format!("'{name}'")).join(",");
-        connection
-            .prepare(&format!(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ({names}) ORDER BY name"
-            ))
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap()
-    }
-
-    #[test]
-    fn version_33_upgrades_once_and_refuses_unexpected_versions() {
-        let root = tempfile::tempdir().unwrap();
-        drop(Store::open(root.path()).unwrap());
-        let database = root.path().join("manager.db");
-        let connection = Connection::open(&database).unwrap();
-        assert_eq!(tables(&connection), TABLES);
-
-        let dropped = TABLES.map(|name| format!("DROP TABLE {name};")).join("");
-        connection
-            .execute_batch(&format!(
-                "{dropped} DROP TABLE background_jobs; PRAGMA user_version=33;"
-            ))
-            .unwrap();
-        assert!(tables(&connection).is_empty());
-        drop(connection);
-
-        drop(Store::open(root.path()).unwrap());
-        let mut connection = Connection::open(&database).unwrap();
-        assert_eq!(tables(&connection), TABLES);
-        let version: i64 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, crate::store::DATABASE_VERSION);
-        // Reopening, or a concurrent startup, changes nothing.
-        upgrade(&mut connection).unwrap();
-        drop(Store::open(root.path()).unwrap());
-        assert_eq!(tables(&connection), TABLES);
-
-        connection.pragma_update(None, "user_version", 30).unwrap();
-        assert!(upgrade(&mut connection).is_err());
     }
 
     fn conversation(db: &Db<'_>, id: &str, writer: &EntryWriter) -> Conversation {

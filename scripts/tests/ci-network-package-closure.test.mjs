@@ -13,8 +13,8 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { acquireNetworkPackages, installNetworkPackageClosure, networkPackageManifest } from '../ci-network-package-closure.mjs'
-import { prepareNetworkTools } from '../prepare-network-tools.mjs'
+import { acquireNetworkPackages, installNetworkPackageClosure, networkPackageManifest } from '../ci/ci-network-package-closure.mjs'
+import { prepareNetworkTools } from '../ci/prepare-network-tools.mjs'
 
 function archiveUrl(snapshotUrl) {
   const url = new URL(snapshotUrl)
@@ -93,7 +93,7 @@ function fixture(options = {}) {
 
 describe('pinned network package closure', () => {
   it('refuses acquisition CLI outside disposable CI', () => {
-    const cli = fileURLToPath(new URL('../ci-network-package-closure.mjs', import.meta.url))
+    const cli = fileURLToPath(new URL('../ci/ci-network-package-closure.mjs', import.meta.url))
     const result = spawnSync(process.execPath, [cli, 'acquire', '/unused'], { encoding: 'utf8', env: { CI: '', GITHUB_ACTIONS: '' } })
     expect(result.status).toBe(1)
     expect(result.stdout).toBe('')

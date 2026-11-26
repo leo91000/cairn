@@ -4,7 +4,6 @@ pub mod agent_avatars;
 pub mod agent_grants;
 mod agent_merge;
 mod agent_plan;
-pub mod antigravity;
 pub mod api;
 pub mod artifacts;
 pub mod attachments;
@@ -15,15 +14,17 @@ pub mod background_jobs;
 pub(crate) mod capabilities;
 mod chat_inbox;
 pub(crate) mod chat_plan_settings;
-pub mod chat_process;
 pub mod chat_titles;
 pub mod chats;
-pub mod claude;
-pub mod claude_process;
-mod codex_background;
-mod codex_login;
 pub mod coding_agent;
 pub(crate) mod coding_agent_configuration;
+
+pub use coding_agent::{
+    antigravity_runtime as antigravity, claude_process, claude_session as claude,
+    codex_process as chat_process, opencode_runtime as opencode,
+};
+pub(crate) use coding_agent::{codex_background, codex_login};
+
 pub mod config;
 pub mod context_usage;
 pub mod conversation_deletion;
@@ -50,7 +51,6 @@ pub mod native;
 pub mod network;
 pub mod nodes;
 pub mod notifications;
-pub mod opencode;
 pub mod outcome;
 pub mod performance;
 pub mod plugins;
@@ -75,7 +75,6 @@ pub mod runs;
 pub mod service;
 pub mod skills;
 pub mod storage;
-mod storage_migration;
 pub mod store;
 pub mod supervisor;
 pub(crate) mod task_storage;
@@ -108,7 +107,3 @@ pub(crate) use common::{
     account_fixture, agent_fixture, attempt_fixture, mission_fixture, node_fixture, relay_fixture,
     run_fixture,
 };
-
-#[cfg(test)]
-#[path = "../tests/common/placement_migration_fixture.rs"]
-pub(crate) mod placement_migration_fixture;

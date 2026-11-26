@@ -4,7 +4,7 @@
 Seeds quota-owned environments on an ext4 pool through the controller's own
 code, migrates them with the real host script and systemd units, checks that
 the mount survives a simulated reboot, rolls back, migrates again and exercises
-the migrated pool. Run as root by scripts/qualify-native-quota.mjs only.
+the migrated pool. Run as root by scripts/ci/qualify-native-quota.mjs only.
 """
 import hashlib
 import importlib.util

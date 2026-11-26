@@ -77,7 +77,6 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
         ["node-budget"] => node_budget(&broker, request).await,
         ["storage-policy"] => storage_policy(&broker, request).await,
         ["storage-policy", "probe"] => storage_policy_probe(request).await,
-        ["disks", run, "publication-fence"] => legacy_fence(&broker, request, run).await,
         ["disks", run, operation @ "storage-status"] => {
             disk_storage(&broker, request, run, operation).await
         }
@@ -179,16 +178,6 @@ async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {
     let operation = tokio::spawn(async move { control.apply(&state, configuration).await });
     operation.await.map_err(Error::internal)??;
     json_response(json!({ "ready": true }))
-}
-
-async fn legacy_fence(broker: &Broker, request: Request, run: &str) -> Result<Response> {
-    uuid(run)?;
-    require_post(&request)?;
-    let bytes = body(request, 16384, "Invalid legacy journal fence.").await?;
-    let value: Value = decode(&bytes, "Invalid legacy journal fence.")?;
-    let publication = text(&value, "backupId");
-    crate::storage::legacy_fences::fence(&broker.state, run, publication).await?;
-    json_response(json!({ "fenced": publication }))
 }
 
 async fn disk_storage(

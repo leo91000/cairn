@@ -65,7 +65,7 @@ permission alone.
 schemas, response schemas, descriptions and OAuth scopes. Regenerate deliberately:
 
 ```sh
-node scripts/generate-gmail-methods.mjs
+node scripts/dev/generate-gmail-methods.mjs
 ```
 
 `methods` lists operations; `methods` with `method` returns detailed schemas.

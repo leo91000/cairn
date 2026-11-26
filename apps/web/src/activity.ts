@@ -225,10 +225,8 @@ export function proposedPlanApproval(events: RunEvent[], cards: TimelineEntry[] 
   if (!text(item.text).trim())
     return undefined
 
-  if (!('request_id' in item) && latest.legacyPlanApproval !== true)
-    return undefined
-
-  if ('request_id' in item && (!text(item.request_id) || (requestSource >= 0 && text(item.request_id) !== requestId)))
+  const authoredRequest = text(item.request_id)
+  if (!authoredRequest || (requestSource >= 0 && authoredRequest !== requestId))
     return undefined
 
   return `${latest.runId}:${latest.id}`

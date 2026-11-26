@@ -2,145 +2,36 @@ use super::*;
 use crate::store::Store;
 use cairn_contracts::{FailureOrigin, NoticeCode, SpeedNotice, TimelineNotice, TimelineState};
 use rusqlite::Connection;
-use std::collections::BTreeMap;
 
-// Dump produced by the previous main's real Store, run admission and event writer.
-const PREVIOUS: &str = include_str!("../../tests/fixtures/timeline-v18.sql");
+const SEED_EVENTS: &str = include_str!("../../tests/fixtures/timeline-seed-events.json");
 
 const CODEX: &str = "00000000-0000-4000-8000-0000000000a1";
 const CLAUDE: &str = "00000000-0000-4000-8000-0000000000a2";
 const OPENCODE: &str = "00000000-0000-4000-8000-0000000000a3";
 const ACTIVITY: &str = "00000000-0000-4000-8000-0000000000a4";
 
-fn previous(root: &std::path::Path) -> Connection {
-    let mut db = Connection::open(root.join("manager.db")).unwrap();
-    db.execute_batch(PREVIOUS).unwrap();
-    crate::runs::projections::upgrade(&mut db).unwrap();
-    db.execute_batch(crate::plugins::hooks::SCHEMA).unwrap();
-    db.pragma_update(None, "user_version", 20).unwrap();
-    crate::worker::progress::upgrade(&mut db).unwrap();
-    db.execute_batch(
-        "INSERT INTO plugin_instances(id,plugin_id,name,enabled,revision,settings,secret_keys,updated_at) VALUES('00000000-0000-4000-8000-000000000099','github','retained',1,'revision','{}','[]',1);
-         INSERT INTO plugin_hook_events(id,instance_id,revision,package_digest,external_id,name,payload,created_at) VALUES('retained-hook','00000000-0000-4000-8000-000000000099','revision','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','external','event','{}',1);
-         INSERT INTO plugin_hook_receipts(instance_id,external_id,expires_at) VALUES('00000000-0000-4000-8000-000000000099','external',1000);",
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO run_progress(run_id,state) VALUES(?,'{}')",
-        [CODEX],
-    )
-    .unwrap();
-    std::fs::write(root.join("mcp-encryption-key"), [42_u8; 32]).unwrap();
-    db
-}
-
-/// Retained rows outside timeline/A10 layouts, plus exact retained run columns
-/// and both complete wire projections. A10's own migration tests qualify the
-/// converted attempt/reservation rows and counters.
-fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
-    let names = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'timeline_%' AND name NOT IN ('runs','placements','attempts','exclusive_reservations','exclusive_members','exclusive_paused_runs','exclusive_sequence') ORDER BY name")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    let mut snapshot: BTreeMap<String, Vec<String>> = names
-        .into_iter()
-        .map(|name| {
-            // Compare retained columns across both placement23 and Plan26 migrations.
-            let projection = if matches!(
-                name.as_str(),
-                "chat_messages" | "chat_questions" | "nodes" | "direct_journal_acknowledgements"
-            ) {
-                db.prepare(&format!("PRAGMA table_info({name})"))
-                    .unwrap()
-                    .query_map([], |row| row.get::<_, String>(1))
-                    .unwrap()
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .unwrap()
-                    .into_iter()
-                    .filter(|column| {
-                        column != "plan"
-                            && column != "exclusive_reservation"
-                            && column != "detached"
-                    })
-                    .map(|column| format!("\"{column}\""))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            } else {
-                "*".to_owned()
-            };
-            let filter = if name == "kv" {
-                " WHERE key!='agent-access-rollout'"
-            } else {
-                ""
-            };
-            let mut statement = db
-                .prepare(&format!("SELECT {projection} FROM \"{name}\"{filter}"))
-                .unwrap();
-            let columns = statement.column_count();
-            let mut rows = statement
-                .query_map([], |row| {
-                    (0..columns)
-                        .map(|index| {
-                            Ok(format!(
-                                "{:?}",
-                                row.get::<_, rusqlite::types::Value>(index)?
-                            ))
-                        })
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                        .map(|values| values.join("|"))
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            rows.sort();
-            (name, rows)
+async fn seeded_store(root: &std::path::Path) -> Store {
+    let store = Store::open(root).unwrap();
+    let seed: Value = serde_json::from_str(SEED_EVENTS).unwrap();
+    store
+        .transaction(move |db| {
+            for run in seed["runs"].as_array().unwrap() {
+                let state: cairn_contracts::RunState = serde_json::from_value(run.clone())?;
+                db.admit_run(&state, None, &serde_json::json!({}), None)?;
+            }
+            for event in seed["events"].as_array().unwrap() {
+                let run = event["runId"].as_str().unwrap();
+                let created_at = event["createdAt"].as_i64().unwrap();
+                let kind = EventKind::from_adapter(event["type"].as_str().unwrap());
+                let text = event["text"].as_str().unwrap();
+                let payload = (!event["payload"].is_null()).then(|| &event["payload"]);
+                db.event_at(run, &kind, text, payload, created_at)?;
+            }
+            Ok(())
         })
-        .collect();
-    snapshot.insert(
-        "retained run columns".into(),
-        vec![format!(
-            "{:?}",
-            crate::placement_migration_fixture::retained_run_columns(db)
-        )],
-    );
-    snapshot.insert(
-        "complete run projections".into(),
-        crate::placement_migration_fixture::run_views(db)
-            .into_iter()
-            .map(|value| value.to_string())
-            .collect(),
-    );
-    snapshot
-}
-
-// Later startup steps may add tables; every previously existing row must remain.
-fn assert_preserved_tables(db: &Connection, before: &BTreeMap<String, Vec<String>>) {
-    let mut after = tables(db);
-    assert_eq!(after.remove("coding_agent_configurations"), Some(vec![]));
-
-    for table in [
-        "plugin_contribution_grants",
-        "plugin_grant_resources",
-        "plugin_credential_suppliers",
-        "agent_account_access",
-    ] {
-        assert!(
-            after.remove(table).is_some(),
-            "missing grant migration table {table}"
-        );
-    }
-
-    for (table, rows) in before {
-        assert_eq!(after.get(table), Some(rows), "{table}");
-    }
-}
-
-fn version(db: &Connection) -> i64 {
-    db.pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap()
+        .await
+        .unwrap();
+    store
 }
 
 async fn cards(store: &Store, run: &str) -> Vec<TimelineEntry> {
@@ -149,10 +40,10 @@ async fn cards(store: &Store, run: &str) -> Vec<TimelineEntry> {
 }
 
 #[tokio::test]
-async fn replay_and_migration_discard_reset_timestamps_outside_the_wire_range() {
+async fn replay_discards_reset_timestamps_outside_the_wire_range() {
     use serde_json::json;
     let root = tempfile::tempdir().unwrap();
-    let db = previous(root.path());
+    let store = seeded_store(root.path()).await;
     for (kind, payload) in [
         (
             EventKind::ProviderLimit,
@@ -164,34 +55,18 @@ async fn replay_and_migration_discard_reset_timestamps_outside_the_wire_range() 
         ),
         (EventKind::EngineRetry, json!({"delayMs": u64::MAX})),
     ] {
-        db.execute(
-            "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,?,?,?,?)",
-            rusqlite::params![CODEX, 1000, kind.as_str(), "", payload.to_string()],
-        )
-        .unwrap();
+        store.event(CODEX, &kind, "", Some(payload)).await.unwrap();
     }
-    drop(db);
-    let store = Store::open(root.path()).unwrap();
-    let migrated = cards(&store, CODEX).await;
-    assert!(migrated.iter().any(|card| matches!(&card.content,
+    let live = cards(&store, CODEX).await;
+    assert!(live.iter().any(|card| matches!(&card.content,
         TimelineContent::Notice { notice } if notice.usage_limit.as_ref().is_some_and(|limit| limit.resets_at.is_none())
     )));
-    assert!(migrated.iter().any(|card| matches!(&card.content,
+    assert!(live.iter().any(|card| matches!(&card.content,
         TimelineContent::Notice { notice } if notice.quota.as_ref().is_some_and(|quota| quota.resets_at.is_none())
     )));
-    assert!(migrated.iter().any(|card| matches!(&card.content,
+    assert!(live.iter().any(|card| matches!(&card.content,
         TimelineContent::Notice { notice } if notice.engine_retry.as_ref().is_some_and(|retry| retry.delay_ms.is_none())
     )));
-    store
-        .event(
-            CODEX,
-            &EventKind::ProviderLimit,
-            "",
-            Some(json!({"status": "rejected", "resetsAt": 10_000_000_000_000_000_i64})),
-        )
-        .await
-        .unwrap();
-    let live = cards(&store, CODEX).await;
     assert!(
         live.iter()
             .filter_map(|card| match &card.content {
@@ -207,8 +82,7 @@ async fn replay_and_migration_discard_reset_timestamps_outside_the_wire_range() 
 #[tokio::test]
 async fn ending_many_replies_does_not_amplify_a_small_live_batch() {
     let root = tempfile::tempdir().unwrap();
-    previous(root.path());
-    let store = Store::open(root.path()).unwrap();
+    let store = seeded_store(root.path()).await;
     let text = "x".repeat(16 * 1024);
     store
         .transaction(move |db| {
@@ -263,30 +137,23 @@ async fn ending_many_replies_does_not_amplify_a_small_live_batch() {
 }
 
 #[tokio::test]
-async fn private_answer_marker_hides_historical_and_live_payload_text() {
+async fn private_answer_marker_hides_live_payload_text() {
     let root = tempfile::tempdir().unwrap();
-    let db = previous(root.path());
+    let store = seeded_store(root.path()).await;
     let marker = "Answered a private question.";
     let secret = "private answer that must stay hidden";
     let payload = serde_json::json!({"text": secret});
-    db.execute(
-        "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,?,?,?,?)",
-        rusqlite::params![CODEX, 2, "chat.user", marker, payload.to_string()],
-    )
-    .unwrap();
-    let store = Store::open(root.path()).unwrap();
-    let migrated = cards(&store, CODEX).await;
-    assert!(migrated.iter().any(
-        |card| matches!(&card.content, TimelineContent::UserMessage { text, .. } if text == marker)
-    ));
-    assert!(!format!("{migrated:?}").contains(secret));
-
     store
         .event(CODEX, &EventKind::ChatUser, marker, Some(payload))
         .await
         .unwrap();
     let live = cards(&store, CODEX).await;
-    assert_eq!(live.iter().filter(|card| matches!(&card.content, TimelineContent::UserMessage { text, .. } if text == marker)).count(), 2);
+    assert_eq!(
+        live.iter()
+            .filter(|card| matches!(&card.content, TimelineContent::UserMessage { text, .. } if text == marker))
+            .count(),
+        1
+    );
     assert!(!format!("{live:?}").contains(secret));
 }
 
@@ -325,24 +192,19 @@ fn long_failure_reply_is_hidden_when_failure_arrives_after_reply() {
 }
 
 #[tokio::test]
-async fn long_engine_item_ids_survive_migration_and_live_updates() {
+async fn long_engine_item_ids_survive_live_updates() {
     let root = tempfile::tempdir().unwrap();
-    let db = previous(root.path());
+    let store = seeded_store(root.path()).await;
     let first = "é".repeat(1100);
     let second = format!("{first}b");
     for id in [&first, &second] {
         let payload =
             serde_json::json!({"item": {"id": id, "type": "agent_message", "text": "Before"}});
-        db.execute(
-            "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,?,?,?,?)",
-            rusqlite::params![CODEX, 2, "item.updated", "Before", payload.to_string()],
-        )
-        .unwrap();
+        store
+            .event(CODEX, &EventKind::ItemUpdated, "Before", Some(payload))
+            .await
+            .unwrap();
     }
-    let before = tables(&db);
-    let store = Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
-    assert_preserved_tables(&db, &before);
     let old = cards(&store, CODEX).await;
     let first_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &first)).unwrap();
     let second_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &second)).unwrap();
@@ -358,8 +220,8 @@ async fn long_engine_item_ids_survive_migration_and_live_updates() {
 #[tokio::test]
 async fn checkpoint_keeps_no_failure_text_and_still_folds_truncated_reasons() {
     let root = tempfile::tempdir().unwrap();
-    let db = previous(root.path());
-    let store = Store::open(root.path()).unwrap();
+    let store = seeded_store(root.path()).await;
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
     let message = "private diagnostic with a long tail";
     store
         .event(
@@ -470,15 +332,10 @@ fn shown(cards: &[TimelineEntry]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn upgrade_builds_the_timeline_from_retained_events_and_changes_nothing_else() {
+async fn seeded_events_build_the_expected_timeline() {
     let root = tempfile::tempdir().unwrap();
-    let db = previous(root.path());
-    let before = tables(&db);
-    assert!(before["events"].len() >= 48);
-
-    let store = Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
-    assert_preserved_tables(&db, &before);
+    let store = seeded_store(root.path()).await;
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),
@@ -602,14 +459,12 @@ async fn upgrade_builds_the_timeline_from_retained_events_and_changes_nothing_el
         ]
     );
 
-    // Reopening the upgraded database performs no further migration.
+    // Reopening leaves the projection untouched.
     drop(store);
-    let rows = tables(&db);
     let projection: i64 = db
         .query_row("SELECT COUNT(*) FROM timeline_entries", [], |r| r.get(0))
         .unwrap();
     Store::open(root.path()).unwrap();
-    assert_eq!(tables(&db), rows);
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM timeline_entries", [], |r| r
             .get::<_, i64>(0))
@@ -623,25 +478,6 @@ fn notice_code(card: &TimelineEntry) -> Option<NoticeCode> {
         TimelineContent::Notice { notice } => Some(notice.code),
         _ => None,
     }
-}
-
-#[test]
-fn a_failed_upgrade_leaves_version_21_and_its_events_intact() {
-    let root = tempfile::tempdir().unwrap();
-    let db = previous(root.path());
-    // A conflicting leftover table makes the projection's schema fail mid-upgrade.
-    db.execute_batch("CREATE TABLE timeline_state(run_id TEXT);")
-        .unwrap();
-    let before = tables(&db);
-    assert!(Store::open(root.path()).is_err());
-    assert_eq!(version(&db), 21);
-    assert_eq!(tables(&db), before);
-    assert!(
-        !db.prepare("SELECT 1 FROM sqlite_master WHERE name='timeline_entries'")
-            .unwrap()
-            .exists([])
-            .unwrap()
-    );
 }
 
 /// The projection as stored, with the run identity normalized.
@@ -675,7 +511,8 @@ fn normalize(mut cards: Vec<Card>) -> Vec<(String, i64, i64, i64, String)> {
 #[tokio::test]
 async fn live_batches_full_replay_and_checkpoint_restart_build_the_same_timeline() {
     let root = tempfile::tempdir().unwrap();
-    let db = previous(root.path());
+    let store = seeded_store(root.path()).await;
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
     let corpus = db
         .prepare("SELECT run_id,created_at,type,text,payload FROM events ORDER BY id")
         .unwrap()
@@ -691,7 +528,6 @@ async fn live_batches_full_replay_and_checkpoint_restart_build_the_same_timeline
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    let store = Store::open(root.path()).unwrap();
     // Record the corpus again through the live writer, in transactions of varying size.
     db.execute_batch(
         "DELETE FROM timeline_entries; DELETE FROM timeline_state; DELETE FROM events;",
@@ -761,7 +597,6 @@ async fn live_batches_full_replay_and_checkpoint_restart_build_the_same_timeline
                         .get::<_, Option<String>>(5)?
                         .map(|p| serde_json::value::RawValue::from_string(p).unwrap()),
                     display_id: None,
-                    legacy_plan_approval: None,
                     timeline: false,
                 })
             })
@@ -814,8 +649,7 @@ async fn live_batches_full_replay_and_checkpoint_restart_build_the_same_timeline
 #[tokio::test]
 async fn shared_client_corpus_matches_the_server_timeline() {
     let root = tempfile::tempdir().unwrap();
-    previous(root.path());
-    let store = Store::open(root.path()).unwrap();
+    let store = seeded_store(root.path()).await;
     // The tool-activity sample the apps already share, recorded as one more run.
     let sample: Vec<Value> = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/activity-events.json"
@@ -875,7 +709,6 @@ fn replay(events: &[(EventKind, &str, Value)]) -> Vec<TimelineEntry> {
             payload: (!payload.is_null())
                 .then(|| serde_json::value::RawValue::from_string(payload.to_string()).unwrap()),
             display_id: None,
-            legacy_plan_approval: None,
             timeline: false,
         })
         .collect::<Vec<_>>();
@@ -1131,36 +964,10 @@ fn reconnect_diagnostics_recover_and_event_shaped_stderr_stays_process_output() 
     );
 }
 
-#[test]
-fn version_18_upgrades_through_both_projections() {
-    let root = tempfile::tempdir().unwrap();
-    let db = Connection::open(root.path().join("manager.db")).unwrap();
-    db.execute_batch(PREVIOUS).unwrap();
-    std::fs::write(root.path().join("mcp-encryption-key"), [42_u8; 32]).unwrap();
-    let events: i64 = db
-        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
-        .unwrap();
-    Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
-    assert_eq!(
-        db.query_row("SELECT COUNT(*) FROM events", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap(),
-        events
-    );
-    assert!(
-        db.query_row("SELECT COUNT(*) FROM timeline_entries", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap()
-            > 0
-    );
-}
-
 #[tokio::test]
 async fn background_wait_tracks_changes_resumption_and_restart() {
     let root = tempfile::tempdir().unwrap();
-    previous(root.path());
-    let store = Store::open(root.path()).unwrap();
+    let store = seeded_store(root.path()).await;
     let wait = |tasks: serde_json::Value| serde_json::json!({"tasks": tasks});
     store
         .event(
@@ -1255,8 +1062,7 @@ async fn background_wait_tracks_changes_resumption_and_restart() {
 #[tokio::test]
 async fn empty_wait_ends_the_interval_and_a_new_wait_gets_a_new_start() {
     let root = tempfile::tempdir().unwrap();
-    previous(root.path());
-    let store = Store::open(root.path()).unwrap();
+    let store = seeded_store(root.path()).await;
     store
         .transaction(|db| {
             for (at, tasks) in [
@@ -1310,8 +1116,7 @@ async fn empty_wait_ends_the_interval_and_a_new_wait_gets_a_new_start() {
 #[tokio::test]
 async fn plan_delivery_flag_is_hydrated_without_changing_the_stored_card_or_private_answer() {
     let root = tempfile::tempdir().unwrap();
-    drop(previous(root.path()));
-    let store = Store::open(root.path()).unwrap();
+    let store = seeded_store(root.path()).await;
     store
         .event(
             CODEX,
@@ -1344,120 +1149,4 @@ async fn plan_delivery_flag_is_hydrated_without_changing_the_stored_card_or_priv
     drop(store);
     let reopened = Store::open(root.path()).unwrap();
     assert!(cards(&reopened, CODEX).await.iter().any(|entry| matches!(&entry.content, TimelineContent::UserMessage { plan: true, message_id, .. } if message_id.as_deref() == Some("protected-attachment"))));
-}
-
-#[tokio::test]
-async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pages() {
-    let root = tempfile::tempdir().unwrap();
-    let store = Store::open(root.path()).unwrap();
-    let run = "00000000-0000-4000-8000-0000000000a5";
-    store
-        .transaction(move |db| {
-            let state: cairn_contracts::RunState = serde_json::from_value(serde_json::json!({
-                "id": run,
-                "taskId": "legacy-plan-approval",
-                "status": "succeeded",
-            }))?;
-            db.admit_run(&state, None, &serde_json::json!({}), None)?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    let request = serde_json::json!({
-        "messageId": "request-a",
-        "text": "Plan this",
-    });
-    for _ in 0..2 {
-        store
-            .event(
-                run,
-                &EventKind::ChatUser,
-                "Plan this",
-                Some(request.clone()),
-            )
-            .await
-            .unwrap();
-    }
-    store
-        .event(
-            run,
-            &EventKind::ItemCompleted,
-            "Approach",
-            Some(serde_json::json!({
-                "item": {
-                    "id": "plan-a",
-                    "type": "proposed_plan",
-                    "text": "Approach",
-                },
-            })),
-        )
-        .await
-        .unwrap();
-
-    let first = store
-        .read(move |db| db.event_page(run, 0, 10))
-        .await
-        .unwrap();
-    let request_boundary = first[1].id;
-    let single_request_plan = first.last().unwrap();
-    assert_eq!(single_request_plan.legacy_plan_approval, Some(true));
-
-    store
-        .event(
-            run,
-            &EventKind::ChatUser,
-            "Another request",
-            Some(serde_json::json!({
-                "messageId": "request-b",
-                "text": "Another request",
-            })),
-        )
-        .await
-        .unwrap();
-    store
-        .event(
-            run,
-            &EventKind::ItemCompleted,
-            "Revised approach",
-            Some(serde_json::json!({
-                "item": {
-                    "id": "plan-b",
-                    "type": "proposed_plan",
-                    "text": "Revised approach",
-                },
-            })),
-        )
-        .await
-        .unwrap();
-
-    let live = store
-        .read(move |db| Ok(db.live_events_between(run, request_boundary, i64::MAX)?.0))
-        .await
-        .unwrap();
-    let paged_plan = live.last().unwrap();
-    assert_eq!(paged_plan.kind, EventKind::ItemCompleted);
-    assert_eq!(paged_plan.legacy_plan_approval, Some(false));
-
-    let event_page = store
-        .read(move |db| db.event_page(run, request_boundary, 10))
-        .await
-        .unwrap();
-    assert_eq!(event_page.last().unwrap().legacy_plan_approval, Some(false));
-
-    let history = store
-        .read(move |db| Ok(db.events_before(run, i64::MAX)?.0))
-        .await
-        .unwrap();
-    let historical_plan = history
-        .iter()
-        .find(|event| {
-            event.payload.as_ref().is_some_and(|payload| {
-                serde_json::from_str::<serde_json::Value>(payload.get())
-                    .ok()
-                    .and_then(|payload| payload.pointer("/item/id").cloned())
-                    == Some(serde_json::json!("plan-b"))
-            })
-        })
-        .unwrap();
-    assert_eq!(historical_plan.legacy_plan_approval, Some(false));
 }

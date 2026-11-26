@@ -910,7 +910,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires the dedicated disposable ext4 quota fixture; scripts/qualify-native-quota.mjs"]
+    #[ignore = "requires the dedicated disposable ext4 quota fixture; scripts/ci/qualify-native-quota.mjs"]
     async fn kernel_quota_lifecycle_qualification() {
         assert_eq!(
             std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),

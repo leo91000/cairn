@@ -1,9 +1,6 @@
 //! Trusted node identities. Enrollment and revocation are serialized with heartbeats.
 pub mod alerts;
 pub mod attempts;
-pub(crate) mod attempts_migration;
-#[cfg(test)]
-mod attempts_migration_tests;
 pub mod connector;
 pub mod coordination;
 pub(crate) mod disk_capacity;
@@ -18,7 +15,6 @@ pub mod moves;
 pub mod native_mode;
 pub mod placement;
 pub mod relay;
-pub(crate) mod retired_publications;
 pub mod run_placement;
 pub(crate) mod settings;
 pub mod snapshots;

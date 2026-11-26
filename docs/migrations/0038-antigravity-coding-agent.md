@@ -1,5 +1,9 @@
 # 0038 — Antigravity coding agent (SQLite schema 37)
 
+This guide describes a historical migration in the schema-37 manager at
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 Version 36 upgrades to 37 automatically in `Store::open`
 ([ADR-0090](../adr/0090-antigravity-coding-agent.md)).
 

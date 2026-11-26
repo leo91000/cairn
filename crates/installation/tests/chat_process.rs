@@ -2029,3 +2029,308 @@ fn structured_tool_payloads_redact_credentials_and_nested_output() {
         })
     );
 }
+
+fn side_question(id: &str, text: &str) -> Value {
+    json!({ "id": format!("side-question:{id}"), "sideQuestion": { "id": id, "text": text } })
+}
+
+/// The `thread/sample` requests and cancellations the Codex fixture received.
+fn fixture_lines(home: &Path, name: &str) -> Vec<Value> {
+    std::fs::read_to_string(home.join(name))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+async fn until(condition: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn side_questions_are_sampled_from_the_running_turn_without_joining_it() {
+    const ANSWERED: &str = "a1b2c3d4-0000-4000-8000-000000000001";
+    const TOOL: &str = "a1b2c3d4-0000-4000-8000-000000000002";
+    const WITHDRAWN: &str = "a1b2c3d4-0000-4000-8000-000000000003";
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let observed = home.clone();
+    let config = config(&root);
+    let input = plan(&root, "fixture:chat-hang");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
+    });
+    let mut inbox = vec![
+        side_question(
+            ANSWERED,
+            "About this reply of yours:\n> Done.\n\nWhy this order?",
+        ),
+        side_question(TOOL, "fixture:side-tool"),
+        side_question(WITHDRAWN, "fixture:side-hold"),
+    ];
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            events.push(event.clone());
+            if event["type"] == "chat.side.available" {
+                deliver(&root, &json!(inbox)).await;
+            }
+            let settled = |id: &str| {
+                events.iter().any(|event| {
+                    event["sideQuestionId"] == id
+                        && matches!(
+                            text(event, "type"),
+                            "chat.side.answered" | "chat.side.failed"
+                        )
+                })
+            };
+            if settled(ANSWERED) && settled(TOOL) && inbox.len() == 3 {
+                inbox.push(json!({
+                    "id": format!("withdraw-side-question:{WITHDRAWN}"),
+                    "sideQuestionId": WITHDRAWN,
+                    "sideQuestionCancelled": true,
+                }));
+                deliver(&root, &json!(inbox)).await;
+                until(|| !fixture_lines(&observed, "fixture-sample-cancels.jsonl").is_empty())
+                    .await;
+                inbox.push(json!({ "id": "finish", "text": "finish now" }));
+                deliver(&root, &json!(inbox)).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+
+    let answered = position(&events, "chat.side.answered");
+    assert_eq!(events[answered]["sideQuestionId"], ANSWERED);
+    assert_eq!(events[answered]["text"], "Side answer: Why this order?");
+    let failed = position(&events, "chat.side.failed");
+    assert_eq!(events[failed]["sideQuestionId"], TOOL);
+    assert!(text(&events[failed], "error").contains("tried to use a tool"));
+    // A withdrawn question settles silently; admission closes before the reply completes.
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["sideQuestionId"] == WITHDRAWN)
+    );
+    assert!(position(&events, "chat.side.closed") < position(&events, "turn.completed"));
+
+    // Each question was sampled from the running turn, as a side question.
+    let samples = fixture_lines(&observed, "fixture-samples.jsonl");
+    assert_eq!(samples.len(), 3);
+    let turn = conversation(&observed)["turns"][0]["id"].clone();
+    for sample in &samples {
+        assert_eq!(sample["threadId"], "fixture-chat");
+        assert_eq!(sample["expectedTurnId"], turn);
+        assert_eq!(sample["allowInProgressTurn"], true);
+        assert!(text(sample, "prompt").starts_with("The user asks you a side question"));
+    }
+    assert!(text(&samples[0], "prompt").ends_with("Why this order?"));
+    let held = samples
+        .iter()
+        .find(|sample| text(sample, "prompt").ends_with("fixture:side-hold"))
+        .unwrap();
+    assert_eq!(
+        fixture_lines(&observed, "fixture-sample-cancels.jsonl"),
+        vec![json!({ "requestId": held["requestId"] })]
+    );
+    // None of them steered the turn or entered its history.
+    let history = conversation(&observed).to_string();
+    for question in ["Why this order?", "fixture:side-tool", "fixture:side-hold"] {
+        assert!(!history.contains(question), "{question}");
+    }
+}
+
+#[tokio::test]
+async fn a_finished_turn_withdraws_the_side_questions_codex_is_still_answering() {
+    const HELD: &str = "a1b2c3d4-0000-4000-8000-000000000004";
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let observed = home.clone();
+    let config = config(&root);
+    let input = plan(&root, "fixture:chat-hang");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
+    });
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            events.push(event.clone());
+            if event["type"] == "chat.side.available" {
+                let held = side_question(HELD, "fixture:side-hold");
+                deliver(&root, &json!([held])).await;
+                until(|| !fixture_lines(&observed, "fixture-samples.jsonl").is_empty()).await;
+                let finish = json!({ "id": "finish", "text": "finish now" });
+                deliver(&root, &json!([held, finish])).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+
+    let failed = position(&events, "chat.side.failed");
+    assert_eq!(events[failed]["sideQuestionId"], HELD);
+    assert!(text(&events[failed], "error").starts_with("The reply stopped before"));
+    assert!(position(&events, "chat.side.closed") < failed);
+    assert!(failed < position(&events, "turn.completed"));
+    assert_eq!(
+        fixture_lines(&observed, "fixture-sample-cancels.jsonl").len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn an_answer_codex_sent_as_the_turn_ends_is_recorded_before_admission_closes() {
+    const LAST: &str = "a1b2c3d4-0000-4000-8000-000000000006";
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let observed = home.clone();
+    let config = config(&root);
+    let input = plan(&root, "fixture:chat-hang");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
+    });
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            events.push(event.clone());
+            if event["type"] == "chat.side.available" {
+                // Codex answers it while the adapter steers the turn to its end, and
+                // completes the turn before refusing that steer.
+                let question = side_question(LAST, "fixture:side-finish");
+                deliver(&root, &json!([question])).await;
+                until(|| !fixture_lines(&observed, "fixture-samples.jsonl").is_empty()).await;
+                let finish = json!({ "id": "finish", "text": "finish now" });
+                deliver(&root, &json!([question, finish])).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+
+    // The worker expires the questions still open once admission closes, so the answer
+    // must come first.
+    let answered = position(&events, "chat.side.answered");
+    assert_eq!(events[answered]["sideQuestionId"], LAST);
+    assert_eq!(events[answered]["text"], "Side answer: fixture:side-finish");
+    assert!(answered < position(&events, "chat.side.closed"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.side.failed")
+    );
+}
+
+#[tokio::test]
+async fn side_questions_wait_while_codex_compacts_the_turn() {
+    const WAITING: &str = "a1b2c3d4-0000-4000-8000-000000000007";
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let observed = home.clone();
+    let config = config(&root);
+    let input = plan(&root, "fixture:chat-hang fixture:mid-turn-compaction");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
+    });
+    let mut events = Vec::new();
+    let mut sampled_while_compacting = None;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            events.push(event.clone());
+            if event["type"] == "chat.side.compacting" && event["compacting"] == true {
+                let question = side_question(WAITING, "Why?");
+                deliver(&root, &json!([question])).await;
+                // Several inbox polls, none of which may sample it yet.
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                sampled_while_compacting =
+                    Some(!fixture_lines(&observed, "fixture-samples.jsonl").is_empty());
+                let end = json!({ "id": "end", "text": "end compaction" });
+                deliver(&root, &json!([question, end])).await;
+            }
+            if event["type"] == "chat.side.answered" {
+                let finish = json!({ "id": "finish", "text": "finish now" });
+                deliver(&root, &json!([finish])).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+
+    assert_eq!(sampled_while_compacting, Some(false));
+    let started = events
+        .iter()
+        .position(|event| event["type"] == "chat.side.compacting" && event["compacting"] == true)
+        .unwrap();
+    let ended = events
+        .iter()
+        .position(|event| event["type"] == "chat.side.compacting" && event["compacting"] == false)
+        .unwrap();
+    let answered = position(&events, "chat.side.answered");
+    assert!(started < ended && ended < answered);
+    assert_eq!(events[answered]["sideQuestionId"], WAITING);
+}
+
+#[tokio::test]
+async fn a_codex_release_before_thread_sample_never_takes_side_questions() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    std::fs::write(home.join("fixture-release"), "0.171.0").unwrap();
+    let observed = home.clone();
+    let config = config(&root);
+    let input = plan(&root, "fixture:chat-hang");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
+    });
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            events.push(event.clone());
+            if event["type"] == "chat.side.unavailable" {
+                let question = side_question("a1b2c3d4-0000-4000-8000-000000000005", "Why?");
+                deliver(&root, &json!([question])).await;
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let finish = json!({ "id": "finish", "text": "finish now" });
+                deliver(&root, &json!([question, finish])).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+
+    let unavailable = position(&events, "chat.side.unavailable");
+    assert_eq!(events[unavailable]["release"], "0.171.0");
+    for kind in [
+        "chat.side.available",
+        "chat.side.answered",
+        "chat.side.failed",
+        "chat.side.closed",
+    ] {
+        assert!(!events.iter().any(|event| event["type"] == kind), "{kind}");
+    }
+    // The question was neither sampled nor mistaken for steering.
+    assert!(fixture_lines(&observed, "fixture-samples.jsonl").is_empty());
+    assert!(!conversation(&observed).to_string().contains("Why?"));
+}
+
+fn position(events: &[Value], kind: &str) -> usize {
+    events
+        .iter()
+        .position(|event| event["type"] == kind)
+        .unwrap_or_else(|| panic!("missing {kind}"))
+}

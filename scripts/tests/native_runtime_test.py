@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Disposable real systemd/directory-quota/local-disk qualification; never a personal host.
 
-Invoked through scripts/test-native-runtime.mjs with isolated fixture credentials.
+Invoked through scripts/ci/test-native-runtime.mjs with isolated fixture credentials.
 The loopback bridge exists only in this fixture; production remains Unix-only.
 """
 import base64

@@ -175,7 +175,7 @@ pub fn validate_settings_schema(settings: &[Value]) -> Result<(), &'static str> 
         let needs_options = choice && !dynamic;
         let flags_ok = ["required", "hidden", "dynamic", "refresh"]
             .iter()
-            .all(|flag| field.get(*flag).is_none_or(|value| value.is_boolean()))
+            .all(|flag| field.get(*flag).is_none_or(Value::is_boolean))
             && (!dynamic || choice);
         validate_limits(field, kind)?;
         let pattern_ok = match field.get("pattern") {

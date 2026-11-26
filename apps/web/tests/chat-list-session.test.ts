@@ -1,6 +1,6 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import { expect, it, vi } from 'vitest'
-import { effectScope, watch } from 'vue'
+import { effectScope, nextTick } from 'vue'
 import { state } from '../src/api'
 import { publishChats, useChatList } from '../src/chat-list'
 import {
@@ -9,7 +9,6 @@ import {
   writeChatList,
   writeHistory,
 } from '../src/history-cache'
-import { cacheSession } from '../src/use-live-run'
 
 vi.mock('../src/api', async () => {
   const { reactive } = await import('vue')
@@ -34,11 +33,8 @@ it('compares another installation\'s lists only with its own', async () => {
   const effect = effectScope()
   const list = effect.run(() => useChatList())!
   publishChats([{ id: 'a', slug: '', createdAt: 50_000 } as ChatView])
-  const shown: string[][] = []
-  effect.run(() => watch(list, value => shown.push(value.map(chat => chat.id)), { flush: 'sync' }))
 
-  // The second installation's lists are saved before it opens, so it can restore them.
-  const second = await cacheScope('second:test-session')
+  const second = await cacheScope(`second:${state.csrf}`)
   await writeHistory(second, '/chats/b/stream', {
     version: 2,
     cursor: 0,
@@ -49,11 +45,12 @@ it('compares another installation\'s lists only with its own', async () => {
     savedAt: Date.now(),
   })
   await writeChatList(second, { chats: [{ id: 'b', slug: '', createdAt: 1 }] as ChatView[], planTurnsEnabled: false, savedAt: Date.now() })
+
   Object.assign(state, { installationId: 'second' })
-  expect(cacheSession()).toBe('second:test-session')
+  await nextTick()
+  // The first installation's list leaves at once; the second's saved list replaces it.
+  expect(list.value).toEqual([])
   await vi.waitFor(() => expect(list.value.map(chat => chat.id)).toEqual(['b']))
-  // The first installation's list left at once; the second's saved list replaced it.
-  expect(shown).toEqual([[], ['b']])
   publishChats([{ id: 'b', slug: '', createdAt: 1 } as ChatView])
   await new Promise(resolve => setTimeout(resolve, 10))
   expect(peekHistory(second, '/chats/b/stream')).toBeDefined()

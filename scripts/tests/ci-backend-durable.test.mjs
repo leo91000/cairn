@@ -28,7 +28,7 @@ import {
   readProof,
   runDurableBackend,
   UPLOADER_SHA,
-} from '../ci-backend-durable.mjs'
+} from '../ci/ci-backend-durable.mjs'
 
 function fixture(t, mode = 'success', periodicDelayMs = 0) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-durable-'))
@@ -488,7 +488,7 @@ for (const mode of ['hang', 'periodic-hang', 'finished-hang']) {
 
 it('retains remote receipts when the foreground parent is killed, with fixture-owned descendants cleaned separately', async (t) => {
   const f = fixture(t)
-  const module = fileURLToPath(new URL('../ci-backend-durable.mjs', import.meta.url))
+  const module = fileURLToPath(new URL('../ci/ci-backend-durable.mjs', import.meta.url))
   const worker = path.join(f.root, 'worker.mjs')
   writeFileSync(worker, `
     import {artifactPublisher,runDurableBackend} from ${JSON.stringify(module)};

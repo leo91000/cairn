@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import {
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { projectResumeDiagnostic } from '../../../tests/e2e/resume-diagnostic'
+import { createResumeDiagnosticReporter } from '../src/chat-resume-diagnostics'
 
 describe('resume failure diagnostics', () => {
   it('keeps only fixed stages, enum values, booleans, and a capped count', () => {
@@ -58,5 +64,26 @@ describe('resume failure diagnostics', () => {
       stages: [],
     })
     expect(projectResumeDiagnostic(Number.POSITIVE_INFINITY, 'not records').requestCount).toBe(0)
+  })
+
+  it('scopes the 16-record diagnostic budget per reporter instance', () => {
+    const received: string[] = []
+    vi.stubGlobal('window', {
+      __cairnTestResumeDiagnostic: (record: { stage: string }) => received.push(record.stage),
+    })
+    try {
+      const first = createResumeDiagnosticReporter(true)
+      for (let i = 0; i < 20; i++)
+        first({ stage: 'resume-attempt' })
+      expect(received).toHaveLength(16)
+
+      const second = createResumeDiagnosticReporter(true)
+      second({ stage: 'handler-entered' })
+      expect(received).toHaveLength(17)
+      expect(received.at(-1)).toBe('handler-entered')
+    }
+    finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

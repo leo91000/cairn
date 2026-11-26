@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import process from 'node:process'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { observeRustBuild } from '../ci-rust-build-observation.mjs'
+import { observeRustBuild } from '../ci/ci-rust-build-observation.mjs'
 
 const environment = {
   GITHUB_ACTIONS: 'true',
@@ -98,7 +98,7 @@ test('rejects local execution, unknown phases and missing locations before files
 })
 
 test('CLI refuses a local probe and does not expose its environment', () => {
-  const script = fileURLToPath(new URL('../ci-rust-build-observation.mjs', import.meta.url))
+  const script = fileURLToPath(new URL('../ci/ci-rust-build-observation.mjs', import.meta.url))
   const result = spawnSync(process.execPath, [script, 'before-build', '/not-written.json'], {
     encoding: 'utf8',
     env: { ...environment, GITHUB_ACTIONS: 'false' },

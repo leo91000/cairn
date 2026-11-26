@@ -1,10 +1,7 @@
 //! Hook rules, their immutable versions and the rights the current version uses.
-use crate::{
-    error::{Error, Result},
-    store::Db,
-};
+use crate::{error::Result, store::Db};
 use cairn_contracts::{HookRuleDefinition, HookRuleSource};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
 pub(crate) const SCHEMA: &str = "
@@ -46,26 +43,6 @@ CREATE TABLE IF NOT EXISTS hook_rule_uses(
 CREATE INDEX IF NOT EXISTS hook_rule_uses_agent ON hook_rule_uses(agent_id,kind);
 CREATE INDEX IF NOT EXISTS hook_rule_uses_instance ON hook_rule_uses(instance_id,kind);
 ";
-
-/// Version 30 to 31. No rule exists before, so nothing is converted. Earlier upgrade
-/// rehearsals may already hold the empty tables.
-pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Recheck under the write lock: another startup may have completed the upgrade.
-    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if (31..=crate::store::DATABASE_VERSION).contains(&version) {
-        return Ok(());
-    }
-    if version != 30 {
-        return Err(Error::bad(
-            "Unexpected installation database version during upgrade.",
-        ));
-    }
-    tx.execute_batch(SCHEMA)?;
-    tx.pragma_update(None, "user_version", 31)?;
-    tx.commit()?;
-    Ok(())
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RuleRow {
@@ -298,47 +275,5 @@ impl Db<'_> {
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tables(connection: &Connection) -> Vec<String> {
-        connection
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('hook_rules','hook_rule_versions','hook_rule_uses') ORDER BY name")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn version_thirty_gains_empty_rule_tables_once() {
-        let root = tempfile::tempdir().unwrap();
-        drop(crate::store::Store::open(root.path()).unwrap());
-        let database = root.path().join("manager.db");
-        let connection = Connection::open(&database).unwrap();
-        connection
-            .execute_batch("DROP TABLE background_jobs; DROP TABLE hook_rule_uses; DROP TABLE hook_rule_versions; DROP TABLE hook_rules; PRAGMA user_version=30;")
-            .unwrap();
-        assert!(tables(&connection).is_empty());
-        drop(connection);
-
-        drop(crate::store::Store::open(root.path()).unwrap());
-        let mut connection = Connection::open(&database).unwrap();
-        assert_eq!(
-            tables(&connection),
-            ["hook_rule_uses", "hook_rule_versions", "hook_rules"]
-        );
-        let version: i64 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, crate::store::DATABASE_VERSION);
-        upgrade(&mut connection).unwrap();
-        connection.pragma_update(None, "user_version", 29).unwrap();
-        assert!(upgrade(&mut connection).is_err());
     }
 }

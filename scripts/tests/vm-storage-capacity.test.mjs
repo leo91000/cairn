@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { prepareVmStorageCapacity } from '../prepare-vm-storage-capacity.mjs'
+import { prepareVmStorageCapacity } from '../ci/prepare-vm-storage-capacity.mjs'
 
 const identity = `sha256:${'a'.repeat(64)}`
 const valid = {

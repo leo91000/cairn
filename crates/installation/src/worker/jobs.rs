@@ -24,22 +24,6 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE background_jobs(
 ) WITHOUT ROWID;
 CREATE INDEX background_jobs_run ON background_jobs(run_id,attempt_id);";
 
-pub(crate) fn upgrade(db: &mut rusqlite::Connection) -> Result<()> {
-    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 35 {
-        tx.execute_batch(SCHEMA)?;
-        crate::waits::sql::upgrade_jobs(&tx)?;
-        tx.pragma_update(None, "user_version", 36)?;
-    } else if !(36..=crate::store::DATABASE_VERSION).contains(&version) {
-        return Err(Error::conflict(
-            "Unexpected version during background jobs upgrade.",
-        ));
-    }
-    tx.commit()?;
-    Ok(())
-}
-
 pub(crate) async fn track(
     s: &Service,
     run: &Value,
@@ -369,35 +353,5 @@ mod tests {
             assert_eq!(observed.kind.as_deref(),Some("job_finished"));
             Ok(())
         }).await.unwrap();
-    }
-
-    #[test]
-    fn migration_preserves_existing_waits_and_accepts_job_and_time_members() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection.execute_batch("CREATE TABLE runs(id TEXT PRIMARY KEY); CREATE TABLE conversations(id TEXT PRIMARY KEY); INSERT INTO runs VALUES('run'); INSERT INTO conversations VALUES('chat');").unwrap();
-        // Reconstruct the previous version's schema independently of the upgrade.
-        let legacy = crate::waits::sql::SCHEMA
-            .replace("'job_finished','delay','at',", "")
-            .replace("       OR (kind IN ('job_finished','delay','at') AND target_run_id IS NULL AND target_chat_id IS NULL AND plugin_id IS NULL AND condition_type IS NOT NULL AND project_id IS NULL AND plugin_input IS NULL)\n", "");
-        connection.execute_batch(&legacy).unwrap();
-        connection.execute_batch("INSERT INTO durable_wakeups(key,chat_id,id,reason,seconds,created_at,wake_at) VALUES(1,'chat','w','fixture',60,1,60001); INSERT INTO wait_conditions(wakeup_key,position,kind,target_run_id) VALUES(1,0,'run_finished','target'); PRAGMA user_version=35;").unwrap();
-        upgrade(&mut connection).unwrap();
-        upgrade(&mut connection).unwrap();
-        let target: String = connection
-            .query_row(
-                "SELECT target_run_id FROM wait_conditions WHERE position=0",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(target, "target");
-        connection.execute_batch("INSERT INTO wait_conditions(wakeup_key,position,kind,condition_type) VALUES(1,1,'job_finished','job'),(1,2,'delay','5'),(1,3,'at','2026-11-16T00:00:00Z');").unwrap();
-        assert_eq!(
-            connection
-                .query_row("SELECT count(*) FROM wait_conditions", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            4
-        );
     }
 }

@@ -1,5 +1,9 @@
 # Installation database 18 → 19
 
+This guide describes a historical migration in the schema-37 manager at
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 `Store::open` performs this migration before serving requests. In one immediate
 SQLite transaction it verifies that `runs.data` and `runs.summary_data` are the
 expected generated columns, removes those columns and creates the equivalent
@@ -13,11 +17,12 @@ remains available for repair and retry. Reopening version 19 or a newer version
 performs no further work in this migration. Keep a consistent database/WAL backup
 before upgrading; there is no downgrade after a successful commit.
 
-The tests in `crates/installation/src/runs/projections/tests.rs` upgrade a real
-version-18 database, compare the original and new JSON projections, verify
-integrity and foreign keys, exercise concurrent startups, and check rollback on
-an unexpected schema or a conflicting view.
+The historical tests in `crates/installation/src/runs/projections/tests.rs` at
+commit `8062c889e7c1107d8230823c39328ce94acf61aa` upgrade a real version-18
+database, compare the original and new JSON projections, verify integrity and
+foreign keys, exercise concurrent startups, and check rollback on an unexpected
+schema or a conflicting view.
 
-The historical version-19 view definition is frozen in
-`crates/installation/src/runs/projections/v19.sql`: the projection upgrade must
-not reference placement columns introduced by [version 23](0023-typed-placement.md).
+That revision retains the version-19 view definition in
+`crates/installation/src/runs/projections/v19.sql`. The projection upgrade
+references only columns available before [version 23](0023-typed-placement.md).

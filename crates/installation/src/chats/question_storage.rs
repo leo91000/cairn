@@ -295,12 +295,6 @@ impl Db<'_> {
         Ok(())
     }
 
-    /// The only caller is the atomic v15 importer. Retired engine options had
-    /// no selection identity; retain their labels/order without inventing one.
-    pub(super) fn import_question(&self, question: &ChatQuestion) -> Result<()> {
-        self.write_question(question, question.source == "cairn")
-    }
-
     fn write_question(&self, q: &ChatQuestion, validate_new: bool) -> Result<()> {
         self.0.execute("DELETE FROM chat_questions WHERE id=?1 AND EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=?1 AND m.expires<=?2)", params![q.id,crate::config::now()])?;
         let existing = self.question(&q.chat_id, &q.id)?;

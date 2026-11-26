@@ -152,10 +152,10 @@ humaine connue lors de sa complétion (`request_id`). Le reçu Claude le garde a
 l'objet ; le rejeu Codex le reconstruit dans l'ordre des éléments natifs, avant les
 clarifications ultérieures. Un nouvel identifiant d'événement lors de la reprise
 ne renouvelle pas cette frontière : clients et transaction d'approbation refusent
-une demande plus récente. Les anciens reçus à une seule demande ont une frontière
-non ambiguë ; ceux à plusieurs demandes sans cette information restaurent le
-contenu mais exigent une nouvelle proposition avant l'approbation. Cela ne relance
-pas un tour natif achevé et ne modifie pas les messages ordinaires.
+une demande plus récente. Une proposition issue d’un ancien reçu sans
+`request_id` reste visible dans l’historique. Web, Android et la transaction
+commune HTTP/MCP exigent une nouvelle proposition avant l’approbation.
+L’affichage de l’ancien plan ne relance pas un tour natif achevé.
 
 ## Limites
 

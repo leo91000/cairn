@@ -684,7 +684,7 @@ pub struct WebPushSender {
 }
 
 impl WebPushSender {
-    pub fn new(private_key: String, subject: String) -> Result<Self, &'static str> {
+    pub fn new(private_key: &str, subject: String) -> Result<Self, &'static str> {
         use p256::elliptic_curve::sec1::ToEncodedPoint;
         let bytes = URL_SAFE_NO_PAD
             .decode(private_key.trim_end_matches('='))

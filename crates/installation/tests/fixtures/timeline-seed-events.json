@@ -1,0 +1,571 @@
+{
+  "runs": [
+    {
+      "id": "00000000-0000-4000-8000-000000000010",
+      "taskId": "00000000-0000-4000-8000-000000000011",
+      "status": "interrupted",
+      "createdAt": 1700000000001
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000a1",
+      "taskId": "00000000-0000-4000-8000-000000000011",
+      "status": "failed",
+      "createdAt": 1700000000001
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000a2",
+      "taskId": "00000000-0000-4000-8000-000000000011",
+      "status": "cancelled",
+      "createdAt": 1700000000001
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000a3",
+      "taskId": "00000000-0000-4000-8000-000000000011",
+      "status": "interrupted",
+      "createdAt": 1700000000001
+    }
+  ],
+  "events": [
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "chat.user",
+      "text": "Fix the build",
+      "payload": {
+        "attachments": [],
+        "createdAt": 1,
+        "messageId": "m1",
+        "text": "Fix the build"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "status",
+      "text": "Using Codex account: Studio",
+      "payload": {}
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "status",
+      "text": "running",
+      "payload": null
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "thread.started",
+      "text": "",
+      "payload": {
+        "thread_id": "thread-1",
+        "type": "thread.started"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "turn.started",
+      "text": "",
+      "payload": {
+        "type": "turn.started"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "item.started",
+      "text": "",
+      "payload": {
+        "item": {
+          "id": "msg_1",
+          "text": "",
+          "type": "agent_message"
+        },
+        "type": "item.started"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "item.updated",
+      "text": "Looking",
+      "payload": {
+        "item": {
+          "id": "msg_1",
+          "text": "Looking",
+          "type": "agent_message"
+        },
+        "type": "item.updated"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "item.updated",
+      "text": "Looking at the build",
+      "payload": {
+        "item": {
+          "id": "msg_1",
+          "text": "Looking at the build",
+          "type": "agent_message"
+        },
+        "type": "item.updated"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "item.completed",
+      "text": "",
+      "payload": {
+        "item": {
+          "id": "err_1",
+          "message": "Reconnecting... 1/5 (stream disconnected before completion: 503 Service Unavailable)",
+          "type": "error"
+        },
+        "type": "item.completed"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "item.started",
+      "text": "",
+      "payload": {
+        "item": {
+          "command": "cargo build",
+          "id": "cmd_1",
+          "status": "in_progress",
+          "type": "command_execution"
+        },
+        "type": "item.started"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623557,
+      "type": "item.completed",
+      "text": "",
+      "payload": {
+        "item": {
+          "aggregated_output": "{\"type\":\"turn.failed\"}",
+          "command": "cargo build",
+          "exit_code": 0,
+          "id": "cmd_1",
+          "status": "completed",
+          "type": "command_execution"
+        },
+        "type": "item.completed"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "item.completed",
+      "text": "Looking at the build. Fixed.",
+      "payload": {
+        "item": {
+          "id": "msg_1",
+          "text": "Looking at the build. Fixed.",
+          "type": "agent_message"
+        },
+        "type": "item.completed"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "turn.completed",
+      "text": "",
+      "payload": {
+        "type": "turn.completed",
+        "usage": {
+          "input_tokens": 1200,
+          "output_tokens": 340
+        }
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "status",
+      "text": "succeeded",
+      "payload": null
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "chat.user",
+      "text": "And the tests?",
+      "payload": {
+        "attachments": [
+          {
+            "chatId": "00000000-0000-4000-8000-000000000071",
+            "id": "00000000-0000-4000-8000-0000000000f1",
+            "kind": "file",
+            "name": "log.txt",
+            "size": 12
+          }
+        ],
+        "createdAt": 2,
+        "messageId": "m2",
+        "text": "And the tests?"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "status",
+      "text": "Routing replies",
+      "payload": {
+        "route": {
+          "providerName": "OpenRouter"
+        }
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "turn.started",
+      "text": "",
+      "payload": {
+        "type": "turn.started"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "error",
+      "text": "stream error: 503 reconnecting 2/5",
+      "payload": {
+        "message": "stream error: websocket closed, reconnecting 2/5",
+        "type": "error",
+        "willRetry": true
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "item.completed",
+      "text": "Tests pass.",
+      "payload": {
+        "item": {
+          "id": "msg_1",
+          "text": "Tests pass.",
+          "type": "agent_message"
+        },
+        "type": "item.completed"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "turn.completed",
+      "text": "",
+      "payload": {
+        "type": "turn.completed"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "chat.user",
+      "text": "Deploy it",
+      "payload": {
+        "attachments": [],
+        "createdAt": 3,
+        "messageId": "m3",
+        "text": "Deploy it"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "turn.started",
+      "text": "",
+      "payload": {
+        "type": "turn.started"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "turn.failed",
+      "text": "Rate limit exceeded",
+      "payload": {
+        "error": {
+          "message": "Rate limit exceeded"
+        },
+        "type": "turn.failed"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "error",
+      "text": "Rate limit exceeded",
+      "payload": {
+        "message": "Rate limit exceeded",
+        "type": "error"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "retry.scheduled",
+      "text": "Temporary agent error. Retrying in 5 seconds (attempt 1/3).",
+      "payload": {
+        "retry": {
+          "attempt": 1,
+          "cause": "provider",
+          "limit": 3,
+          "nextAttemptAt": 10
+        }
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "status",
+      "text": "Retrying",
+      "payload": {
+        "attempt": true
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623558,
+      "type": "turn.started",
+      "text": "",
+      "payload": {
+        "type": "turn.started"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623559,
+      "type": "turn.failed",
+      "text": "Rate limit exceeded",
+      "payload": {
+        "error": {
+          "message": "Rate limit exceeded"
+        },
+        "type": "turn.failed"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623559,
+      "type": "status",
+      "text": "failed",
+      "payload": {
+        "error": {
+          "message": "Rate limit exceeded"
+        }
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a1",
+      "createdAt": 1793314623559,
+      "type": "diagnostic",
+      "text": "{\"type\":\"turn.completed\"} stderr that looks like protocol",
+      "payload": null
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "chat.user",
+      "text": "Summarize",
+      "payload": {
+        "attachments": [],
+        "createdAt": 4,
+        "messageId": "c1",
+        "questionId": "q1",
+        "text": "(private answer)"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "status",
+      "text": "Codex speed",
+      "payload": {
+        "speed": {
+          "applied": "standard"
+        }
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "turn.started",
+      "text": "",
+      "payload": {
+        "type": "turn.started"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "engine.retry",
+      "text": "",
+      "payload": {
+        "attempt": 1,
+        "delayMs": 2000,
+        "maxRetries": 10,
+        "reason": "overloaded",
+        "status": 529
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "engine.retry",
+      "text": "",
+      "payload": {
+        "attempt": 2,
+        "delayMs": 4000,
+        "maxRetries": 10,
+        "reason": "overloaded",
+        "status": 529
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "item.started",
+      "text": "",
+      "payload": {
+        "item": {
+          "id": "c-msg-0",
+          "text": "Working",
+          "type": "agent_message"
+        },
+        "type": "item.started"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "provider.limit",
+      "text": "",
+      "payload": {
+        "resetsAt": 9007199254740991,
+        "status": "allowed_warning",
+        "window": "five_hour"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "engine.notice",
+      "text": "",
+      "payload": {
+        "level": "warning",
+        "message": "Context almost full"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "turn.waiting",
+      "text": "",
+      "payload": {
+        "tasks": [
+          {
+            "description": "npm test"
+          }
+        ]
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "item.completed",
+      "text": "Working on it",
+      "payload": {
+        "item": {
+          "id": "c-msg-0",
+          "text": "Working on it",
+          "type": "agent_message"
+        },
+        "type": "item.completed"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "turn.failed",
+      "text": "Claude execution stopped.",
+      "payload": {
+        "error": {
+          "message": "Claude execution stopped."
+        }
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a2",
+      "createdAt": 1793314623559,
+      "type": "status",
+      "text": "cancelled",
+      "payload": null
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a3",
+      "createdAt": 1793314623559,
+      "type": "status",
+      "text": "Queued",
+      "payload": null
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a3",
+      "createdAt": 1793314623559,
+      "type": "turn.started",
+      "text": "",
+      "payload": {
+        "type": "turn.started"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a3",
+      "createdAt": 1793314623560,
+      "type": "item.updated",
+      "text": "Partial",
+      "payload": {
+        "item": {
+          "id": "o-1",
+          "text": "Partial",
+          "type": "agent_message"
+        },
+        "type": "item.updated"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a3",
+      "createdAt": 1793314623560,
+      "type": "output",
+      "text": "plain worker output",
+      "payload": null
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a3",
+      "createdAt": 1793314623560,
+      "type": "runner.failed",
+      "text": "controller lost",
+      "payload": {
+        "error": {
+          "message": "controller lost"
+        },
+        "type": "runner.failed"
+      }
+    },
+    {
+      "runId": "00000000-0000-4000-8000-0000000000a3",
+      "createdAt": 1793314623560,
+      "type": "status",
+      "text": "interrupted",
+      "payload": null
+    }
+  ]
+}

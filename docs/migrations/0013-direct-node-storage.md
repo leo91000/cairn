@@ -1,5 +1,9 @@
 # Installation database 12 → 13
 
+This guide describes a historical migration in the schema-37 manager at
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 Direct node storage adds coordination metadata without rewriting disk payloads:
 
 - `direct_storage_grants` retains issued PUT windows and ambiguous outcomes.

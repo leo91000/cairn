@@ -22,7 +22,7 @@ use cairn_contracts::{
     AgentAccount, AgentId, ConversationLifecycle, ListAgentAccountsOutput, Mission, MissionSettings,
 };
 use cairn_protocol::TaskAuthorPolicy;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -46,31 +46,6 @@ pub(crate) const SUSPENDED: &str =
 
 pub(crate) const DENIED: &str =
     "You don't have access to this agent. Ask the installation owner to give you access.";
-
-/// Version 29 to 30. Existing memberships keep the existing agents.
-pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Recheck under the write lock: another startup may have completed the upgrade.
-    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if (30..=crate::store::DATABASE_VERSION).contains(&version) {
-        return Ok(());
-    }
-    if version != 29 {
-        return Err(Error::bad(
-            "Unexpected installation database version during upgrade.",
-        ));
-    }
-
-    tx.execute_batch(SCHEMA)?;
-    let agents = tx
-        .prepare("SELECT id FROM agents ORDER BY id")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Db(&tx).set(ROLLOUT, &json!({ "agentIds": agents }), None)?;
-    tx.pragma_update(None, "user_version", 30)?;
-    tx.commit()?;
-    Ok(())
-}
 
 impl Db<'_> {
     pub(crate) fn agent_accounts(&self, agent: &str) -> Result<Vec<AgentAccount>> {
@@ -787,25 +762,6 @@ mod tests {
     use crate::{agent_fixture::AgentFixture, relay_fixture, run_fixture::DbRunFixture};
 
     const MEMBER: &str = "member-account";
-
-    #[test]
-    fn reopening_an_upgraded_database_preserves_its_rollout_agent_list() {
-        let mut connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE agents(id TEXT PRIMARY KEY);
-             INSERT INTO agents VALUES('existing');
-             CREATE TABLE kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
-             PRAGMA user_version=29;",
-            )
-            .unwrap();
-        upgrade(&mut connection).unwrap();
-        let initial = Db(&connection).kv(ROLLOUT).unwrap().unwrap();
-        assert_eq!(initial, json!({ "agentIds": ["existing"] }));
-
-        upgrade(&mut connection).unwrap();
-        assert_eq!(Db(&connection).kv(ROLLOUT).unwrap(), Some(initial));
-    }
 
     /// A member's request straight to the installation API, without the fixture relay's
     /// own membership refresh, so only the installation decides when to confirm them.

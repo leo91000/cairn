@@ -12,6 +12,7 @@ struct JobsController {
     root: PathBuf,
     jobs: tokio::sync::Mutex<Registry>,
     turns: tokio::sync::Mutex<Vec<(Value, Vec<Value>, bool)>>,
+    turn_completed: tokio::sync::Notify,
     activity: tokio::sync::Notify,
     disconnect_activity: Option<tokio_util::sync::CancellationToken>,
     close_started: tokio::sync::Notify,
@@ -70,6 +71,7 @@ impl JobsController {
             let mut turns = state.turns.lock().await;
             turns[index].1.push(json!({"offset":2,"event":{"type":"output","stderr":false,"data":STANDARD.encode(output)}}));
             turns[index].2 = true;
+            state.turn_completed.notify_waiters();
         });
     }
 }
@@ -191,29 +193,41 @@ async fn serve_jobs_controller(
         return Json(response).into_response();
     }
     if path.contains("/turn/") {
-        let parts: Vec<_> = path.split('/').collect();
-        let turn = parts[4];
-        let turns = state.turns.lock().await;
-        let Some((plan, _, done)) = turns.iter().find(|(plan, _, _)| plan["turnId"] == turn) else {
-            return StatusCode::ACCEPTED.into_response();
+        let turn = path.split('/').nth(4).unwrap();
+        let starting = path.ends_with("/start");
+        // As on the native controller, hold a completion request until the
+        // receipt is ready or the server's observation window expires.
+        let response = async {
+            loop {
+                let completed = state.turn_completed.notified();
+                {
+                    let turns = state.turns.lock().await;
+                    let Some((plan, _, done)) =
+                        turns.iter().find(|(plan, _, _)| plan["turnId"] == turn)
+                    else {
+                        return StatusCode::ACCEPTED.into_response();
+                    };
+                    if starting {
+                        return Json(json!({"offset":0})).into_response();
+                    }
+                    if *done {
+                        return Json(TurnReceipt {
+                            attempt_id: text(plan, "id").into(),
+                            generation: "fixture-generation".into(),
+                            turn_id: turn.into(),
+                            code: 0,
+                            log_start: 0,
+                            log_end: 2,
+                        })
+                        .into_response();
+                    }
+                }
+                completed.await;
+            }
         };
-        if path.ends_with("/start") {
-            return Json(json!({"offset":0})).into_response();
-        }
-        if !done {
-            drop(turns);
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            return StatusCode::ACCEPTED.into_response();
-        }
-        return Json(TurnReceipt {
-            attempt_id: text(plan, "id").into(),
-            generation: "fixture-generation".into(),
-            turn_id: turn.into(),
-            code: 0,
-            log_start: 0,
-            log_end: 2,
-        })
-        .into_response();
+        return tokio::time::timeout(Duration::from_secs(20), response)
+            .await
+            .unwrap_or_else(|_| StatusCode::ACCEPTED.into_response());
     }
     if path.ends_with("/logs") {
         let offset = request
@@ -396,6 +410,7 @@ async fn jobs_fixture(
             cairn_installation::background_jobs::boot_ms().unwrap() + 60_000,
         )),
         turns: tokio::sync::Mutex::new(Vec::new()),
+        turn_completed: tokio::sync::Notify::new(),
         activity: tokio::sync::Notify::new(),
         disconnect_activity: matches!(
             deadline,
@@ -789,10 +804,11 @@ async fn check_background_deadline(case: DeadlineCase) {
         .await;
     assert_eq!(completed["summary"], "Background work started");
     assert_eq!(fixture.worker_active_runs().await, Some(1));
-    assert!(matches!(
-        state.jobs.lock().await.status(job_id).unwrap(),
-        Outcome::Running
-    ));
+    let outcome = state.jobs.lock().await.status(job_id).unwrap();
+    assert!(
+        matches!(outcome, Outcome::Running),
+        "background job ended before advancing the fixture clock: {outcome:?}"
+    );
 
     tokio::time::timeout(Duration::from_secs(10), state.activity.notified())
         .await

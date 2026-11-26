@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hasJniZeroInit, smokeProbe, verifySmokeOutput } from '../android-release-smoke.mjs'
+import { hasJniZeroInit, smokeProbe, verifySmokeOutput } from '../android/android-release-smoke.mjs'
 
 const success = `INSTRUMENTATION_RESULT: cairnReleaseSmoke=${smokeProbe}\nINSTRUMENTATION_CODE: -1\n`
 

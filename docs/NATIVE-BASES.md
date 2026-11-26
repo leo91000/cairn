@@ -100,7 +100,7 @@ filesystems for the actual quota, base and identity admission cases:
 
 ```sh
 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
-  CAIRN_NATIVE_DISPOSABLE_HOST=1 node scripts/qualify-native-quota.mjs
+  CAIRN_NATIVE_DISPOSABLE_HOST=1 node scripts/ci/qualify-native-quota.mjs
 ```
 
 Do not designate a personal or production host. The launcher refuses an unset

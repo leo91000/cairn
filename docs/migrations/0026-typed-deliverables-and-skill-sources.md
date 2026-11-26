@@ -1,5 +1,9 @@
 # Typed deliverables and skill sources (25 → 26)
 
+This historical migration and its tests remain available at commit
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 Schema-24 databases first run the existing coding-agent configuration upgrade
 to schema 25. This A16 migration then upgrades schema 25 to 26 automatically at
 startup in one immediate SQLite transaction. `artifacts` identifies a run/key;
@@ -30,8 +34,8 @@ the value cast to BLOB, preserving legal leading NULs and multibyte strings.
 Stop the previous manager and retain a consistent database/WAL backup before an
 upgrade. An older binary cannot open schema 26: recovery requires the retained
 backup or a compatible forward fix. This PR authorizes no production action.
-Follow the private upgrade rehearsal in `docs/PRODUCTION-CAIRN.md` before a future
-release; synthetic qualification does not replace it.
+For current upgrades, follow the
+[private upgrade rehearsal](../PRODUCTION-CAIRN.md#private-installation-upgrade-rehearsal).
 
 ## Qualification
 
@@ -39,8 +43,8 @@ release; synthetic qualification does not replace it.
 committed real v24 Store snapshot from main `c2e72b39` (the test-only #661
 commit uses identical native sources). The fixture applies base `f599b77c`'s
 24→25 coding-agent-configuration schema step and adds one explicitly synthetic
-configuration row. Opening this schema-25 fixture through the current Store runs
-A16's 25→26 migration followed by the Plan 26→27 migration. The fixture compares
+configuration row. The historical qualification exercised A16's 25→26 migration followed by the
+Plan 26→27 migration against this schema-25 fixture. The fixture compares
 every pre-existing column and row while excluding only the two expected Plan
 columns. The configuration row and all prior rows/schema objects must remain
 unchanged. Artifact versions, a public link and skill

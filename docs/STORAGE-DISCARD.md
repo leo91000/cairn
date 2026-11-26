@@ -110,7 +110,7 @@ silently skipping it in a container build sandbox:
 
 ```sh
 rustup toolchain install 1.97.0 --profile minimal
-scripts/test-firecracker-discard.sh
+scripts/ci/test-firecracker-discard.sh
 ```
 
 Disposable retained-image boot test on Debian with KVM, Python 3.11,

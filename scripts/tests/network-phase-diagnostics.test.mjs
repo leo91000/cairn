@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
-import { networkPhaseDiagnostics } from '../network-phase-diagnostics.mjs'
+import { networkPhaseDiagnostics } from '../ci/network-phase-diagnostics.mjs'
 
 it('keeps the last entered operation through lifecycle and cleanup events', () => {
   const directory = mkdtempSync(join(tmpdir(), 'cairn-network-phases-'))
