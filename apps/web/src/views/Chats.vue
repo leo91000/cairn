@@ -93,6 +93,7 @@ import NodeExecution from '../components/NodeExecution.vue'
 import PlanBar from '../components/PlanBar.vue'
 import QueueStrip from '../components/QueueStrip.vue'
 import RecoveryNotice from '../components/RecoveryNotice.vue'
+import SideQuestionButton from '../components/SideQuestionButton.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import SubagentBar from '../components/SubagentBar.vue'
 import SubagentPanel from '../components/SubagentPanel.vue'
@@ -321,6 +322,29 @@ const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
 const sideQuestions = ref<InstanceType<typeof ChatSideQuestions>>()
+const headerSideQuestionButton = ref<InstanceType<typeof SideQuestionButton>>()
+const workingSideQuestionButton = ref<InstanceType<typeof SideQuestionButton>>()
+const fullscreenSideQuestionButton = ref<InstanceType<typeof SideQuestionButton>>()
+const sideQuestionIndicator = computed(() => sideQuestions.value?.indicator ?? null)
+
+function sideQuestionFocusTarget() {
+  const workingButton = workingSideQuestionButton.value?.button
+  if (workingButton && activity.value?.canFocusWorkingAction(workingButton))
+    return workingButton
+
+  if (activity.value?.fullscreen)
+    return fullscreenSideQuestionButton.value?.button ?? activity.value.fullscreenButton
+
+  return headerSideQuestionButton.value?.button ?? visibleMenuTrigger()
+}
+
+async function moveSideQuestionFocus() {
+  const conversation = detail.value?.id
+  await nextTick()
+  if (detail.value?.id === conversation && document.activeElement === document.body)
+    sideQuestionFocusTarget()?.focus({ preventScroll: true })
+}
+
 // How many side questions each reply has, for its badge in the conversation.
 const sideQuestionCounts = computed(() => {
   const counts: Record<string, number> = {}
@@ -1702,6 +1726,14 @@ function key(event: KeyboardEvent) {
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-1">
+          <SideQuestionButton
+            v-if="sideQuestionIndicator && !activity?.showsWorkingIndicator && !activity?.fullscreen"
+            ref="headerSideQuestionButton"
+            :indicator="sideQuestionIndicator"
+            header
+            @click="sideQuestions?.openDefault()"
+            @move-focus="moveSideQuestionFocus"
+          />
           <button
             v-if="detail?.run && fileCount"
             :class="iconButton"
@@ -1969,7 +2001,30 @@ function key(event: KeyboardEvent) {
             @position="live.savePosition"
             @implement="implementPlan"
             @pause-wait="busy || action('pause', { paused: true })"
-          />
+          >
+            <template #announcements>
+              <p class="sr-only" role="status" data-testid="side-question-status">
+                {{ sideQuestionIndicator && sideQuestionIndicator.kind !== 'idle' && sideQuestionIndicator.kind !== 'saved' ? sideQuestionIndicator.label : '' }}
+              </p>
+            </template>
+            <template v-if="sideQuestionIndicator" #working-action>
+              <SideQuestionButton
+                ref="workingSideQuestionButton"
+                :indicator="sideQuestionIndicator"
+                @click="sideQuestions?.openDefault()"
+                @move-focus="moveSideQuestionFocus"
+              />
+            </template>
+            <template v-if="sideQuestionIndicator" #fullscreen-action>
+              <SideQuestionButton
+                ref="fullscreenSideQuestionButton"
+                :indicator="sideQuestionIndicator"
+                header
+                @click="sideQuestions?.openDefault()"
+                @move-focus="moveSideQuestionFocus"
+              />
+            </template>
+          </ActivityFeed>
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
             <UiNotice
               v-if="detail?.environmentState"
@@ -2027,6 +2082,7 @@ function key(event: KeyboardEvent) {
               :can-ask="!readOnly && !!detail.canAskSideQuestion"
               :reason="detail.sideQuestionReason"
               :provider="detail.provider"
+              :default-trigger="sideQuestionFocusTarget"
               @reveal="activity?.reveal($event) || sideQuestions?.unreachable($event)"
             />
             <section
