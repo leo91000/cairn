@@ -6,6 +6,7 @@ import {
   computed,
   onScopeDispose,
   ref,
+  shallowRef,
   watch,
 } from 'vue'
 import { readRunHistory } from '../../../packages/contracts/generated/readRunHistory'
@@ -68,8 +69,10 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
   const timeline = ref<TimelineEntry[]>([])
   const status = ref<LiveStatus>('connecting')
   const slow = ref(false)
-  // The saved copy shown is known to be older than the server's conversation.
-  const stale = ref(false)
+  // The saved copy shown until the stream completes it. Whether it is outdated is decided again
+  // whenever what the Fil knows changes, so a list read after the copy still flags it.
+  const savedCopy = shallowRef<CachedHistory>()
+  const stale = computed(() => !!savedCopy.value && options.current?.(savedCopy.value) === false)
   const catchingUp = ref(true)
   const synced = ref(false)
   // The snapshot shown comes from the saved conversation, not yet from the server.
@@ -155,7 +158,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     }
 
     if (cached) {
-      stale.value = options.current?.(cached) === false
+      savedCopy.value = cached
       showSaved(cached)
     }
 
@@ -272,7 +275,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
 
         complete = !batch.more
         if (complete) {
-          stale.value = false
+          savedCopy.value = undefined
           hasOlder.value = older
           synced.value = true
           if (served)
@@ -334,7 +337,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     olderError.value = ''
     position.value = undefined
     synced.value = false
-    stale.value = false
+    savedCopy.value = undefined
     restored.value = false
     hasOlder.value = false
     snapshot.value = undefined

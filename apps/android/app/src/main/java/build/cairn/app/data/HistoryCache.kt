@@ -257,6 +257,7 @@ class HistoryCache(
         withContext(Dispatchers.IO) {
             val prefix = runLogPrefix(origin, session)
             lock.withLock {
+                dropUnnamedRunLogs()
                 val keys =
                     memory.keys.filter { it.startsWith(prefix) } +
                         synchronized(pendingLock) {
@@ -269,6 +270,35 @@ class HistoryCache(
                 }
             }
         }
+
+    /**
+     * Run logs saved before they were named apart can only be told by reading them: this happens
+     * once, at the first removal, and a marker records it.
+     */
+    private fun dropUnnamedRunLogs() {
+        val marker = File(root, ".run-logs-named")
+        if (marker.exists()) return
+        root
+            .listFiles()
+            .orEmpty()
+            .filter { it.isFile && !it.name.startsWith("run-") && !it.name.startsWith(".") }
+            .filter { file ->
+                runCatching {
+                        val value =
+                            memory[file.name]?.value
+                                ?: wireJson.decodeFromString<CachedHistory>(
+                                    String(unseal(file.name, file.readBytes()), Charsets.UTF_8)
+                                )
+                        value.state.chat == null && value.state.run != null
+                    }
+                    .getOrDefault(false)
+            }
+            .forEach { removeLocked(it.name) }
+        runCatching {
+            root.mkdirs()
+            marker.createNewFile()
+        }
+    }
 
     suspend fun clear() =
         withContext(Dispatchers.IO) {
@@ -349,6 +379,8 @@ class HistoryCache(
             root
                 .listFiles()
                 .orEmpty()
+                // Markers are not saved conversations.
+                .filterNot { it.name.startsWith(".") }
                 .sortedByDescending { it.lastModified() }
                 .forEachIndexed { index, file ->
                     total += file.length()

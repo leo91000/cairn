@@ -56,7 +56,7 @@ it('forgets the saved copies of conversations that leave the server list', async
     createdAt: 1,
   } as ChatView
   const kept = { id: 'kept', slug: '', createdAt: 1 } as ChatView
-  // Just created: a list read moments earlier may not hold it yet.
+  // The server's lists only move forward: even the newest conversation is gone once unlisted.
   const fresh = { id: 'fresh', slug: '', createdAt: Date.now() } as ChatView
   await writeHistory(scope, '/chats/fresh/stream', saved())
   publishChats([gone, kept, fresh])
@@ -70,7 +70,7 @@ it('forgets the saved copies of conversations that leave the server list', async
   // Run logs do not name their conversation: every saved one goes.
   expect(peekHistory(scope, '/runs/gone-run/stream')).toBeUndefined()
   expect(peekHistory(scope, '/chats/kept/stream')).toBeDefined()
-  expect(peekHistory(scope, '/chats/fresh/stream')).toBeDefined()
+  expect(peekHistory(scope, '/chats/fresh/stream')).toBeUndefined()
 })
 
 it('forgets what left the list since it was saved when the server list arrives first', async () => {
@@ -81,12 +81,15 @@ it('forgets what left the list since it was saved when the server list arrives f
   vi.stubGlobal('document', Object.assign(new EventTarget(), { hidden: false }))
   const scope = await cacheScope('test-session')
   await writeHistory(scope, '/chats/gone/stream', saved())
-  await writeChatList(scope, { chats: [{ id: 'gone', slug: '', createdAt: 1 }, { id: 'kept', slug: '', createdAt: 20_000 }] as ChatView[], planTurnsEnabled: false, savedAt: Date.now() })
+  await writeHistory(scope, '/chats/newer/stream', saved())
+  // Another tab saved a list holding a conversation created after the server list read here.
+  await writeChatList(scope, { chats: [{ id: 'gone', slug: '', createdAt: 1 }, { id: 'kept', slug: '', createdAt: 20_000 }, { id: 'newer', slug: '', createdAt: 25_000 }] as ChatView[], planTurnsEnabled: false, savedAt: Date.now() })
 
   publishChats([{ id: 'kept', slug: '', createdAt: 20_000 } as ChatView])
   const effect = effectScope()
   const list = effect.run(() => useChatList())!
   await vi.waitFor(() => expect(peekHistory(scope, '/chats/gone/stream')).toBeUndefined())
+  expect(peekHistory(scope, '/chats/newer/stream')).toBeDefined()
   expect(list.value.map(chat => chat.id)).toEqual(['kept'])
   effect.stop()
   vi.unstubAllGlobals()

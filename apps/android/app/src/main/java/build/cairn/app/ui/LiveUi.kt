@@ -60,9 +60,10 @@ fun rememberLive(
     var value by remember(path, api) { mutableStateOf(LiveSnapshot()) }
     var reconnectGeneration by remember(path, api) { mutableIntStateOf(0) }
     val session = remember(path, api) { LiveSession() }
-    // Retained pager pages become previews and then selected again without being restored.
-    // Recheck their latest snapshot at selection, so an outdated one says it is updating.
-    var stale by
+    // The saved copy shown until the stream completes it. Retained pager pages become previews and
+    // then selected again without being restored: their latest snapshot is the copy. Whether it is
+    // outdated is decided again on every composition, so a Fil read after the copy still flags it.
+    var savedCopy by
         remember(path, api, streaming) {
             val previous = session.snapshot
             val detail = previous.state
@@ -77,7 +78,7 @@ fun rememberLive(
                         previous.entries,
                     )
                 else null
-            mutableStateOf(streaming && saved != null && !current(saved))
+            mutableStateOf(saved?.takeIf { streaming })
         }
     val parentScope = rememberCoroutineScope()
     val scope =
@@ -108,7 +109,7 @@ fun rememberLive(
             if (session.path != path)
                 vm.historyCache.read(key)?.let {
                     session.restore(it, path, api.streamGeneration.get())
-                    stale = streaming && !isCurrent(it)
+                    savedCopy = it.takeIf { streaming }
                     value = session.snapshot
                 }
             val replay = session.snapshot
@@ -153,7 +154,7 @@ fun rememberLive(
                                         }
                                     // Only the server's own complete state replaces the copy, as
                                     // on the web; a reconnect keeps saying it is updating.
-                                    if (it !== replay && it.status == LIVE_STATUS) stale = false
+                                    if (it !== replay && it.status == LIVE_STATUS) savedCopy = null
                                 }
                                 if (it.httpStatus in listOf(401, 403, 404, 409)) {
                                     vm.historyCache.remove(key)
@@ -197,6 +198,7 @@ fun rememberLive(
         }
     }
     // An outdated copy says it is updating, even when it came from an earlier live snapshot.
+    val stale = savedCopy?.let { !current(it) } == true
     val visible =
         when {
             !stale -> value

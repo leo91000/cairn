@@ -64,6 +64,27 @@ class HistoryCacheTest {
         }
 
     @Test
+    fun `run logs saved before they were named apart go once`() = runBlocking {
+        val run = Run(id = "r", status = "succeeded", taskId = "")
+        val cache = cache()
+        // Saved under a bare digest, as before run logs were named apart.
+        cache.save("legacy", record().copy(state = LiveState(run = run)), true)
+        cache.save(
+            "conversation",
+            record().copy(state = LiveState(run = run, chat = Chat(id = "c"))),
+            true,
+        )
+        cache().removeRunLogs("origin", "session")
+        val reopened = cache()
+        assertNull(reopened.read("legacy"))
+        assertNotNull(reopened.read("conversation"))
+        // Later removals only drop files by name.
+        reopened.save("legacy", record().copy(state = LiveState(run = run)), true)
+        reopened.removeRunLogs("origin", "session")
+        assertNotNull(cache().read("legacy"))
+    }
+
+    @Test
     fun `a forgotten conversation is never saved again until the cache is cleared`() = runBlocking {
         val cache = cache()
         cache.save("gone", record(), true)

@@ -42,12 +42,12 @@ function saveList() {
 // A conversation that leaves the server's list was deleted or is no longer shared with this
 // person: its saved copies go too, under the slug and the identifier it may be opened by, and
 // the saved run logs, among which its earlier runs cannot be told apart.
-function forgetRemoved(previous: ChatView[], chats: ChatView[]) {
+function forgetRemoved(previous: ChatView[], chats: ChatView[], spareRecent = false) {
   const listed = new Set(chats.map(chat => chat.id))
-  // A list read moments earlier, by another tab or stream, may not hold a conversation created
-  // since: only a conversation older than the newest one listed, by the server's clock, is gone.
-  const newest = Math.max(0, ...previous.map(chat => chat.createdAt), ...chats.map(chat => chat.createdAt))
-  const removed = previous.filter(chat => !listed.has(chat.id) && chat.createdAt < newest - RECENT)
+  // A list another tab saved may hold a conversation created after the server list read here:
+  // only one older than the newest the server lists, by the server's clock, is gone then.
+  const newest = Math.max(0, ...chats.map(chat => chat.createdAt))
+  const removed = previous.filter(chat => !listed.has(chat.id) && (!spareRecent || chat.createdAt < newest - RECENT))
   if (!removed.length)
     return
   void cacheScope(cacheSession()).then((scope) => {
@@ -85,7 +85,7 @@ async function restoreList() {
     return
   // The server's list may have arrived first: what left it since the save goes too.
   if (served)
-    forgetRemoved(saved.chats, chatList.value)
+    forgetRemoved(saved.chats, chatList.value, true)
   else
     publishChats(saved.chats, { saved: true, planTurnsEnabled: saved.planTurnsEnabled })
 }

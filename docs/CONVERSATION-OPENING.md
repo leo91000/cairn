@@ -133,8 +133,9 @@ invalidates its reading position. Logout and a changed cache revision still inva
 every saved conversation. A conversation that leaves the server's list (deleted, or no
 longer shared) loses its own saved copy on web and Android, is not saved again while the page
 or app is open, and the session's saved run logs go with it, since a run does not name its
-conversation. A conversation created within 10 seconds of the newest one listed (server
-clock) is never treated as gone: a list read moments earlier may predate it; the web also compares the server's
+conversation. Server lists only move forward, so a conversation missing from a
+later one is gone; only against a list another web tab saved, a conversation created within
+10 seconds of the newest one the server lists (server clock) is spared; the web also compares the server's
 first list with the list it saved last. Signing out of the web also deletes the earlier
 `cairn-history-v2` store.
 

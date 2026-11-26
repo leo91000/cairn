@@ -107,16 +107,10 @@ fun nextLiveState(previous: LiveState?, state: LiveState?, changes: ChatChanges?
 fun leftChatPaths(previous: List<Chat>?, chats: List<Chat>?): List<String> {
     if (previous == null || chats == null) return emptyList()
     val listed = chats.mapTo(HashSet()) { it.id }
-    // A list read moments earlier may not hold a conversation created since: only a conversation
-    // older than the newest one listed, by the server's clock, is gone, as on the web.
-    val newest = (previous + chats).maxOfOrNull { it.createdAt } ?: 0
-    return previous
-        .filter { it.id !in listed && it.createdAt < newest - RECENT_CHAT_MILLIS }
-        .map { savedChatPath(it.id) }
+    // Both lists come from this device's own list stream, which only moves forward: unlike a list
+    // another web tab saved, a conversation missing from the newer one is gone.
+    return previous.filter { it.id !in listed }.map { savedChatPath(it.id) }
 }
-
-/** The server shares a list for up to a quarter second; this leaves ample margin. */
-private const val RECENT_CHAT_MILLIS = 10_000L
 
 /** Where a conversation opened by its identifier is saved. */
 fun savedChatPath(id: String) = "/chats/${segment(id)}/stream"
