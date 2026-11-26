@@ -274,7 +274,7 @@ internal fun WorkingIndicator(
         }
         if (action != null) {
             Spacer(Modifier.width(4.dp))
-            action()
+            Box(Modifier.withoutLineHeight()) { action() }
         }
     }
 }

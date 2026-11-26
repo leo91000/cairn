@@ -6,6 +6,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.dp
@@ -405,28 +406,36 @@ abstract class SideQuestionCases {
                 )
             }
         }
-        compose.onNodeWithContentDescription("Question à côté · Sans réponse").assertExists()
+        compose.onNodeWithContentDescription("Question à côté · Sans réponse (1)").assertExists()
         questions = listOf(failed, answered)
-        compose.onNodeWithContentDescription("Question à côté · Réponse prête").assertExists()
+        compose
+            .onNodeWithContentDescription("Question à côté · Réponse prête (1) · Sans réponse (1)")
+            .assertExists()
     }
 
     @Test
     fun theButtonOffersAGeneralQuestionOnTheWorkingRowBeforeAnyReply() {
         val side = SideQuestionState()
+        var showAction by mutableStateOf(false)
+        val action: @Composable () -> Unit = {
+            SideQuestionButton(
+                chat(canAsk = true).copy(sideQuestions = emptyList()),
+                side,
+            )
+        }
         compose.setContent {
             CairnTheme {
                 WorkingIndicator(
                     WorkingStep("Omni travaille", "Dernière étape : Exécuter une commande", 1000L),
-                    action = {
-                        SideQuestionButton(
-                            chat(canAsk = true).copy(sideQuestions = emptyList()),
-                            side,
-                        )
-                    },
+                    modifier = Modifier.testTag("working-row"),
+                    action = if (showAction) action else null,
                 )
             }
         }
-        compose.onNodeWithTag("agent-working").assertExists()
+        val workingRow = compose.onNodeWithTag("working-row")
+        val height = workingRow.getBoundsInRoot().height
+        showAction = true
+        assertEquals(height, workingRow.getBoundsInRoot().height)
         compose.onNodeWithContentDescription("Poser une question à côté").performClick()
         assertTrue(side.open)
         assertEquals("", side.itemId)
@@ -445,7 +454,7 @@ abstract class SideQuestionCases {
                 )
             }
         }
-        compose.onNodeWithContentDescription("Questions à côté · Enregistrées").assertExists()
+        compose.onNodeWithContentDescription("Questions à côté · Enregistrées (1)").assertExists()
         compose.onNodeWithTag("side-question-button").performClick()
         assertTrue(side.open)
     }

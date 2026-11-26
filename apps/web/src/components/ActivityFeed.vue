@@ -497,6 +497,7 @@ defineExpose({
   subagents,
   plan,
   showsWorkingIndicator,
+  fullscreen,
   openFiles: () => { artifactViewer.value = '' },
   enterFullscreen,
   followLatest,
@@ -522,6 +523,7 @@ defineExpose({
             <span class="activity-presence w-[7px] h-[7px] rounded-full bg-[light-dark(#8e8baa,_var(--dark-accent-surface))] shrink-0" :class="{ live: active && !suspended }" /><span>{{ active && suspended ? exclusiveSuspensionLabel : fullscreen ? task : chat ? (active ? 'Working' : 'Conversation') : 'Agent activity' }}</span>
           </div>
           <div class="activity-toolbar-controls ml-auto flex items-center gap-5 shrink-0 phone:flex-1 phone:justify-end phone:gap-4">
+            <slot v-if="fullscreen && !showsWorkingIndicator" name="fullscreen-action" />
             <button v-if="deliverables?.length" class="rounded-md px-2 py-2 text-xs text-muted hover:bg-hover hover:text-ink" @click="artifactViewer = ''">
               Files · {{ latestArtifacts(deliverables).length }}
             </button>

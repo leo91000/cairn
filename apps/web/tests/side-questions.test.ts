@@ -41,7 +41,6 @@ describe('sideQuestionIndicator', () => {
       label: 'Ask a side question',
       badge: null,
       badgeTone: null,
-      hasQuestions: false,
     })
   })
 
@@ -56,7 +55,6 @@ describe('sideQuestionIndicator', () => {
       label: 'Side question · Claude Code is answering',
       badge: null,
       badgeTone: null,
-      hasQuestions: true,
     })
 
     expect(sideQuestionIndicator({
@@ -66,10 +64,9 @@ describe('sideQuestionIndicator', () => {
       provider: 'antigravity',
     })).toEqual({
       kind: 'pending',
-      label: 'Side questions · Antigravity is answering',
+      label: 'Side questions · Antigravity is answering · Answer ready (1)',
       badge: '1',
       badgeTone: 'accent',
-      hasQuestions: true,
     })
   })
 
@@ -85,10 +82,9 @@ describe('sideQuestionIndicator', () => {
       provider: 'claude',
     })).toEqual({
       kind: 'failed',
-      label: 'Side question · Not answered',
+      label: 'Side question · Not answered (1)',
       badge: '!',
       badgeTone: 'danger',
-      hasQuestions: true,
     })
 
     expect(sideQuestionIndicator({
@@ -98,10 +94,9 @@ describe('sideQuestionIndicator', () => {
       provider: 'claude',
     })).toEqual({
       kind: 'ready',
-      label: 'Side questions · Answer ready',
-      badge: '2',
+      label: 'Side questions · Answer ready (1) · Not answered (1)',
+      badge: '1',
       badgeTone: 'accent',
-      hasQuestions: true,
     })
 
     expect(sideQuestionIndicator({
@@ -111,10 +106,9 @@ describe('sideQuestionIndicator', () => {
       provider: 'claude',
     })).toEqual({
       kind: 'saved',
-      label: 'Side questions · Saved',
+      label: 'Side questions · Saved (3)',
       badge: '3',
       badgeTone: 'neutral',
-      hasQuestions: true,
     })
   })
 

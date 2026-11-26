@@ -30,6 +30,7 @@ const props = defineProps<{
   /** Why a side question cannot be asked now, from the server. */
   reason?: string | null
   provider?: Provider | null
+  defaultTrigger?: HTMLButtonElement
 }>()
 const emit = defineEmits<{
   /** Follow a side question back to the reply it is about. */
@@ -37,6 +38,7 @@ const emit = defineEmits<{
 }>()
 
 const open = ref(false)
+const openedFromDefault = ref(false)
 const text = ref('')
 const quote = ref('')
 const itemId = ref('')
@@ -66,7 +68,7 @@ watch([text, quote, itemId, replyEventId, focus], () => {
   draftRevision++
 }, { flush: 'sync' })
 
-// Answers that arrived while the panel was closed show above the composer until read.
+// Answers that arrived while the panel was closed are highlighted until read.
 const seen = ref(new Set<string>())
 let known = ''
 watch(() => [props.chatId, props.questions, focusEvents.value] as const, ([chatId, questions]) => {
@@ -89,8 +91,6 @@ watch(() => [props.chatId, props.questions, focusEvents.value] as const, ([chatI
     markSeen()
 }, { immediate: true })
 
-const pending = computed(() => props.questions.filter(question => question.status === 'pending'))
-const unread = computed(() => props.questions.filter(question => question.status !== 'pending' && question.status !== 'cancelled' && !seen.value.has(question.id)))
 const shown = computed(() => props.questions.filter((question) => {
   if (!focus.value)
     return true
@@ -108,13 +108,6 @@ function markSeen() {
 }
 
 const engine = computed(() => props.provider ? providers[props.provider].label : 'The agent')
-const status = computed(() => {
-  if (pending.value.length)
-    return `${engine.value} is answering`
-  if (!unread.value.length)
-    return 'Saved'
-  return unread.value.some(question => question.status === 'answered') ? 'Answer ready' : 'Not answered'
-})
 const indicator = computed(() => sideQuestionIndicator({
   questions: props.questions,
   seen: seen.value,
@@ -127,10 +120,12 @@ function openDefault() {
     show()
   else
     ask({ itemId: '', replyEventId: null, quote: '' })
+  openedFromDefault.value = true
 }
 
 function ask(about: { itemId: string, replyEventId: number | null, quote: string }) {
   draftRevision++
+  openedFromDefault.value = false
   itemId.value = about.itemId
   replyEventId.value = about.replyEventId
   quote.value = about.quote
@@ -144,6 +139,7 @@ function ask(about: { itemId: string, replyEventId: number | null, quote: string
 /** Opens the panel, on the side questions about one reply when `item` is given. */
 function show(reply?: { itemId: string, replyEventId: number | null, replyEventIds: number[] }) {
   draftRevision++
+  openedFromDefault.value = false
   const item = reply?.itemId ?? ''
   // Questions asked from a reply's panel are about that reply.
   if (item && (item !== itemId.value || reply?.replyEventId !== replyEventId.value)) {
@@ -250,11 +246,12 @@ defineExpose({
 
 <template>
   <p class="sr-only" role="status">
-    {{ pending.length || unread.length ? `Side ${pending.length + unread.length > 1 ? 'questions' : 'question'} · ${status}` : '' }}
+    {{ indicator && indicator.kind !== 'idle' && indicator.kind !== 'saved' ? indicator.label : '' }}
   </p>
   <Modal
     v-if="open"
     title="Side questions"
+    :return-focus="openedFromDefault ? defaultTrigger : undefined"
     drawer
     @close="open = false"
   >

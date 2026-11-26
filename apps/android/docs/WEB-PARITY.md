@@ -3,7 +3,7 @@
 ## Compact icon-only side-question trigger (2026-11-25)
 
 Web and Android replace the full-width side-question card above the composer with a
-compact icon-only circular trigger (`SideQuestionButton`) showing four visual states:
+compact icon-only circular trigger (`SideQuestionButton`) with visual states:
 neutral while available, an animated arc while answering, an accent count badge when
 an answer is ready, a coral `!` badge when an unread question failed, and a subtle
 count badge for read saved questions. While the live working indicator is shown, the
@@ -12,7 +12,8 @@ the status title so the detail line keeps its width; when the working indicator 
 absent (for example after the turn ends with saved or unread side questions, or while
 a subagent bar replaces the working row), the same icon-only trigger moves to the
 conversation header beside the Files action, disappearing completely when no side
-questions exist and asking is unavailable. Accessible labels and polite live-region
+questions exist and asking is unavailable. Fullscreen moves the fallback into its own
+toolbar. Accessible labels and polite live-region
 announcements remain on both platforms (English on web, French on Android); the
 side-question drawer/sheet, per-reply badges, text-selection quoting, public MCP and
 `cairn_installation` capabilities and authorization are unchanged.

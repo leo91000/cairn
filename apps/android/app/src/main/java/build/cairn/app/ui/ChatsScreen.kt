@@ -1429,6 +1429,8 @@ internal fun ChatPage(
                             Modifier.weight(1f).padding(start = 16.dp),
                             style = MaterialTheme.typography.titleSmall,
                         )
+                        if (sideChat != null && hasSideAction && !showWorkingIndicator)
+                            SideQuestionButton(sideChat, side, size = 40.dp)
                         ActionIcon("Quitter le plein écran", Icons.Default.Close) {
                             fullscreen = false
                         }

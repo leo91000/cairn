@@ -11,7 +11,6 @@ export interface SideQuestionIndicator {
   label: string
   badge: string | null
   badgeTone: SideQuestionBadgeTone | null
-  hasQuestions: boolean
 }
 
 function formatBadgeCount(count: number): string {
@@ -34,80 +33,68 @@ export function sideQuestionIndicator(input: {
     canAsk,
     provider,
   } = input
-  const hasQuestions = questions.length > 0
-  if (!hasQuestions && !canAsk)
-    return null
+  if (!questions.length) {
+    return canAsk
+      ? {
+          kind: 'idle',
+          label: 'Ask a side question',
+          badge: null,
+          badgeTone: null,
+        }
+      : null
+  }
 
-  const pending = questions.filter(question => question.status === 'pending')
-  const unread = questions.filter(
-    question => question.status !== 'pending' && question.status !== 'cancelled' && !seen.has(question.id),
-  )
-  const isPending = pending.length > 0
-  const hasUnreadAnswer = unread.some(question => question.status === 'answered')
-  const hasUnreadFailure = !hasUnreadAnswer && unread.length > 0
+  const pending = questions.some(question => question.status === 'pending')
+  let answers = 0
+  let failures = 0
+  for (const question of questions) {
+    if (seen.has(question.id))
+      continue
+    if (question.status === 'answered')
+      answers++
+    if (question.status === 'failed')
+      failures++
+  }
+
   const engine = provider ? providers[provider].label : 'The agent'
-  const noun = questions.length > 1 ? 'questions' : 'question'
+  const noun = questions.length === 1 ? 'question' : 'questions'
+  const status = [
+    pending ? `${engine} is answering` : '',
+    answers ? `Answer ready (${answers})` : '',
+    failures ? `Not answered (${failures})` : '',
+  ].filter(Boolean).join(' · ')
 
-  if (!hasQuestions) {
+  if (answers) {
     return {
-      kind: 'idle',
-      label: 'Ask a side question',
-      badge: null,
-      badgeTone: null,
-      hasQuestions: false,
+      kind: pending ? 'pending' : 'ready',
+      label: `Side ${noun} · ${status}`,
+      badge: formatBadgeCount(answers),
+      badgeTone: 'accent',
     }
   }
 
-  const badge = hasUnreadAnswer
-    ? formatBadgeCount(unread.length)
-    : hasUnreadFailure
-      ? '!'
-      : !isPending
-          ? formatBadgeCount(questions.length)
-          : null
-  const badgeTone: SideQuestionBadgeTone | null = hasUnreadAnswer
-    ? 'accent'
-    : hasUnreadFailure
-      ? 'danger'
-      : !isPending
-          ? 'neutral'
-          : null
+  if (failures) {
+    return {
+      kind: pending ? 'pending' : 'failed',
+      label: `Side ${noun} · ${status}`,
+      badge: '!',
+      badgeTone: 'danger',
+    }
+  }
 
-  if (isPending) {
+  if (pending) {
     return {
       kind: 'pending',
-      label: `Side ${noun} · ${engine} is answering`,
-      badge,
-      badgeTone,
-      hasQuestions: true,
-    }
-  }
-
-  if (hasUnreadAnswer) {
-    return {
-      kind: 'ready',
-      label: `Side ${noun} · Answer ready`,
-      badge,
-      badgeTone,
-      hasQuestions: true,
-    }
-  }
-
-  if (hasUnreadFailure) {
-    return {
-      kind: 'failed',
-      label: `Side ${noun} · Not answered`,
-      badge,
-      badgeTone,
-      hasQuestions: true,
+      label: `Side ${noun} · ${status}`,
+      badge: null,
+      badgeTone: null,
     }
   }
 
   return {
     kind: 'saved',
-    label: `Side ${noun} · Saved`,
-    badge,
-    badgeTone,
-    hasQuestions: true,
+    label: `Side ${noun} · Saved (${questions.length})`,
+    badge: formatBadgeCount(questions.length),
+    badgeTone: 'neutral',
   }
 }

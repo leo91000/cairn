@@ -322,6 +322,14 @@ const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
 const sideQuestions = ref<InstanceType<typeof ChatSideQuestions>>()
+const headerSideQuestionButton = ref<InstanceType<typeof SideQuestionButton>>()
+const workingSideQuestionButton = ref<InstanceType<typeof SideQuestionButton>>()
+const fullscreenSideQuestionButton = ref<InstanceType<typeof SideQuestionButton>>()
+const sideQuestionTrigger = computed(() =>
+  workingSideQuestionButton.value?.button
+  ?? fullscreenSideQuestionButton.value?.button
+  ?? headerSideQuestionButton.value?.button,
+)
 const sideQuestionIndicator = computed(() => sideQuestions.value?.indicator ?? null)
 // How many side questions each reply has, for its badge in the conversation.
 const sideQuestionCounts = computed(() => {
@@ -1705,7 +1713,8 @@ function key(event: KeyboardEvent) {
         </div>
         <div class="flex shrink-0 items-center gap-1">
           <SideQuestionButton
-            v-if="sideQuestionIndicator && !activity?.showsWorkingIndicator"
+            v-if="sideQuestionIndicator && !activity?.showsWorkingIndicator && !activity?.fullscreen"
+            ref="headerSideQuestionButton"
             :indicator="sideQuestionIndicator"
             header
             @click="sideQuestions?.openDefault()"
@@ -1980,7 +1989,16 @@ function key(event: KeyboardEvent) {
           >
             <template v-if="sideQuestionIndicator" #working-action>
               <SideQuestionButton
+                ref="workingSideQuestionButton"
                 :indicator="sideQuestionIndicator"
+                @click="sideQuestions?.openDefault()"
+              />
+            </template>
+            <template v-if="sideQuestionIndicator" #fullscreen-action>
+              <SideQuestionButton
+                ref="fullscreenSideQuestionButton"
+                :indicator="sideQuestionIndicator"
+                header
                 @click="sideQuestions?.openDefault()"
               />
             </template>
@@ -2042,6 +2060,7 @@ function key(event: KeyboardEvent) {
               :can-ask="!readOnly && !!detail.canAskSideQuestion"
               :reason="detail.sideQuestionReason"
               :provider="detail.provider"
+              :default-trigger="sideQuestionTrigger"
               @reveal="activity?.reveal($event) || sideQuestions?.unreachable($event)"
             />
             <section

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { SideQuestionIndicator } from '../side-questions'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { MessageSquareQuote } from '../icons'
 import Icon from './Icon.vue'
 
@@ -10,6 +10,8 @@ const props = defineProps<{
   header?: boolean
 }>()
 const emit = defineEmits<{ click: [] }>()
+const button = ref<HTMLButtonElement>()
+defineExpose({ button })
 
 const surfaceClass = computed(() => {
   switch (props.indicator.kind) {
@@ -40,11 +42,12 @@ const badgeClass = computed(() => {
 
 <template>
   <button
+    ref="button"
     type="button"
     data-testid="side-question-button"
-    class="relative inline-grid shrink-0 place-items-center rounded-full border transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+    class="relative inline-grid size-9 shrink-0 place-items-center rounded-full border transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
     :class="[
-      header ? 'size-9 pointer-coarse:size-10' : 'size-9 pointer-coarse:size-10',
+      header ? 'pointer-coarse:size-10' : '',
       surfaceClass,
     ]"
     :aria-label="indicator.label"

@@ -71,6 +71,17 @@ abstract class ChatSwipeCases {
         }
 
     @Test
+    fun savedSideAnswersStayAccessibleInFullscreen() =
+        withChats(single = true, sideAnswer = true) {
+            open("Chat récent")
+            compose.onNodeWithContentDescription("Options de la conversation").performClick()
+            compose.onNodeWithText("Plein écran").performClick()
+            compose.onNodeWithContentDescription("Quitter le plein écran").assertExists()
+            compose.onNodeWithTag("side-question-button").performClick()
+            compose.onNodeWithText("Voir la réponse").assertExists()
+        }
+
+    @Test
     fun automaticPerformanceSharingUsesBeaconWithoutConversationContent() = withChats {
         // Another UI instance may already have consumed the process-wide interval.
         Performance.uploadCadence.tryAcquire()

@@ -8,6 +8,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -16,13 +17,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -243,15 +244,22 @@ internal fun SideQuestionButton(
     if (!hasQuestions && !chat.canAskSideQuestion) return
 
     val isPending = pending.isNotEmpty()
-    val hasUnreadAnswer = unread.any { it.status == "answered" }
-    val hasUnreadFailure = !hasUnreadAnswer && unread.isNotEmpty()
+    val answers = unread.count { it.status == "answered" }
+    val failures = unread.count { it.status == "failed" }
+    val hasUnreadAnswer = answers > 0
+    val hasUnreadFailure = !hasUnreadAnswer && failures > 0
+    val status =
+        listOfNotNull(
+                if (isPending) "${engine(chat.provider)} répond" else null,
+                if (hasUnreadAnswer) "Réponse prête ($answers)" else null,
+                if (failures > 0) "Sans réponse ($failures)" else null,
+            )
+            .joinToString(" · ")
     val label =
         when {
             !hasQuestions -> "Poser une question à côté"
-            isPending -> "Question à côté · ${engine(chat.provider)} répond"
-            hasUnreadAnswer -> "Question à côté · Réponse prête"
-            hasUnreadFailure -> "Question à côté · Sans réponse"
-            else -> "Questions à côté · Enregistrées"
+            status.isNotEmpty() -> "Question à côté · $status"
+            else -> "Questions à côté · Enregistrées (${chat.sideQuestions.size})"
         }
 
     val colors = MaterialTheme.colorScheme
@@ -281,7 +289,7 @@ internal fun SideQuestionButton(
 
     val badgeText =
         when {
-            hasUnreadAnswer -> if (unread.size > 99) "99+" else unread.size.toString()
+            hasUnreadAnswer -> if (answers > 99) "99+" else answers.toString()
             hasUnreadFailure -> "!"
             !isPending && hasQuestions ->
                 if (chat.sideQuestions.size > 99) "99+" else chat.sideQuestions.size.toString()
@@ -300,73 +308,75 @@ internal fun SideQuestionButton(
             else -> colors.onSurface
         }
 
-    Surface(
-        onClick = { if (!hasQuestions) side.ask("", "") else side.show() },
+    Box(
         modifier =
-            modifier.size(maxOf(size, 48.dp)).testTag("side-question-button").semantics {
-                contentDescription = label
-                liveRegion = LiveRegionMode.Polite
-            },
-        color = Color.Transparent,
-        shape = CircleShape,
+            modifier
+                .size(maxOf(size, 48.dp))
+                .testTag("side-question-button")
+                .semantics {
+                    contentDescription = label
+                    liveRegion = LiveRegionMode.Polite
+                }
+                .clickable(role = Role.Button) {
+                    if (!hasQuestions) side.ask("", "") else side.show()
+                },
+        contentAlignment = Alignment.Center,
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            Box(Modifier.size(size + 8.dp), contentAlignment = Alignment.Center) {
-                Box(
-                    Modifier.size(size)
-                        .clip(CircleShape)
-                        .background(container)
-                        .border(borderWidth, borderColor, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        CairnIcons.SideQuestion,
-                        null,
-                        Modifier.size(size * 0.47f),
-                        tint = iconTint,
+        Box(Modifier.size(size + 8.dp), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier.size(size)
+                    .clip(CircleShape)
+                    .background(container)
+                    .border(borderWidth, borderColor, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    CairnIcons.SideQuestion,
+                    null,
+                    Modifier.size(size * 0.47f),
+                    tint = iconTint,
+                )
+            }
+            if (isPending) {
+                val transition = rememberInfiniteTransition(label = "side-question-pending")
+                val angle by
+                    transition.animateFloat(
+                        0f,
+                        360f,
+                        infiniteRepeatable(tween(1200, easing = LinearEasing)),
+                        label = "spin",
+                    )
+                val arcColor = colors.primary
+                Canvas(Modifier.size(size)) {
+                    val stroke = 2.dp.toPx()
+                    drawArc(
+                        color = arcColor,
+                        startAngle = angle - 90f,
+                        sweepAngle = 95f,
+                        useCenter = false,
+                        style = Stroke(width = stroke, cap = StrokeCap.Round),
                     )
                 }
-                if (isPending) {
-                    val transition = rememberInfiniteTransition(label = "side-question-pending")
-                    val angle by
-                        transition.animateFloat(
-                            0f,
-                            360f,
-                            infiniteRepeatable(tween(1200, easing = LinearEasing)),
-                            label = "spin",
-                        )
-                    val arcColor = colors.primary
-                    Canvas(Modifier.size(size)) {
-                        val stroke = 2.dp.toPx()
-                        drawArc(
-                            color = arcColor,
-                            startAngle = angle - 90f,
-                            sweepAngle = 95f,
-                            useCenter = false,
-                            style = Stroke(width = stroke, cap = StrokeCap.Round),
-                        )
-                    }
-                }
-                if (badgeText != null)
-                    Box(
-                        Modifier.align(Alignment.TopEnd)
-                            .defaultMinSize(minWidth = 17.dp, minHeight = 17.dp)
-                            .clip(CircleShape)
-                            .background(badgeBg)
-                            .border(1.5.dp, colors.background, CircleShape)
-                            .padding(horizontal = 4.dp)
-                            .clearAndSetSemantics {},
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            badgeText,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = badgeFg,
-                            maxLines = 1,
-                        )
-                    }
             }
+            if (badgeText != null)
+                Box(
+                    Modifier.align(Alignment.TopEnd)
+                        .defaultMinSize(minWidth = 17.dp, minHeight = 17.dp)
+                        .clip(CircleShape)
+                        .background(badgeBg)
+                        .border(1.5.dp, colors.background, CircleShape)
+                        .padding(horizontal = 4.dp)
+                        .clearAndSetSemantics {},
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        badgeText,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = badgeFg,
+                        maxLines = 1,
+                    )
+                }
         }
     }
 }
