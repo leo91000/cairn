@@ -58,7 +58,7 @@ private fun presentScope(scope: String): ScopePresentation =
             ScopePresentation(
                 title = "Gestion",
                 description =
-                    "Créer et modifier les tâches, les projets, les agents et les skills.",
+                    "Créer, modifier et supprimer des données de l’installation, et configurer les accès des agents et les intégrations.",
                 icon = AuthIcons.Pencil,
                 elevated = false,
             )

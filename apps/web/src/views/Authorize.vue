@@ -93,7 +93,7 @@ function presentScope(scope: string): ScopePresentation {
 
   return {
     title: 'Manage',
-    description: 'Create and modify tasks, projects, agents, and skills',
+    description: 'Create, edit, and delete installation data, and configure agent access and integrations',
     icon: Pencil,
     elevated: false,
   }
