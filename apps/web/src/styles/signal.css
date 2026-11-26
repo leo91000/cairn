@@ -167,6 +167,37 @@
 .signal-veil-enter-active, .signal-veil-leave-active { transition: opacity 0.2s linear; }
 .signal-veil-enter-from, .signal-veil-leave-to { opacity: 0; }
 
+/* « Signal Pur » auth & OAuth stage: calm paper/obsidian canvas, subtle blue+amber beacon glow, crisp card. */
+.auth-stage {
+  position: relative;
+  overflow-x: clip;
+  background:
+    radial-gradient(640px 380px at 50% 14%, light-dark(rgba(20, 54, 90, 0.08), rgba(47, 110, 199, 0.16)), transparent 70%),
+    radial-gradient(420px 260px at 58% 10%, light-dark(rgba(184, 101, 10, 0.09), rgba(242, 169, 59, 0.1)), transparent 68%),
+    var(--color-canvas);
+}
+.auth-stage-card {
+  box-shadow: light-dark(
+    0 14px 40px -18px rgba(22, 21, 29, 0.16),
+    0 22px 54px -20px rgba(0, 0, 0, 0.7)
+  );
+}
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--color-subtle);
+  font-size: 12px;
+  font-weight: 500;
+}
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--color-line);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .souffle-halo::after, .souffle-halo > .souffle-core, .veille-ring::before, .veille-dot, .live-dot, .side-question-spin, .unread-dot, .avatar-orbit, .avatar-orbit::before { animation: none; }
   .souffle-sweep { color: var(--color-ink); background: none; }

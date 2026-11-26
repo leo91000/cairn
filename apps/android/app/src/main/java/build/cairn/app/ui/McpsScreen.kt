@@ -11,6 +11,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import build.cairn.app.data.*
 import build.cairn.contracts.*
@@ -64,18 +65,52 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
             Text("Ajouter un MCP")
         }
         SearchField("Rechercher", query, { query = it })
-        if (oauthNotice.isNotBlank()) Text(oauthNotice)
+        if (oauthNotice.isNotBlank()) {
+            Notice(oauthNotice, tone = NoticeTone.INFO) {
+                IconButton(onClick = { oauthNotice = "" }) {
+                    Icon(
+                        CairnIcons.Close,
+                        "Fermer",
+                        Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
         if (oauth != null) {
-            Text("Terminez l’autorisation dans le navigateur, puis revenez dans Cairn.")
-            TextButton(
-                onClick = {
-                    vm.perform {
-                        oauth?.let { api.cancelMcpConnection(McpIdInput(it)) }
-                        oauth = null
+            AuthCard(padding = PaddingValues(16.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    CircularProgressIndicator(
+                        Modifier.size(22.dp),
+                        strokeWidth = 2.5.dp,
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Autorisation OAuth en cours",
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            "Terminez l’autorisation dans le navigateur, puis revenez dans Cairn.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
-            ) {
-                Text("Annuler cette connexion")
+                OutlinedButton(
+                    onClick = {
+                        vm.perform {
+                            oauth?.let { api.cancelMcpConnection(McpIdInput(it)) }
+                            oauth = null
+                        }
+                    },
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                ) {
+                    Text("Annuler cette connexion")
+                }
             }
         }
         items

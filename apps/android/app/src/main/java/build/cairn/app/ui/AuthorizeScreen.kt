@@ -1,119 +1,886 @@
 package build.cairn.app.ui
 
+import android.os.Build
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.encodeToJsonElement
-import kotlinx.serialization.json.put
+import kotlinx.coroutines.flow.first
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
+private data class ScopePresentation(
+    val title: String,
+    val description: String,
+    val icon: ImageVector,
+    val elevated: Boolean,
+)
+
+private fun presentScope(scope: String): ScopePresentation =
+    when (scope) {
+        "read" ->
+            ScopePresentation(
+                title = "Lecture",
+                description = "Lire les tâches, les profils, les skills et les résultats.",
+                icon = AuthIcons.Eye,
+                elevated = false,
+            )
+        "run" ->
+            ScopePresentation(
+                title = "Exécution complète",
+                description = "Lancer et arrêter des tâches avec les accès complets du worker.",
+                icon = AuthIcons.Terminal,
+                elevated = true,
+            )
+        "manage" ->
+            ScopePresentation(
+                title = "Gestion",
+                description =
+                    "Créer et modifier les tâches, les projets, les agents et les skills.",
+                icon = AuthIcons.Pencil,
+                elevated = false,
+            )
+        else ->
+            ScopePresentation(
+                title = scope,
+                description = "Permission personnalisée demandée par ce client.",
+                icon = AuthIcons.ShieldCheck,
+                elevated = false,
+            )
+    }
+
+private fun redirectHostLabel(redirectUri: String): Pair<String, Boolean> {
+    val parsed = redirectUri.toHttpUrlOrNull() ?: return redirectUri to false
+    val isDefaultPort =
+        (parsed.scheme == "https" && parsed.port == 443) ||
+            (parsed.scheme == "http" && parsed.port == 80)
+    val hostname = if (':' in parsed.host) "[${parsed.host}]" else parsed.host
+    val host = if (isDefaultPort) hostname else "$hostname:${parsed.port}"
+    val local = parsed.host in setOf("localhost", "127.0.0.1", "::1")
+    return host to local
+}
 
 @Composable
-fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String, consumed: () -> Unit) {
+fun AuthorizeScreen(vm: CairnViewModel, state: Workspace, sharedUrl: String = "") {
+    val credentials = accountCredentials()
+    val context = LocalContext.current
     var url by rememberSaveable { mutableStateOf(sharedUrl) }
     var preview by remember { mutableStateOf<ConsentPreview?>(null) }
     var parameters by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var selectedInstallationId by rememberSaveable {
+        mutableStateOf(state.installation?.id.orEmpty())
+    }
+    var confirmationRequired by remember { mutableStateOf(false) }
+    var confirmationChallenge by remember { mutableStateOf<String?>(null) }
+    var confirmationCode by remember { mutableStateOf("") }
+    var editingUrl by remember { mutableStateOf(false) }
     var redirect by remember { mutableStateOf("") }
+    var approvedDecision by remember { mutableStateOf(true) }
+
+    fun loadPreview(targetUrl: String) {
+        vm.perform {
+            val (parsed, loaded) = previewMcpConsent(targetUrl)
+            parameters = parsed
+            preview = loaded
+            editingUrl = false
+            redirect = ""
+            confirmationRequired = loaded.confirmationRequired
+            confirmationChallenge = null
+            confirmationCode = ""
+            val choices = loaded.installations
+            if (choices.none { it.id == selectedInstallationId }) {
+                selectedInstallationId =
+                    choices.firstOrNull { it.id == state.installation?.id }?.id
+                        ?: choices.firstOrNull()?.id.orEmpty()
+            }
+        }
+    }
+
     LaunchedEffect(sharedUrl) {
         if (sharedUrl.isNotBlank()) {
+            vm.state.first { !it.busy }
             url = sharedUrl
             preview = null
             redirect = ""
-            consumed()
+            loadPreview(sharedUrl)
         }
     }
-    Page {
-        Heading(
-            "Autoriser un assistant",
-            "Vérifiez ce que le client pourra faire dans votre espace.",
-        )
-        Text(
-            "Partagez une page d’autorisation Cairn vers cette application depuis votre navigateur, ou collez son lien ici."
-        )
-        Field(
-            "Lien d’autorisation",
-            url,
-            {
-                url = it
-                preview = null
-                redirect = ""
-            },
-            keyboardOptions = InputKeyboards.Uri,
-        )
-        Button(
-            onClick = {
-                vm.perform {
-                    parameters = authorizationParameters(url, api.origin)
-                    preview =
-                        api.send(
-                            "POST",
-                            "/mcp/oauth/preview",
-                            wireJson.encodeToJsonElement(parameters),
-                        )
-                }
-            },
-            enabled = url.isNotBlank() && !state.busy && redirect.isEmpty(),
-        ) {
-            Text("Examiner la demande")
+
+    fun decide(approved: Boolean, installationId: String) {
+        vm.perform {
+            redirect = recordMcpConsent(parameters, approved, installationId).redirect
+            approvedDecision = approved
         }
-        preview?.let { details ->
-            Panel {
-                Text(details.client.client_name, style = MaterialTheme.typography.titleLarge)
-                details.scopes.forEach { scope ->
-                    Text(
-                        when (scope) {
-                            "read" -> "Lire les tâches, les profils, les skills et les résultats."
-                            "run" ->
-                                "Lancer et arrêter des tâches avec les accès complets du worker."
-                            "manage" ->
-                                "Créer et modifier les tâches, les projets, les agents et les skills."
-                            else -> scope
-                        }
-                    )
-                }
-                if (redirect.isEmpty())
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        listOf(false to "Refuser", true to "Autoriser").forEach { (approved, label)
-                            ->
-                            OutlinedButton(
-                                onClick = {
-                                    vm.perform {
-                                        redirect =
-                                            api.send<ConsentResult>(
-                                                    "POST",
-                                                    "/mcp/oauth/consent",
-                                                    buildJsonObject {
-                                                        put(
-                                                            "parameters",
-                                                            wireJson.encodeToJsonElement(
-                                                                parameters
-                                                            ),
-                                                        )
-                                                        put("approved", approved)
-                                                        put(
-                                                            "installationId",
-                                                            checkNotNull(state.installation).id,
-                                                        )
-                                                    },
-                                                )
-                                                .redirect
-                                    }
-                                },
-                                enabled = !state.busy,
+    }
+
+    LaunchedEffect(state.error) {
+        val message = state.error.orEmpty()
+        if (
+            message.contains("Confirm your identity", ignoreCase = true) ||
+                message.contains("Confirmez votre identité", ignoreCase = true)
+        ) {
+            confirmationRequired = true
+        }
+    }
+
+    AuthBackdrop {
+        Column(
+            Modifier.fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Column(
+                Modifier.widthIn(max = 520.dp).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                val details = preview
+                if (details == null || editingUrl) {
+                    AuthCard {
+                        Heading(
+                            "Autoriser un assistant",
+                            "Vérifiez ce que le client pourra faire dans votre espace.",
+                        )
+                        Text(
+                            "Partagez une page d’autorisation Cairn vers cette application depuis votre navigateur, ou collez son lien ici.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Field(
+                            "Lien d’autorisation",
+                            url,
+                            {
+                                url = it
+                                if (details == null) {
+                                    preview = null
+                                    redirect = ""
+                                }
+                            },
+                            keyboardOptions = InputKeyboards.Uri,
+                        )
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            if (details != null) {
+                                OutlinedButton(
+                                    onClick = { editingUrl = false },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                ) {
+                                    Text("Annuler")
+                                }
+                            }
+                            Button(
+                                onClick = { loadPreview(url) },
+                                enabled = url.isNotBlank() && !state.busy,
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.weight(1.4f).heightIn(min = 48.dp),
                             ) {
-                                Text(label)
+                                Text("Examiner la demande")
                             }
                         }
                     }
-                else {
-                    Text(
-                        "La décision est enregistrée. Retournez au client pour terminer la connexion."
-                    )
-                    ExternalButton("Retourner au client", redirect)
+                } else if (redirect.isNotEmpty()) {
+                    val installations = details.installations
+                    val chosen = installations.firstOrNull { it.id == selectedInstallationId }
+                    val (redirectHost, _) = redirectHostLabel(details.client.redirect_uri)
+
+                    AuthCard(padding = PaddingValues(24.dp)) {
+                        Column(
+                            Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Box(
+                                Modifier.size(56.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(
+                                        if (approvedDecision) signal.success.copy(alpha = 0.14f)
+                                        else MaterialTheme.colorScheme.surfaceVariant
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    if (approvedDecision) CairnIcons.Check else CairnIcons.Close,
+                                    null,
+                                    Modifier.size(26.dp),
+                                    tint =
+                                        if (approvedDecision) signal.success
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Text(
+                                if (approvedDecision) "Accès autorisé" else "Accès refusé",
+                                style = MaterialTheme.typography.headlineSmall,
+                                textAlign = TextAlign.Center,
+                            )
+                            Text(
+                                "La décision est enregistrée. Retournez au client pour terminer la connexion.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                            Surface(
+                                Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainer,
+                                border =
+                                    BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            ) {
+                                Column(
+                                    Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    SummaryRow("Client", details.client.client_name)
+                                    if (chosen != null) SummaryRow("Installation", chosen.name)
+                                    if (redirectHost.isNotBlank())
+                                        SummaryRow("Destination", redirectHost, monospace = true)
+                                    SummaryRow(
+                                        "Permissions",
+                                        details.scopes.joinToString(" · ") {
+                                            presentScope(it).title
+                                        },
+                                    )
+                                }
+                            }
+                            Button(
+                                onClick = { browse(context, redirect) },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            ) {
+                                Text("Retourner au client")
+                            }
+                            Text(
+                                "Vous pouvez révoquer cet accès à tout moment dans Paramètres.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
+                } else {
+                    val installations = details.installations
+                    val chosen =
+                        installations.firstOrNull { it.id == selectedInstallationId }
+                            ?: installations.firstOrNull()
+                    val (redirectHost, isLocalRedirect) =
+                        redirectHostLabel(details.client.redirect_uri)
+
+                    AuthCard {
+                        // Connection bridge: [Client monogram] <-> [Cairn mark]
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                Modifier.size(48.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(Color(0xFFD97757)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    initial(details.client.client_name),
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Box(
+                                Modifier.size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surfaceContainer)
+                                    .border(
+                                        1.dp,
+                                        MaterialTheme.colorScheme.outlineVariant,
+                                        CircleShape,
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    AuthIcons.Link,
+                                    null,
+                                    Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Box(
+                                Modifier.size(48.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceContainer)
+                                    .border(
+                                        1.dp,
+                                        MaterialTheme.colorScheme.outlineVariant,
+                                        RoundedCornerShape(14.dp),
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                CairnLogo()
+                            }
+                        }
+
+                        Column(
+                            Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                "Autoriser « ${details.client.client_name} » ?",
+                                style = MaterialTheme.typography.titleLarge,
+                                textAlign = TextAlign.Center,
+                            )
+                            Text(
+                                "Cet assistant demande l’accès MCP à votre espace Cairn.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+
+                        // Amber Trust & Redirect card
+                        Surface(
+                            Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            color = signal.warningSoft,
+                            border = BorderStroke(1.dp, signal.warning.copy(alpha = 0.35f)),
+                        ) {
+                            Column(
+                                Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Icon(
+                                        AuthIcons.Warning,
+                                        null,
+                                        Modifier.size(15.dp),
+                                        tint = signal.warning,
+                                    )
+                                    Text(
+                                        "Client non vérifié",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = signal.warning,
+                                    )
+                                }
+                                if (redirectHost.isNotBlank()) {
+                                    Surface(
+                                        Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = MaterialTheme.colorScheme.surface,
+                                        border =
+                                            BorderStroke(
+                                                1.dp,
+                                                MaterialTheme.colorScheme.outlineVariant,
+                                            ),
+                                    ) {
+                                        Row(
+                                            Modifier.fillMaxWidth()
+                                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                        ) {
+                                            Text(
+                                                "Destination",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            ) {
+                                                Icon(
+                                                    if (isLocalRedirect) AuthIcons.Laptop
+                                                    else AuthIcons.Lock,
+                                                    null,
+                                                    Modifier.size(14.dp),
+                                                    tint =
+                                                        if (isLocalRedirect)
+                                                            MaterialTheme.colorScheme.primary
+                                                        else signal.success,
+                                                )
+                                                Text(
+                                                    redirectHost,
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                                Surface(
+                                                    shape = CircleShape,
+                                                    color =
+                                                        MaterialTheme.colorScheme.surfaceContainer,
+                                                    border =
+                                                        BorderStroke(
+                                                            1.dp,
+                                                            MaterialTheme.colorScheme
+                                                                .outlineVariant,
+                                                        ),
+                                                ) {
+                                                    Text(
+                                                        if (isLocalRedirect) "App locale"
+                                                        else "HTTPS",
+                                                        Modifier.padding(
+                                                            horizontal = 6.dp,
+                                                            vertical = 2.dp,
+                                                        ),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color =
+                                                            MaterialTheme.colorScheme
+                                                                .onSurfaceVariant,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Text(
+                                    "Ce nom est déclaré par le client et n’est pas vérifié par Cairn. Continuez uniquement si vous faites confiance à cette destination.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = signal.warning,
+                                )
+                            }
+                        }
+
+                        // Installation selector
+                        if (chosen != null) {
+                            var menuOpen by remember { mutableStateOf(false) }
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    "Installation cible",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Box {
+                                    Surface(
+                                        onClick = {
+                                            if (installations.size > 1 && !state.busy)
+                                                menuOpen = true
+                                        },
+                                        enabled = installations.size > 1 && !state.busy,
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = MaterialTheme.colorScheme.surfaceContainer,
+                                        border =
+                                            BorderStroke(
+                                                1.dp,
+                                                MaterialTheme.colorScheme.outlineVariant,
+                                            ),
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        Row(
+                                            Modifier.fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Box(
+                                                Modifier.size(8.dp)
+                                                    .clip(CircleShape)
+                                                    .background(
+                                                        if (chosen.online) signal.success
+                                                        else
+                                                            MaterialTheme.colorScheme
+                                                                .onSurfaceVariant
+                                                    )
+                                            )
+                                            Spacer(Modifier.width(10.dp))
+                                            Column(Modifier.weight(1f)) {
+                                                Text(
+                                                    chosen.name,
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                                Text(
+                                                    if (chosen.online) "En ligne" else "Hors ligne",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color =
+                                                        MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                            if (installations.size > 1) {
+                                                Icon(
+                                                    CairnIcons.Down,
+                                                    "Choisir une installation",
+                                                    Modifier.size(18.dp),
+                                                    tint =
+                                                        MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                        }
+                                    }
+                                    DropdownMenu(menuOpen, { menuOpen = false }) {
+                                        installations.forEach { item ->
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Column {
+                                                        Text(item.name)
+                                                        Text(
+                                                            if (item.online) "En ligne"
+                                                            else "Hors ligne",
+                                                            style =
+                                                                MaterialTheme.typography.labelSmall,
+                                                            color =
+                                                                MaterialTheme.colorScheme
+                                                                    .onSurfaceVariant,
+                                                        )
+                                                    }
+                                                },
+                                                trailingIcon = {
+                                                    if (item.id == chosen.id)
+                                                        Icon(CairnIcons.Check, "Sélectionnée")
+                                                },
+                                                onClick = {
+                                                    selectedInstallationId = item.id
+                                                    menuOpen = false
+                                                },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Tiered scope cards
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                "Permissions demandées",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Surface(
+                                Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainer,
+                                border =
+                                    BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            ) {
+                                Column {
+                                    details.scopes.forEachIndexed { index, scope ->
+                                        val info = presentScope(scope)
+                                        if (index > 0) {
+                                            HorizontalDivider(
+                                                color = MaterialTheme.colorScheme.outlineVariant
+                                            )
+                                        }
+                                        val rowBackground =
+                                            if (info.elevated)
+                                                Brush.horizontalGradient(
+                                                    listOf(
+                                                        signal.attentionSoft.copy(alpha = 0.75f),
+                                                        Color.Transparent,
+                                                    )
+                                                )
+                                            else null
+                                        Row(
+                                            Modifier.fillMaxWidth()
+                                                .then(
+                                                    if (rowBackground != null)
+                                                        Modifier.background(rowBackground)
+                                                    else Modifier
+                                                )
+                                                .padding(horizontal = 12.dp, vertical = 11.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            verticalAlignment = Alignment.Top,
+                                        ) {
+                                            Box(
+                                                Modifier.size(30.dp)
+                                                    .clip(RoundedCornerShape(9.dp))
+                                                    .background(
+                                                        if (info.elevated) signal.attentionSoft
+                                                        else MaterialTheme.colorScheme.surface
+                                                    )
+                                                    .border(
+                                                        1.dp,
+                                                        if (info.elevated)
+                                                            signal.attention.copy(alpha = 0.35f)
+                                                        else
+                                                            MaterialTheme.colorScheme
+                                                                .outlineVariant,
+                                                        RoundedCornerShape(9.dp),
+                                                    ),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Icon(
+                                                    info.icon,
+                                                    null,
+                                                    Modifier.size(15.dp),
+                                                    tint =
+                                                        if (info.elevated) signal.attention
+                                                        else MaterialTheme.colorScheme.primary,
+                                                )
+                                            }
+                                            Column(Modifier.weight(1f)) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement =
+                                                        Arrangement.spacedBy(8.dp),
+                                                ) {
+                                                    Text(
+                                                        info.title,
+                                                        style = MaterialTheme.typography.titleSmall,
+                                                    )
+                                                    if (info.elevated) {
+                                                        Surface(
+                                                            shape = CircleShape,
+                                                            color = signal.attentionSoft,
+                                                            border =
+                                                                BorderStroke(
+                                                                    1.dp,
+                                                                    signal.attention.copy(
+                                                                        alpha = 0.35f
+                                                                    ),
+                                                                ),
+                                                        ) {
+                                                            Text(
+                                                                "Accès élevé",
+                                                                Modifier.padding(
+                                                                    horizontal = 7.dp,
+                                                                    vertical = 2.dp,
+                                                                ),
+                                                                style =
+                                                                    MaterialTheme.typography
+                                                                        .labelSmall,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = signal.attention,
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                Text(
+                                                    info.description,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color =
+                                                        MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Inline identity confirmation
+                        if (confirmationRequired) {
+                            Surface(
+                                Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainer,
+                                border =
+                                    BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            ) {
+                                Column(
+                                    Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Icon(
+                                            AuthIcons.ShieldCheck,
+                                            null,
+                                            Modifier.size(16.dp),
+                                            tint = MaterialTheme.colorScheme.primary,
+                                        )
+                                        Text(
+                                            "Confirmation d’identité requise",
+                                            style = MaterialTheme.typography.titleSmall,
+                                        )
+                                    }
+                                    Text(
+                                        "Confirmez votre session par passkey ou code e-mail avant d’accorder cet accès.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    if (Build.VERSION.SDK_INT >= 28) {
+                                        FilledTonalButton(
+                                            onClick = {
+                                                vm.perform {
+                                                    confirmAccountPasskey(credentials)
+                                                    confirmationRequired = false
+                                                    confirmationChallenge = null
+                                                    confirmationCode = ""
+                                                    notify("Identité confirmée.")
+                                                }
+                                            },
+                                            enabled = !state.busy,
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier.fillMaxWidth(),
+                                        ) {
+                                            SocialProviderIcon(AccountProvider.Passkey)
+                                            Spacer(Modifier.width(8.dp))
+                                            Text("Confirmer avec une passkey")
+                                        }
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            vm.perform {
+                                                confirmationChallenge =
+                                                    accountConfirmationCode().challenge
+                                            }
+                                        },
+                                        enabled = !state.busy,
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        Text(
+                                            if (confirmationChallenge == null)
+                                                "Recevoir un code par e-mail"
+                                            else "Renvoyer un code par e-mail"
+                                        )
+                                    }
+                                    if (confirmationChallenge != null) {
+                                        OtpCodeField(
+                                            label = "Code de confirmation",
+                                            value = confirmationCode,
+                                            onValueChange = { confirmationCode = it },
+                                            enabled = !state.busy,
+                                        )
+                                        Button(
+                                            onClick = {
+                                                vm.perform {
+                                                    confirmAccountEmail(
+                                                        checkNotNull(confirmationChallenge),
+                                                        confirmationCode,
+                                                    )
+                                                    confirmationRequired = false
+                                                    confirmationChallenge = null
+                                                    confirmationCode = ""
+                                                    notify("Identité confirmée.")
+                                                }
+                                            },
+                                            enabled = !state.busy && confirmationCode.isNotBlank(),
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier.fillMaxWidth(),
+                                        ) {
+                                            Text("Valider la confirmation")
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            Surface(
+                                Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(11.dp),
+                                color = signal.success.copy(alpha = 0.12f),
+                                border = BorderStroke(1.dp, signal.success.copy(alpha = 0.28f)),
+                            ) {
+                                Row(
+                                    Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Icon(
+                                        AuthIcons.ShieldCheck,
+                                        null,
+                                        Modifier.size(16.dp),
+                                        tint = signal.success,
+                                    )
+                                    Text(
+                                        "Identité confirmée récemment — prêt à autoriser",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = signal.success,
+                                    )
+                                }
+                            }
+                        }
+
+                        // Primary / Secondary actions
+                        val targetInstallationId = chosen?.id.orEmpty()
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            OutlinedButton(
+                                onClick = { decide(false, targetInstallationId) },
+                                enabled = !state.busy,
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                            ) {
+                                Text("Refuser")
+                            }
+                            Button(
+                                onClick = { decide(true, targetInstallationId) },
+                                enabled =
+                                    !state.busy &&
+                                        !confirmationRequired &&
+                                        targetInstallationId.isNotBlank(),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.weight(1.35f).heightIn(min = 48.dp),
+                            ) {
+                                Text("Autoriser")
+                            }
+                        }
+
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Révocable dans Paramètres.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            TextButton(onClick = { editingUrl = true }, enabled = !state.busy) {
+                                Text("Changer de lien")
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SummaryRow(label: String, value: String, monospace: Boolean = false) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = if (monospace) FontFamily.Monospace else null,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }

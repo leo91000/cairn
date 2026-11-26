@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
-import UiAlert from '../components/UiAlert.vue'
+import OAuthStatusCard from '../components/OAuthStatusCard.vue'
 
 const props = defineProps<{ parameters?: Record<string, string> }>()
 const error = ref('')
 const completed = ref(false)
 const parameters = props.parameters ?? Object.fromEntries(new URLSearchParams(location.search))
+const cardState = computed(() => error.value ? 'error' : completed.value ? 'success' : 'loading')
+const cardTitle = computed(() => error.value ? 'Sign-in could not be completed' : completed.value ? 'Account connected' : 'Completing sign-in…')
+const message = computed(() => completed.value ? 'Signed in. Return to the account editor in Cairn and save the account.' : 'Completing sign-in…')
 // Remove the single-use code before rendering links or loading other resources.
 history.replaceState(null, '', location.pathname)
 
@@ -22,10 +25,10 @@ onMounted(async () => {
 </script>
 
 <template>
-  <UiAlert v-if="error">
-    {{ error }}
-  </UiAlert>
-  <p v-else role="status">
-    {{ completed ? 'Signed in. Return to the account editor in Cairn and save the account.' : 'Completing sign-in…' }}
-  </p>
+  <OAuthStatusCard
+    :state="cardState"
+    :title="cardTitle"
+    :message="message"
+    :error="error"
+  />
 </template>

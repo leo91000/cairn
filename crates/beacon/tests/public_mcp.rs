@@ -315,6 +315,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         preview["installations"][0]["id"],
         relay.session["installations"][0]["id"]
     );
+    assert_eq!(preview["confirmationRequired"], false);
 
     let consent: Value = owner_post(
         &relay,

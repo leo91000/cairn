@@ -41,6 +41,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 
 fun body(vararg pairs: Pair<String, String>) = buildJsonObject {
@@ -580,6 +581,34 @@ constructor(
 
     suspend fun confirmAccountPasskey(credentials: CairnCredentials) =
         CairnAccountSignIn(checkNotNull(accountConnection), credentials).confirmPasskey()
+
+    suspend fun previewMcpConsent(url: String): Pair<Map<String, String>, ConsentPreview> {
+        val account = checkNotNull(accountConnection)
+        val parameters = authorizationParameters(url, account.origin)
+        val preview =
+            account.send<ConsentPreview>(
+                "POST",
+                "/mcp/oauth/preview",
+                wireJson.encodeToJsonElement(parameters),
+            )
+        return parameters to preview
+    }
+
+    suspend fun recordMcpConsent(
+        parameters: Map<String, String>,
+        approved: Boolean,
+        installationId: String,
+    ): ConsentResult =
+        checkNotNull(accountConnection)
+            .send(
+                "POST",
+                "/mcp/oauth/consent",
+                buildJsonObject {
+                    put("parameters", wireJson.encodeToJsonElement(parameters))
+                    put("approved", approved)
+                    put("installationId", installationId)
+                },
+            )
 
     suspend fun accountConfirmationCode(): EmailChallenge =
         checkNotNull(accountConnection)

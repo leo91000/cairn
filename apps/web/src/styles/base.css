@@ -91,14 +91,14 @@ label {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  font-size: 12px;
-  font-weight: 500;
-  color: light-dark(#514d7c, var(--dark-muted));
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-ink);
   min-width: 0;
 }
 label small {
   font-size: 12px;
-  color: light-dark(#827fa4, var(--dark-subtle));
+  color: var(--color-muted);
   font-weight: 400;
   line-height: 1.6;
 }
@@ -107,30 +107,32 @@ textarea,
 select {
   width: 100%;
   min-width: 0;
-  border: 1px solid light-dark(#d6d5e6, var(--dark-control-border));
-  border-radius: 7px;
-  padding: 11px 12px;
-  background: light-dark(#fff, var(--dark-inset));
-  color: light-dark(#34305d, var(--dark-text));
-  font-size: 12px;
+  border: 1px solid var(--color-control);
+  border-radius: 10px;
+  padding: 11px 13px;
+  background: var(--color-inset);
+  color: var(--color-ink);
+  font-size: 13.5px;
   outline: none;
   transition:
     border-color 0.15s,
+    background-color 0.15s,
     box-shadow 0.15s;
 }
 input:focus,
 textarea:focus,
 select:focus {
-  border-color: light-dark(#7c77ae, var(--dark-accent));
-  box-shadow: 0 0 0 3px light-dark(#e0dff0, #a7a2da2b);
+  border-color: var(--color-accent);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-focus);
 }
 input::placeholder,
 textarea::placeholder {
-  color: light-dark(#9997b4, var(--dark-subtle));
+  color: var(--color-subtle);
 }
 input:disabled {
-  background: light-dark(#f1f0f7, var(--dark-inset));
-  color: light-dark(#9391aa, var(--dark-subtle));
+  background: var(--color-variant);
+  color: var(--color-subtle);
 }
 textarea {
   resize: vertical;

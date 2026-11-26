@@ -251,13 +251,22 @@ pub(super) async fn require_recent_proof(
     require_recent_proof_for_session(connection, &digest(session_token(headers))).await
 }
 
+pub(super) async fn has_recent_proof<'c>(
+    executor: impl sqlx_core::executor::Executor<'c, Database = sqlx_postgres::Postgres>,
+    session_digest: &str,
+) -> Result<bool, ApiError> {
+    let (recent,): (bool,) = query_as("SELECT EXISTS (SELECT 1 FROM web_sessions WHERE digest = $1 AND expires_at > clock_timestamp() AND last_proof_at > clock_timestamp() - interval '5 minutes' AND last_proof_at <= clock_timestamp())")
+        .bind(session_digest)
+        .fetch_one(executor)
+        .await?;
+    Ok(recent)
+}
+
 pub(super) async fn require_recent_proof_for_session(
     connection: &mut sqlx_postgres::PgConnection,
     session_digest: &str,
 ) -> Result<(), ApiError> {
-    let (recent,): (bool,) = query_as("SELECT EXISTS (SELECT 1 FROM web_sessions WHERE digest = $1 AND expires_at > clock_timestamp() AND last_proof_at > clock_timestamp() - interval '5 minutes' AND last_proof_at <= clock_timestamp())")
-        .bind(session_digest).fetch_one(connection).await?;
-    if !recent {
+    if !has_recent_proof(connection, session_digest).await? {
         return Err(ApiError::Http(
             StatusCode::FORBIDDEN,
             "Confirm your identity with an email code or passkey before continuing",

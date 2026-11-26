@@ -294,12 +294,25 @@ pub(super) async fn callback(
         Err(_) => Err(rejected()),
     };
     let mut response = result.unwrap_or_else(|error| match error {
-        ApiError::Http(StatusCode::CONFLICT, _) => Redirect::to("/?sign_in_error=oauth_link_required").into_response(),
-        ApiError::Http(StatusCode::FORBIDDEN, _) => Redirect::to("/?sign_in_error=oauth_proof").into_response(),
+        ApiError::Http(StatusCode::CONFLICT, _) => {
+            Redirect::to("/?sign_in_error=oauth_link_required").into_response()
+        }
+        ApiError::Http(StatusCode::FORBIDDEN, _) => {
+            Redirect::to("/?sign_in_error=oauth_proof").into_response()
+        }
         ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, _) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Html("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Sign-in provider unavailable</title><h1>Sign-in provider unavailable</h1><p>Please try again or use another sign-in method.</p><a href=\"/?sign_in_error=oauth_unavailable\">Try again</a></html>"),
-        ).into_response(),
+            [(header::CONTENT_SECURITY_POLICY, SIGNAL_HTML_CSP)],
+            Html(signal_oauth_html(
+                "en",
+                "Sign-in provider unavailable",
+                "<div class='badge warn' aria-hidden='true'>!</div>\
+                 <h1>Sign-in provider unavailable</h1>\
+                 <p class='lead'>Please try again or use another sign-in method.</p>\
+                 <a class='btn primary' href='/?sign_in_error=oauth_unavailable'>Try again</a>",
+            )),
+        )
+            .into_response(),
         _ => Redirect::to("/?sign_in_error=oauth").into_response(),
     });
     response.headers_mut().append(
@@ -433,30 +446,31 @@ async fn native_confirmation(
     if updated.rows_affected() != 1 {
         return Err(rejected());
     }
-    let html = format!(
-        "<!doctype html><html lang=fr><meta charset=utf-8><meta name=viewport content='width=device-width'>\
-         <title>Autoriser Cairn pour Android</title>\
+    let body = format!(
+        "<div class='bridge' aria-hidden='true'>\
+         <span class='tile gh'><svg viewBox='0 0 24 24' width='20' height='20' fill='currentColor'><path d='M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.04 0 0 .97-.31 3.17 1.18a10.97 10.97 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.11 3.04.74.8 1.19 1.83 1.19 3.08 0 4.41-2.69 5.39-5.25 5.67.41.36.78 1.06.78 2.14 0 1.55-.01 2.8-.01 3.18 0 .31.21.68.8.56A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z'/></svg></span>\
+         <span class='arrow'>&rarr;</span>\
+         <span class='tile cairn'>{CAIRN_SYMBOL_SVG}</span>\
+         </div>\
          <h1>Autoriser l’application Cairn pour Android</h1>\
-         <p>Compte GitHub vérifié : <strong>{displayed_email}</strong></p>\
-         <p>Cette autorisation connectera ou liera ce compte à l’application Cairn pour Android qui a demandé la connexion.</p>\
-         <p role=alert>Ne confirmez pas un lien reçu d’une autre personne. Continuez uniquement si vous venez de demander cette connexion dans Cairn sur votre appareil.</p>\
+         <p class='lead'>Compte GitHub vérifié</p>\
+         <p class='chip'><strong>{displayed_email}</strong></p>\
+         <p class='note'>Cette autorisation connectera ou liera ce compte à l’application Cairn pour Android qui a demandé la connexion.</p>\
+         <p class='alert' role=alert>Ne confirmez pas un lien reçu d’une autre personne. Continuez uniquement si vous venez de demander cette connexion dans Cairn sur votre appareil.</p>\
          <form method=post action='/api/account/oauth/github/native/confirm'>\
          <input type=hidden name=challenge value='{challenge}'>\
          <input type=hidden name=proof value='{proof}'>\
-         <button type=submit>Autoriser sur cet appareil</button></form>\
-         <p>Pour annuler, fermez cet onglet sans autoriser.</p></html>"
+         <button class='btn primary' type=submit>Autoriser sur cet appareil</button></form>\
+         <p class='foot'>Pour annuler, fermez cet onglet sans autoriser.</p>"
     );
+    let html = signal_oauth_html("fr", "Autoriser Cairn pour Android", &body);
     Ok((
         [
             (
                 header::SET_COOKIE,
                 browser_cookie(service, "cairn_native_confirmation", &browser, 300),
             ),
-            (
-                header::CONTENT_SECURITY_POLICY,
-                "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
-                    .into(),
-            ),
+            (header::CONTENT_SECURITY_POLICY, SIGNAL_HTML_CSP.into()),
             // Browser form POSTs need a non-null Origin for the exact-origin
             // check. Send only the public origin, never the callback's query.
             (header::REFERRER_POLICY, "strict-origin".into()),
@@ -631,7 +645,21 @@ async fn complete_identity(
             return Err(rejected());
         }
         transaction.commit().await?;
-        return Ok(axum::response::Html("<!doctype html><html lang=fr><meta name=viewport content='width=device-width'><title>Cairn</title><p>Connexion réussie. Revenez dans l’application Cairn.</p></html>").into_response());
+        let html = signal_oauth_html(
+            "fr",
+            "Cairn",
+            "<div class='badge ok' aria-hidden='true'>\
+             <svg viewBox='0 0 24 24' width='24' height='24' fill='none' stroke='currentColor' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'/></svg>\
+             </div>\
+             <h1>Connexion réussie</h1>\
+             <p class='lead'>Connexion réussie. Revenez dans l’application Cairn.</p>\
+             <p class='foot'>Vous pouvez fermer cet onglet.</p>",
+        );
+        return Ok((
+            [(header::CONTENT_SECURITY_POLICY, SIGNAL_HTML_CSP)],
+            axum::response::Html(html),
+        )
+            .into_response());
     }
 
     let session_response = create_session(
@@ -941,4 +969,45 @@ pub(super) async fn native_finish(
     .await?;
     transaction.commit().await?;
     Ok(response)
+}
+
+const SIGNAL_HTML_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+
+const CAIRN_SYMBOL_SVG: &str = "<svg viewBox='0 0 24 24' width='24' height='24' aria-hidden='true'>\
+<g class='stone'><rect x='6.2' y='11.4' width='11.6' height='4.4' rx='2.2'/><rect x='2.8' y='17.6' width='18.4' height='4.6' rx='2.3'/></g>\
+<path class='spark-fill' d='M12 2.6 14.8 5.4 12 8.2 9.2 5.4Z' stroke-width='1' stroke-linejoin='round'/>\
+<path class='spark-stroke' d='M6.9 2.2a6 6 0 0 0 0 6.4M17.1 2.2a6 6 0 0 1 0 6.4' fill='none' stroke-width='1.7' stroke-linecap='round'/>\
+</svg>";
+
+fn signal_oauth_html(lang: &str, title: &str, body: &str) -> String {
+    let title = crate::html::escape_html(title);
+    format!(
+        "<!doctype html><html lang='{lang}'><head><meta charset='utf-8'>\
+         <meta name='viewport' content='width=device-width,initial-scale=1'>\
+         <title>{title}</title>\
+         <style>\
+         :root{{color-scheme:light dark;--bg:#f4f2ec;--card:#fff;--inset:#f9f8f4;--line:#e3dfd5;--ink:#16151d;--muted:#6d6a78;--primary:#14365a;--primary-h:#204b78;--warn:#7a5710;--warn-bg:#fff3c7;--warn-line:#ead48b;--ok:#12806f;--ok-bg:#e1f4f0;--stone:#14365a;--spark:#b8650a;--shadow:0 14px 40px -18px rgba(22,21,29,.16)}}\
+         @media(prefers-color-scheme:dark){{:root{{--bg:#0f0f14;--card:#17171e;--inset:#131319;--line:#2a2a35;--ink:#f3f2f7;--muted:#9d9bab;--primary:#2f6ec7;--primary-h:#3a7bd5;--warn:#f3cf7a;--warn-bg:#322a1b;--warn-line:#4d3f24;--ok:#4fc7a8;--ok-bg:#162e29;--stone:#dce6f2;--spark:#f2a93b;--shadow:0 22px 54px -20px rgba(0,0,0,.7)}}}}\
+         *{{box-sizing:border-box;margin:0;padding:0}}\
+         body{{min-height:100dvh;display:grid;place-items:center;padding:24px 16px;background:radial-gradient(620px 360px at 50% 12%,rgba(47,110,199,.12),transparent 70%),radial-gradient(400px 240px at 58% 8%,rgba(184,101,10,.09),transparent 68%),var(--bg);color:var(--ink);font:400 15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}}\
+         main{{width:100%;max-width:416px;background:var(--card);border:1px solid var(--line);border-radius:20px;padding:28px 24px;box-shadow:var(--shadow);text-align:center}}\
+         .stone{{fill:var(--stone)}}.spark-fill{{fill:var(--spark);stroke:var(--spark)}}.spark-stroke{{stroke:var(--spark)}}\
+         .bridge{{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:18px}}\
+         .tile{{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;border:1px solid var(--line);background:var(--inset)}}\
+         .tile.gh{{background:#16151d;color:#fff;border-color:transparent}}\
+         .arrow{{color:var(--muted);font-weight:700}}\
+         .badge{{width:52px;height:52px;border-radius:16px;margin:0 auto 16px;display:grid;place-items:center;font-weight:700;font-size:20px}}\
+         .badge.ok{{background:var(--ok-bg);color:var(--ok)}}\
+         .badge.warn{{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn-line)}}\
+         h1{{font-size:20px;line-height:1.25;letter-spacing:-.02em;margin-bottom:10px}}\
+         .lead{{font-size:14px;color:var(--muted);margin-bottom:12px}}\
+         .chip{{display:inline-block;padding:6px 14px;border-radius:999px;background:var(--inset);border:1px solid var(--line);font-size:13.5px;margin-bottom:14px;word-break:break-all}}\
+         .note{{font-size:13.5px;color:var(--muted);margin-bottom:16px}}\
+         .alert{{text-align:left;font-size:12.5px;line-height:1.5;color:var(--warn);background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:12px;padding:12px 14px;margin-bottom:18px}}\
+         .btn{{display:inline-flex;align-items:center;justify-content:center;width:100%;min-height:46px;padding:0 18px;border-radius:12px;border:0;font:600 14.5px/1 inherit;text-decoration:none;cursor:pointer}}\
+         .btn.primary{{background:var(--primary);color:#fff}}\
+         .btn.primary:hover{{background:var(--primary-h)}}\
+         .foot{{font-size:12.5px;color:var(--muted);margin-top:14px}}\
+         </style></head><body><main>{body}</main></body></html>"
+    )
 }
