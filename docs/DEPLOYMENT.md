@@ -446,8 +446,8 @@ Deploy matching current Beacon and installation binaries. Follow the
 [Beacon database compatibility runbook](BEACON.md#next-release-recreate-the-beacon-database)
 before promotion. Historical incompatible migration ledgers need a separately
 prepared data-preserving migration; routine releases do not reset Beacon or
-installation data. Version-11 installations use the
-[automatic inventory upgrade](migrations/0012-typed-node-inventory.md).
+installation data. For older installation databases, follow the
+[data-preserving installation upgrade](PRODUCTION-CAIRN.md#data-preserving-upgrades).
 A protocol mismatch requires an update and prevents reconnection. Rollback also
 requires a matching binary set and a database created by that Beacon version;
 keep access closed until the set is consistent.

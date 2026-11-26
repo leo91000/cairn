@@ -629,15 +629,15 @@ these local timings are separate from production network latency.
 
 ## Coding-agent accounts and usage (A15)
 
-SQLite v14 replaces `agentAccounts` with `coding_agent_accounts`,
+SQLite v14 replaced `agentAccounts` with `coding_agent_accounts`,
 `account_usage`, ordered `account_usage_windows`, `account_exhaustion` and
 `account_leases`. Named columns own selection state, parallel limits, priority,
 model-provider binding and both current/exhausted usage. Relations reference their
 account; lease deletion is restricted while a slot is held. The lease run key also
 supports background title/avatar work without fabricating a retained run. Startup
 invalidates runtime leases before new admission, keeping the existing credential
-recovery and recovering-run exclusion. The one-time startup migration from v13
-preserves all account state and encrypted credentials transactionally; see
+recovery and recovering-run exclusion. The historical migration from v13
+preserved all account state and encrypted credentials transactionally; see
 [migration 0014](migrations/0014-typed-account-pool.md). There is no runtime legacy
 reader or records mirror. The existing Driver and worker still own connection, refresh/reset,
 remaining-capacity selection, exhaustion switching and run-scoped credential isolation.
@@ -701,9 +701,9 @@ boundaries; execution-node/backend migration and native provenance retain their
 owning domain adapters until A10/A11/A18. These adapters read the typed SQL writer,
 never `records`, and do not accept another persisted format.
 
-SQLite v15 upgrades version 14 atomically at startup; see
-[the preserving migration](migrations/0015-typed-conversations.md); v27 adds the
-message and question plan flags ([migration](migrations/0027-plan-requests.md)).
+The historical [version-14 upgrade](migrations/0015-typed-conversations.md) ran
+atomically at startup. The [version-27 migration](migrations/0027-plan-requests.md)
+added message and question plan flags.
 Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
 `conversation_engine_switches` and the singleton `conversation_retention` policy.
 Conversation and message revisions rotate with writes. Slugs are unique and never
@@ -793,7 +793,7 @@ installation grants are preserved. HTTP's existing binary upload adapter and
 Discord/Gmail imports call the same domain reservation/publication path. No UI
 presentation, file/message/count limit or sandbox input format changes.
 
-SQLite 16 → 17 imports uploaded metadata and quotas atomically; see
+The historical SQLite 16 → 17 migration imported uploaded metadata and quotas atomically; see
 [migration 0017](migrations/0017-attachment-reservations.md). Indexed constrained
 attachment rows and per-conversation quota/reservation counters replace KV scans.
 Service assembles the domain without exposing an upload mutex. Unique speculative
@@ -825,7 +825,7 @@ storage limits remain available with their existing authorization.
 shutdown deadlines on HTTP, public MCP, `cairn_installation` and both apps.
 `NodeStoragePolicy` retains only memory cache and free disk reserve controls.
 
-SQLite 17 → 18 imports the KV state atomically; see
+The historical SQLite 17 → 18 migration imported the KV state atomically; see
 [migration 0018](migrations/0018-personal-read-state.md). Constrained
 `WITHOUT ROWID` tables keyed by account replace prefix scans of KV.
 `tests/fixtures/personal-settings-contracts.json` qualifies the commands, views and
@@ -886,8 +886,9 @@ reported by the work. See [ADR-0078](adr/0078-cairn-timeline.md).
 
 `crates/installation/src/timeline` holds the pure reducer and its SQL projection.
 `Db::event` applies each event in a savepoint with its insert, so a caller that
-catches a failure never keeps half of an event. Fresh installs create the schema;
-version 21 upgrades through [migration 0022](migrations/0022-timeline-projection.md).
+catches a failure never keeps half of an event. Fresh installs create the schema.
+[Migration 0022](migrations/0022-timeline-projection.md) describes the historical
+version-21 transition.
 An opening window includes an older active background wait once, so diagnostics or subagent progress cannot hide it.
 Message text, notice details, background task descriptions and IDs, and quota messages are read from the source event:
 the projection stores no copy of them. Pruned events take their cards along.
@@ -962,10 +963,10 @@ backend selection do not change. The shared placement corpus qualifies defaults,
 all exclusive lifecycle states and command bounds in Rust, JSON Schema/TypeScript
 and Kotlin; server validation remains authoritative.
 
-The [automatic migration](migrations/0023-typed-placement.md) replaces attempt and
-reservation records with constrained placement/attempt/reservation tables, ordered
-relations and named run placement columns. It preserves controller fencing and
-sequence high-water marks. Node inventory and run public views are projections,
+The [historical placement migration](migrations/0023-typed-placement.md)
+replaced attempt and reservation records with constrained placement/attempt/reservation
+tables, ordered relations and named run placement columns. It preserved controller
+fencing and sequence high-water marks. Node inventory and run public views are projections,
 without an inventory reservation mirror or a second placement document. Remaining
 volume/publication and disk-checkpoint adapters belong to A11/A18.
 

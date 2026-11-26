@@ -1,5 +1,9 @@
 # Native VM disk capability (layouts 27/28 → 29)
 
+This guide describes a historical migration in the schema-37 manager at
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 Stop the installation and preserve an offline database backup before upgrading.
 Layout 28 on main added the turn-boundary index. This upgrade preserves that
 index, or creates it for a layout-27 database, and adds `nodes.vm_disks` in the

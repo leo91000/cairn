@@ -1,5 +1,9 @@
 # Installation database 18 → 19
 
+This guide describes a historical migration in the schema-37 manager at
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 `Store::open` performs this migration before serving requests. In one immediate
 SQLite transaction it verifies that `runs.data` and `runs.summary_data` are the
 expected generated columns, removes those columns and creates the equivalent

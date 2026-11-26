@@ -107,9 +107,9 @@ release environment backing. See [local disk operations](CONVERSATION-STORAGE-OP
 Expiration metadata uses the existing `records` store: `environment-expirations`
 holds the detached environment while its interrupted worker finishes stopping;
 `environment-retirements` holds captured attempt/process/node identities, worktrees,
-projects, exact detached publications and retry/erasure progress. Schema 32
-separates detached publication acknowledgements from the active run slot; see
-[migration 0032](migrations/0032-detached-publication-acknowledgements.md). The run
+projects and retry/erasure progress. Schema 38 retires the historical
+publication-acknowledgement tables during the
+[installation upgrade](PRODUCTION-CAIRN.md#data-preserving-upgrades). The run
 boundary records an `environmentAdmissionRevision` to reject stale preparations
 when the first destination/backend is replaced, `environmentRetirementId` to scope
 cleanup notices, and `environmentExpirationCause` alongside `environmentExpiredAt`.

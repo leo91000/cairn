@@ -101,7 +101,8 @@ schema. Databases with an incompatible historical SQLx ledger have no automatic
 upgrade path in this refactor. Check the persisted ledger against the exact image
 before promotion. A mismatch blocks routine rollout until a data-preserving
 migration is prepared; it does not authorize deleting Beacon data. The installation
-database's [11 → 12 upgrade](migrations/0012-typed-node-inventory.md) is independent.
+database follows its own
+[data-preserving upgrade procedure](PRODUCTION-CAIRN.md#data-preserving-upgrades).
 
 The destructive historical reset below requires a separate explicit instruction
 to discard Beacon accounts and access state. It is not part of a routine release

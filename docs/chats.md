@@ -74,6 +74,8 @@ proposes an approach without changing anything. Each such message shows a **Plan
 badge. The proposal appears as a **Proposed plan** card; **Implement** on the latest
 one queues an ordinary message in the same conversation, which runs with the agent's
 usual permissions. Turning **Plan** off and writing a message does the same.
+Historical proposals without an authored request ID remain visible. Ask for a
+fresh Plan proposal before approving one.
 
 A selected or saved Plan choice is never silently converted to an ordinary request. If the current engine cannot run Plan (OpenCode), sending is blocked until you choose Codex, Claude Code or Antigravity, or explicitly turn Plan off. The same rule applies after restoring a draft or switching engines.
 
