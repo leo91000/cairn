@@ -4,6 +4,10 @@ import android.app.Application
 import androidx.compose.runtime.*
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.input.InputModeManager
+import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
@@ -39,6 +43,7 @@ abstract class ChatSwipeCases {
         get() = compose.onNodeWithTag("conversation-history")
 
     private lateinit var vm: CairnViewModel
+    private lateinit var inputMode: InputModeManager
     private var expectedPages = 1
     private val historyRequests = java.util.concurrent.CopyOnWriteArrayList<String>()
     private val telemetryReports = java.util.concurrent.CopyOnWriteArrayList<String>()
@@ -52,7 +57,12 @@ abstract class ChatSwipeCases {
                     .fetchSemanticsNode()
                     .config[SemanticsProperties.VerticalScrollAxisRange]
                     .value()
-            compose.onNodeWithTag("side-question-card").performClick()
+            compose.runOnIdle { Assert.assertTrue(inputMode.requestInputMode(InputMode.Keyboard)) }
+            compose
+                .onNodeWithTag("side-question-button")
+                .performSemanticsAction(SemanticsActions.RequestFocus)
+                .assertIsFocused()
+                .performClick()
             compose.onNodeWithText("Voir la réponse").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 history
@@ -68,6 +78,18 @@ abstract class ChatSwipeCases {
                     .config[SemanticsProperties.VerticalScrollAxisRange]
                     .value() < tail / 2
             )
+            compose.onNodeWithContentDescription("Options de la conversation").assertIsFocused()
+        }
+
+    @Test
+    fun savedSideAnswersStayAccessibleInFullscreen() =
+        withChats(single = true, sideAnswer = true) {
+            open("Chat récent")
+            compose.onNodeWithContentDescription("Options de la conversation").performClick()
+            compose.onNodeWithText("Plein écran").performClick()
+            compose.onNodeWithContentDescription("Quitter le plein écran").assertExists()
+            compose.onNodeWithTag("side-question-button").performClick()
+            compose.onNodeWithText("Voir la réponse").assertExists()
         }
 
     @Test
@@ -597,6 +619,7 @@ abstract class ChatSwipeCases {
                             LocalPerformanceUploadCadence provides uploadCadence
                         ) {
                             CairnTheme {
+                                inputMode = LocalInputModeManager.current
                                 CairnApp(
                                     vm = vm,
                                     targetChat = incomingChat,

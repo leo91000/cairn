@@ -37,7 +37,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.selected
@@ -343,6 +347,7 @@ internal fun ChatPage(
             )
         }
     val sideScope = rememberCoroutineScope()
+    val inputMode = LocalInputModeManager.current
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
     val listState = rememberLazyListState()
@@ -408,6 +413,25 @@ internal fun ChatPage(
                         .copy(subagents = waitingForSubagents(it.taskIds, currentSubagents))
                 } ?: workingStep(live.events, chat?.agentName.orEmpty(), chat?.run?.startedAt)
         }
+    val sideChat = chat?.let { if (readOnly) it.copy(canAskSideQuestion = false) else it }
+    val sideStatus = sideChat?.takeIf(::hasSideQuestionAction)?.let { SideQuestionStatus(it, side) }
+    val showWorkingIndicator =
+        chat?.exclusiveSuspended != true &&
+            working != null &&
+            !live.catchingUp &&
+            // The bar already shows the subagents it waits for.
+            !(subagentBar && working.subagents)
+    val sidePlacement =
+        when {
+            sideStatus == null -> null
+            showWorkingIndicator && working?.waiting != null -> SideQuestionPlacement.Waiting
+            showWorkingIndicator -> SideQuestionPlacement.Working
+            fullscreen -> SideQuestionPlacement.FullscreenHeader
+            else -> SideQuestionPlacement.Header
+        }
+    val sideFocusFallback = remember(id) { FocusRequester() }
+    val sideButtonFocus =
+        key(id) { rememberSideQuestionButtonFocus(sidePlacement, sideFocusFallback) }
     val conversationError = conversationError(chat, readOnly)
     val error = conversationError?.takeUnless {
         quota != null && (isQuotaMessage(it) || it == quota.message)
@@ -932,6 +956,14 @@ internal fun ChatPage(
                             choosing = true
                         },
                     ) {
+                        if (sideChat != null && sideStatus != null && !showWorkingIndicator)
+                            SideQuestionButton(
+                                sideChat,
+                                side,
+                                sideButtonFocus,
+                                size = 40.dp,
+                                status = sideStatus,
+                            )
                         val files = live.state?.artifacts?.size ?: 0
                         if (id != null) {
                             Box {
@@ -955,7 +987,7 @@ internal fun ChatPage(
                                     }
                             }
                         }
-                        Box {
+                        Box(Modifier.focusRequester(sideFocusFallback)) {
                             ActionIcon("Options de la conversation", CairnIcons.More) {
                                 menu = true
                             }
@@ -1153,8 +1185,18 @@ internal fun ChatPage(
                             Modifier.weight(1f).padding(start = 16.dp),
                             style = MaterialTheme.typography.titleSmall,
                         )
-                        ActionIcon("Quitter le plein écran", Icons.Default.Close) {
-                            fullscreen = false
+                        if (sideChat != null && sideStatus != null && !showWorkingIndicator)
+                            SideQuestionButton(
+                                sideChat,
+                                side,
+                                sideButtonFocus,
+                                size = 40.dp,
+                                status = sideStatus,
+                            )
+                        Box(Modifier.focusRequester(sideFocusFallback)) {
+                            ActionIcon("Quitter le plein écran", Icons.Default.Close) {
+                                fullscreen = false
+                            }
                         }
                     }
                 if (choosing) {
@@ -1428,10 +1470,10 @@ internal fun ChatPage(
                                     }
                                 }
                         }
-                        if (live.catchingUp && id != null) {
-                            OpeningOutline(live.error ?: live.status, Modifier.weight(1f))
-                        } else {
-                            Box(Modifier.weight(1f).fillMaxWidth()) {
+                        Box(Modifier.weight(1f).fillMaxWidth()) {
+                            if (live.catchingUp && id != null) {
+                                OpeningOutline(live.error ?: live.status, Modifier.fillMaxSize())
+                            } else {
                                 LazyColumn(
                                     Modifier.fillMaxSize()
                                         .historyVisibility(positionReady)
@@ -1697,13 +1739,23 @@ internal fun ChatPage(
                                                 color = signal.warning,
                                             )
                                         }
-                                    else if (
-                                        working != null &&
-                                            !live.catchingUp &&
-                                            // The bar already shows the subagents it waits for.
-                                            !(subagentBar && working.subagents)
-                                    )
-                                        item(key = "agent-working") { WorkingIndicator(working) }
+                                    else if (showWorkingIndicator && working != null)
+                                        item(key = "agent-working") {
+                                            WorkingIndicator(
+                                                working,
+                                                action =
+                                                    if (sideChat != null && sideStatus != null) {
+                                                        {
+                                                            SideQuestionButton(
+                                                                sideChat,
+                                                                side,
+                                                                sideButtonFocus,
+                                                                status = sideStatus,
+                                                            )
+                                                        }
+                                                    } else null,
+                                            )
+                                        }
                                 }
                                 HistoryStatus(
                                     live,
@@ -1717,6 +1769,7 @@ internal fun ChatPage(
                                     follow = true
                                 }
                             }
+                            if (selected) SideQuestionAnnouncement(sideStatus)
                         }
                         if (!fullscreen) requestPlan?.let { PlanBar(it) }
                         if (subagentBar) SubagentBar(currentSubagents, active, openSubagent)
@@ -1779,11 +1832,6 @@ internal fun ChatPage(
                                 title = "Vous pouvez suivre cette conversation",
                                 icon = CairnIcons.Shield,
                                 maxLines = 4,
-                            )
-                        if (chat != null)
-                            SideQuestionCard(
-                                if (readOnly) chat.copy(canAskSideQuestion = false) else chat,
-                                side,
                             )
                         if (!fullscreen)
                             Surface(
@@ -2161,6 +2209,11 @@ internal fun ChatPage(
                         followGesture.syncFollow(false)
                         follow = false
                         sideScope.launch {
+                            if (inputMode.inputMode == InputMode.Keyboard) {
+                                // The working-row opener can scroll out of view with the reply.
+                                withFrameNanos {}
+                                runCatching { sideFocusFallback.requestFocus() }
+                            }
                             listState.animateScrollToItem(index + if (id == null) 1 else 0)
                         }
                     } else side.unreachable(itemId, replyEventId)

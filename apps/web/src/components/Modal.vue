@@ -22,7 +22,7 @@ const props = defineProps<{
   sheet?: boolean
   drawer?: boolean
   headless?: boolean
-  returnFocus?: HTMLElement
+  returnFocus?: HTMLElement | (() => HTMLElement | undefined)
 }>()
 const emit = defineEmits<{ close: [] }>()
 const dialog = ref<HTMLDialogElement>()
@@ -34,7 +34,8 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   dialog.value?.close()
-  const target = props.returnFocus ?? previous
+  const returnFocus = props.returnFocus
+  const target = (typeof returnFocus === 'function' ? returnFocus() : returnFocus) ?? previous
   target?.focus()
 })
 </script>

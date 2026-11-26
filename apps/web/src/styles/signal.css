@@ -137,6 +137,7 @@
   from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 50%, transparent); }
   to { box-shadow: 0 0 0 7px transparent; }
 }
+.side-question-spin { animation: veille-turn 1.2s linear infinite; }
 
 /* Finished work not read yet: a dot that pops in once and a faint wash of the accent on its card.
    Read in place, the dot folds away before the card moves to Recent. */
@@ -167,7 +168,7 @@
 .signal-veil-enter-from, .signal-veil-leave-to { opacity: 0; }
 
 @media (prefers-reduced-motion: reduce) {
-  .souffle-halo::after, .souffle-halo > .souffle-core, .veille-ring::before, .veille-dot, .live-dot, .unread-dot, .avatar-orbit, .avatar-orbit::before { animation: none; }
+  .souffle-halo::after, .souffle-halo > .souffle-core, .veille-ring::before, .veille-dot, .live-dot, .side-question-spin, .unread-dot, .avatar-orbit, .avatar-orbit::before { animation: none; }
   .souffle-sweep { color: var(--color-ink); background: none; }
   .avatar-orbit { background: none; }
   .avatar-orbit::before { opacity: 0.35; }
