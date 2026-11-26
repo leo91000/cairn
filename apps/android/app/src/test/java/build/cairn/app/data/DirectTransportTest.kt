@@ -222,6 +222,110 @@ class DirectTransportTest {
     }
 
     @Test
+    fun `event streams request gzip and decode each flushed chunk as it arrives`() = runTest {
+        val encoded = java.io.ByteArrayOutputStream()
+        val gzip = java.util.zip.GZIPOutputStream(encoded, true)
+        fun encode(text: String): ByteArray {
+            gzip.write(text.toByteArray())
+            gzip.flush()
+            return encoded.toByteArray().also { encoded.reset() }
+        }
+        val chunks =
+            ArrayDeque(
+                listOf(
+                    encode("event: batch\ndata: {\"n\":1}\n\n"),
+                    encode("event: batch\ndata: {\"n\":2}\n\n"),
+                    gzip.finish().let { encoded.toByteArray() },
+                )
+            )
+        MockWebServer().use { server ->
+            server.start()
+            lateinit var channel: DirectChannel
+            fun send(frame: JsonObject) =
+                channel.receive(singleFramePacket(frame.toString().toByteArray()))
+            channel =
+                DirectChannel(
+                    { packet, _, _ ->
+                        val request =
+                            wireJson
+                                .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                .jsonObject
+                        val id = request["id"]!!
+                        when (request["type"]!!.jsonPrimitive.content) {
+                            "request" -> {
+                                val headers =
+                                    request["headers"]!!.jsonArray.map {
+                                        it.jsonArray[0].jsonPrimitive.content to
+                                            it.jsonArray[1].jsonPrimitive.content
+                                    }
+                                assertTrue("accept-encoding" to "identity" in headers)
+                                assertTrue("x-cairn-stream-encoding" to "gzip" in headers)
+                                send(
+                                    buildJsonObject {
+                                        put("type", "stream_start")
+                                        put("id", id)
+                                        put("status", 200)
+                                        put(
+                                            "headers",
+                                            buildJsonArray {
+                                                add(
+                                                    buildJsonArray {
+                                                        add("content-type")
+                                                        add("text/event-stream")
+                                                    }
+                                                )
+                                                add(
+                                                    buildJsonArray {
+                                                        add("content-encoding")
+                                                        add("gzip")
+                                                    }
+                                                )
+                                            },
+                                        )
+                                        put("body", "")
+                                    }
+                                )
+                            }
+                            "stream_credit" ->
+                                send(
+                                    chunks.removeFirstOrNull()?.let { chunk ->
+                                        buildJsonObject {
+                                            put("type", "stream_chunk")
+                                            put("id", id)
+                                            put("body", Base64.getEncoder().encodeToString(chunk))
+                                        }
+                                    }
+                                        ?: buildJsonObject {
+                                            put("type", "stream_end")
+                                            put("id", id)
+                                            put("failed", false)
+                                        }
+                                )
+                        }
+                    },
+                    {},
+                )
+            val request =
+                Request.Builder()
+                    .url(server.url("/api/installations/test/api/chats/stream?after=0"))
+                    .header("Accept", "text/event-stream")
+                    .build()
+            channel.request(request, "/api/installations/test/api/", { false }).use {
+                assertNull(it.header("content-encoding"))
+                val source = it.body.source()
+                // The first event decodes before the next chunk is requested.
+                assertEquals("event: batch", source.readUtf8LineStrict())
+                assertEquals(2, chunks.size)
+                assertEquals(
+                    "data: {\"n\":1}\n\nevent: batch\ndata: {\"n\":2}\n\n",
+                    source.readUtf8(),
+                )
+            }
+            channel.close()
+        }
+    }
+
+    @Test
     fun `a protocol mismatch is actionable and never falls back to relay`() = runBlocking {
         val packets =
             listOf(
@@ -1336,7 +1440,7 @@ taskId = "",)), false, false, history = "h1", entries = listOf(build.cairn.contr
                         build.cairn.app.ui.backgroundWait(final.entries),
                     )
                     assertEquals(
-                        "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1&recent=1",
+                        "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1&recent=1&compact=1",
                         server.takeRequest().path,
                     )
                     assertEquals("relay", api.transport.route.value)

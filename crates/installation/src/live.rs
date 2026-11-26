@@ -35,6 +35,9 @@ struct Scope {
     /// A conversation's stream also carries the list, so a browser tab reading a
     /// conversation keeps a single stream within its account's stream capacity.
     with_list: bool,
+    /// The client applies list changes and reads the chat's run from `run` (`compact=1`):
+    /// the list is sent once per connection, then only the conversations that changed.
+    compact: bool,
 }
 
 impl Scope {
@@ -44,6 +47,7 @@ impl Scope {
             id: id.to_owned(),
             account: account.to_owned(),
             with_list: false,
+            compact: false,
         }
     }
 
@@ -209,6 +213,9 @@ struct State {
     chat: Value,
     artifacts: Vec<Value>,
     cache_revision: Value,
+    /// Compact streams only: the revision of saved history, which trashing leaves unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_revision: Option<Value>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_chats"
@@ -304,6 +311,59 @@ impl CardRange {
     }
 }
 
+/// Changes to the conversation list since the previous batch of a compact stream.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatChanges {
+    /// New conversations and conversations whose summary changed, in full.
+    upserts: Vec<Value>,
+    /// Conversations that left the list.
+    removed: Vec<String>,
+    /// Every listed id in order, when the order differs from the previous list
+    /// without its removed conversations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    order: Option<Vec<String>>,
+}
+
+impl ChatChanges {
+    fn between(before: &[Value], after: &[Value]) -> Option<Self> {
+        let previous: HashMap<&str, &Value> =
+            before.iter().map(|chat| (text(chat, "id"), chat)).collect();
+        let listed: std::collections::HashSet<&str> =
+            after.iter().map(|chat| text(chat, "id")).collect();
+
+        let upserts: Vec<Value> = after
+            .iter()
+            .filter(|chat| previous.get(text(chat, "id")) != Some(chat))
+            .cloned()
+            .collect();
+        let removed: Vec<String> = before
+            .iter()
+            .map(|chat| text(chat, "id"))
+            .filter(|id| !listed.contains(id))
+            .map(str::to_owned)
+            .collect();
+
+        let kept = before
+            .iter()
+            .map(|chat| text(chat, "id"))
+            .filter(|id| listed.contains(id));
+        let reordered = !kept.eq(after.iter().map(|chat| text(chat, "id")));
+        let order = reordered.then(|| {
+            after
+                .iter()
+                .map(|chat| text(chat, "id").to_owned())
+                .collect()
+        });
+
+        (!upserts.is_empty() || !removed.is_empty() || order.is_some()).then_some(Self {
+            upserts,
+            removed,
+            order,
+        })
+    }
+}
+
 /// One SSE `batch` event.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -321,6 +381,8 @@ struct Batch {
     has_older: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<State>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_changes: Option<ChatChanges>,
 }
 
 use cairn_contracts::{
@@ -465,6 +527,13 @@ fn read_page(
             && crate::validation::encoded_size(&entries)?
                 + crate::validation::encoded_size(&events)?
                 > PAGE_BYTES);
+    // A compact stream reads the chat's run from `run`, which is the same value.
+    let mut chat = chat;
+    if scope.compact
+        && let Some(chat) = chat.as_object_mut()
+    {
+        chat.remove("run");
+    }
     let state = State {
         plan_turns_enabled: crate::chat_plan_settings::view(db)?.enabled,
         artifacts: artifacts(db, run_id)?,
@@ -473,6 +542,14 @@ fn read_page(
         cache_revision: db
             .kv("conversation-cache-revision")?
             .unwrap_or_else(|| "initial".into()),
+        // Compact clients forget deleted conversations from list changes and follow this
+        // revision instead, in its own field: a client never mistakes one for the other. It
+        // stays "initial" until a change that invalidates saved history itself writes it.
+        history_revision: scope
+            .compact
+            .then(|| db.kv("conversation-history-revision"))
+            .transpose()?
+            .map(|revision| revision.unwrap_or_else(|| "initial".into())),
         chats,
     };
     Ok(Page {
@@ -548,6 +625,7 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
     }
     let scope = Scope {
         with_list: input.query.get("list").is_some_and(|v| v == "1"),
+        compact: input.query.get("compact").is_some_and(|v| v == "1"),
         ..Scope::new(kind, id, account)
     };
     // Subscribe before reading: commits during replay remain observable.
@@ -577,6 +655,7 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         cursor: after,
         pending: Some(first),
         previous: None,
+        list: None,
         history: None,
         replies: Replies::default(),
         read_at: Instant::now(),
@@ -605,6 +684,8 @@ struct Subscription {
     cursor: i64,
     pending: Option<Page>,
     previous: Option<State>,
+    /// The list a compact stream last sent, which its next changes apply to.
+    list: Option<Arc<Vec<Value>>>,
     history: Option<String>,
     replies: Replies,
     /// When the last page was read, to pace rebuilding the conversation list.
@@ -661,6 +742,24 @@ impl Subscription {
                 },
             }
         }
+    }
+
+    /// A compact stream compares its state without the list: the connection's first
+    /// list is sent whole, later ones only as the conversations that changed.
+    fn take_list(&mut self, state: &mut State) -> (Option<Arc<Vec<Value>>>, Option<ChatChanges>) {
+        if !self.scope.compact {
+            return (None, None);
+        }
+        let Some(chats) = state.chats.take() else {
+            return (None, None);
+        };
+        let Some(previous) = self.list.replace(chats.clone()) else {
+            return (Some(chats), None);
+        };
+        if Arc::ptr_eq(&previous, &chats) {
+            return (None, None);
+        }
+        (None, ChatChanges::between(&previous, &chats))
     }
 
     /// Reads the next page; returns a batch when it carries anything new.
@@ -728,7 +827,12 @@ impl Subscription {
             self.cursor = 0;
         }
         self.history = Some(current.history.clone());
+        let (full_list, chat_changes) = self.take_list(&mut current.state);
         let changed = self.previous.as_ref() != Some(&current.state);
+        let state = (changed || full_list.is_some()).then(|| State {
+            chats: full_list.or_else(|| current.state.chats.clone()),
+            ..current.state.clone()
+        });
         if current.draining_cards && !current.entries.is_empty() {
             let (entries, large_entries) = split_large(std::mem::take(&mut current.entries))?;
             self.replies.forget(&large_entries);
@@ -741,7 +845,8 @@ impl Subscription {
                 history: current.history.clone(),
                 oldest: current.oldest,
                 has_older: current.oldest.map(|_| current.has_older),
-                state: changed.then(|| current.state.clone()),
+                state,
+                chat_changes,
             };
             current.reset = false;
             current.oldest = None;
@@ -768,10 +873,11 @@ impl Subscription {
             history: current.history,
             oldest: current.oldest,
             has_older: current.oldest.map(|_| current.has_older),
-            state: changed.then(|| current.state.clone()),
+            state,
+            chat_changes,
         };
         self.previous = Some(current.state);
-        if !(changed || has_events || reset) {
+        if !(batch.state.is_some() || batch.chat_changes.is_some() || has_events || reset) {
             return Ok(None);
         }
         let has_backlog = batch.more;

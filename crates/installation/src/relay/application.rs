@@ -110,7 +110,9 @@ impl DirectTraffic {
 
                             // Direct clients hand stream chunks to readers verbatim, without an
                             // HTTP decoder. A client predating this route's classification may
-                            // still ask for gzip, so streamed bodies always use identity.
+                            // still ask for gzip, so streamed bodies always use identity. A
+                            // client that decodes gzip event streams asks for them explicitly.
+                            let gzip = stream && wants_gzip_stream(&request.headers);
                             if stream {
                                 request
                                     .headers
@@ -128,6 +130,7 @@ impl DirectTraffic {
                             let streaming = StreamOutput {
                                 frames: output.clone(),
                                 credit: credit.clone(),
+                                gzip,
                             };
                             let router = router.clone();
                             let output = output.clone();
@@ -164,5 +167,29 @@ impl DirectTraffic {
                 }
             }
         }
+    }
+}
+
+/// A direct client that decodes gzip event streams asks for them explicitly.
+fn wants_gzip_stream(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("x-cairn-stream-encoding") && value == "gzip"
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wants_gzip_stream;
+
+    #[test]
+    fn only_an_explicit_stream_encoding_asks_for_gzip_streams() {
+        let header = |name: &str, value: &str| vec![(name.to_owned(), value.to_owned())];
+        assert!(wants_gzip_stream(&header(
+            "X-Cairn-Stream-Encoding",
+            "gzip"
+        )));
+        assert!(!wants_gzip_stream(&header("x-cairn-stream-encoding", "br")));
+        assert!(!wants_gzip_stream(&header("accept-encoding", "gzip")));
+        assert!(!wants_gzip_stream(&[]));
     }
 }

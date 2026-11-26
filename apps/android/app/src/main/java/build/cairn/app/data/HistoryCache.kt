@@ -63,6 +63,8 @@ class HistoryCache(
     private val memory = linkedMapOf<String, Entry>()
     private val pendingLock = Any()
     private val pending = mutableMapOf<String, PendingSave>()
+    /** Deleted conversations: a reader still open never saves them again, as on the web. */
+    private val forgotten = mutableSetOf<String>()
     private val positions = mutableMapOf<String, Position>()
     private val written = mutableMapOf<String, Long>()
     private val dirty = mutableSetOf<String>()
@@ -70,10 +72,19 @@ class HistoryCache(
     private val maxTotal = 20L * 1024 * 1024
     private val ttl = 7L * 24 * 60 * 60 * 1000
 
-    fun key(origin: String, session: String, path: String): String =
-        MessageDigest.getInstance("SHA-256")
-            .digest("$origin\n$session\n$path".toByteArray())
-            .joinToString("") { "%02x".format(it) }
+    fun key(origin: String, session: String, path: String): String {
+        val digest = digest("$origin\n$session\n$path")
+        // Run logs are named apart, so they can be dropped without reading them.
+        return if (path.startsWith("/runs/")) runLogPrefix(origin, session) + digest else digest
+    }
+
+    private fun runLogPrefix(origin: String, session: String) =
+        "run-" + digest("$origin\n$session").take(16) + "-"
+
+    private fun digest(value: String) =
+        MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).joinToString("") {
+            "%02x".format(it)
+        }
 
     private fun valid(value: CachedHistory) =
         value.version == 2 &&
@@ -98,9 +109,11 @@ class HistoryCache(
                             ?: runCatching {
                                 val file = File(root, key)
                                 require(file.length() in 1..(maxEntry + 64).toLong())
-                                wireJson.decodeFromString<CachedHistory>(
-                                    String(unseal(key, file.readBytes()), Charsets.UTF_8)
-                                )
+                                wireJson
+                                    .decodeFromString<CachedHistory>(
+                                        String(unseal(key, file.readBytes()), Charsets.UTF_8)
+                                    )
+                                    .let { it.copy(state = it.state.withChatRun()) }
                             }
                                 .getOrNull()
                     if (value == null || !valid(value)) {
@@ -123,7 +136,7 @@ class HistoryCache(
         expectedGeneration: Long,
     ): PendingSave? =
         synchronized(pendingLock) {
-            if (expectedGeneration != generation) return@synchronized null
+            if (expectedGeneration != generation || key in forgotten) return@synchronized null
             if (olderThan(value, pending[key]?.value)) return@synchronized null
             PendingSave(key, value, expectedGeneration).also { pending[key] = it }
         }
@@ -221,6 +234,12 @@ class HistoryCache(
     suspend fun flush(key: String) =
         withContext(Dispatchers.IO) { lock.withLock { writeLocked(key) } }
 
+    /** Removes a deleted conversation's saved copy for good: it is never saved again. */
+    suspend fun forget(key: String) {
+        synchronized(pendingLock) { forgotten.add(key) }
+        remove(key)
+    }
+
     suspend fun remove(key: String) =
         withContext(Dispatchers.IO) {
             lock.withLock {
@@ -229,18 +248,76 @@ class HistoryCache(
             }
         }
 
+    /**
+     * Drops every saved run log of a session, by name. A run does not name its conversation, so a
+     * deleted conversation's earlier runs cannot be told apart; a run log opens from its stream
+     * again, as on the web.
+     */
+    suspend fun removeRunLogs(origin: String, session: String) =
+        withContext(Dispatchers.IO) {
+            val prefix = runLogPrefix(origin, session)
+            lock.withLock {
+                dropUnnamedRunLogs()
+                val keys =
+                    memory.keys.filter { it.startsWith(prefix) } +
+                        synchronized(pendingLock) {
+                            pending.keys.filter { it.startsWith(prefix) }
+                        } +
+                        root.list().orEmpty().filter { it.startsWith(prefix) }
+                for (key in keys.toSet()) {
+                    synchronized(pendingLock) { pending.remove(key) }
+                    removeLocked(key)
+                }
+            }
+        }
+
+    /**
+     * Run logs saved before they were named apart can only be told by reading them: this happens
+     * once, at the first removal, and a marker records it.
+     */
+    private fun dropUnnamedRunLogs() {
+        val marker = File(root, RUN_LOGS_NAMED)
+        if (marker.exists()) return
+        root
+            .listFiles()
+            .orEmpty()
+            .filter { it.isFile && !it.name.startsWith("run-") && !it.name.startsWith(".") }
+            .filter { file ->
+                runCatching {
+                        val value =
+                            memory[file.name]?.value
+                                ?: wireJson.decodeFromString<CachedHistory>(
+                                    String(unseal(file.name, file.readBytes()), Charsets.UTF_8)
+                                )
+                        value.state.chat == null && value.state.run != null
+                    }
+                    .getOrDefault(false)
+            }
+            .forEach { removeLocked(it.name) }
+        runCatching {
+            root.mkdirs()
+            marker.createNewFile()
+        }
+    }
+
     suspend fun clear() =
         withContext(Dispatchers.IO) {
             lock.withLock {
                 synchronized(pendingLock) {
                     generation++
                     pending.clear()
+                    forgotten.clear()
                 }
                 positions.clear()
                 memory.clear()
                 written.clear()
                 dirty.clear()
                 root.listFiles()?.forEach { it.delete() }
+                // Nothing saved before run logs were named apart remains.
+                runCatching {
+                    root.mkdirs()
+                    File(root, RUN_LOGS_NAMED).createNewFile()
+                }
             }
         }
 
@@ -269,7 +346,7 @@ class HistoryCache(
             total += entry.bytes
             if (total > maxTotal) evictMemory(key)
         }
-        while (memory.size > 12) evictMemory(memory.keys.first())
+        while (memory.size > MAX_COUNT) evictMemory(memory.keys.first())
     }
 
     private fun evictMemory(key: String) {
@@ -283,7 +360,10 @@ class HistoryCache(
         if (key !in dirty) return
         val value = memory[key]?.value ?: return
         runCatching {
-            val bytes = wireJson.encodeToString(value).toByteArray()
+            // The chat's run is the state's own `run`, restored when the file is read.
+            val stored =
+                value.copy(state = value.state.copy(chat = value.state.chat?.copy(run = null)))
+            val bytes = wireJson.encodeToString(stored).toByteArray()
             if (bytes.size > maxEntry) {
                 removeLocked(key)
                 return
@@ -304,11 +384,13 @@ class HistoryCache(
             root
                 .listFiles()
                 .orEmpty()
+                // Markers are not saved conversations.
+                .filterNot { it.name.startsWith(".") }
                 .sortedByDescending { it.lastModified() }
                 .forEachIndexed { index, file ->
                     total += file.length()
                     if (
-                        index >= 12 ||
+                        index >= MAX_COUNT ||
                             total > maxTotal ||
                             System.currentTimeMillis() - file.lastModified() >= ttl
                     )
@@ -318,6 +400,12 @@ class HistoryCache(
     }
 
     companion object {
+        /** A saved conversation holds its own history only, so many fit the byte budget. */
+        private const val MAX_COUNT = 60
+
+        /** Marks a cache whose run logs are all named apart. */
+        private const val RUN_LOGS_NAMED = ".run-logs-named"
+
         fun encrypted(context: Context): HistoryCache {
             fun key(): SecretKey {
                 val alias = "cairn.history.v1"

@@ -276,10 +276,14 @@ export class DirectChannel {
 
       const headers = new Headers(options.headers)
       // DataChannel responses bypass the browser's HTTP decompression.
-      headers.set('accept-encoding', !streaming && typeof DecompressionStream !== 'undefined' ? 'gzip' : 'identity')
+      const gzip = typeof DecompressionStream !== 'undefined'
+      headers.set('accept-encoding', !streaming && gzip ? 'gzip' : 'identity')
+      // Event streams are compressed as a whole, each chunk flushed as it is sent.
+      if (streaming && gzip && headers.get('accept') === 'text/event-stream')
+        headers.set('x-cairn-stream-encoding', 'gzip')
       if (options.body !== undefined && !headers.has('content-type'))
         headers.set('content-type', 'application/json')
-      const forwarded = [...headers].filter(([name]) => ['content-type', 'accept', 'accept-encoding', 'range', 'if-none-match', 'if-modified-since', 'last-event-id', 'mcp-protocol-version', 'mcp-method'].includes(name))
+      const forwarded = [...headers].filter(([name]) => ['content-type', 'accept', 'accept-encoding', 'x-cairn-stream-encoding', 'range', 'if-none-match', 'if-modified-since', 'last-event-id', 'mcp-protocol-version', 'mcp-method'].includes(name))
       void this.send({
         type: 'request',
         id,
@@ -417,6 +421,12 @@ export class DirectChannel {
           return this.send({ type: 'cancel', id })
         },
       }, { highWaterMark: 0 })
+      if (headers.get('content-encoding') === 'gzip') {
+        headers.delete('content-encoding')
+        pending.resolve(new Response(body.pipeThrough(new DecompressionStream('gzip') as ReadableWritablePair<Uint8Array, Uint8Array>), { status: frame.status, headers }))
+        return
+      }
+
       pending.resolve(new Response(body, { status: frame.status, headers }))
     }
     else if (frame.type === 'stream_chunk') {

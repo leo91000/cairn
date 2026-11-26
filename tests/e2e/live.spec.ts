@@ -501,7 +501,7 @@ test('cached history survives reload before a delayed stream, then clear on logo
   await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').filter({ hasText: 'Cache persistence proof' }).first()).toBeVisible()
   const count = (current = false) => page.evaluate(({ chatId, current }) => new Promise<number>((resolve, reject) => {
-    const request = indexedDB.open('cairn-history-v2')
+    const request = indexedDB.open('cairn-history-v3')
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readonly')
@@ -568,7 +568,7 @@ test('a cached run restores the reading offset while its stream is still connect
   await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
   await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve) => {
-    const request = indexedDB.open('cairn-history-v2')
+    const request = indexedDB.open('cairn-history-v3')
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readonly')
@@ -580,7 +580,7 @@ test('a cached run restores the reading offset while its stream is still connect
   // A previous visit may have cached "running" just before the run completed.
   await page.goto(workspacePath(`${workspace.url}/agents`))
   await page.evaluate(() => new Promise<void>((resolve, reject) => {
-    const request = indexedDB.open('cairn-history-v2')
+    const request = indexedDB.open('cairn-history-v3')
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readwrite')
@@ -589,7 +589,8 @@ test('a cached run restores the reading offset while its stream is still connect
       read.onsuccess = () => {
         for (const entry of read.result) {
           const value = JSON.parse(entry.text)
-          if (value.state.run)
+          // The saved conversation list is not a conversation.
+          if (value.state?.run)
             value.state.run.status = 'running'
           store.put({ ...entry, text: JSON.stringify(value) })
         }
@@ -671,13 +672,13 @@ test('following the latest output resumes a long backlog on the recent window, w
 
   const line = (i: number) => page.locator('.activity-message').filter({ hasText: `Resume line ${String(i).padStart(3, '0')}.` })
   const saved = () => page.evaluate(runId => new Promise<{ cursor: number, top?: number, follow?: boolean } | null>((resolve) => {
-    const open = indexedDB.open('cairn-history-v2')
+    const open = indexedDB.open('cairn-history-v3')
     open.onsuccess = () => {
       const db = open.result
       const tx = db.transaction('entries')
       const request = tx.objectStore('entries').getAll()
       request.onsuccess = () => {
-        const value = request.result.map(entry => JSON.parse(entry.text)).find(entry => entry.state.run?.id === runId)
+        const value = request.result.map(entry => JSON.parse(entry.text)).find(entry => entry.state?.run?.id === runId)
         resolve(value ? { cursor: value.cursor, top: value.position?.top, follow: value.position?.follow } : null)
       }
 
@@ -813,14 +814,14 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect.poll(async () => {
     await scroller.evaluate(el => el.scrollTop = 0)
     return page.evaluate(runId => new Promise<boolean>((resolve) => {
-      const open = indexedDB.open('cairn-history-v2')
+      const open = indexedDB.open('cairn-history-v3')
       open.onsuccess = () => {
         const db = open.result
         const tx = db.transaction('entries')
         const request = tx.objectStore('entries').getAll()
         request.onsuccess = () => resolve(request.result.some((entry) => {
           const saved = JSON.parse(entry.text)
-          return saved.state.run?.id === runId && saved.entries.length >= 350 && saved.hasOlder === false
+          return saved.state?.run?.id === runId && saved.entries.length >= 350 && saved.hasOlder === false
         }))
         tx.oncomplete = () => db.close()
       }
@@ -830,12 +831,12 @@ test('recent history loads older pages without moving the reader and survives a 
   await page.getByRole('button', { name: 'Latest activity', exact: true }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve) => {
-    const open = indexedDB.open('cairn-history-v2')
+    const open = indexedDB.open('cairn-history-v3')
     open.onsuccess = () => {
       const db = open.result
       const tx = db.transaction('entries')
       const request = tx.objectStore('entries').getAll()
-      request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).entries.length)))
+      request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).entries?.length ?? 0)))
       tx.oncomplete = () => db.close()
     }
   }))).toBeGreaterThanOrEqual(350)
