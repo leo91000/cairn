@@ -94,6 +94,7 @@ async function main() {
     await writeFile(path.join(source, 'home/.claude/.credentials.json'), JSON.stringify({ fixture: 'provisioned' }))
     await writeFile(path.join(source, 'chat-input/messages.json'), '[]')
     await writeFile(path.join(source, 'workspace/nested-kvm.c'), await readFile(new URL('./fixtures/nested-kvm.c', import.meta.url)))
+    await writeFile(path.join(source, 'workspace/guest-child-supervision.mjs'), await readFile(new URL('./fixtures/guest-child-supervision.mjs', import.meta.url)))
     const networkProbe = await readFile(new URL('./fixtures/vm-network.mjs', import.meta.url))
     await writeFile(path.join(source, 'workspace/network-probe.mjs'), networkProbe)
     docker('network', 'create', '--internal', '--subnet', '93.184.216.0/29', networkName)
@@ -117,6 +118,7 @@ if(mode==='first'||mode==='resume')assert.match(execFileSync(root+'/workspace/ne
 assert.match(execFileSync('uname',['-r'],{encoding:'utf8'}),/^6\\.12\\.109/);
 assert.equal(fs.existsSync('/sys/bus/serio/devices/serio0'),false,'guest has no emulated PS/2 keyboard');
 if(mode==='first'){
+  execFileSync(process.execPath,[root+'/workspace/guest-child-supervision.mjs'],{timeout:15000});
   const templates='/opt/cairn-codex-state';
   const manifest=JSON.parse(fs.readFileSync(templates+'/manifest.json','utf8'));
   assert.equal(manifest.version,1);

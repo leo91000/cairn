@@ -1024,6 +1024,7 @@ async fn connected(
                         let streaming = StreamOutput {
                             frames: output.clone(),
                             credit: credit.clone(),
+                            gzip: false,
                         };
                         let task = requests.spawn(async move {
                             let _permit = match permit {
@@ -1065,6 +1066,57 @@ fn request_failure(id: String, status: u16, message: &str) -> ApiResponse {
 struct StreamOutput {
     frames: mpsc::Sender<Frame>,
     credit: std::sync::Arc<Semaphore>,
+    /// The direct client decodes a gzip event stream (`x-cairn-stream-encoding: gzip`).
+    gzip: bool,
+}
+
+/// Compresses an event stream chunk by chunk. Each chunk is flushed, so the client
+/// decodes every event as soon as it arrives, while later events share the history
+/// of earlier ones: a repeated conversation summary costs a few bytes.
+struct StreamEncoder(flate2::write::GzEncoder<Vec<u8>>);
+
+impl StreamEncoder {
+    fn new() -> Self {
+        Self(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ))
+    }
+
+    fn encode(&mut self, chunk: &[u8]) -> std::io::Result<Vec<u8>> {
+        use std::io::Write;
+        self.0.write_all(chunk)?;
+        self.0.flush()?;
+        Ok(std::mem::take(self.0.get_mut()))
+    }
+
+    fn finish(self) -> std::io::Result<Vec<u8>> {
+        self.0.finish()
+    }
+}
+
+/// Sends one encoded chunk in frames of at most `MAX_STREAM_CHUNK`. The caller holds
+/// the credit for the first frame; every further frame waits for its own credit.
+async fn send_chunk(output: &StreamOutput, id: &str, chunk: &[u8]) -> Result<()> {
+    for (index, piece) in chunk.chunks(MAX_STREAM_CHUNK).enumerate() {
+        if index > 0 {
+            output
+                .credit
+                .acquire()
+                .await
+                .map_err(Error::internal)?
+                .forget();
+        }
+        output
+            .frames
+            .send(Frame::StreamChunk {
+                id: id.to_owned(),
+                body: piece.to_vec(),
+            })
+            .await
+            .map_err(|_| Error::unavailable("Relay closed."))?;
+    }
+    Ok(())
 }
 
 async fn dispatch(
@@ -1109,7 +1161,7 @@ async fn dispatch(
         .map_err(|_| Error::gateway_timeout("Installation request timed out."))?
         .map_err(|_| Error::bad_gateway("Installation handler failed."))?;
     let status = response.status().as_u16();
-    let headers = response
+    let mut headers: Vec<(String, String)> = response
         .headers()
         .iter()
         .filter(|(name, _)| cairn_protocol::response_header(name.as_str()))
@@ -1143,6 +1195,22 @@ async fn dispatch(
     if is_stream {
         let output = streaming;
         let id = input.id;
+        // Only live event streams are compressed: files keep their stored bytes and ranges.
+        let events = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"));
+        let mut encoder = (output.gzip
+            && events
+            && (200..300).contains(&status)
+            && !response
+                .headers()
+                .contains_key(axum::http::header::CONTENT_ENCODING))
+        .then(StreamEncoder::new);
+        if encoder.is_some() {
+            headers.push(("content-encoding".into(), "gzip".into()));
+        }
         output
             .frames
             .send(Frame::StreamStart(ApiResponse {
@@ -1166,31 +1234,23 @@ async fn dispatch(
                     .map_err(Error::internal)?
                     .forget();
                 let Some(chunk) = body.next().await else {
+                    // The credit taken for the next chunk carries the gzip trailer.
+                    if let Some(encoder) = encoder.take() {
+                        let trailer = encoder.finish().map_err(Error::internal)?;
+                        send_chunk(&output, &id, &trailer).await?;
+                    }
                     break;
                 };
                 let chunk = chunk.map_err(|_| Error::bad_gateway("Installation stream failed."))?;
+                let chunk = match encoder.as_mut() {
+                    Some(encoder) => encoder.encode(&chunk).map_err(Error::internal)?.into(),
+                    None => chunk,
+                };
                 if chunk.is_empty() {
                     output.credit.add_permits(1);
                     continue;
                 }
-                for (index, piece) in chunk.chunks(MAX_STREAM_CHUNK).enumerate() {
-                    if index > 0 {
-                        output
-                            .credit
-                            .acquire()
-                            .await
-                            .map_err(Error::internal)?
-                            .forget();
-                    }
-                    output
-                        .frames
-                        .send(Frame::StreamChunk {
-                            id: id.clone(),
-                            body: piece.to_vec(),
-                        })
-                        .await
-                        .map_err(|_| Error::unavailable("Relay closed."))?;
-                }
+                send_chunk(&output, &id, &chunk).await?;
             }
             Ok(())
         }
@@ -1238,4 +1298,115 @@ pub async fn beacon_address(data_dir: &Path) -> Result<Option<(String, String)>>
         beacon.origin().ascii_serialization(),
         identity.installation_id,
     )))
+}
+
+#[cfg(test)]
+mod stream_encoding_tests {
+    use super::*;
+    use axum::{
+        response::sse::{Event, Sse},
+        routing::get,
+    };
+    use std::io::Read;
+
+    fn router() -> Router {
+        Router::new()
+            .route(
+                "/api/chats/stream",
+                get(|| async {
+                    let events = futures_util::stream::iter((0..3).map(|n| {
+                        Ok::<_, std::convert::Infallible>(
+                            Event::default()
+                                .event("batch")
+                                .data(format!("{{\"n\":{n}}}")),
+                        )
+                    }));
+                    Sse::new(events)
+                }),
+            )
+            .route("/api/plain/stream", get(|| async { "plain body" }))
+    }
+
+    /// Dispatches one streamed request, granting credit for every frame.
+    async fn stream(path: &str, gzip: bool) -> (Vec<(String, String)>, Vec<Vec<u8>>) {
+        let (frames, mut received) = mpsc::channel(16);
+        let credit = std::sync::Arc::new(Semaphore::new(0));
+        let output = StreamOutput {
+            frames,
+            credit: credit.clone(),
+            gzip,
+        };
+        let request = ApiRequest {
+            id: "request".into(),
+            account_id: "account".into(),
+            role: Role::Owner,
+            mcp_scopes: None,
+            mcp_credential_digest: None,
+            public_artifact: None,
+            method: "GET".into(),
+            path: path.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let task = tokio::spawn(dispatch(router(), request, output));
+
+        let mut headers = Vec::new();
+        let mut chunks = Vec::new();
+        while let Some(frame) = received.recv().await {
+            match frame {
+                Frame::StreamStart(response) => headers = response.headers,
+                Frame::StreamChunk { body, .. } => chunks.push(body),
+                Frame::StreamEnd { failed, .. } => {
+                    assert!(!failed);
+                    break;
+                }
+                _ => panic!("unexpected frame"),
+            }
+            credit.add_permits(1);
+        }
+        assert!(task.await.unwrap().unwrap().is_none());
+        (headers, chunks)
+    }
+
+    fn encoding(headers: &[(String, String)]) -> Option<&str> {
+        headers
+            .iter()
+            .find(|(name, _)| name == "content-encoding")
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[tokio::test]
+    async fn requested_event_streams_are_gzip_and_every_chunk_decodes_on_arrival() {
+        let (headers, chunks) = stream("/api/chats/stream", true).await;
+        assert_eq!(encoding(&headers), Some("gzip"));
+
+        // Each chunk is flushed: the events decode before the stream ends.
+        let events: Vec<u8> = chunks[..chunks.len() - 1].concat();
+        let mut decoder = flate2::write::GzDecoder::new(Vec::new());
+        std::io::Write::write_all(&mut decoder, &events).unwrap();
+        std::io::Write::flush(&mut decoder).unwrap();
+        let partial = String::from_utf8(decoder.get_ref().clone()).unwrap();
+        assert_eq!(partial.matches("event: batch").count(), 3);
+
+        let mut whole = String::new();
+        flate2::read::GzDecoder::new(chunks.concat().as_slice())
+            .read_to_string(&mut whole)
+            .unwrap();
+        assert_eq!(whole, partial);
+    }
+
+    #[tokio::test]
+    async fn streams_stay_identity_unless_requested_or_not_events() {
+        let (headers, chunks) = stream("/api/chats/stream", false).await;
+        assert_eq!(encoding(&headers), None);
+        assert!(
+            String::from_utf8(chunks.concat())
+                .unwrap()
+                .contains("data: {\"n\":2}")
+        );
+
+        let (headers, chunks) = stream("/api/plain/stream", true).await;
+        assert_eq!(encoding(&headers), None);
+        assert_eq!(chunks.concat(), b"plain body");
+    }
 }

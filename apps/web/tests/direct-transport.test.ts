@@ -380,6 +380,79 @@ it.each(['/api/runs/r/stream?history=invalid', '/api/shared-artifacts/a/file', '
   finally { transport.close() }
 })
 
+it('requests gzip event streams and decodes each flushed chunk as it arrives', async () => {
+  const { DirectChannel } = await import('../src/direct-channel')
+  const { createGzip, constants } = await import('node:zlib')
+  const gzip = createGzip()
+  const output: Buffer[] = []
+  gzip.on('data', (data: Buffer) => output.push(data))
+  const encode = (text: string) => new Promise<string>((resolve) => {
+    gzip.write(text)
+    gzip.flush(constants.Z_SYNC_FLUSH, () => resolve(Buffer.concat(output.splice(0)).toString('base64')))
+  })
+  const finish = () => new Promise<string>((resolve) => {
+    gzip.once('end', () => resolve(Buffer.concat(output.splice(0)).toString('base64')))
+    gzip.end()
+  })
+
+  const channel = new Channel()
+  channel.readyState = 'open'
+  const transport = new DirectChannel(channel as unknown as RTCDataChannel, { account_id: 'a', role: 'owner' }, () => {})
+  try {
+    const pending = transport.request('/api/chats/stream?after=0&compact=1', { headers: { accept: 'text/event-stream' } })
+    await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+    const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+    expect(request.headers).toContainEqual(['accept-encoding', 'identity'])
+    expect(request.headers).toContainEqual(['x-cairn-stream-encoding', 'gzip'])
+    reply(channel, {
+      type: 'stream_start',
+      id: request.id,
+      status: 200,
+      headers: [['content-type', 'text/event-stream'], ['content-encoding', 'gzip']],
+      body: '',
+    })
+    const response = await pending
+    expect(response.headers.get('content-encoding')).toBeNull()
+    const reader = response.body!.getReader()
+    const decoder = new TextDecoder()
+    const first = reader.read()
+    await vi.waitFor(() => expect(channel.packets.length).toBe(2))
+    reply(channel, { type: 'stream_chunk', id: request.id, body: await encode('event: batch\ndata: {"n":1}\n\n') })
+    // The first event decodes before any later chunk is sent.
+    expect(decoder.decode((await first).value)).toBe('event: batch\ndata: {"n":1}\n\n')
+
+    const rest = (async () => {
+      let text = ''
+      for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read())
+        text += decoder.decode(chunk.value, { stream: true })
+      return text
+    })()
+    await vi.waitFor(() => expect(channel.packets.length).toBe(3))
+    reply(channel, { type: 'stream_chunk', id: request.id, body: await encode('event: batch\ndata: {"n":2}\n\n') })
+    await vi.waitFor(() => expect(channel.packets.length).toBe(4))
+    reply(channel, { type: 'stream_chunk', id: request.id, body: await finish() })
+    await vi.waitFor(() => expect(channel.packets.length).toBe(5))
+    reply(channel, { type: 'stream_end', id: request.id, failed: false })
+    expect(await rest).toBe('event: batch\ndata: {"n":2}\n\n')
+  }
+  finally { transport.close() }
+})
+
+it('keeps event streams identity where gzip decompression is unavailable', async () => {
+  vi.stubGlobal('DecompressionStream', undefined)
+  const { DirectChannel } = await import('../src/direct-channel')
+  const channel = new Channel()
+  channel.readyState = 'open'
+  const transport = new DirectChannel(channel as unknown as RTCDataChannel, { account_id: 'a', role: 'owner' }, () => {})
+  try {
+    void transport.request('/api/chats/stream?after=0', { headers: { accept: 'text/event-stream' } }).catch(() => {})
+    await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+    const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+    expect(request.headers.map(([name]: [string]) => name)).not.toContain('x-cairn-stream-encoding')
+  }
+  finally { transport.close() }
+})
+
 it('keeps compressed HEAD heartbeat responses bodyless', async () => {
   const { DirectChannel } = await import('../src/direct-channel')
   const channel = new Channel()
@@ -578,7 +651,7 @@ it('moves live streams between routes using only the accepted cursor and history
   const connection = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 7, history: 'v1' })
   await vi.waitFor(() => expect(channel.packets.length).toBe(1))
   const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
-  expect(request.path).toBe('/api/chats/c/stream?after=7&history=v1&window=1')
+  expect(request.path).toBe('/api/chats/c/stream?after=7&history=v1&window=1&compact=1')
   reply(channel, {
     type: 'stream_start',
     id: request.id,

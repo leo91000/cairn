@@ -441,6 +441,14 @@ class DirectChannel(
                             add(if (streamedRoute) "identity" else "gzip")
                         }
                     )
+                    // Event streams are compressed as a whole, each chunk flushed as it is sent.
+                    if (streamedRoute && request.header("Accept") == "text/event-stream")
+                        add(
+                            buildJsonArray {
+                                add("x-cairn-stream-encoding")
+                                add("gzip")
+                            }
+                        )
                     for (name in
                         listOf(
                             "accept",
@@ -569,7 +577,9 @@ class DirectChannel(
                             runCatching { control("cancel", id) }
                         }
                     }
-                val source = input.source().buffer()
+                val gzip = responseHeaders["content-encoding"] == "gzip"
+                if (gzip) builder.removeHeader("content-encoding")
+                val source = (if (gzip) LazyGzip(input) else input).source().buffer()
                 return builder
                     .body(
                         object : ResponseBody() {
@@ -712,4 +722,21 @@ class DirectChannel(
             throw error
         }
     }
+}
+
+/**
+ * Decodes a gzip event stream as its chunks arrive. The header is read on the first read, so
+ * building the response never waits for the stream's first event.
+ */
+private class LazyGzip(private val encoded: InputStream) : InputStream() {
+    private val lazyDecoded = lazy { GZIPInputStream(encoded, 8192) }
+    private val decoded by lazyDecoded
+
+    override fun read(): Int = decoded.read()
+
+    override fun read(target: ByteArray, start: Int, length: Int): Int =
+        decoded.read(target, start, length)
+
+    // Closing the decoder releases its native inflater and closes the encoded stream.
+    override fun close() = if (lazyDecoded.isInitialized()) decoded.close() else encoded.close()
 }

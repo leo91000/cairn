@@ -123,15 +123,19 @@ Keep one manager replica per SQLite data volume. If using a prefilled claim code
 set `CAIRN_INSTALLATION_CLAIM_CODE` and `CAIRN_INSTALLATION_NAME` before first startup;
 otherwise follow [Manual Compose claim](#manual-compose-claim) after startup.
 
-For a local build, resolve the agent tool versions CI would choose and pass them to Docker
-(see [tool versions](CLI-UPDATES.md)). Antigravity also needs the archive URL and SHA-512
-that were resolved with its version (`ANTIGRAVITY_URL`, `ANTIGRAVITY_SHA512`). The image is
-built for linux/amd64 only:
+For a source build, use a committed checkout and pass its revision as `VCS_REF`.
+This selects the VM image cache for that revision and lets the runner boot the
+packaged kernel while preserving conversation volumes. Resolve the agent tool
+versions CI would choose and pass them to Docker (see [tool versions](CLI-UPDATES.md)).
+Antigravity also needs the archive URL and SHA-512 that were resolved with its
+version (`ANTIGRAVITY_URL`, `ANTIGRAVITY_SHA512`). The image is built for
+linux/amd64 only.
 
 ```sh
-versions=$(node scripts/cli-updates.mjs build-versions) \
+revision=$(git rev-parse --verify HEAD) \
+  && versions=$(node scripts/cli-updates.mjs build-versions) \
   && node -e 'for (const [key, value] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${key.includes("-") ? key.replace("-", "_").toUpperCase() : `${key.toUpperCase()}_VERSION`}=${value}`)' "$versions" \
-  | xargs docker compose build \
+  | xargs docker compose build --build-arg "VCS_REF=$revision" \
   && docker compose up -d
 ```
 

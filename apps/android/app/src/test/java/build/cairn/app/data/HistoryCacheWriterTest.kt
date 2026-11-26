@@ -253,7 +253,8 @@ class HistoryCacheWriterTest {
             old.close()
             old.flush()
             assertNull(cache.read("chat"))
-            assertTrue(directory.root.listFiles().orEmpty().isEmpty())
+            // Only the marker that every run log is named apart remains.
+            assertTrue(directory.root.listFiles().orEmpty().all { it.name.startsWith(".") })
         } finally {
             old.close()
             current.close()
