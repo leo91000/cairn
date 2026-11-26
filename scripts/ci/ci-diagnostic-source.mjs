@@ -4,6 +4,28 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
+const backendLayouts = [
+  { launcher: 'scripts/dev/test-backend.mjs', namespace: 'scripts/ci/test-native-namespace.mjs' },
+  { launcher: 'scripts/test-backend.mjs', namespace: 'scripts/test-native-namespace.mjs' },
+]
+
+export function backendScriptsAt(source) {
+  const paths = backendLayouts.flatMap(layout => Object.values(layout))
+  const entries = execFileSync('git', ['ls-tree', '-r', '--full-tree', 'HEAD', '--', ...paths], {
+    cwd: source,
+    encoding: 'utf8',
+    timeout: 10000,
+  })
+  const regular = new Set(entries.split('\n').flatMap((entry) => {
+    const match = entry.match(/^100(?:644|755) blob [a-f0-9]+\t(.+)$/)
+    return match ? [match[1]] : []
+  }))
+  const scripts = backendLayouts.find(layout => Object.values(layout).every(file => regular.has(file)))
+  if (!scripts)
+    throw new Error('Pinned backend source lacks a supported script layout')
+  return scripts
+}
+
 export function selectJobClock(value, runner, now = Date.now()) {
   if (!Array.isArray(value.jobs) || value.total_count > 100 || !runner)
     throw new Error('Incomplete CI job clock inventory')
@@ -53,17 +75,22 @@ async function main() {
     sources[name] = source
   }
 
-  if (role === 'backend')
-    execFileSync(process.execPath, ['scripts/ci/backend-ci-phase-overlay.mjs', path.join(sources.candidate, 'scripts/dev/test-backend.mjs')], { stdio: 'inherit' })
+  const backendScripts = role === 'backend' ? backendScriptsAt(sources.candidate) : undefined
+  if (backendScripts)
+    execFileSync(process.execPath, ['scripts/ci/backend-ci-phase-overlay.mjs', path.join(sources.candidate, backendScripts.launcher)], { stdio: 'inherit' })
   writeFileSync(path.join(output, 'source.json'), `${JSON.stringify({
     diagnosticOnly: true,
     clock,
     observer: process.env.GITHUB_SHA,
     revisions,
     sources,
+    backendScripts,
     qualificationClaim: false,
   })}\n`, { mode: 0o600 })
-  writeFileSync(process.env.GITHUB_ENV, `CI_JOB_STARTED_AT=${clock.startedAt / 1000}\nCI_DIAGNOSTIC_SOURCE=${sources.candidate}\nCI_DIAGNOSTIC_REFERENCE_SOURCE=${sources.reference ?? ''}\n`, { flag: 'a' })
+  const backendEnv = backendScripts
+    ? `CI_DIAGNOSTIC_BACKEND_LAUNCHER=${backendScripts.launcher}\nCI_DIAGNOSTIC_BACKEND_NAMESPACE=${backendScripts.namespace}\n`
+    : ''
+  writeFileSync(process.env.GITHUB_ENV, `CI_JOB_STARTED_AT=${clock.startedAt / 1000}\nCI_DIAGNOSTIC_SOURCE=${sources.candidate}\nCI_DIAGNOSTIC_REFERENCE_SOURCE=${sources.reference ?? ''}\n${backendEnv}`, { flag: 'a' })
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url))

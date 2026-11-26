@@ -1,5 +1,9 @@
 # Installation database 26 → 27
 
+This historical migration and its tests remain available at commit
+`8062c889e7c1107d8230823c39328ce94acf61aa`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 Plan turns ([ADR 0080](../adr/0080-plan-turns.md)) add a `plan` flag to queued and
 delivered messages, and to questions asked by a plan turn. The current main
 schema-26 migration first converts typed deliverable and skill-source metadata
@@ -28,9 +32,8 @@ chain. It checks retained rows, repeated opens, a stored plan request and the
 column constraints. The deliverable and skill-source migration has its separate
 schema-25 preservation suite.
 
-The reproducible two-source qualification runs only on an ephemeral CI runner:
-set `plan-storage-reference` to the exact reviewed schema-26 base SHA when
-dispatching `Quality and container`. It builds the actual reference and
+The historical two-source qualification used the `plan-storage-reference`
+input on an ephemeral CI runner. It built the exact schema-26 reference and
 candidate, runs the same 1,000-record typed message/question workload in three
 alternating trials, and executes the old manager against a synthetic upgraded
 copy. It never opens production data. Raw timings, encoded/domain bytes, database

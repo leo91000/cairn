@@ -21,14 +21,15 @@ import {
   writeLifecycle,
 } from './ci-backend-trace.mjs'
 import { observeCommand } from './ci-deadline.mjs'
+import { backendScriptsAt } from './ci-diagnostic-source.mjs'
 
 export const UPLOADER_SHA = '043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' // upload-artifact v7.0.1
 export const BACKEND_COMMAND = 'node' // Preserve setup-pnpm's PATH-selected runtime.
 export const BACKEND_ARGS = ['scripts/dev/test-backend.mjs', '--nextest', '--test-threads', '8', '--no-fail-fast', '--color', 'never', '--status-level', 'all']
 // Selection is available only inside main's validated diagnostic startup path.
-export function backendDiagnosticCommand(selector = 'full', workspace) {
+export function backendDiagnosticCommand(selector = 'full', workspace, launcher = BACKEND_ARGS[0]) {
   if (selector === 'full')
-    return { command: BACKEND_COMMAND, args: BACKEND_ARGS }
+    return { command: BACKEND_COMMAND, args: [launcher, ...BACKEND_ARGS.slice(1)] }
   if (selector === 'avatar-authority' && path.isAbsolute(workspace))
     return { command: BACKEND_COMMAND, args: [path.join(workspace, 'scripts/ci/ci-avatar-authority-diagnostic.mjs')] }
   throw new Error('Unknown backend diagnostic selector')
@@ -495,6 +496,10 @@ export async function main() {
     const gitHead = cwd => execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 10000 }).trim()
     if (gitHead(source) !== pinned.revisions.candidate || gitHead(uploaderRoot) !== UPLOADER_SHA)
       throw new Error('Diagnostic source or uploader identity mismatch')
+    const scripts = backendScriptsAt(source)
+    if (pinned.backendScripts?.launcher !== scripts.launcher || pinned.backendScripts?.namespace !== scripts.namespace)
+      throw new Error('Diagnostic source script layout mismatch')
+
     const dependenciesFile = path.join(output, 'dependencies.json')
     verifyBackendDependencies(dependencyOptions(env), readProof(dependenciesFile, 65536))
     const receipt = {
@@ -512,11 +517,11 @@ export async function main() {
       traceObserverSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci/ci-backend-trace.mjs'), 65536)),
       dependenciesSHA256: sha256(readBounded(dependenciesFile, 65536)),
       sourceManifestSHA256: sha256(readBounded(path.join(output, 'source.json'), 65536)),
-      launcherSHA256: sha256(readBounded(path.join(source, 'scripts/dev/test-backend.mjs'), 65536)),
+      launcherSHA256: sha256(readBounded(path.join(source, scripts.launcher), 65536)),
       acquisition: 'unknown',
     }
     const selector = env.BACKEND_DIAGNOSTIC_SELECTOR || 'full'
-    const selected = backendDiagnosticCommand(selector, workspace)
+    const selected = backendDiagnosticCommand(selector, workspace, scripts.launcher)
     receipt.selector = selector
     if (selector === 'avatar-authority')
       receipt.avatarObserverSHA256 = sha256(readBounded(path.join(workspace, 'scripts/ci/ci-avatar-authority-diagnostic.mjs'), 65536))

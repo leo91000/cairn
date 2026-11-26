@@ -274,17 +274,21 @@ skip or weaken it because the diagnostic passed.
 
 The observer remains at the workflow commit while isolated worktrees hold the
 pinned sources. Backend phases are insertion-only additions to that source's
-isolated launcher. Native diagnostics build both exact sources, checksum their
-binaries and keep each archived private fixture paired with its own binaries.
+isolated launcher. The script paths are selected from the candidate's Git tree,
+including candidates before the script reorganization. Native diagnostics
+build both exact sources, checksum their binaries and keep each archived
+private fixture paired with its own binaries.
 Both fixtures receive the same insertion-only phase/stack observer; artifact
 manifests preserve the original and observed hashes. The comparison does not
 silently move to the observer commit's first parent.
 
 Backend-only diagnostics provision the candidate's Node resolution context
 after setup-pnpm has installed the observer's dependencies. The bridge requires
-identical package/lock/workspace bytes in both pinned Git sources and working
-trees, a physical complete pnpm12.3.4 installation, its exact application lock
-document and the declared versions of every direct provider, official-client,
+the exact bytes of both pinned Git sources in their working trees. Lock and
+workspace files must also match between the two sources. Their package manifests
+may differ only by the known script path moves in this reorganization. The
+bridge checks a physical complete pnpm12.3.4 installation, its exact application
+lock document and the declared versions of every direct provider, official-client,
 stdio and tsx dependency. Root importer identities (including peer versions)
 determine the canonical virtual-store package paths. The receipt binds those
 paths, manifest bytes, and each required ESM entrypoint's canonical path and

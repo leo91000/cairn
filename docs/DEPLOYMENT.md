@@ -432,7 +432,7 @@ Publish the JSON, logs and screenshots to durable private artifact storage. Then
 from the trusted operator environment (not the Intel host), record the result:
 
 ```sh
-node scripts/nested-android-validation.mjs record /path/to/intel.json https://<durable-report-url>
+node scripts/android/nested-android-validation.mjs record /path/to/intel.json https://<durable-report-url>
 ```
 
 The recorded commit status documents the result; CI does not wait for it.

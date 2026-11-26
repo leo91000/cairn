@@ -75,10 +75,10 @@ commits and save working files before changing nodes. See
 capacity, retention and recovery.
 
 New installations have no Garage service and need no bucket or S3 credentials.
-Updating an older installation expires environments that depend on S3, without
-copying their files back. The [migration and release note](migrations/0033-local-conversation-disks.md)
-describe this loss: push commits and
-save files to keep before updating. The update does not erase old
+The intermediate local-disk release expires environments that depend on S3.
+The [historical migration and release note](migrations/0033-local-conversation-disks.md)
+describe which files to save beforehand. Push commits and save working files
+before that upgrade. The update leaves the old
 `data/storage-s3.json`, `garage.env`, `garage.toml`, Garage data, external buckets
 or environment values. Rerunning the installer preserves those files' contents.
 The update supervisor and installer reruns retain any existing Garage service
@@ -125,15 +125,12 @@ candidate pending for repair and retry. The supervisor does not start a previous
 binary against the data. The replacement's stop, readiness and verification
 bounds remain within the twenty-minute lease.
 
-Version-11 manager databases support the automatic
-[data-preserving upgrade to version 12](migrations/0012-typed-node-inventory.md).
-Direct-storage releases continue with the preserving
-[version 13 metadata upgrade](migrations/0013-direct-node-storage.md).
-Retain a consistent database/WAL backup before upgrading; automatic updates create
-no backups. Preserve installation identity and node state; retain legacy object storage
-while a rollback remains possible. Other
-schema transitions require their own documented compatibility path; an unsupported
-version is not an instruction to reinstall or erase data.
+The compacted database uses schema 38. Before approving the update for an
+existing installation, verify schema 37 and a successful start on a
+local-disk release, such as Cairn v0.80.0. For a schema 11–36 database, complete
+the intermediate upgrade first. Follow the
+[data-preserving upgrade procedure](PRODUCTION-CAIRN.md#data-preserving-upgrades)
+and retain a consistent database/WAL backup. Automatic updates create no backups.
 
 ```sh
 sudo systemctl status cairn-installation-update.timer

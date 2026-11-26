@@ -24,6 +24,31 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const gitHead = cwd => execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 10000 }).trim()
 const gitFile = (cwd, sha, file) => execFileSync('git', ['show', `${sha}:${file}`], { cwd, timeout: 10000 })
 
+const relocatedCommands = new Map([
+  ['validate:pr', 'scripts/ci/validate-pr.mjs'],
+  ['format:rust', 'scripts/dev/rust-format.mjs'],
+  ['lint', 'scripts/dev/rust-format.mjs'],
+  ['lint:fix', 'scripts/dev/rust-format.mjs'],
+  ['test:backend', 'scripts/dev/test-backend.mjs'],
+  ['generate:contracts', 'scripts/dev/generate-contracts.mjs'],
+  ['check:contracts', 'scripts/dev/generate-contracts.mjs'],
+  ['pre-commit', 'scripts/dev/pre-commit.mjs'],
+])
+
+function sameManifestAfterScriptMoves(observed, pinned) {
+  // The bridge never runs package scripts. Allow these exact relocations while
+  // preserving byte equality for the rest of the manifest and both lock files.
+  const relocated = pinned.toString().replace(/^( {4}"([^"]+)": ")([^"\r\n]*)(")/gm, (line, prefix, key, command, suffix) => {
+    const current = relocatedCommands.get(key)
+    if (!current)
+      return line
+
+    const previous = `scripts/${path.posix.basename(current)}`
+    return prefix + command.replace(`node ${previous}`, `node ${current}`) + suffix
+  })
+  return observed.equals(Buffer.from(relocated))
+}
+
 function regular(file) {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
@@ -144,7 +169,9 @@ function inspect({
   for (const file of metadata) {
     const observed = regular(path.join(observer, file))
     const pinned = regular(path.join(candidate, file))
-    if (!observed.equals(pinned) || !observed.equals(readTracked(observer, observerSha, file))
+    const matching = observed.equals(pinned)
+      || (file === 'package.json' && sameManifestAfterScriptMoves(observed, pinned))
+    if (!matching || !observed.equals(readTracked(observer, observerSha, file))
       || !pinned.equals(readTracked(candidate, source.revisions.candidate, file))) {
       throw new Error('Observer and candidate dependency metadata differ from their pinned Git sources')
     }

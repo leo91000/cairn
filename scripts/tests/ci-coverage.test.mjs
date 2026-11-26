@@ -45,7 +45,7 @@ describe('parallel CI coverage', () => {
       ['Measure bounded Native terminal-reason metadata', 'native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture'],
     ]) {
       expect(quality.jobs.backend.steps.find(step => step.name === name).run)
-        .toBe(`node scripts/dev/test-backend.mjs --workspace --lib ${selection}`)
+        .toBe(`node "\${CI_DIAGNOSTIC_BACKEND_LAUNCHER:-scripts/dev/test-backend.mjs}" --workspace --lib ${selection}`)
     }
   })
 
@@ -584,7 +584,7 @@ describe('parallel CI coverage', () => {
   it('prepares the kernel driver before the native device observation test', () => {
     const steps = quality.jobs.backend.steps
     const driver = steps.findIndex(step => step.name === 'Prepare ublk for native device observation qualification')
-    const probe = steps.findIndex(step => step.run?.includes('node scripts/ci/test-native-namespace.mjs --sudo'))
+    const probe = steps.findIndex(step => step.run?.includes(`node "\${CI_DIAGNOSTIC_BACKEND_NAMESPACE:-scripts/ci/test-native-namespace.mjs}" --sudo`))
     expect(driver).toBeGreaterThan(-1)
     expect(probe).toBeGreaterThan(driver)
     expect(steps[driver].uses).toBe('./.github/actions/ensure-ublk')

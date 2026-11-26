@@ -328,20 +328,20 @@ jobs:
           if-no-files-found: ignore
       - name: Measure the bounded bootstrap observer without filesystem work
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
-        run: node scripts/dev/test-backend.mjs --workspace --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
+        run: node "${CI_DIAGNOSTIC_BACKEND_LAUNCHER:-scripts/dev/test-backend.mjs}" --workspace --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Measure bounded Native terminal-reason metadata
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
-        run: node scripts/dev/test-backend.mjs --workspace --lib native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture
+        run: node "${CI_DIAGNOSTIC_BACKEND_LAUNCHER:-scripts/dev/test-backend.mjs}" --workspace --lib native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture
       - name: Prepare ublk for native device observation qualification
         uses: ./.github/actions/ensure-ublk
         with:
           update-apt: 'false'
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
-        run: node scripts/ci/test-native-namespace.mjs --sudo
+        run: node "${CI_DIAGNOSTIC_BACKEND_NAMESPACE:-scripts/ci/test-native-namespace.mjs}" --sudo
       - name: Check Rust documentation examples
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
-        run: node scripts/dev/test-backend.mjs --doc
+        run: node "${CI_DIAGNOSTIC_BACKEND_LAUNCHER:-scripts/dev/test-backend.mjs}" --doc
       - uses: ./.github/actions/observe-rust-build
         if: always()
         with:

@@ -785,7 +785,6 @@ fn require_current_proposal(
         event_id: i64,
         kind: String,
         has_content: bool,
-        request_kind: Option<String>,
         request_id: Option<String>,
     }
     let stale = || {
@@ -811,7 +810,8 @@ fn require_current_proposal(
         db.0.query_row(
             "SELECT id,type,CASE WHEN json_type(payload,'$.item.text')='text'
          THEN length(trim(json_extract(payload,'$.item.text'),char(9)||char(10)||char(13)||' '))>0
-         ELSE 0 END,json_type(payload,'$.item.request_id'),json_extract(payload,'$.item.request_id')
+         ELSE 0 END,CASE WHEN json_type(payload,'$.item.request_id')='text'
+         THEN json_extract(payload,'$.item.request_id') END
          FROM events WHERE run_id=?
          AND type IN ('item.started','item.updated','item.completed')
          AND json_extract(payload,'$.item.type')='proposed_plan'
@@ -823,8 +823,7 @@ fn require_current_proposal(
                     event_id: row.get(0)?,
                     kind: row.get(1)?,
                     has_content: row.get(2)?,
-                    request_kind: row.get(3)?,
-                    request_id: row.get(4)?,
+                    request_id: row.get(3)?,
                 })
             },
         )
@@ -833,45 +832,27 @@ fn require_current_proposal(
         event_id,
         kind,
         has_content,
-        request_kind,
         request_id,
     } = event.ok_or_else(stale)?;
+    let request_id = request_id.filter(|id| !id.is_empty()).ok_or_else(stale)?;
     if kind != "item.completed"
         || !has_content
         || approval.source_id != format!("{run_id}:{event_id}")
     {
         return Err(stale());
     }
-    let (request_count, latest_request): (i64, Option<String>) = db.0.query_row(
-        "SELECT COUNT(DISTINCT CASE
-             WHEN json_type(payload,'$.messageId')='text'
-               AND json_extract(payload,'$.messageId')!=''
-             THEN 'message:' || json_extract(payload,'$.messageId')
-             ELSE 'source:' || id
-         END), (SELECT json_extract(payload,'$.messageId') FROM events
-         WHERE run_id=? AND type='chat.user' ORDER BY id DESC LIMIT 1)
-         FROM events WHERE run_id=? AND type='chat.user'",
-        rusqlite::params![run_id, run_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    if let Some(request_kind) = request_kind {
-        if request_kind != "text"
-            || request_id.as_deref().unwrap_or("").is_empty()
-            || request_id != latest_request
-        {
-            return Err(stale());
-        }
-    } else if request_count != 1 {
-        // Older receipts had no request_id. Their proposal is still attributable only
-        // when the run contains exactly one human request.
-        return Err(stale());
-    }
-    let later_request: bool = db.0.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=? AND id>? AND type='chat.user')",
-        rusqlite::params![run_id, event_id],
-        |row| row.get(0),
-    )?;
-    if later_request {
+    let latest_request: Option<(i64, Option<String>)> =
+        db.0.query_row(
+            "SELECT id,CASE WHEN json_type(payload,'$.messageId')='text'
+             THEN json_extract(payload,'$.messageId') END
+             FROM events WHERE run_id=? AND type='chat.user' ORDER BY id DESC LIMIT 1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if !latest_request.is_some_and(|(source, latest)| {
+        source < event_id && latest.as_deref() == Some(request_id.as_str())
+    }) {
         return Err(stale());
     }
     Ok(())

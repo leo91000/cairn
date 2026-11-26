@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -28,6 +28,7 @@ import {
   BACKEND_COMMAND,
   backendDiagnosticCommand,
 } from '../ci/ci-backend-durable.mjs'
+import { backendScriptsAt } from '../ci/ci-diagnostic-source.mjs'
 
 function fixture() {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-avatar-diagnostic-'))
@@ -76,6 +77,27 @@ it('keeps the default full command exact and admits only the fixed named diagnos
   for (const value of ['', null, 'avatar-authority; command', '../shell', ['avatar-authority']])
     assert.throws(() => backendDiagnosticCommand(value, '/observer'))
   assert.throws(() => backendDiagnosticCommand('avatar-authority', 'relative'))
+})
+
+it.each([
+  ['scripts/test-backend.mjs', 'scripts/test-native-namespace.mjs'],
+  ['scripts/dev/test-backend.mjs', 'scripts/ci/test-native-namespace.mjs'],
+])('selects and executes the tracked backend layout for %s', (launcher, namespace) => {
+  const f = fixture()
+  const git = (...args) => execFileSync('git', args, { cwd: f.source, stdio: 'pipe' })
+  git('init', '--quiet')
+  for (const file of [launcher, namespace]) {
+    mkdirSync(path.dirname(path.join(f.source, file)), { recursive: true })
+    writeFileSync(path.join(f.source, file), 'fixture script')
+  }
+
+  git('add', '--', launcher, namespace)
+  git('-c', 'user.name=Cairn Test', '-c', 'user.email=test@example.invalid', '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'Fixture')
+
+  assert.deepEqual(backendScriptsAt(f.source), { launcher, namespace })
+  assert.deepEqual(backendDiagnosticCommand('full', '/observer', launcher).args, [launcher, ...BACKEND_ARGS.slice(1)])
+  assert.equal(runAvatarDiagnostic({ ...f.options, launcher }), 0)
+  assert.deepEqual(f.calls[1].args, [launcher, ...AVATAR_ARGS.slice(1)])
 })
 
 it('builds the matching worker before one exact package/lib invocation and records closed provenance', () => {

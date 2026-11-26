@@ -141,6 +141,27 @@ it('goes red/green through the actual Node ESM resolver in the separate candidat
   assert.deepEqual(verifyBackendDependencies(f.options, proof), proof)
 })
 
+it.each([false, true])('checks pinned manifests across script-only relocation, altered dependency: %s', (changedDependency) => {
+  const f = fixture()
+  const manifest = f.meta['package.json']
+  let historical = manifest.replace('scripts/ci/validate-pr.mjs', 'scripts/validate-pr.mjs')
+    .replaceAll(/scripts\/dev\/(rust-format|test-backend|generate-contracts|pre-commit)\.mjs/g, 'scripts/$1.mjs')
+  if (changedDependency)
+    historical = historical.replace(/("tsx": ")[^"]+/, (_match, prefix) => `${prefix}0.0.0`)
+
+  writeFileSync(path.join(f.candidate, 'package.json'), historical)
+  f.options.readTracked = (directory, _revision, file) => Buffer.from(
+    directory === f.candidate && file === 'package.json' ? historical : f.meta[file],
+  )
+  if (changedDependency) {
+    assert.throws(() => prepareBackendDependencies(f.options), /dependency metadata differ/)
+  }
+  else {
+    const proof = prepareBackendDependencies(f.options)
+    assert.deepEqual(verifyBackendDependencies(f.options, proof), proof)
+  }
+})
+
 it('covers every real provider/official-client/stdio import and records canonical ESM entrypoints', () => {
   const f = fixture()
   const args = ['--input-type=module', '-e', requiredImports.map(name => `import ${JSON.stringify(name)};`).join('\n')]

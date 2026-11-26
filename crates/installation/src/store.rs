@@ -36,7 +36,8 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 37;
+const PRE_COMPACTION_DATABASE_VERSION: i64 = 37;
+pub(crate) const DATABASE_VERSION: i64 = 38;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -99,6 +100,46 @@ fn enable_wal(connection: &Connection, timeout: Duration) -> rusqlite::Result<()
     connection.busy_timeout(timeout)
 }
 
+fn upgrade_compact_schema(writer: &mut Connection) -> Result<()> {
+    let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version == DATABASE_VERSION {
+        return Ok(());
+    }
+    if version != PRE_COMPACTION_DATABASE_VERSION {
+        return Err(Error::bad(
+            "Unexpected database version during storage compaction.",
+        ));
+    }
+
+    let retired = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM kv WHERE key='migration:local-conversation-disks:v1')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !retired {
+        return Err(Error::bad(
+            "Local-disk retirement is incomplete; start a compatible schema-37 manager before upgrading.",
+        ));
+    }
+
+    // Drop the retired dependants before their referenced tables. The earlier
+    // manager already detached S3 environments and queued local retirement.
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS direct_journal_acknowledgements;
+         DROP TABLE IF EXISTS direct_storage_grants;
+         DROP TABLE IF EXISTS direct_read_authorizations;
+         DROP TABLE IF EXISTS direct_object_quarantines;
+         DROP TABLE IF EXISTS shared_references;
+         DROP TABLE IF EXISTS shared_publications;
+         DROP TABLE IF EXISTS shared_objects;
+         DROP TABLE IF EXISTS remote_deletions;",
+    )?;
+    tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
         std::fs::create_dir_all(directory)?;
@@ -106,7 +147,7 @@ impl Store {
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh && version != DATABASE_VERSION {
+        if !fresh && !matches!(version, PRE_COMPACTION_DATABASE_VERSION | DATABASE_VERSION) {
             return Err(Error::bad(
                 "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
@@ -116,7 +157,9 @@ impl Store {
         // Allow durable writes on a slow disk to finish under contention.
         writer.busy_timeout(Duration::from_secs(30))?;
         writer.execute_batch("PRAGMA foreign_keys=ON;")?;
-        if fresh {
+        if version == PRE_COMPACTION_DATABASE_VERSION {
+            upgrade_compact_schema(&mut writer)?;
+        } else if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('node-attempts','node-exclusive-requests','agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
@@ -1329,7 +1372,86 @@ mod schema_tests {
             DATABASE_VERSION
         );
         db.prepare("SELECT payload FROM events").unwrap();
-        assert!(!db.table_exists(None, "disk_block_migration").unwrap());
+        assert!(!db.table_exists(None, "shared_publications").unwrap());
+    }
+
+    #[tokio::test]
+    async fn compaction_requires_completed_retirement_and_preserves_live_v37_data() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .set("retained", json!({ "value": 42 }), None)
+            .await
+            .unwrap();
+        drop(store);
+
+        let file = root.path().join("manager.db");
+        let db = Connection::open(&file).unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE shared_objects(id TEXT PRIMARY KEY);
+             CREATE TABLE shared_publications(id TEXT PRIMARY KEY);
+             CREATE TABLE shared_references(publication TEXT REFERENCES shared_publications(id),object TEXT REFERENCES shared_objects(id));
+             CREATE TABLE direct_journal_acknowledgements(publication TEXT REFERENCES shared_publications(id));
+             CREATE TABLE direct_storage_grants(object TEXT REFERENCES shared_objects(id));
+             CREATE TABLE direct_read_authorizations(id TEXT PRIMARY KEY);
+             CREATE TABLE direct_object_quarantines(id TEXT PRIMARY KEY);
+             CREATE TABLE remote_deletions(id TEXT PRIMARY KEY);
+             INSERT INTO shared_objects VALUES('object');
+             INSERT INTO shared_publications VALUES('publication');
+             INSERT INTO shared_references VALUES('publication','object');
+             INSERT INTO direct_journal_acknowledgements VALUES('publication');
+             INSERT INTO direct_storage_grants VALUES('object');",
+        )
+        .unwrap();
+        db.pragma_update(None, "user_version", PRE_COMPACTION_DATABASE_VERSION)
+            .unwrap();
+
+        let error = Store::open(root.path()).err().unwrap();
+        assert!(error.message.contains("retirement is incomplete"));
+        assert!(db.table_exists(None, "shared_references").unwrap());
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            PRE_COMPACTION_DATABASE_VERSION
+        );
+        Db(&db)
+            .set(
+                "migration:local-conversation-disks:v1",
+                &json!({ "completedAt": 1 }),
+                None,
+            )
+            .unwrap();
+
+        let compacted = Store::open(root.path()).unwrap();
+        assert_eq!(
+            compacted.kv("retained").await.unwrap(),
+            Some(json!({ "value": 42 }))
+        );
+        for table in [
+            "shared_objects",
+            "shared_publications",
+            "shared_references",
+            "direct_journal_acknowledgements",
+            "direct_storage_grants",
+            "direct_read_authorizations",
+            "direct_object_quarantines",
+            "remote_deletions",
+        ] {
+            assert!(!db.table_exists(None, table).unwrap(), "{table}");
+        }
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            DATABASE_VERSION
+        );
+        assert!(
+            !db.prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        assert!(Store::open(root.path()).is_ok());
     }
 
     #[test]
@@ -1405,7 +1527,8 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        let unsupported_versions = (0..DATABASE_VERSION).chain([DATABASE_VERSION + 1, 99]);
+        let unsupported_versions =
+            (0..PRE_COMPACTION_DATABASE_VERSION).chain([DATABASE_VERSION + 1, 99]);
         for version in unsupported_versions {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();

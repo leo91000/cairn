@@ -14,6 +14,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { isolateTestCredentials } from '../dev/test-environment.mjs'
+import { backendScriptsAt } from './ci-diagnostic-source.mjs'
 
 export const AVATAR_FILTER = 'test(agent_avatars::tests::) | test(authorization::tests::) | test(authorization::jobs::tests::)'
 export const AVATAR_ARGS = ['scripts/dev/test-backend.mjs', '--nextest', '-p', 'cairn-installation', '--lib', '--test-threads', '8', '--no-fail-fast', '--color', 'never', '--status-level', 'all', '-E', AVATAR_FILTER]
@@ -47,14 +48,14 @@ export function workerIdentity(file) {
   finally { closeSync(fd) }
 }
 
-export function sourceIdentity(source, candidate) {
+export function sourceIdentity(source, candidate, launcher) {
   const git = args => execFileSync('git', args, { cwd: source, encoding: 'utf8', timeout: 10000 }).trim()
   const commit = git(['rev-parse', 'HEAD'])
   if (!/^[a-f0-9]{40}$/.test(candidate ?? '') || commit !== candidate)
     throw new Error('Avatar diagnostic source mismatch')
   // Existing diagnostic setup inserts only the phase observer in this launcher.
   const changed = git(['diff', '--name-only', 'HEAD']).split('\n').filter(Boolean)
-  if (changed.some(file => file !== 'scripts/dev/test-backend.mjs'))
+  if (changed.some(file => file !== launcher))
     throw new Error('Avatar diagnostic source has tracked changes')
   return { commit, tree: git(['rev-parse', 'HEAD^{tree}']) }
 }
@@ -64,12 +65,13 @@ export function runAvatarDiagnostic({
   candidate,
   output,
   env,
+  launcher = AVATAR_ARGS[0],
   run = spawnSync,
   identify = sourceIdentity,
 }) {
   if (!path.isAbsolute(source) || !path.isAbsolute(output) || env.CARGO_BUILD_TARGET)
     throw new Error('Invalid avatar diagnostic paths or cross-compilation target')
-  const revision = identify(source, candidate)
+  const revision = identify(source, candidate, launcher)
   const commandEnv = { ...env, CARGO_TARGET_DIR: path.join(source, 'target') }
   delete commandEnv.CAIRN_TEST_CODE_WORKER
   delete commandEnv.CAIRN_TEST_CODE_WORKERS
@@ -92,7 +94,7 @@ export function runAvatarDiagnostic({
   })}\n`, { flag: 'wx', mode: 0o600 })
   if (build !== 0)
     return build
-  identify(source, candidate)
+  identify(source, candidate, launcher)
   // --lib does not select an integration-test CARGO_BIN_EXE_cairn. The existing
   // grant fixture falls back here after test-backend deletes worker overrides.
   const worker = workerIdentity(path.join(source, 'target/debug/cairn'))
@@ -102,21 +104,21 @@ export function runAvatarDiagnostic({
     selector: 'avatar-authority',
     source: revision,
     worker: { path: 'target/debug/cairn', ...worker },
-    launcherSHA256: digest(readFileSync(path.join(source, 'scripts/dev/test-backend.mjs'))),
+    launcherSHA256: digest(readFileSync(path.join(source, launcher))),
     fixtureSHA256: digest(readFileSync(path.join(source, 'crates/installation/tests/fixtures/plugin_grants.rs'))),
     avatarTestSHA256: digest(readFileSync(path.join(source, 'crates/installation/src/agent_avatars/tests.rs'))),
     cargoLockSHA256: digest(readFileSync(path.join(source, 'Cargo.lock'))),
     iteration: 1,
   }
   writeFileSync(path.join(output, 'avatar-worker.json'), `${JSON.stringify(provenance)}\n`, { flag: 'wx', mode: 0o600 })
-  const result = execute('node', AVATAR_ARGS)
+  const result = execute('node', [launcher, ...AVATAR_ARGS.slice(1)])
   writeFileSync(path.join(output, 'avatar-result.json'), `${JSON.stringify({
     diagnosticOnly: true,
     qualificationClaim: false,
     iteration: 1,
     exitCode: result,
   })}\n`, { flag: 'wx', mode: 0o600 })
-  identify(source, candidate)
+  identify(source, candidate, launcher)
   if (workerIdentity(path.join(source, 'target/debug/cairn')).sha256 !== worker.sha256)
     throw new Error('Candidate worker changed during the diagnostic')
   return result
@@ -132,6 +134,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       candidate: process.env.CAIRN_AVATAR_DIAGNOSTIC_CANDIDATE,
       output: process.env.CAIRN_AVATAR_DIAGNOSTIC_OUTPUT,
       env: process.env,
+      launcher: backendScriptsAt(process.cwd()).launcher,
     })
   }
   catch {
