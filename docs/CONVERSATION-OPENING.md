@@ -131,8 +131,10 @@ and headroom; web accounts conservatively in UTF-16 bytes, Android in UTF-8 byte
 An evicted prefix remains available from server pagination. Evicting a prefix also
 invalidates its reading position. Logout and a changed cache revision still invalidate
 every saved conversation. A conversation that leaves the server's list (deleted, or no
-longer shared) loses its own saved copy on web and Android, and every saved run log goes
-with it, since a run does not name its conversation; the web also compares the server's
+longer shared) loses its own saved copy on web and Android, is not saved again while the page
+or app is open, and the session's saved run logs go with it, since a run does not name its
+conversation. A conversation created within 10 seconds of the newest one listed (server
+clock) is never treated as gone: a list read moments earlier may predate it; the web also compares the server's
 first list with the list it saved last. Signing out of the web also deletes the earlier
 `cairn-history-v2` store.
 

@@ -81,9 +81,9 @@ it('forgets what left the list since it was saved when the server list arrives f
   vi.stubGlobal('document', Object.assign(new EventTarget(), { hidden: false }))
   const scope = await cacheScope('test-session')
   await writeHistory(scope, '/chats/gone/stream', saved())
-  await writeChatList(scope, { chats: [{ id: 'gone', slug: '', createdAt: 1 }, { id: 'kept', slug: '', createdAt: 1 }] as ChatView[], planTurnsEnabled: false, savedAt: Date.now() })
+  await writeChatList(scope, { chats: [{ id: 'gone', slug: '', createdAt: 1 }, { id: 'kept', slug: '', createdAt: 20_000 }] as ChatView[], planTurnsEnabled: false, savedAt: Date.now() })
 
-  publishChats([{ id: 'kept', slug: '', createdAt: 1 } as ChatView])
+  publishChats([{ id: 'kept', slug: '', createdAt: 20_000 } as ChatView])
   const effect = effectScope()
   const list = effect.run(() => useChatList())!
   await vi.waitFor(() => expect(peekHistory(scope, '/chats/gone/stream')).toBeUndefined())

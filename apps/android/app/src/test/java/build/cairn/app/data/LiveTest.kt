@@ -645,10 +645,19 @@ class LiveTest {
 
     @Test
     fun `conversations that leave the list name the saved copies to forget`() {
-        val list = listOf(Chat(id = "a"), Chat(id = "b c", runId = "r1"), Chat(id = "d"))
+        val list =
+            listOf(
+                Chat(id = "a", createdAt = 1),
+                Chat(id = "b c", runId = "r1", createdAt = 1),
+                // Created moments before the newest: a list read earlier may not hold it yet.
+                Chat(id = "fresh", createdAt = 55_000),
+            )
         assertEquals(
             listOf("/chats/b%20c/stream"),
-            leftChatPaths(list, listOf(Chat(id = "d"), Chat(id = "a"))),
+            leftChatPaths(
+                list,
+                listOf(Chat(id = "new", createdAt = 60_000), Chat(id = "a", createdAt = 1)),
+            ),
         )
         assertEquals(emptyList<String>(), leftChatPaths(null, list))
         assertEquals(emptyList<String>(), leftChatPaths(list, null))

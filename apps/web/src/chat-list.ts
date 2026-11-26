@@ -45,9 +45,9 @@ function saveList() {
 function forgetRemoved(previous: ChatView[], chats: ChatView[]) {
   const listed = new Set(chats.map(chat => chat.id))
   // A list read moments earlier, by another tab or stream, may not hold a conversation created
-  // since: only an older conversation missing from the server's list is gone.
-  const settled = Date.now() - RECENT
-  const removed = previous.filter(chat => !listed.has(chat.id) && chat.createdAt < settled)
+  // since: only a conversation older than the newest one listed, by the server's clock, is gone.
+  const newest = Math.max(0, ...previous.map(chat => chat.createdAt), ...chats.map(chat => chat.createdAt))
+  const removed = previous.filter(chat => !listed.has(chat.id) && chat.createdAt < newest - RECENT)
   if (!removed.length)
     return
   void cacheScope(cacheSession()).then((scope) => {
