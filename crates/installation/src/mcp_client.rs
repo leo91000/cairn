@@ -96,6 +96,14 @@ struct HttpTransport {
 
 type DenialCallback = Box<dyn Fn() + Send + Sync>;
 
+fn report_access_denied(handler: &Option<DenialCallback>, status: u16) {
+    if matches!(status, 401 | 403)
+        && let Some(handler) = handler
+    {
+        handler();
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct CatalogueCredential {
     pub(crate) fingerprint: Option<blake3::Hash>,
@@ -582,11 +590,7 @@ impl HttpTransport {
             self.allow_private,
             self.response_budget,
             |status, headers| {
-                if matches!(status, 401 | 403)
-                    && let Some(on_access_denied) = on_access_denied
-                {
-                    on_access_denied();
-                }
+                report_access_denied(on_access_denied, status);
                 if legacy_initialize
                     && (200..300).contains(&status)
                     && let Some(value) = headers
@@ -678,7 +682,7 @@ impl HttpTransport {
                 None,
                 self.allow_private,
                 self.response_budget.map(|_| 4096),
-                |_, _| {},
+                |status, _| report_access_denied(&self.on_access_denied, status),
             ),
         )
         .await;

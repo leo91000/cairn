@@ -803,6 +803,9 @@ mod tests {
                     let (entered, release) = (entered.clone(), release.clone());
                     async move {
                         let session = headers.get("mcp-session-id").and_then(|value| value.to_str().ok());
+                        if matches!(session, Some("13" | "15")) {
+                            return StatusCode::FORBIDDEN;
+                        }
                         if matches!(session, Some("2" | "4" | "5" | "6" | "8" | "9")) {
                             entered.notify_one();
                             release.notified().await;
@@ -1005,6 +1008,27 @@ mod tests {
         assert!(s.mcps.gateway_catalogs.get(id, identity).is_some());
         s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
         revoked_release.notify_one();
+        wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
+        assert!(s.mcps.gateway_catalogs.get(id, identity).is_none());
+
+        let new_grant = s.mcps.run_configuration(&s, &run).await.unwrap();
+        let bearer = text(&new_grant["env"], crate::mcps::RUN_TOKEN_ENV);
+        assert_eq!(
+            list(&s, id, bearer).await.unwrap()["tools"][0]["name"],
+            "fixture"
+        );
+        assert!(s.mcps.gateway_catalogs.get(id, identity).is_none());
+
+        list(&s, id, bearer).await.unwrap();
+        let access = Access::for_grant(&s, id, bearer).await.unwrap();
+        let (previous, _) = s.mcps.gateway_catalogs.get(id, identity).unwrap();
+        refresh_in_background(
+            s.clone(),
+            access,
+            identity,
+            previous,
+            Duration::from_secs(3),
+        );
         wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
         assert!(s.mcps.gateway_catalogs.get(id, identity).is_none());
         upstream.abort();
