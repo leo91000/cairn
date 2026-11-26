@@ -474,6 +474,12 @@ internal fun ColumnScope.SideQuestionPanel(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        else if (chat.provider == "codex")
+            Text(
+                "Codex répond en un seul message. S’il tente d’exécuter un outil, comme une commande, l’outil ne s’exécute pas et la question échoue. Une recherche web activée pour l’agent peut quand même s’exécuter sur les serveurs d’OpenAI pendant ce message ; elle est en lecture seule.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         if (chat.canAskSideQuestion) {
             if (side.itemId.isNotEmpty())
                 TextButton(onClick = { side.ask("", "") }) { Text("Poser une question générale") }
@@ -545,8 +551,11 @@ internal fun ColumnScope.SideQuestionPanel(
                 when (chat.sideQuestionUnavailable) {
                     "between-replies" ->
                         "Les questions à côté sont possibles pendant que l’agent travaille sur une réponse. Envoyez plutôt un message."
+                    // Reported by earlier servers for every Codex reply.
                     "codex" ->
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
+                    "codex-release" ->
+                        "Cette version de Codex ne peut pas répondre aux questions à côté dans Cairn : il faut une version stable, 0.172.0 ou plus récente. Posez-la dans la conversation."
                     "opencode" ->
                         "OpenCode ne peut pas encore répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
                     "unknown-agent" ->
@@ -556,9 +565,9 @@ internal fun ColumnScope.SideQuestionPanel(
                     "compacting" ->
                         "La conversation compacte son contexte. Réessayez une fois la compaction terminée."
                     "claude-release" ->
-                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : seule la version 2.1.308 a été qualifiée. Posez-la dans la conversation."
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : il faut une version stable, 2.1.308 ou plus récente. Posez-la dans la conversation."
                     "not-offered" ->
-                        "${if (chat.provider == "antigravity") "Antigravity" else "Claude Code"} n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
+                        "${engine(chat.provider)} n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
                     // A reason this version does not know yet: the server's own words.
                     else ->
                         chat.sideQuestionReason

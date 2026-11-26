@@ -306,18 +306,30 @@ abstract class SideQuestionCases {
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
                     )
                     .assertExists()
+                compose
+                    .onNodeWithText(
+                        "Codex répond en un seul message. S’il tente d’exécuter un outil, comme une commande, l’outil ne s’exécute pas et la question échoue. Une recherche web activée pour l’agent peut quand même s’exécuter sur les serveurs d’OpenAI pendant ce message ; elle est en lecture seule."
+                    )
+                    .assertExists()
                 compose.onNodeWithText("Demander").assertDoesNotExist()
                 // Focused on one reply, only its question shows until the user asks for all.
                 compose.onNodeWithText("Et les tests ?").assertExists()
                 compose.onNodeWithText("Pourquoi cet ordre ?").assertDoesNotExist()
                 compose.onNodeWithText("Tout afficher").performClick()
                 compose.onNodeWithText("Pourquoi cet ordre ?").assertExists()
-                // A Claude Code release too old for side questions says so.
+                // A Codex release too old for side questions says so.
+                unavailable = "codex-release"
+                compose
+                    .onNodeWithText(
+                        "Cette version de Codex ne peut pas répondre aux questions à côté dans Cairn : il faut une version stable, 0.172.0 ou plus récente. Posez-la dans la conversation."
+                    )
+                    .assertExists()
+                // So does a Claude Code release.
                 provider = "claude"
                 unavailable = "claude-release"
                 compose
                     .onNodeWithText(
-                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : seule la version 2.1.308 a été qualifiée. Posez-la dans la conversation."
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : il faut une version stable, 2.1.308 ou plus récente. Posez-la dans la conversation."
                     )
                     .assertExists()
                 // A reply that has not offered them yet says so too.

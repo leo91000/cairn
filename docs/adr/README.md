@@ -95,6 +95,7 @@ for current behavior.
 | 0084 | [Drain native filesystem access per attempt](0084-native-attempt-access-drain.md) |
 | 0091 | [Failed turns return unsent messages](0091-failed-turns-return-unsent-messages.md) |
 | 0092 | [Instant native environment start](0092-instant-native-environment-start.md) |
+| 0093 | [Side questions use each engine's own side mechanism, qualified per release](0093-engine-side-questions.md) |
 
 ## Renumbered collisions
 

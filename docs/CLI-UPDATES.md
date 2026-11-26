@@ -9,8 +9,8 @@ before deciding whether to reuse an image. It prints JSON and, when
 
 | Tool | Official source | Channel | Native check in CI |
 | --- | --- | --- | --- |
-| Codex | npm `@openai/codex` | dist-tag `latest` | plan-turn boundary |
-| Claude Code | npm `@anthropic-ai/claude-code` | exact `2.1.311` | catalog, usage, turn, resumption, plan-turn boundary |
+| Codex | npm `@openai/codex` | dist-tag `latest` | plan-turn boundary, side questions |
+| Claude Code | npm `@anthropic-ai/claude-code` | exact `2.1.311` | catalog, usage, turn, resumption, plan-turn boundary, side questions |
 | OpenCode | npm `opencode-ai` | dist-tag `latest` | catalog, turn, resumption |
 | Antigravity | Google updater manifest `linux_amd64.json` | current release only | `tests/antigravity.rs` |
 | GitHub CLI | GitHub `cli/cli` latest release | not draft or prerelease | none |
@@ -109,8 +109,15 @@ production, the CLIs may still contact their vendors' public endpoints:
   must reach the conversation, and the turn after a plan must write again. The job
   installs bubblewrap and socat, and lifts Ubuntu's restriction on unprivileged user
   namespaces, which both sandboxes need. `publish` depends on this job, so a release
-  whose plan-turn boundary does not hold is not served. The short PR validation does
-  not run it, nor does a `backend-only` dispatch, which resolves no engine release.
+  whose plan-turn boundary does not hold is not served.
+- Claude Code and Codex each answer side questions through their adapter while a turn
+  runs (`tests/native_side_questions.rs`): a side answer that calls a tool must not
+  run it, a withdrawn question settles silently, and no side question reaches the
+  conversation, the reply or the saved session (nor, for Codex, the next turn). Adapters offer side questions from a minimum
+  release onwards, so this check, not a version pin, keeps a release that breaks them
+  from being served ([ADR-0093](adr/0093-engine-side-questions.md)).
+- The short PR validation runs none of these checks, nor does a `backend-only`
+  dispatch, which resolves no engine release.
 
 The `resolve` job reads the served versions from the configuration of the
 installation image production reports at `CAIRN_BEACON_ORIGIN/install/release`
@@ -190,4 +197,7 @@ following checks before merge:
   `NATIVE_PROBE_PATH` adds a directory to the engine's `PATH`,
   `NATIVE_PROBE_DROP_CAPS` drops inherited capabilities, and
   A private `/tmp` wraps the entire test runner, with `TMPDIR` outside it; see [the plan-turn decision](adr/0080-plan-turns.md#qualification).
+- Side questions (Claude Code and Codex): CI runs `native_side_questions` for the
+  resolved releases. To run it elsewhere:
+  `CLAUDE_NATIVE_BIN=… CODEX_NATIVE_BIN=… pnpm test:backend -p cairn-installation --test native_side_questions -- --ignored --test-threads 1`.
 - All engines: keep their autoupdaters disabled at runtime.

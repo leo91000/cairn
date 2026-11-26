@@ -246,6 +246,12 @@ async function main() {
         result = request.method === 'thread/read' ? { thread } : { data: [thread] }
       }
 
+      if (request.method === 'initialize') {
+        // Codex names its release in its user agent; `fixture-release` replaces it.
+        const release = path.join(process.env.CODEX_HOME, 'fixture-release')
+        result = { userAgent: `cairn_installation/${existsSync(release) ? readFileSync(release, 'utf8').trim() : '0.172.0'} (fixture)` }
+      }
+
       if (request.method === 'account/read')
         result = { account: auth ? { type: 'chatgpt', email: `${id}@example.test`, planType: 'plus' } : null }
       if (request.method === 'account/rateLimits/read') {

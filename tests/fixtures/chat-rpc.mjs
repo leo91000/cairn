@@ -32,6 +32,8 @@ export function chatFixture() {
 
   let active
   let counter = 0
+  const heldSamples = new Set()
+  let finishingSample
   let hold = false
   let questionRequest
   let asked = false
@@ -173,6 +175,40 @@ export function chatFixture() {
       return true
     }
 
+    // Side questions: one response sampled from the running turn, which never joins it.
+    // `fixture:side-tool` stands for an attempted tool call, `fixture:side-hold` for a
+    // sample answered only by its cancellation, `fixture:side-finish` for an answer sent,
+    // then the turn's completion, while the adapter steers the turn with `finish now`.
+    if (method === 'thread/sample') {
+      appendFileSync(path.join(process.env.CODEX_HOME, 'fixture-samples.jsonl'), `${JSON.stringify({ requestId: request.id, ...params })}\n`)
+      if (!active || active.id !== params.expectedTurnId || params.allowInProgressTurn !== true) {
+        emit({ id: request.id, error: { code: -32000, message: 'No running turn to sample' } })
+        return true
+      }
+
+      if (params.prompt.includes('fixture:side-finish')) {
+        finishingSample = request
+        return true
+      }
+
+      if (params.prompt.includes('fixture:side-hold')) {
+        heldSamples.add(request.id)
+        return true
+      }
+
+      const text = params.prompt.includes('fixture:side-tool') ? null : `Side answer: ${params.prompt.split('\n\n').at(-1)}`
+      emit({ id: request.id, result: { responseId: `sample-${request.id}`, sourceTurnId: active.id, text } })
+      return true
+    }
+
+    if (method === 'thread/sample/cancel') {
+      appendFileSync(path.join(process.env.CODEX_HOME, 'fixture-sample-cancels.jsonl'), `${JSON.stringify(params)}\n`)
+      if (heldSamples.delete(params.requestId))
+        emit({ id: params.requestId, error: { code: -32603, message: 'sample canceled' } })
+      emit({ id: request.id, result: {} })
+      return true
+    }
+
     if (!['thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'thread/turns/list', 'thread/items/list'].includes(method))
       return false
     if (method === 'thread/start') {
@@ -218,6 +254,17 @@ export function chatFixture() {
         return true
       }
 
+      // `fixture:mid-turn-compaction` compacts the turn's context until `end compaction`.
+      if (method === 'turn/steer' && active && params.input[0].text.includes('end compaction'))
+        notify('item/completed', { threadId: thread.id, turnId: active.id, item: { id: `compaction-${active.id}`, type: 'contextCompaction' } })
+
+      if (method === 'turn/steer' && finishingSample && params.input[0].text.includes('finish now')) {
+        const sample = finishingSample
+        finishingSample = undefined
+        emit({ id: sample.id, result: { responseId: `sample-${sample.id}`, sourceTurnId: active.id, text: `Side answer: ${sample.params.prompt.split('\n\n').at(-1)}` } })
+        finish()
+      }
+
       if (method === 'turn/steer' && (!active || active.id !== params.expectedTurnId)) {
         emit({ id: request.id, error: { code: -32000, message: 'Turn has finished' } })
         return true
@@ -238,6 +285,8 @@ export function chatFixture() {
         }
         thread.turns.push(active)
         notify('turn/started', { threadId: thread.id, turn: active })
+        if (params.input[0].text.includes('fixture:mid-turn-compaction'))
+          notify('item/started', { threadId: thread.id, turnId: active.id, item: { id: `compaction-${active.id}`, type: 'contextCompaction' } })
         // Codex emits a plan item in its plan mode, which `fixture:plan-item` stands for
         // outside a Cairn plan turn.
         if (params.collaborationMode?.mode === 'plan' || params.input[0].text.includes('fixture:plan-item')) {
