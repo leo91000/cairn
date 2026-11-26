@@ -153,9 +153,13 @@ internal fun rememberNow(key: Any?): Long {
  * replaces it while the agent only waits for its background tasks.
  */
 @Composable
-internal fun WorkingIndicator(step: WorkingStep, modifier: Modifier = Modifier) {
+internal fun WorkingIndicator(
+    step: WorkingStep,
+    modifier: Modifier = Modifier,
+    action: (@Composable () -> Unit)? = null,
+) {
     if (step.waiting != null) {
-        WaitingIndicator(step, step.waiting, modifier)
+        WaitingIndicator(step, step.waiting, modifier, action)
         return
     }
     val now = rememberNow(step.since)
@@ -184,71 +188,93 @@ internal fun WorkingIndicator(step: WorkingStep, modifier: Modifier = Modifier) 
         )
     val elapsed = liveElapsed(step.since, now)
     val base = MaterialTheme.colorScheme.onSurface
-    Row(
-        modifier.fillMaxWidth().testTag("agent-working").clearAndSetSemantics {
-            contentDescription =
-                listOf(step.title, step.detail).filter { it.isNotBlank() }.joinToString(" : ")
-            liveRegion = LiveRegionMode.Polite
-        },
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
-            Canvas(Modifier.fillMaxSize()) {
-                val radius = size.minDimension / 2
-                drawCircle(
-                    primary.copy(alpha = 0.35f * (1 - ring)),
-                    radius * (0.55f + 0.45f * ring),
-                    style = Stroke(2.dp.toPx()),
-                )
-                drawCircle(primary.copy(alpha = 0.12f), radius * 0.62f)
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.weight(1f).testTag("agent-working").clearAndSetSemantics {
+                contentDescription =
+                    listOf(step.title, step.detail).filter { it.isNotBlank() }.joinToString(" : ")
+                liveRegion = LiveRegionMode.Polite
+            },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val radius = size.minDimension / 2
+                    drawCircle(
+                        primary.copy(alpha = 0.35f * (1 - ring)),
+                        radius * (0.55f + 0.45f * ring),
+                        style = Stroke(2.dp.toPx()),
+                    )
+                    drawCircle(primary.copy(alpha = 0.12f), radius * 0.62f)
+                }
+                Box(
+                    Modifier.size(20.dp).scale(breath).clip(CircleShape).background(primary),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        CairnIcons.Steer,
+                        null,
+                        Modifier.size(11.dp),
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                    )
+                }
             }
-            Box(
-                Modifier.size(20.dp).scale(breath).clip(CircleShape).background(primary),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    CairnIcons.Steer,
-                    null,
-                    Modifier.size(11.dp),
-                    tint = MaterialTheme.colorScheme.onPrimary,
-                )
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${step.title}…",
+                        Modifier.weight(1f, fill = false),
+                        style =
+                            MaterialTheme.typography.titleSmall.copy(
+                                brush =
+                                    Brush.linearGradient(
+                                        listOf(
+                                            base.copy(alpha = 0.55f),
+                                            base,
+                                            base.copy(alpha = 0.55f),
+                                        ),
+                                        start = Offset(sweep - 170f, 0f),
+                                        end = Offset(sweep + 170f, 0f),
+                                    )
+                            ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (action != null && elapsed.isNotBlank()) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "· $elapsed",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                }
+                if (step.detail.isNotBlank())
+                    Text(
+                        step.detail,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily =
+                            if (step.detail.startsWith("Dernière étape")) null
+                            else FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
             }
-        }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                "${step.title}…",
-                style =
-                    MaterialTheme.typography.titleSmall.copy(
-                        brush =
-                            Brush.linearGradient(
-                                listOf(base.copy(alpha = 0.55f), base, base.copy(alpha = 0.55f)),
-                                start = Offset(sweep - 170f, 0f),
-                                end = Offset(sweep + 170f, 0f),
-                            )
-                    ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (step.detail.isNotBlank())
+            if (action == null && elapsed.isNotBlank()) {
+                Spacer(Modifier.width(8.dp))
                 Text(
-                    step.detail,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily =
-                        if (step.detail.startsWith("Dernière étape")) null
-                        else FontFamily.Monospace,
+                    elapsed,
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                 )
+            }
         }
-        if (elapsed.isNotBlank()) {
-            Spacer(Modifier.width(8.dp))
-            Text(
-                elapsed,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        if (action != null) {
+            Spacer(Modifier.width(4.dp))
+            Box(Modifier.withoutLineHeight()) { action() }
         }
     }
 }
@@ -261,7 +287,12 @@ private const val SHOWN_TASKS = 3
  * agent thinking for hours. The time counts from the start of the wait.
  */
 @Composable
-private fun WaitingIndicator(step: WorkingStep, tasks: List<String>, modifier: Modifier) {
+private fun WaitingIndicator(
+    step: WorkingStep,
+    tasks: List<String>,
+    modifier: Modifier,
+    action: (@Composable () -> Unit)? = null,
+) {
     val now = rememberNow(step.since)
     val transition = rememberInfiniteTransition(label = "waiting")
     val turn by
@@ -285,97 +316,117 @@ private fun WaitingIndicator(step: WorkingStep, tasks: List<String>, modifier: M
         if (tasks.size == 1) "L’agent reprend quand elle se termine."
         else "L’agent reprend quand elles se terminent."
     val elapsed = liveElapsed(step.since, now)
-    Row(
-        modifier.fillMaxWidth().testTag("agent-waiting").clearAndSetSemantics {
-            contentDescription = "${step.title} : ${step.detail}. $resumes"
-            liveRegion = LiveRegionMode.Polite
-        },
-        verticalAlignment = Alignment.Top,
-    ) {
-        Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
-            // The ring turns in the draw phase, so the slow rotation never recomposes the row.
-            Canvas(Modifier.fillMaxSize().graphicsLayer { rotationZ = turn }) {
-                val stroke = 1.5.dp.toPx()
-                drawCircle(
-                    ring,
-                    size.minDimension / 2 - 2.dp.toPx() - stroke / 2,
-                    style =
-                        Stroke(
-                            stroke,
-                            pathEffect =
-                                PathEffect.dashPathEffect(floatArrayOf(3.dp.toPx(), 3.dp.toPx())),
-                        ),
-                )
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Row(
+            Modifier.weight(1f).testTag("agent-waiting").clearAndSetSemantics {
+                contentDescription = "${step.title} : ${step.detail}. $resumes"
+                liveRegion = LiveRegionMode.Polite
+            },
+            verticalAlignment = Alignment.Top,
+        ) {
+            Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                // The ring turns in the draw phase, so the slow rotation never recomposes the row.
+                Canvas(Modifier.fillMaxSize().graphicsLayer { rotationZ = turn }) {
+                    val stroke = 1.5.dp.toPx()
+                    drawCircle(
+                        ring,
+                        size.minDimension / 2 - 2.dp.toPx() - stroke / 2,
+                        style =
+                            Stroke(
+                                stroke,
+                                pathEffect =
+                                    PathEffect.dashPathEffect(
+                                        floatArrayOf(3.dp.toPx(), 3.dp.toPx())
+                                    ),
+                            ),
+                    )
+                }
+                Box(
+                    Modifier.size(20.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        CairnIcons.Terminal,
+                        null,
+                        Modifier.size(11.dp),
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
             }
-            Box(
-                Modifier.size(20.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    CairnIcons.Terminal,
-                    null,
-                    Modifier.size(11.dp),
-                    tint = MaterialTheme.colorScheme.onSurface,
-                )
-            }
-        }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f).padding(top = 2.dp)) {
-            Text(
-                step.title,
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            FlowRow(
-                Modifier.padding(top = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                tasks.take(SHOWN_TASKS).forEach { task ->
-                    WaitingTask {
-                        Box(
-                            Modifier.size(6.dp)
-                                .clip(CircleShape)
-                                .background(accent.copy(alpha = glow))
-                        )
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f).padding(top = 2.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        step.title,
+                        Modifier.weight(1f, fill = false),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (action != null && elapsed.isNotBlank()) {
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            task,
+                            "· $elapsed",
                             style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
+                            color = muted,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
-                if (tasks.size > SHOWN_TASKS)
-                    WaitingTask {
-                        Text(
-                            "+${tasks.size - SHOWN_TASKS}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
+                FlowRow(
+                    Modifier.padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    tasks.take(SHOWN_TASKS).forEach { task ->
+                        WaitingTask {
+                            Box(
+                                Modifier.size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(accent.copy(alpha = glow))
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                task,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
+                    if (tasks.size > SHOWN_TASKS)
+                        WaitingTask {
+                            Text(
+                                "+${tasks.size - SHOWN_TASKS}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                }
+                Text(
+                    resumes,
+                    Modifier.padding(top = 6.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = muted,
+                )
             }
-            Text(
-                resumes,
-                Modifier.padding(top = 6.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = muted,
-            )
+            if (action == null && elapsed.isNotBlank()) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    elapsed,
+                    Modifier.padding(top = 2.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = muted,
+                )
+            }
         }
-        if (elapsed.isNotBlank()) {
-            Spacer(Modifier.width(8.dp))
-            Text(
-                elapsed,
-                Modifier.padding(top = 2.dp),
-                style = MaterialTheme.typography.labelMedium,
-                color = muted,
-            )
+        if (action != null) {
+            Spacer(Modifier.width(4.dp))
+            action()
         }
     }
 }

@@ -1,6 +1,14 @@
 package build.cairn.app.ui
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -9,14 +17,24 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.CairnViewModel
 import build.cairn.app.data.Chat
@@ -210,55 +228,206 @@ private fun engine(provider: String?) =
         else -> "L’agent"
     }
 
-/** Above the composer while questions are retained, so every answer remains reachable. */
+internal fun hasSideQuestionAction(chat: Chat?): Boolean =
+    chat != null && (chat.canAskSideQuestion || chat.sideQuestions.isNotEmpty())
+
+internal enum class SideQuestionPlacement {
+    Working,
+    Waiting,
+    Header,
+    FullscreenHeader,
+}
+
+/** Keep keyboard focus when the visible side-question button moves between placements. */
 @Composable
-internal fun SideQuestionCard(chat: Chat, side: SideQuestionState) {
-    val pending = chat.sideQuestions.filter { it.status == "pending" }
-    val unread = side.unread(chat.sideQuestions)
-    val shown = pending.firstOrNull() ?: unread.firstOrNull() ?: chat.sideQuestions.lastOrNull()
-    if (shown == null && !chat.canAskSideQuestion) return
-    Surface(
-        onClick = { if (shown == null) side.ask("", "") else side.show() },
-        modifier =
-            Modifier.fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp)
-                .testTag("side-question-card"),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-    ) {
-        Row(
-            Modifier.heightIn(min = 48.dp).padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                CairnIcons.SideQuestion,
-                null,
-                Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.primary,
+internal fun rememberSideQuestionButtonFocus(
+    placement: SideQuestionPlacement?,
+    fallback: FocusRequester,
+): Modifier {
+    val requester = remember { FocusRequester() }
+    var focused by remember { mutableStateOf(false) }
+    var placed by remember { mutableStateOf<SideQuestionPlacement?>(null) }
+    // Take the snapshot before Compose detaches the outgoing focus target.
+    val restoreFocus = focused
+    LaunchedEffect(placement) {
+        if (restoreFocus) {
+            withFrameNanos {}
+            // Keep the reading position when the new working row is outside the visible history.
+            val restored =
+                placement != null &&
+                    placed == placement &&
+                    runCatching { requester.requestFocus() }.getOrDefault(false)
+            if (!restored) runCatching { fallback.requestFocus() }
+        }
+    }
+    return Modifier.focusRequester(requester)
+        .onFocusChanged { focused = it.isFocused }
+        .onPlaced { placed = placement }
+}
+
+internal class SideQuestionStatus(chat: Chat, side: SideQuestionState) {
+    val pending = chat.sideQuestions.any { it.status == "pending" }
+    private val unread = side.unread(chat.sideQuestions)
+    val answers = unread.count { it.status == "answered" }
+    val failures = unread.count { it.status == "failed" }
+    val announcement =
+        listOfNotNull(
+                if (pending) "${engine(chat.provider)} répond" else null,
+                if (answers > 0) "Réponse prête ($answers)" else null,
+                if (failures > 0) "Sans réponse ($failures)" else null,
             )
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    when {
-                        shown == null -> "Poser une question à côté"
-                        pending.isNotEmpty() -> "Question à côté · ${engine(chat.provider)} répond"
-                        unread.any { it.status == "answered" } -> "Question à côté · Réponse prête"
-                        unread.isNotEmpty() -> "Question à côté · Sans réponse"
-                        else -> "Questions à côté · Enregistrées"
-                    },
-                    // Announced when the answer arrives.
-                    Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
+            .joinToString(" · ")
+            .takeIf { it.isNotEmpty() }
+            ?.let { "Question à côté · $it" }
+}
+
+/** Keep announcements available while the working row is scrolled out of the history. */
+@Composable
+internal fun SideQuestionAnnouncement(status: SideQuestionStatus?) {
+    Box(
+        Modifier.size(1.dp).testTag("side-question-status").semantics {
+            contentDescription = status?.announcement.orEmpty()
+            liveRegion = LiveRegionMode.Polite
+        }
+    )
+}
+
+/**
+ * Compact icon-only trigger for side questions: lives on the working row while the agent works and
+ * moves to the header when saved or unread answers remain after the turn.
+ */
+@Composable
+internal fun SideQuestionButton(
+    chat: Chat,
+    side: SideQuestionState,
+    modifier: Modifier = Modifier,
+    size: Dp = 36.dp,
+    status: SideQuestionStatus = SideQuestionStatus(chat, side),
+) {
+    val hasQuestions = chat.sideQuestions.isNotEmpty()
+    if (!hasQuestions && !chat.canAskSideQuestion) return
+
+    val isPending = status.pending
+    val answers = status.answers
+    val hasUnreadAnswer = answers > 0
+    val hasUnreadFailure = !hasUnreadAnswer && status.failures > 0
+    val label =
+        status.announcement
+            ?: if (hasQuestions) "Questions à côté · Enregistrées (${chat.sideQuestions.size})"
+            else "Poser une question à côté"
+
+    val colors = MaterialTheme.colorScheme
+    val container =
+        when {
+            isPending -> colors.primaryContainer.copy(alpha = 0.65f)
+            hasUnreadAnswer -> colors.primaryContainer
+            hasUnreadFailure -> colors.errorContainer
+            else -> colors.surface
+        }
+    val iconTint =
+        when {
+            isPending -> colors.primary
+            hasUnreadAnswer -> colors.onPrimaryContainer
+            hasUnreadFailure -> colors.error
+            hasQuestions -> colors.onSurface
+            else -> colors.onSurfaceVariant
+        }
+    val borderColor =
+        when {
+            isPending -> colors.primary.copy(alpha = 0.28f)
+            hasUnreadAnswer -> colors.primary.copy(alpha = 0.65f)
+            hasUnreadFailure -> colors.error.copy(alpha = 0.55f)
+            else -> colors.outlineVariant
+        }
+    val borderWidth = if (!isPending && (hasUnreadAnswer || hasUnreadFailure)) 1.5.dp else 1.dp
+
+    val badgeText =
+        when {
+            hasUnreadAnswer -> if (answers > 99) "99+" else answers.toString()
+            hasUnreadFailure -> "!"
+            !isPending && hasQuestions ->
+                if (chat.sideQuestions.size > 99) "99+" else chat.sideQuestions.size.toString()
+            else -> null
+        }
+    val badgeBg =
+        when {
+            hasUnreadAnswer -> colors.primary
+            hasUnreadFailure -> colors.error
+            else -> colors.surfaceContainerHighest
+        }
+    val badgeFg =
+        when {
+            hasUnreadAnswer -> colors.onPrimary
+            hasUnreadFailure -> colors.onError
+            else -> colors.onSurface
+        }
+
+    Box(
+        modifier =
+            modifier
+                .size(maxOf(size, 48.dp))
+                .testTag("side-question-button")
+                .semantics { contentDescription = label }
+                .clickable(role = Role.Button) {
+                    if (!hasQuestions) side.ask("", "") else side.show()
+                },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(size + 8.dp), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier.size(size)
+                    .clip(CircleShape)
+                    .background(container)
+                    .border(borderWidth, borderColor, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    CairnIcons.SideQuestion,
+                    null,
+                    Modifier.size(size * 0.47f),
+                    tint = iconTint,
                 )
-                if (shown != null)
-                    Text(
-                        shown.text,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
             }
+            if (isPending) {
+                val transition = rememberInfiniteTransition(label = "side-question-pending")
+                val angle by
+                    transition.animateFloat(
+                        0f,
+                        360f,
+                        infiniteRepeatable(tween(1200, easing = LinearEasing)),
+                        label = "spin",
+                    )
+                val arcColor = colors.primary
+                Canvas(Modifier.size(size)) {
+                    val stroke = 2.dp.toPx()
+                    drawArc(
+                        color = arcColor,
+                        startAngle = angle - 90f,
+                        sweepAngle = 95f,
+                        useCenter = false,
+                        style = Stroke(width = stroke, cap = StrokeCap.Round),
+                    )
+                }
+            }
+            if (badgeText != null)
+                Box(
+                    Modifier.align(Alignment.TopEnd)
+                        .defaultMinSize(minWidth = 17.dp, minHeight = 17.dp)
+                        .clip(CircleShape)
+                        .background(badgeBg)
+                        .border(1.5.dp, colors.background, CircleShape)
+                        .padding(horizontal = 4.dp)
+                        .clearAndSetSemantics {},
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        badgeText,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = badgeFg,
+                        maxLines = 1,
+                    )
+                }
         }
     }
 }
