@@ -4,6 +4,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -29,14 +31,19 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import build.cairn.app.data.AccountProvider
+import kotlin.math.floor
 
 internal const val EMAIL_CODE_LENGTH = 8
 
@@ -141,6 +148,8 @@ internal fun OtpCodeField(
     val input = if (field.text == value) field else TextFieldValue(value, TextRange(value.length))
     val selection = input.selection
     val activeIndex = selection.start.coerceAtMost(EMAIL_CODE_LENGTH - 1)
+    val layoutDirection = LocalLayoutDirection.current
+    val cellGap = 6.dp
 
     BasicTextField(
         value = input,
@@ -177,10 +186,49 @@ internal fun OtpCodeField(
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
-                Box(Modifier.fillMaxWidth()) {
+                Box(
+                    Modifier.fillMaxWidth().pointerInput(value, layoutDirection) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            var pointer = down
+                            do {
+                                pointer =
+                                    awaitPointerEvent(PointerEventPass.Final).changes.firstOrNull {
+                                        it.id == down.id
+                                    } ?: return@awaitEachGesture
+                                if (
+                                    (pointer.position - down.position).getDistance() >=
+                                        viewConfiguration.touchSlop
+                                )
+                                    return@awaitEachGesture
+                            } while (pointer.pressed)
+
+                            if (
+                                pointer.uptimeMillis - down.uptimeMillis >=
+                                    viewConfiguration.longPressTimeoutMillis
+                            )
+                                return@awaitEachGesture
+
+                            // The real field handles focus, presses and paste. Align a short tap
+                            // with the visible cells after the field has handled it.
+                            val distance =
+                                if (layoutDirection == LayoutDirection.Ltr) pointer.position.x
+                                else size.width - pointer.position.x
+                            val gap = cellGap.toPx()
+                            val step = (size.width + gap) / EMAIL_CODE_LENGTH
+                            val firstCenter = (step - gap) / 2
+                            val offset =
+                                (floor((distance - firstCenter) / step).toInt() + 1).coerceIn(
+                                    0,
+                                    value.length,
+                                )
+                            field = TextFieldValue(value, TextRange(offset))
+                        }
+                    }
+                ) {
                     Row(
                         Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(cellGap),
                     ) {
                         repeat(EMAIL_CODE_LENGTH) { index ->
                             val char = value.getOrNull(index)?.toString().orEmpty()

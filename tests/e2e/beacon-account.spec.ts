@@ -251,6 +251,11 @@ test('email sign-in works after a third party exhausts their challenge, persists
     const deliveredCode = messages[0]!.text.match(/\b\d{8}\b/)![0]
     const wrongCode = deliveredCode === '00000000' ? '00000001' : '00000000'
     await codeInput.fill(wrongCode)
+    const fourthCell = codeInput.locator('xpath=..').locator('[aria-hidden="true"] > div').nth(3)
+    const bounds = await fourthCell.boundingBox()
+    expect(bounds).not.toBeNull()
+    await page.mouse.click(bounds!.x + bounds!.width / 4, bounds!.y + bounds!.height / 2)
+    expect(await codeInput.evaluate(element => (element as HTMLInputElement).selectionStart)).toBe(3)
     await signIn.click()
     await expect(page.getByRole('alert')).toContainText('Invalid or expired code')
     await codeInput.fill(deliveredCode)

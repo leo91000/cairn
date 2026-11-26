@@ -15,6 +15,7 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 const inputId = useId()
+const grid = ref<HTMLDivElement>()
 const focused = ref(false)
 const selection = ref({ start: 0, end: 0 })
 const characters = computed(() => Array.from({ length: props.length }, (_, index) => props.modelValue[index] ?? ''))
@@ -31,6 +32,20 @@ function updateSelection(event: Event) {
 
 function focus(event: FocusEvent) {
   focused.value = true
+  updateSelection(event)
+}
+
+function placeCaret(event: MouseEvent) {
+  const input = event.target as HTMLInputElement
+  if (event.detail === 1 && !event.shiftKey && input.selectionStart === input.selectionEnd && grid.value) {
+    const index = Array.from(grid.value.children).findIndex((cell) => {
+      const bounds = cell.getBoundingClientRect()
+      return event.clientX < bounds.left + bounds.width / 2
+    })
+    const position = Math.min(index === -1 ? props.length : index, input.value.length)
+    input.setSelectionRange(position, position)
+  }
+
   updateSelection(event)
 }
 
@@ -57,8 +72,9 @@ function onInput(event: Event) {
     <label :for="inputId" class="text-xs font-semibold text-ink">
       {{ label }}
     </label>
-    <div class="relative">
+    <div class="relative" dir="ltr">
       <div
+        ref="grid"
         class="grid gap-2 phone:gap-1.5"
         :style="{ gridTemplateColumns: `repeat(${length}, minmax(0, 1fr))` }"
         aria-hidden="true"
@@ -99,7 +115,7 @@ function onInput(event: Event) {
         @input="onInput"
         @focus="focus"
         @select="updateSelection"
-        @click="updateSelection"
+        @click="placeCaret"
         @keyup="updateSelection"
         @blur="focused = false"
       >

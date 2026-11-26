@@ -4,9 +4,12 @@ import android.app.Application
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.text.TextRange
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import androidx.work.Configuration
@@ -121,11 +124,18 @@ class AuthorizeScreenTest {
                                     .setBody(
                                         """[{"id":"inst-1","name":"Maison","role":"member","online":false}]"""
                                     )
-                            "/api/mcp/oauth/preview" ->
+                            "/api/mcp/oauth/preview" -> {
+                                val parameters =
+                                    wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
+                                val clientId =
+                                    parameters.getValue("client_id").jsonPrimitive.content
+                                val clientName =
+                                    if (clientId == "client-2") "Autre assistant" else "Claude"
                                 MockResponse()
                                     .setBody(
-                                        """{"client":{"client_id":"client-1","client_name":"Claude","redirect_uri":"https://claude.ai/cb"},"scopes":["read","manage","run"],"installations":[{"id":"inst-3","name":"Atelier","role":"owner","online":true},{"id":"inst-2","name":"Bureau","role":"owner","online":false}],"confirmationRequired":true}"""
+                                        """{"client":{"client_id":"$clientId","client_name":"$clientName","redirect_uri":"https://claude.ai/cb"},"scopes":["read","manage","run"],"installations":[{"id":"inst-3","name":"Atelier","role":"owner","online":true},{"id":"inst-2","name":"Bureau","role":"owner","online":false}],"confirmationRequired":true}"""
                                     )
+                            }
                             "/api/account/email-code" ->
                                 MockResponse().setBody("""{"challenge":"email-challenge"}""")
                             "/api/account/reauth/email" ->
@@ -202,6 +212,27 @@ class AuthorizeScreenTest {
                 }
                 assertTrue(consumed)
 
+                compose.onNodeWithText("Changer de lien").performScrollTo().performClick()
+                compose
+                    .onNode(hasSetTextAction())
+                    .performScrollTo()
+                    .performTextReplacement(sharedUrl.replace("client-1", "client-2"))
+                compose.onNodeWithText("Examiner la demande").performScrollTo().performClick()
+                compose.waitUntil(10_000) {
+                    compose
+                        .onAllNodesWithText("Autoriser « Autre assistant » ?")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.runOnIdle { incomingUrl = sharedUrl }
+                compose.waitUntil(10_000) {
+                    compose
+                        .onAllNodesWithText("Autoriser « Claude » ?")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Autoriser « Autre assistant » ?").assertDoesNotExist()
+
                 compose.runOnIdle { incomingUrl = "https://elsewhere.example.test/authorize" }
                 compose.waitUntil(10_000) {
                     compose
@@ -243,6 +274,15 @@ class AuthorizeScreenTest {
                 codeInput.performTextInput("12")
                 compose.onNodeWithText("Valider la confirmation").assertIsNotEnabled()
                 codeInput.performTextReplacement("12345678")
+                codeInput.performScrollTo().performTouchInput {
+                    click(Offset(width * 0.4f, height * 0.8f))
+                }
+                codeInput.assert(
+                    SemanticsMatcher.expectValue(
+                        SemanticsProperties.TextSelectionRange,
+                        TextRange(3),
+                    )
+                )
                 compose.onNodeWithText("Valider la confirmation").performScrollTo().performClick()
                 compose.waitUntil(10_000) {
                     compose

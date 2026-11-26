@@ -185,11 +185,13 @@ private fun CairnAppContent(
         return
     }
     var authorizationUrl by rememberSaveable(state.session.account?.id) { mutableStateOf("") }
+    var shareRevision by rememberSaveable(state.session.account?.id) { mutableIntStateOf(0) }
     val sharedConsent: McpConsentState = viewModel(key = "shared-mcp-consent")
     LaunchedEffect(sharedUrl) {
         if (sharedUrl.isNotBlank()) {
-            if (authorizationUrl != sharedUrl) sharedConsent.completed = null
+            sharedConsent.completed = null
             authorizationUrl = sharedUrl
+            shareRevision++
             consumedShare()
         }
     }
@@ -207,7 +209,7 @@ private fun CairnAppContent(
         ) {
             Surface(Modifier.fillMaxSize()) {
                 Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-                    key(state.session.account?.id, authorizationUrl) {
+                    key(state.session.account?.id, shareRevision) {
                         AuthorizeScreen(
                             vm,
                             state,
