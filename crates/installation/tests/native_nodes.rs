@@ -1270,6 +1270,7 @@ async fn automatic_vm_only_bot_delegation_needs_no_native_authority() {
         .plugins
         .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
     f.agent = f.service.agent_fixture(json!({ "access": { "backend": "auto", "nodes": [cairn_installation::nodes::LOCAL_NODE_ID] } }), f.agent["id"].as_str()).await.unwrap();
+    common::relay_fixture::native_authority_unavailable(&f.service).await;
     f.service
         .store
         .set(
@@ -2062,8 +2063,15 @@ async fn native_stop_controls_remain_available_without_host_admission() {
         node["nativeEnabled"] = false.into();
         node["nativeAccounts"] = json!([]);
         f.service.store.put_node_fixture(node).await.unwrap();
-        // The synthetic Beacon has no native-authority endpoint. A refresh
-        // would fail; execution-reducing controls must not depend on it.
+        // Execution-reducing controls must work through a native authority outage.
+        common::relay_fixture::native_authority_unavailable(&f.service).await;
+        let mut cached_proof = f
+            .service
+            .store
+            .kv("native-authority")
+            .await
+            .unwrap()
+            .unwrap();
         f.service
             .store
             .set(
@@ -2101,9 +2109,25 @@ async fn native_stop_controls_remain_available_without_host_admission() {
                 .await;
             assert_eq!(
                 status,
-                StatusCode::FORBIDDEN,
-                "unpause must still fail closed: {response}"
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unpause requires current native authority: {response}"
             );
+            assert_eq!(
+                f.service.conversation_boundary(&chat_id).await.unwrap()["paused"],
+                true
+            );
+
+            // An otherwise valid membership proof must still honor the host revocation.
+            cached_proof["observedAt"] = now().into();
+            f.service
+                .store
+                .set("native-authority", cached_proof, None)
+                .await
+                .unwrap();
+            let (status, response) = f
+                .call(&f.trusted, "POST", &path, json!({ "paused": false }))
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
             assert_eq!(
                 f.service.conversation_boundary(&chat_id).await.unwrap()["paused"],
                 true
@@ -3049,6 +3073,14 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
         }))
         .await
         .unwrap();
+    let plans = f.service.config.data_dir.join("runner-plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    std::fs::write(
+        plans.join(format!("{attempt}.json")),
+        json!({ "runId": run["id"], "backend": "native" }).to_string(),
+    )
+    .unwrap();
+
     let token = auth::token();
     f.service
         .store
@@ -3070,19 +3102,20 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
         "budget": { "slots": 1, "limits": f.node["limits"] },
         "pool": { "capacity": 1 },
     });
-    let send = |body: Value| {
-        let request = Request::builder()
-            .method("POST")
-            .uri("/internal/nodes/heartbeat")
-            .header("host", common::HOST)
+    let send = |path: &str, body: &Value| {
+        let request = common::request("POST", path)
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap();
         common::send(&f.router, request)
     };
-    // The last proof remains valid while Beacon refresh is unavailable. A
-    // heartbeat may renew work, but cannot extend this proof's deadline.
+    let heartbeat_path = "/internal/nodes/heartbeat";
+    let workspace_path = format!("/internal/node-workspace/{attempt}/inbox");
+    let empty = json!({});
+
+    // A failed refresh leaves cached membership available until its original deadline.
+    common::relay_fixture::native_authority_unavailable(&f.service).await;
     f.service
         .store
         .set(
@@ -3095,13 +3128,18 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
         )
         .await
         .unwrap();
-    let first = read_json(send(heartbeat.clone()).await).await;
-    assert_eq!(first["leases"].as_array().unwrap().len(), 1);
+    let first = send(heartbeat_path, &heartbeat).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = read_json(first).await;
+    assert_eq!(first["leases"].as_array().unwrap().len(), 1, "{first}");
+    assert_eq!(first["leases"][0]["id"], attempt);
     let remaining = first["leases"][0]["remainingMs"].as_u64().unwrap();
     assert!(
         remaining > 0 && remaining <= 30_000,
         "grant must retain the proof deadline: {first}"
     );
+    assert_eq!(send(&workspace_path, &empty).await.status(), StatusCode::OK);
+
     let mut node = f
         .service
         .node_boundary(f.node["id"].as_str().unwrap())
@@ -3110,8 +3148,14 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
     assert_eq!(node["executionReady"], true);
     node["nativeAccounts"] = json!([]);
     f.service.store.put_node_fixture(node).await.unwrap();
-    let renewed = read_json(send(heartbeat).await).await;
+    let renewed = send(heartbeat_path, &heartbeat).await;
+    assert_eq!(renewed.status(), StatusCode::OK);
+    let renewed = read_json(renewed).await;
     assert!(renewed["leases"].as_array().unwrap().is_empty());
+    assert_eq!(
+        send(&workspace_path, &empty).await.status(),
+        StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]
@@ -3754,6 +3798,7 @@ async fn revoked_native_permissions_still_allow_disabling_but_never_reenabling_a
         .await
         .unwrap();
     // Even an unavailable authority must not block an execution-reducing edit.
+    common::relay_fixture::native_authority_unavailable(&f.service).await;
     f.service
         .store
         .set(
