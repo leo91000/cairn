@@ -912,10 +912,12 @@ async fn compact_streams_send_the_list_once_then_only_changed_conversations() {
     assert_eq!(batch["state"]["chat"]["id"], older["id"]);
     assert!(batch["state"]["chat"].get("run").is_none());
     assert!(batch["state"].get("run").is_some());
-    let revision = batch["state"]["cacheRevision"].clone();
+    let revision = batch["state"]["historyRevision"].clone();
+    assert_eq!(revision, "initial");
     let mut legacy = f.open_path("/api/chats/stream", None).await;
     let (_, batch) = legacy.batch().await;
     let legacy_revision = batch["state"]["cacheRevision"].clone();
+    assert!(batch["state"].get("historyRevision").is_none());
 
     let mut list = f.open_path("/api/chats/stream?compact=1", None).await;
     let (_, batch) = list.batch().await;
@@ -956,7 +958,7 @@ async fn compact_streams_send_the_list_once_then_only_changed_conversations() {
     let mut reopened = f.open_path("/api/chats/stream?compact=1", None).await;
     let (_, batch) = reopened.batch().await;
     assert_eq!(ids(&batch["state"]["chats"]), [older_id]);
-    assert_eq!(batch["state"]["cacheRevision"], revision);
+    assert_eq!(batch["state"]["historyRevision"], revision);
     // Clients without list changes still drop every saved conversation.
     let mut legacy = f.open_path("/api/chats/stream", None).await;
     let (_, batch) = legacy.batch().await;

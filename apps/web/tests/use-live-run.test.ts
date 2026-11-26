@@ -304,7 +304,7 @@ it('adopts a first history revision without clearing, and clears on a later chan
   effect.run(() => useLiveRun(() => '/chats/a/stream'))
   await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
   const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
-  const batch = (cacheRevision: string) => ({
+  const batch = (historyRevision: string) => ({
     events: [],
     reset: false,
     more: false,
@@ -313,7 +313,8 @@ it('adopts a first history revision without clearing, and clears on a later chan
       run: null,
       chat: null,
       artifacts: [],
-      cacheRevision,
+      cacheRevision: 'trash revision',
+      historyRevision,
     },
   }) as never
   await accept(batch('initial'), 1)

@@ -213,6 +213,9 @@ struct State {
     chat: Value,
     artifacts: Vec<Value>,
     cache_revision: Value,
+    /// Compact streams only: the revision of saved history, which trashing leaves unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_revision: Option<Value>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_chats"
@@ -536,15 +539,17 @@ fn read_page(
         artifacts: artifacts(db, run_id)?,
         run,
         chat,
-        // Compact clients forget deleted conversations from list changes. Their revision
-        // stays "initial" until a change that invalidates saved history itself writes it.
         cache_revision: db
-            .kv(if scope.compact {
-                "conversation-history-revision"
-            } else {
-                "conversation-cache-revision"
-            })?
+            .kv("conversation-cache-revision")?
             .unwrap_or_else(|| "initial".into()),
+        // Compact clients forget deleted conversations from list changes and follow this
+        // revision instead, in its own field: a client never mistakes one for the other. It
+        // stays "initial" until a change that invalidates saved history itself writes it.
+        history_revision: scope
+            .compact
+            .then(|| db.kv("conversation-history-revision"))
+            .transpose()?
+            .map(|revision| revision.unwrap_or_else(|| "initial".into())),
         chats,
     };
     Ok(Page {

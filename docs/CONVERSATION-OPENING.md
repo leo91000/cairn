@@ -22,10 +22,10 @@ never saved opens on an outline until the stream's first snapshot.
   order changed beyond removals, every listed id (`order`); a batch's `state` omits the
   unchanged list. The conversation's `chat` omits `run`, which is the state's own `run`.
   Without `compact=1` streams keep their previous payloads.
-- Trashing a conversation changes `cacheRevision` only on streams without `compact=1`,
-  whose older clients drop every saved conversation on that change. Compact streams carry
-  a separate history revision that trashing leaves unchanged; their clients drop the saved
-  copy of each conversation that leaves the server's list instead.
+- Trashing a conversation changes `cacheRevision`, which older clients follow by dropping
+  every saved conversation. Compact streams also carry `historyRevision`, which trashing
+  leaves unchanged; their clients follow only that field, adopt a first-seen value without
+  clearing, and drop the saved copy of each conversation that leaves the server's list.
 - The opening page is sent without the 25 ms coalescing delay meant for live updates.
 - A resume past more than one page of events first reads the newest window. When it
   reaches back to the saved cursor, which a backlog of replaced text snapshots usually does,

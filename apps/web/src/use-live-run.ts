@@ -229,18 +229,19 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       const apply = (large: TimelineEntry[], events = batch.events) => {
         if (signal?.aborted || disposed || current !== generation)
           return
-        if (batch.state?.cacheRevision) {
-          // Compact streams carry the history revision: a tab of an older bundle, which
-          // follows the trash revision under the previous key, never clears this one's cache.
+        // Only the history revision counts: an installation without compact streams sends none,
+        // and a tab of an older bundle follows the trash revision under the previous key.
+        const revision = batch.state?.historyRevision
+        if (revision) {
           const revisionKey = state.installationId ? `conversation-history-revision:${state.installationId}` : 'conversation-history-revision'
           try {
             // A revision seen for the first time invalidates nothing, as on Android: other
             // installations keep their saved conversations.
             const known = localStorage.getItem(revisionKey)
-            if (known !== batch.state.cacheRevision) {
+            if (known !== revision) {
               if (known !== null)
                 void clearHistoryCache()
-              localStorage.setItem(revisionKey, batch.state.cacheRevision)
+              localStorage.setItem(revisionKey, revision)
             }
           }
           catch { void clearHistoryCache() }

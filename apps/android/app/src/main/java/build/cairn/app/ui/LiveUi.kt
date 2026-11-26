@@ -131,7 +131,7 @@ fun rememberLive(
                                 // revision: a saved copy, or a reconnect that kept its state, may
                                 // carry the trash revision an earlier version followed.
                                 if (it !== replay && it.status == LIVE_STATUS)
-                                    vm.acceptCacheRevision(it.state?.cacheRevision)
+                                    vm.acceptCacheRevision(it.state?.historyRevision)
                                 cacheGeneration = vm.historyCache.generation
                                 if (!it.catchingUp || it.httpStatus != null) {
                                     if (it.history != value.history || it.epoch != value.epoch)

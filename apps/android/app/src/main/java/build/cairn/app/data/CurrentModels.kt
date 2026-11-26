@@ -58,6 +58,8 @@ data class LiveState(
     val chats: List<Chat>? = null,
     val artifacts: List<Deliverable> = emptyList(),
     val cacheRevision: String? = null,
+    /** Compact streams only: the saved-history revision, which trashing leaves unchanged. */
+    val historyRevision: String? = null,
 )
 
 /** The conversation's run is the state's own `run`: compact streams and saved copies omit it. */

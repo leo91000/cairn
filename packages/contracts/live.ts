@@ -6,7 +6,10 @@ import type { TimelineChange } from './generated/typescript/TimelineChange'
 
 export interface LiveState {
   planTurnsEnabled?: boolean
+  /** The trash revision clients without `compact=1` follow. */
   cacheRevision?: string
+  /** Compact streams only: the saved-history revision, which trashing leaves unchanged. */
+  historyRevision?: string
   run: Run | null
   chat: ChatDetail | null
   chats?: ChatView[]

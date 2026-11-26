@@ -159,6 +159,8 @@ export function inMemory(scope: string, path: string) {
 
 /** A conversation read in this page, available without waiting for storage. */
 export function peekHistory(scope: string, path: string): CachedHistory | undefined {
+  if (forgotten.has(`${scope}:${path}`))
+    return undefined
   try {
     return parse(memory.get(`${scope}:${path}`)?.text)
   }
@@ -170,6 +172,9 @@ export function peekHistory(scope: string, path: string): CachedHistory | undefi
 export async function readHistory(scope: string, path: string): Promise<CachedHistory | undefined> {
   const key = `${scope}:${path}`
   const current = epoch
+  // A read started before its deletion must not bring the copy back.
+  if (forgotten.has(key))
+    return undefined
   let text = memory.get(key)?.text
   if (text === undefined) {
     try {
@@ -183,7 +188,7 @@ export async function readHistory(scope: string, path: string): Promise<CachedHi
 
   try {
     const value = parse(text)
-    if (current !== epoch || !value)
+    if (current !== epoch || !value || forgotten.has(key))
       return undefined
     remember(key, text!)
     return value
