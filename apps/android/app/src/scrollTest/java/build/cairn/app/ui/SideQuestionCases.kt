@@ -316,7 +316,7 @@ abstract class SideQuestionCases {
                 unavailable = "claude-release"
                 compose
                     .onNodeWithText(
-                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : il faut la version 2.1.308 ou une plus récente. Posez-la dans la conversation."
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : il faut une version stable, 2.1.308 ou plus récente. Posez-la dans la conversation."
                     )
                     .assertExists()
                 // A reply that has not offered them yet says so too.

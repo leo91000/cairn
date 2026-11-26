@@ -396,7 +396,7 @@ internal fun ColumnScope.SideQuestionPanel(
                     "compacting" ->
                         "La conversation compacte son contexte. Réessayez une fois la compaction terminée."
                     "claude-release" ->
-                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : il faut la version 2.1.308 ou une plus récente. Posez-la dans la conversation."
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : il faut une version stable, 2.1.308 ou plus récente. Posez-la dans la conversation."
                     "not-offered" ->
                         "${engine(chat.provider)} n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
                     // A reason this version does not know yet: the server's own words.

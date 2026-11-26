@@ -346,7 +346,7 @@ pub(crate) fn reason(unavailable: SideQuestionUnavailable) -> &'static str {
             "The conversation is compacting its context. Try again once it finishes."
         }
         SideQuestionUnavailable::ClaudeRelease => {
-            "This Claude Code release cannot answer side questions in Cairn: they need version 2.1.308 or later. Ask in the conversation instead."
+            "This Claude Code release cannot answer side questions in Cairn: they need a stable release, 2.1.308 or later. Ask in the conversation instead."
         }
         SideQuestionUnavailable::NotOffered => {
             "The agent has not offered side questions for this reply yet. Try again in a moment; if it never does, its runtime may need an update."

@@ -7209,7 +7209,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     assert!(
         old_release
             .to_string()
-            .contains("they need version 2.1.308 or later"),
+            .contains("they need a stable release, 2.1.308 or later"),
         "{old_release}"
     );
     let listed = call(

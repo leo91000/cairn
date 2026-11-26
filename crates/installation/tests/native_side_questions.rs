@@ -62,6 +62,27 @@ fn sse(events: &[Value]) -> String {
         .collect()
 }
 
+fn side_events(events: &[Value]) -> Vec<&Value> {
+    events
+        .iter()
+        .filter(|event| {
+            event["type"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("chat.side")
+        })
+        .collect()
+}
+
+/// Every model request, when `NATIVE_PROBE_DUMP` asks for them.
+fn dumped(requests: &[Value]) -> Value {
+    if std::env::var("NATIVE_PROBE_DUMP").is_ok() {
+        json!(requests)
+    } else {
+        Value::Null
+    }
+}
+
 fn report(name: &str, value: &Value) {
     eprintln!("{name}: {}", serde_json::to_string_pretty(value).unwrap());
     if let Ok(directory) = std::env::var("NATIVE_PROBE_REPORTS") {
@@ -192,6 +213,36 @@ fn check_sessions(sessions: &[std::path::PathBuf]) {
     }
 }
 
+/// The running turn's model requests built after its first side question, which must
+/// carry none of them.
+fn check_turn_context(
+    requests: &[Value],
+    is_sample: impl Fn(&Value) -> bool,
+    is_turn: impl Fn(&Value) -> bool,
+) {
+    let first = requests
+        .iter()
+        .position(&is_sample)
+        .expect("no side question reached the model");
+    let later = requests[first..]
+        .iter()
+        .filter(|request| !is_sample(request) && is_turn(request))
+        .collect::<Vec<_>>();
+    assert!(
+        !later.is_empty(),
+        "the turn sent no request after the side questions"
+    );
+    for request in later {
+        let context = request.to_string();
+        for marker in [SIDE_REPLY, TEXT, TOOL, HOLD] {
+            assert!(
+                !context.contains(marker),
+                "{marker} entered the running turn"
+            );
+        }
+    }
+}
+
 /// What both engines must show.
 fn check(events: &[Value], workspace: &Path, output: &Path) {
     assert!(
@@ -235,6 +286,10 @@ fn check(events: &[Value], workspace: &Path, output: &Path) {
     assert!(
         workspace.join("main-write").exists(),
         "the main turn's tool call did not run"
+    );
+    assert!(
+        workspace.join("main-after").exists(),
+        "the main turn did not continue after the side questions"
     );
     assert!(
         !workspace.join("side-write").exists(),
@@ -340,7 +395,11 @@ async fn native_codex_answers_side_questions_without_tools_or_history() {
     std::fs::create_dir(&workspace).unwrap();
     let write = |name: &str| format!("touch {}/{name}", workspace.display());
 
-    let (write_side, write_main) = (write("side-write"), write("main-write"));
+    let writes = (
+        write("side-write"),
+        write("main-write"),
+        write("main-after"),
+    );
     let release = Arc::new(AtomicBool::new(false));
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let (recorded, holding) = (requests.clone(), release.clone());
@@ -350,19 +409,26 @@ async fn native_codex_answers_side_questions_without_tools_or_history() {
             let request: Value = serde_json::from_slice(&body).unwrap();
             recorded.lock().unwrap().push(request.clone());
             let latest = codex_user_texts(&request).pop().unwrap_or_default();
-            // Codex's own instructions name the output type, so look at the items.
-            let started = request["input"]
+            // Codex's own instructions name the output type, so count the items.
+            let outputs = request["input"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .any(|item| item["type"] == "custom_tool_call_output");
+                .filter(|item| item["type"] == "custom_tool_call_output")
+                .count();
             let holding = holding.clone();
-            let (side_write, main_write) = (write_side.clone(), write_main.clone());
+            let (side_write, main_write, main_after) = writes.clone();
             async move {
+                // The main turn runs a command, waits for the side questions, then runs
+                // another one: its next request is built after them.
                 let item = match marker(&latest) {
                     Some(TEXT) => codex_message(SIDE_REPLY),
                     Some(TOOL) => codex_shell(&side_write),
-                    None if !started => codex_shell(&main_write),
+                    None if outputs == 0 => codex_shell(&main_write),
+                    None if outputs == 1 => {
+                        released(&holding).await;
+                        codex_shell(&main_after)
+                    }
                     _ => {
                         released(&holding).await;
                         codex_message(MAIN_REPLY)
@@ -439,20 +505,24 @@ async fn native_codex_answers_side_questions_without_tools_or_history() {
     .map_err(|error| error.message);
 
     let requests = requests.lock().unwrap().clone();
+    let is_sample =
+        |request: &Value| marker(&codex_user_texts(request).pop().unwrap_or_default()).is_some();
     let samples = requests[..next_start]
         .iter()
-        .filter(|request| marker(&codex_user_texts(request).pop().unwrap_or_default()).is_some())
+        .filter(|request| is_sample(request))
         .collect::<Vec<_>>();
+    let side_events = side_events(&events);
+    let bodies = dumped(&requests);
     report(
         "codex-side-questions",
         &json!({
             "binary": binary,
             "result": result,
             "nextResult": next_result,
-            "sideEvents": events.iter().filter(|event| event["type"].as_str().unwrap_or_default().starts_with("chat.side")).collect::<Vec<_>>(),
+            "sideEvents": side_events,
             "sideWrite": workspace.join("side-write").exists(),
             "samples": samples.len(),
-            "requestBodies": if std::env::var("NATIVE_PROBE_DUMP").is_ok() { json!(requests) } else { Value::Null },
+            "requestBodies": bodies,
         }),
     );
 
@@ -466,6 +536,7 @@ async fn native_codex_answers_side_questions_without_tools_or_history() {
     for sample in &samples {
         assert!(sample["input"].to_string().contains(MAIN_REQUEST));
     }
+    check_turn_context(&requests[..next_start], is_sample, |_| true);
     for request in &requests[next_start..] {
         let context = request["input"].to_string();
         for marker in [TEXT, TOOL, HOLD] {
@@ -543,7 +614,11 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
     std::fs::create_dir(&workspace).unwrap();
     let write = |name: &str| format!("touch {}/{name}", workspace.display());
 
-    let (write_side, write_main) = (write("side-write"), write("main-write"));
+    let writes = (
+        write("side-write"),
+        write("main-write"),
+        write("main-after"),
+    );
     let release = Arc::new(AtomicBool::new(false));
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let (recorded, holding) = (requests.clone(), release.clone());
@@ -554,7 +629,7 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
                 let request: Value = serde_json::from_slice(&body).unwrap();
                 recorded.lock().unwrap().push(request.clone());
                 let holding = holding.clone();
-                let (side_write, main_write) = (write_side.clone(), write_main.clone());
+                let (side_write, main_write, main_after) = writes.clone();
                 async move {
                     let model = &request["model"];
                     if request["stream"] != true {
@@ -571,14 +646,15 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
                         return ([("content-type", "application/json")], reply.to_string());
                     }
                     let main = request["tools"].to_string().contains("\"Bash\"");
-                    let started = request["messages"]
+                    let results = request["messages"]
                         .as_array()
                         .into_iter()
                         .flatten()
                         .flat_map(|message| {
                             message["content"].as_array().cloned().unwrap_or_default()
                         })
-                        .any(|block| block["type"] == "tool_result");
+                        .filter(|block| block["type"] == "tool_result")
+                        .count();
                     let body = match marker(&claude_latest_user_text(&request)) {
                         Some(TEXT) => claude_reply(
                             model,
@@ -588,8 +664,13 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
                         Some(TOOL) => {
                             claude_reply(model, &claude_bash("side", &side_write), "tool_use")
                         }
-                        None if main && !started => {
+                        // As for Codex, the turn's next request follows the side questions.
+                        None if main && results == 0 => {
                             claude_reply(model, &claude_bash("main", &main_write), "tool_use")
+                        }
+                        None if main && results == 1 => {
+                            released(&holding).await;
+                            claude_reply(model, &claude_bash("after", &main_after), "tool_use")
                         }
                         Some(_) => {
                             released(&holding).await;
@@ -663,19 +744,27 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
 
     // Claude Code's saved session holds no side question.
     let sessions = saved_sessions(&config.home.join(".claude"));
+    let requests = requests.lock().unwrap().clone();
+    let side_events = side_events(&events);
+    let bodies = dumped(&requests);
     report(
         "claude-side-questions",
         &json!({
             "binary": binary,
             "result": result,
-            "sideEvents": events.iter().filter(|event| event["type"].as_str().unwrap_or_default().starts_with("chat.side")).collect::<Vec<_>>(),
+            "sideEvents": side_events,
             "sideWrite": workspace.join("side-write").exists(),
             "sessions": sessions,
-            "requestBodies": if std::env::var("NATIVE_PROBE_DUMP").is_ok() { json!(requests.lock().unwrap().clone()) } else { Value::Null },
+            "requestBodies": bodies,
         }),
     );
 
     result.unwrap();
     check(&events, &workspace, &root.path().join("result.md"));
     check_sessions(&sessions);
+    let is_sample = |request: &Value| marker(&claude_latest_user_text(request)).is_some();
+    let is_turn = |request: &Value| {
+        request["stream"] == true && request["tools"].to_string().contains("\"Bash\"")
+    };
+    check_turn_context(&requests, is_sample, is_turn);
 }
