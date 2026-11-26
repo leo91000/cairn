@@ -1,0 +1,15 @@
+name: Check Playwright container image version
+description: Verify the installed @playwright/test version matches the pinned Playwright Docker image.
+runs:
+  using: composite
+  steps:
+    - name: Check browser image version
+      shell: bash
+      run: |
+        node --input-type=module <<'JS'
+        import { readFileSync } from 'node:fs'
+        const installed = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
+        const preinstalled = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
+        if (installed !== preinstalled)
+          throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
+        JS

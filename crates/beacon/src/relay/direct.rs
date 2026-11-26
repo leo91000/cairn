@@ -123,9 +123,7 @@ async fn issue(
     };
 
     let claims = DirectClaims {
-        connection_id: renew
-            .map(str::to_owned)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        connection_id: renew.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned),
         installation_id: installation.to_owned(),
         account_id: account.clone(),
         role,

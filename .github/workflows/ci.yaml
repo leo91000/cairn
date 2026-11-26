@@ -32,10 +32,6 @@ on:
         description: Run backend tests and doctests without release resolution or image jobs
         type: boolean
         default: false
-      plan-storage-reference:
-        description: Optional full base SHA for typed Plan storage measurements and the old-version fence
-        type: string
-        default: ''
       backend-qualification:
         description: Run confirmed backend change regression in a separate job after the backend suite
         type: choice
@@ -67,51 +63,20 @@ jobs:
   storage-development:
     name: Direct storage kernel development checks
     if: github.event_name == 'workflow_dispatch' && inputs.ci-diagnostic == 'storage'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      CARGO_INCREMENTAL: '0'
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: Require a non-publishing development dispatch
-        env:
-          VALIDATION_ONLY: ${{ inputs.validation-only }}
-          BACKEND_ONLY: ${{ inputs.backend-only }}
-          DIAGNOSTIC_CANDIDATE: ${{ inputs.diagnostic-candidate }}
-          DIAGNOSTIC_REFERENCE: ${{ inputs.diagnostic-reference }}
-          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
-        run: |
-          test "$VALIDATION_ONLY" = true && test "$BACKEND_ONLY" = false
-          test -z "$DIAGNOSTIC_CANDIDATE" && test -z "$DIAGNOSTIC_REFERENCE" && test -z "$PLAN_STORAGE_REFERENCE"
-          git rev-parse HEAD
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          cache: true
-      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
-      - name: Install bounded native test dependencies
-        timeout-minutes: 10
-        run: node scripts/install-native-ci-dependencies.mjs
-      - name: Qualify project quotas, exhaustion and resumable retirement
-        env:
-          CAIRN_NATIVE_DISPOSABLE_HOST: '1'
-        run: node scripts/qualify-native-quota.mjs
-      - name: Check direct image persistence, legacy refusal and capacity promises
-        run: |
-          pnpm test:backend --workspace --lib storage::image::
-          pnpm test:backend --workspace --lib storage::reservation::
+    uses: ./.github/workflows/ci-storage.yaml
+    with:
+      mode: storage-development
+      validation-only: ${{ inputs.validation-only }}
+      backend-only: ${{ inputs.backend-only }}
+      diagnostic-candidate: ${{ inputs.diagnostic-candidate }}
+      diagnostic-reference: ${{ inputs.diagnostic-reference }}
   vm-discard-qualification:
     name: Direct VM discard implementation qualification
     needs: resolve
     if: inputs.validation-only == true && inputs.vm-storage-qualification == true && needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - run: rustup toolchain install 1.97.0 --profile minimal
-      - name: Exercise the pinned VMM discard and async IO implementation
-        run: bash scripts/test-firecracker-discard.sh
+    uses: ./.github/workflows/ci-storage.yaml
+    with:
+      mode: vm-discard-qualification
   resolve:
     if: inputs.backend-only != true && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '')
     runs-on: ubuntu-24.04
@@ -145,12 +110,12 @@ jobs:
         id: tools
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/cli-updates.mjs build-versions
+        run: node scripts/release/cli-updates.mjs build-versions
       - name: Find the agent tools of the served release
         id: served
         env:
           CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
-        run: node scripts/served-tools.mjs
+        run: node scripts/release/served-tools.mjs
       - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
@@ -162,7 +127,7 @@ jobs:
           SERVED_FOUND: ${{ steps.served.outputs.found }}
           SERVED_CLAUDE: ${{ steps.served.outputs.claude }}
           SERVED_OPENCODE: ${{ steps.served.outputs.opencode }}
-        run: GIT_TREE="$(git rev-parse 'HEAD^{tree}')" node scripts/resolve-release.mjs
+        run: GIT_TREE="$(git rev-parse 'HEAD^{tree}')" node scripts/release/resolve-release.mjs
   build:
     # Browser tests need only these binaries and the frontend, not the whole quality job.
     needs: resolve
@@ -178,7 +143,7 @@ jobs:
         with:
           cache: true
       - name: Acquire the pinned Ubuntu network package closure
-        run: node scripts/ci-network-package-closure.mjs acquire target/ci-network-tools
+        run: node scripts/ci/ci-network-package-closure.mjs acquire target/ci-network-tools
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: network-tools-noble-amd64-v1
@@ -238,8 +203,6 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - name: Validate shared contracts and generated schemas
         run: pnpm validate:pr contracts
-      - name: Check the C3 candidate-selection snapshot model
-        run: python3 -m unittest discover -s scripts/tests -p test_chat_candidates_study.py -v
       - name: Check native reference selection for all workflow events
         run: python3 -m unittest discover -s scripts/tests -p test_native_reference.py -v
       - name: Check native qualification RPC diagnostics
@@ -264,7 +227,7 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
         timeout-minutes: 10
-        run: node scripts/install-native-ci-dependencies.mjs
+        run: node scripts/ci/install-native-ci-dependencies.mjs
       - uses: ./.github/actions/observe-rust-build
         with:
           phase: before-build
@@ -309,15 +272,14 @@ jobs:
           BACKEND_ONLY: ${{ inputs.backend-only }}
           VALIDATION_ONLY: ${{ inputs.validation-only }}
           BACKEND_QUALIFICATION: ${{ inputs.backend-qualification }}
-          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
-        run: node scripts/ci-diagnostic-source.mjs backend
+        run: node scripts/ci/ci-diagnostic-source.mjs backend
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
         timeout-minutes: 10
-        run: node scripts/install-native-ci-dependencies.mjs
+        run: node scripts/ci/install-native-ci-dependencies.mjs
       - uses: ./.github/actions/prepare-rust-runner
         timeout-minutes: 3
       - uses: ./.github/actions/observe-rust-build
@@ -327,7 +289,7 @@ jobs:
         timeout-minutes: 3
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/install-nextest-ci.mjs
+        run: node scripts/ci/install-nextest-ci.mjs
       - name: Acquire the existing artifact publisher at its immutable version
         if: inputs.ci-diagnostic == 'backend'
         uses: actions/checkout@v7.0.1
@@ -338,7 +300,7 @@ jobs:
           persist-credentials: false
       - name: Provision the exact candidate dependency context after observer installation
         if: inputs.ci-diagnostic == 'backend'
-        run: node scripts/ci-backend-dependencies.mjs
+        run: node scripts/ci/ci-backend-dependencies.mjs
       - name: Run diagnostic backend with durable startup and rolling evidence
         if: inputs.ci-diagnostic == 'backend'
         uses: ./.github/actions/backend-durable-evidence
@@ -347,14 +309,14 @@ jobs:
       - name: Qualify native controller concurrency before building every test binary
         if: inputs.ci-diagnostic != 'backend'
         run: >-
-          node scripts/test-backend.mjs --nextest --workspace --lib
+          node scripts/dev/test-backend.mjs --nextest --workspace --lib
           -E 'package(=cairn-installation) & (test(native::service::tests::) | test(nodes::files::tests::))' --no-capture
       - name: Run backend tests across binaries with isolated credentials
         if: inputs.ci-diagnostic != 'backend'
         timeout-minutes: 30
         run: |
           set -o pipefail
-          node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level all 2>&1 | tee backend-tests.log
+          node scripts/dev/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level all 2>&1 | tee backend-tests.log
       - name: Preserve the isolated backend test trace, including interrupted cases
         if: always()
         uses: actions/upload-artifact@v7.0.1
@@ -366,23 +328,20 @@ jobs:
           if-no-files-found: ignore
       - name: Measure the bounded bootstrap observer without filesystem work
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
-        run: node scripts/test-backend.mjs --workspace --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
+        run: node "${CI_DIAGNOSTIC_BACKEND_LAUNCHER:-scripts/dev/test-backend.mjs}" --workspace --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Measure bounded Native terminal-reason metadata
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
-        run: node scripts/test-backend.mjs --workspace --lib native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture
+        run: node "${CI_DIAGNOSTIC_BACKEND_LAUNCHER:-scripts/dev/test-backend.mjs}" --workspace --lib native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture
       - name: Prepare ublk for native device observation qualification
-        run: |
-          if ! sudo modprobe ublk_drv; then
-            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
-            sudo modprobe ublk_drv
-          fi
-          test -c /dev/ublk-control
+        uses: ./.github/actions/ensure-ublk
+        with:
+          update-apt: 'false'
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
-        run: node scripts/test-native-namespace.mjs --sudo
+        run: node "${CI_DIAGNOSTIC_BACKEND_NAMESPACE:-scripts/ci/test-native-namespace.mjs}" --sudo
       - name: Check Rust documentation examples
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
-        run: node scripts/test-backend.mjs --doc
+        run: node "${CI_DIAGNOSTIC_BACKEND_LAUNCHER:-scripts/dev/test-backend.mjs}" --doc
       - uses: ./.github/actions/observe-rust-build
         if: always()
         with:
@@ -403,7 +362,7 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
         timeout-minutes: 10
-        run: node scripts/install-native-ci-dependencies.mjs
+        run: node scripts/ci/install-native-ci-dependencies.mjs
       - uses: ./.github/actions/prepare-rust-runner
         timeout-minutes: 3
       - uses: ./.github/actions/observe-rust-build
@@ -418,8 +377,8 @@ jobs:
           # The resolved release lists its catalog and runs a turn, then resumes sessions an
           # installation can hold: from the oldest supported release, and both ways with the
           # served release, as after an update or a rollback.
-          minimum=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.opencode.minimum)")
-          served=$(node scripts/served-tools.mjs rollback-target opencode "$SERVED_OPENCODE" "$OPENCODE_VERSION")
+          minimum=$(node --input-type=module -e "import { engines } from './scripts/release/cli-updates.mjs'; console.log(engines.opencode.minimum)")
+          served=$(node scripts/release/served-tools.mjs rollback-target opencode "$SERVED_OPENCODE" "$OPENCODE_VERSION")
           # Command substitutions do not inherit errexit, so installation failures return explicitly.
           install() {
             npm install --global --prefix "$RUNNER_TEMP/opencode-$1" --allow-scripts=opencode-ai "opencode-ai@$1" >&2 || return 1
@@ -427,7 +386,7 @@ jobs:
             echo "$RUNNER_TEMP/opencode-$1/bin/opencode"
           }
           native() {
-            node scripts/test-backend.mjs -p cairn-installation --test opencode -- --ignored --exact "$1"
+            node scripts/dev/test-backend.mjs -p cairn-installation --test opencode -- --ignored --exact "$1"
           }
           qualify() {
             OPENCODE_NATIVE_BIN="$1" OPENCODE_NATIVE_RESUME_BIN="$2" native pinned_native_cli_executes_and_resumes_without_global_plugins
@@ -455,8 +414,8 @@ jobs:
           # legacy release resume on it, and sessions move both ways with the served release,
           # as after an update or a rollback.
           # The oldest release this adapter runs: its minimum, if any, else the legacy release.
-          legacy=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.claude.minimum ?? engines.claude.legacy)")
-          served=$(node scripts/served-tools.mjs rollback-target claude "$SERVED_CLAUDE" "$CLAUDE_VERSION")
+          legacy=$(node --input-type=module -e "import { engines } from './scripts/release/cli-updates.mjs'; console.log(engines.claude.minimum ?? engines.claude.legacy)")
+          served=$(node scripts/release/served-tools.mjs rollback-target claude "$SERVED_CLAUDE" "$CLAUDE_VERSION")
           # Command substitutions do not inherit errexit, so installation failures return explicitly.
           install() {
             npm install --global --prefix "$RUNNER_TEMP/claude-$1" --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@$1" >&2 || return 1
@@ -464,7 +423,7 @@ jobs:
             echo "$RUNNER_TEMP/claude-$1/bin/claude"
           }
           native() {
-            node scripts/test-backend.mjs -p cairn-installation --test claude -- --ignored --exact "$1"
+            node scripts/dev/test-backend.mjs -p cairn-installation --test claude -- --ignored --exact "$1"
           }
           qualify() {
             CLAUDE_NATIVE_BIN="$1" CLAUDE_NATIVE_RESUME_BIN="$2" native native_cli_executes_and_resumes_a_session_against_a_local_model
@@ -501,7 +460,7 @@ jobs:
           export AGY_CLI_DISABLE_AUTO_UPDATE=true
           test "$(HOME="$directory/home" "$directory/bin/agy" --version)" = "$ANTIGRAVITY_VERSION"
           ANTIGRAVITY_NATIVE_BIN="$directory/bin/agy" \
-            node scripts/test-backend.mjs -p cairn-installation --test antigravity -- --ignored
+            node scripts/dev/test-backend.mjs -p cairn-installation --test antigravity -- --ignored
       - name: Qualify plan turns of the resolved Claude Code and Codex releases
         # Backend-only runs resolve no engine release; full runs qualify the ones they ship.
         if: inputs.backend-only != true
@@ -524,7 +483,7 @@ jobs:
           codex="$RUNNER_TEMP/codex-$CODEX_VERSION/bin/codex"
           test "$("$codex" --version)" = "codex-cli $CODEX_VERSION"
           CLAUDE_NATIVE_BIN="$claude" CODEX_NATIVE_BIN="$codex" \
-            node scripts/test-backend.mjs -p cairn-installation --test native_plan_turns -- --ignored --test-threads 1
+            node scripts/dev/test-backend.mjs -p cairn-installation --test native_plan_turns -- --ignored --test-threads 1
       - name: Qualify side questions of the resolved Claude Code and Codex releases
         if: inputs.backend-only != true
         env:
@@ -539,7 +498,7 @@ jobs:
           test "$("$claude" --version)" = "$CLAUDE_VERSION (Claude Code)"
           test "$("$codex" --version)" = "codex-cli $CODEX_VERSION"
           CLAUDE_NATIVE_BIN="$claude" CODEX_NATIVE_BIN="$codex" \
-            node scripts/test-backend.mjs -p cairn-installation --test native_side_questions -- --ignored --test-threads 1
+            node scripts/dev/test-backend.mjs -p cairn-installation --test native_side_questions -- --ignored --test-threads 1
       - uses: ./.github/actions/observe-rust-build
         if: always()
         with:
@@ -560,11 +519,11 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
         timeout-minutes: 10
-        run: node scripts/install-native-ci-dependencies.mjs
+        run: node scripts/ci/install-native-ci-dependencies.mjs
       - name: Qualify confirmed backend changes from this commit
         run: |
           set -o pipefail
-          pnpm test:backend -p cairn-installation --test native_nodes both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion -- --exact 2>&1 | tee backend-migration-tests.log
+          pnpm test:backend -p cairn-installation --test native_nodes transitions_and_resume::both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion -- --exact 2>&1 | tee backend-migration-tests.log
           python3 - <<'PYTHON'
           import pathlib, re
           result = pathlib.Path('backend-migration-tests.log').read_text()
@@ -599,18 +558,12 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
         timeout-minutes: 10
-        run: node scripts/install-native-ci-dependencies.mjs
+        run: node scripts/ci/install-native-ci-dependencies.mjs
       - uses: ./.github/actions/observe-rust-build
         with:
           phase: before-build
       - name: Prepare the installation host's required ublk driver
-        run: |
-          if ! sudo modprobe ublk_drv; then
-            sudo apt-get update -qq
-            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
-            sudo modprobe ublk_drv
-          fi
-          test -c /dev/ublk-control
+        uses: ./.github/actions/ensure-ublk
       - name: Build the frontend used by installer and update fixtures
         run: pnpm exec vite build --config apps/web/vite.config.ts
       - name: Validate node supervisor and local disk runtime
@@ -626,7 +579,8 @@ jobs:
           python3 scripts/tests/production_release_test.py
           bash tests/installation-installer-container.sh
           python3 tests/installation_update_containers.py
-          for selected in 'storage::' 'storage_migration::' 'native::block::' 'microvm::pool::' 'runner::'; do
+          pnpm test:backend -p cairn-block-storage --lib
+          for selected in 'storage::' 'native::block::' 'microvm::pool::' 'runner::'; do
             pnpm test:backend --workspace --lib "$selected"
           done
           pnpm test:backend -p cairn-installation --test worker
@@ -634,7 +588,7 @@ jobs:
       - name: Qualify native directory quotas on a private disposable ext4 filesystem
         env:
           CAIRN_NATIVE_DISPOSABLE_HOST: '1'
-        run: node scripts/qualify-native-quota.mjs
+        run: node scripts/ci/qualify-native-quota.mjs
       - uses: ./.github/actions/observe-rust-build
         if: always()
         with:
@@ -660,8 +614,7 @@ jobs:
           BACKEND_ONLY: ${{ inputs.backend-only }}
           VALIDATION_ONLY: ${{ inputs.validation-only }}
           BACKEND_QUALIFICATION: ${{ inputs.backend-qualification }}
-          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
-        run: node scripts/ci-diagnostic-source.mjs native
+        run: node scripts/ci/ci-diagnostic-source.mjs native
       - uses: actions/download-artifact@v8.0.1
         if: inputs.ci-diagnostic != 'native'
         with:
@@ -687,7 +640,7 @@ jobs:
         env:
           EVENT_REFERENCE_SHA: ${{ (inputs.ci-diagnostic == 'native' && inputs.diagnostic-reference) || (inputs.validation-only == true && inputs.native-reference) || github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
         run: |
-          native_reference_sha="$(python3 scripts/native_reference.py)"
+          native_reference_sha="$(python3 scripts/ci/native_reference.py)"
           echo "sha=$native_reference_sha" >> "$GITHUB_OUTPUT"
           echo "key=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
           echo "artifact=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
@@ -698,7 +651,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           NATIVE_REFERENCE_ARTIFACT: ${{ steps.native-reference-key.outputs.artifact }}
         run: |
-          native_reference_found="$(python3 scripts/native_reference.py artifact-available)"
+          native_reference_found="$(python3 scripts/ci/native_reference.py artifact-available)"
           echo "found=$native_reference_found" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v8.0.1
         if: inputs.ci-diagnostic != 'native' && steps.native-reference-artifact.outputs.found == 'true'
@@ -719,21 +672,7 @@ jobs:
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
           CARGO_PROFILE_DEV_DEBUG: '0'
           CARGO_INCREMENTAL: '0'
-        run: |
-          sudo apt-get install -y --no-install-recommends libclang-dev
-          git fetch --no-tags origin "$REFERENCE_SHA"
-          git worktree add --detach /tmp/cairn-native-reference "$REFERENCE_SHA"
-          CARGO_TARGET_DIR="$PWD/reference-target" cargo +1.97.1 build --locked --manifest-path /tmp/cairn-native-reference/Cargo.toml --bin cairn --example native_storage_qualifier
-          mkdir -p reference-native/examples
-          cp reference-target/debug/cairn reference-native/cairn
-          cp reference-target/debug/examples/native_storage_qualifier reference-native/examples/native_storage_qualifier
-          python3 - <<'PYREF'
-          import hashlib, json, os
-          from pathlib import Path
-          binaries = ['cairn', 'examples/native_storage_qualifier']
-          checksums = {name: hashlib.sha256((Path('reference-native') / name).read_bytes()).hexdigest() for name in binaries}
-          Path('reference-native/revision.json').write_text(json.dumps(dict(headSha=os.environ['REFERENCE_SHA'], profile='development, debug=0, incremental=0', features='default (ublk required)', rust='1.97.1', image=os.environ['ImageVersion'], buildRun=os.environ['GITHUB_RUN_ID'], sha256=checksums), indent=2))
-          PYREF
+        run: bash scripts/ci/build-native-reference.sh
       - uses: actions/cache/save@v6.1.0
         if: inputs.ci-diagnostic != 'native' && steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
         with:
@@ -746,7 +685,7 @@ jobs:
           CARGO_INCREMENTAL: '0'
         run: |
           sudo apt-get install -y --no-install-recommends libclang-dev
-          node scripts/ci-deadline.mjs "$PWD/native-diagnostics/build" 90 -- node scripts/ci-diagnostic-native-build.mjs
+          node scripts/ci/ci-deadline.mjs "$PWD/native-diagnostics/build" 90 -- node scripts/ci/ci-diagnostic-native-build.mjs
       - name: Verify the exact reference binaries
         env:
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
@@ -777,7 +716,7 @@ jobs:
       - name: Check the disposable native fixture entrypoint
         run: |
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
-            node scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- python3 -m unittest discover -s scripts/tests -p test_native_local_runtime.py -v
+            node scripts/ci/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- python3 -m unittest discover -s scripts/tests -p test_native_local_runtime.py -v
           else
             python3 -m unittest discover -s scripts/tests -p test_native_local_runtime.py -v
           fi
@@ -808,9 +747,9 @@ jobs:
           fi
           chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
-            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/reference" 90 -- node scripts/test-native-runtime.mjs --reference --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci/ci-deadline.mjs "$PWD/native-diagnostics/reference" 90 -- node scripts/ci/test-native-runtime.mjs --reference --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
           else
-            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" node scripts/test-native-runtime.mjs --reference --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" node scripts/ci/test-native-runtime.mjs --reference --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
           fi
       - name: Qualify local disks, ublk, systemd ownership and crash recovery
         env:
@@ -829,11 +768,11 @@ jobs:
             python3 -B scripts/tests/native_admission_overlay.py "$candidate_fixture" candidate
           fi
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
-            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/candidate" 90 -- node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci/ci-deadline.mjs "$PWD/native-diagnostics/candidate" 90 -- node scripts/ci/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
           else
-            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
-            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_XFS_SMOKE=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/xfs" node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
-            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_CONNECTOR_REFERENCE=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/connector-reference" node scripts/test-native-runtime.mjs --repo "$candidate_fixture" --reference --native-runtime reference-native/cairn --qualifier target/debug/examples/native_storage_qualifier
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" node scripts/ci/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_XFS_SMOKE=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/xfs" node scripts/ci/test-native-runtime.mjs --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier --legacy-runtime reference-native/cairn
+            sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_CONNECTOR_REFERENCE=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/connector-reference" node scripts/ci/test-native-runtime.mjs --repo "$candidate_fixture" --reference --native-runtime reference-native/cairn --qualifier target/debug/examples/native_storage_qualifier
           fi
       - uses: actions/upload-artifact@v7.0.1
         if: always()
@@ -904,26 +843,10 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
-      - name: Check browser image version
-        run: |
-          node --input-type=module <<'JS'
-          import { readFileSync } from 'node:fs'
-          const installed = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
-          const preinstalled = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
-          if (installed !== preinstalled)
-            throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
-          JS
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: browser-build
-          path: dist/
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: browser-backend
-          path: target/debug/
-      - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture target/debug/examples/beacon_sql_fixture
+      - uses: ./.github/actions/check-playwright-image
+      - uses: ./.github/actions/download-browser-artifacts
       - name: Qualify the bundled SQL fixture against disposable Postgres
-        run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
+        run: pnpm exec tsx scripts/ci/qualify-beacon-sql-fixture.ts
       - name: Run browser shard
         timeout-minutes: 10
         run: |
@@ -991,18 +914,11 @@ jobs:
           name: network-tools-noble-amd64-v1
           path: target/ci-network-tools/
       - name: Prepare the complete network-suite toolchain
-        run: node scripts/prepare-network-tools.mjs network-bench
+        run: node scripts/ci/prepare-network-tools.mjs network-bench
       - run: pnpm exec playwright install --with-deps chromium
-      - uses: actions/download-artifact@v8.0.1
+      - uses: ./.github/actions/download-browser-artifacts
         with:
-          name: browser-build
-          path: dist/
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: browser-backend
-          path: target/debug/
-      - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server target/debug/examples/beacon_sql_fixture
-      - run: chmod +x target/debug/examples/network_qualification
+          binaries: target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server target/debug/examples/beacon_sql_fixture target/debug/examples/network_qualification
       - run: pnpm exec vite build --config tests/network-qualification.vite.ts
       - name: Validate real network topology and authenticated sessions
         env:
@@ -1031,15 +947,7 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           install: false
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-      - uses: gradle/actions/setup-gradle@v5
-      - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - uses: ./.github/actions/setup-android-sdk
       - name: Build the native client and instrumented tests
         working-directory: apps/android
         run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
@@ -1083,16 +991,10 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - name: Prepare the native Android network toolchain
-        run: node scripts/prepare-network-tools.mjs android-direct
-      - uses: actions/download-artifact@v8.0.1
+        run: node scripts/ci/prepare-network-tools.mjs android-direct
+      - uses: ./.github/actions/download-browser-artifacts
         with:
-          name: browser-build
-          path: dist/
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: browser-backend
-          path: target/debug/
-      - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server target/debug/examples/beacon_sql_fixture
+          binaries: target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server target/debug/examples/beacon_sql_fixture
       - uses: actions/download-artifact@v8.0.1
         with:
           name: android-direct-apks
@@ -1101,18 +1003,14 @@ jobs:
         with:
           packages: platform-tools
       - name: Reclaim unused Android SDK build packages
-        run: node scripts/android-emulator-sdk.mjs prune
-      - name: Enable emulator acceleration
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
+        run: node scripts/android/android-emulator-sdk.mjs prune
+      - uses: ./.github/actions/enable-kvm-emulator
       - uses: ./.github/actions/setup-android-emulator
         with:
           build-packages: build-tools;37.0.0 platforms;android-36
       # The pinned runner refreshes these packages again; its hook checks after that install and AVD creation.
       - name: Check emulator userdata disk headroom
-        run: node scripts/android-emulator-sdk.mjs preflight
+        run: node scripts/android/android-emulator-sdk.mjs preflight
       - name: Observe native responses, network restart and revocation
         env:
           ANDROID_SCENARIO: ${{ matrix.scenario }}
@@ -1123,10 +1021,10 @@ jobs:
           target: google_apis
           profile: pixel_6
           disable-animations: true
-          pre-emulator-launch-script: node scripts/android-emulator-sdk.mjs preflight
+          pre-emulator-launch-script: node scripts/android/android-emulator-sdk.mjs preflight
           script: >-
             if python3 tests/network-bench.py "$ANDROID_SCENARIO" --android --output "test-results/android-direct/$ANDROID_SCENARIO.json"; then scenario_status=0; else scenario_status=$?; fi;
-            node scripts/android-action-observer.mjs start test-results/android-direct/closure-observation || true;
+            node scripts/android/android-action-observer.mjs start test-results/android-direct/closure-observation || true;
             exit "$scenario_status"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
@@ -1159,40 +1057,10 @@ jobs:
           VALIDATION_ONLY: ${{ inputs.validation-only }}
         run: test "$VM_STORAGE_QUALIFICATION" != true || test "$VALIDATION_ONLY" = true
       - name: Prepare KVM build host
-        run: |
-          test -e /dev/kvm
-          if ! sudo modprobe ublk_drv; then
-            sudo apt-get update -qq
-            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
-            sudo modprobe ublk_drv
-          fi
-          test -c /dev/ublk-control
-          test "$(cat /proc/sys/kernel/io_uring_disabled)" = 0
-          # A working L0 device alone does not guarantee nested KVM for our guest.
-          if grep -qw vmx /proc/cpuinfo; then
-            grep -Eq '^(Y|1)$' /sys/module/kvm_intel/parameters/nested
-          else
-            grep -qw svm /proc/cpuinfo
-            grep -Eq '^(Y|1)$' /sys/module/kvm_amd/parameters/nested
-          fi
-          df -h /
-          # Hosted runners currently have ~87 GB free. Deleting unused SDKs takes up
-          # to minutes, so do it only if a smaller disk ever needs the space.
-          if (( $(df --output=avail -BG / | tail -1 | tr -dc 0-9) < 40 )); then
-            sudo rm -rf /usr/share/dotnet /usr/local/lib/android
-          fi
+        run: bash scripts/ci/prepare-kvm-build-host.sh
       - name: Use Docker's containerd image store
         if: github.event_name == 'pull_request'
-        run: |
-          if test -f /etc/docker/daemon.json; then
-            sudo jq '.features = (.features // {}) | .features["containerd-snapshotter"] = true' /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json.new > /dev/null
-          else
-            printf '%s\n' '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json.new > /dev/null
-          fi
-          sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json
-          sudo systemctl restart docker
-          docker info -f '{{ .DriverStatus }}' | grep -q 'io.containerd.snapshotter.v1'
-          docker buildx inspect default
+        run: bash scripts/ci/enable-containerd-store.sh
       - uses: docker/setup-buildx-action@v4.3.0
         id: vm-builder
         if: github.event_name != 'pull_request'
@@ -1288,25 +1156,11 @@ jobs:
           VM_STORAGE_QUALIFICATION: ${{ inputs.vm-storage-qualification }}
           VALIDATION_ONLY: ${{ inputs.validation-only }}
           VM_STORAGE_BUILDER: ${{ steps.vm-builder.outputs.name }}
-        run: node scripts/prepare-vm-storage-capacity.mjs
+        run: node scripts/ci/prepare-vm-storage-capacity.mjs
       - name: Wait for the concurrent fixture build
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          node --input-type=module <<'JS'
-          import { execFileSync } from 'node:child_process'
-          import { waitForArtifact } from './scripts/android-device-tests.mjs'
-          const gh = args => execFileSync('gh', args, { encoding: 'utf8' })
-          for (const artifact of ['browser-backend', 'browser-build']) {
-            await waitForArtifact({
-              repository: process.env.GITHUB_REPOSITORY,
-              runId: process.env.GITHUB_RUN_ID,
-              attempt: process.env.GITHUB_RUN_ATTEMPT,
-              artifact,
-              job: 'build',
-            }, { gh })
-          }
-          JS
+        run: node scripts/ci/wait-fixture-artifacts.mjs
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-backend
@@ -1320,21 +1174,7 @@ jobs:
         # The PR job changes Docker's image store above. Start this database
         # afterwards so restarting Docker cannot discard a service container.
         # TCP health waits for the final server, beyond socket-only initialization.
-        run: |
-          docker run --detach --name cairn-beacon-smoke-db \
-            --network host \
-            --env POSTGRES_USER=cairn --env POSTGRES_PASSWORD=test-only \
-            --env POSTGRES_DB=cairn_beacon_test \
-            --health-cmd "pg_isready -h 127.0.0.1 -U cairn -d cairn_beacon_test" \
-            --health-interval 1s --health-timeout 5s --health-retries 30 \
-            postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 postgres -c listen_addresses=127.0.0.1
-          for attempt in $(seq 1 30); do
-            if test "$(docker inspect --format '{{.State.Health.Status}}' cairn-beacon-smoke-db)" = healthy; then
-              break
-            fi
-            sleep 1
-          done
-          test "$(docker inspect --format '{{.State.Health.Status}}' cairn-beacon-smoke-db)" = healthy
+        run: bash scripts/ci/start-smoke-postgres.sh
       - name: Smoke-test the exact image
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -1539,12 +1379,7 @@ jobs:
           SERVED_FOUND: ${{ needs.resolve.outputs.served-found }}
           SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
           SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
-        run: |
-          mkdir -p release-evidence
-          node --input-type=module <<'JS'
-          import { writeFileSync } from 'node:fs'
-          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION, claude: process.env.CLAUDE_VERSION, opencode: process.env.OPENCODE_VERSION, antigravity: process.env.ANTIGRAVITY_VERSION }, served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null }))
-          JS
+        run: node scripts/ci/record-release-evidence.mjs
       - uses: actions/upload-artifact@v7.0.1
         if: github.ref == 'refs/heads/main' && github.event_name == 'schedule'
         with:
@@ -1599,7 +1434,7 @@ jobs:
           SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
           CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
-        run: node scripts/served-tools.mjs verify-served
+        run: node scripts/release/served-tools.mjs verify-served
       - name: Deploy the published image and verify the running commit
         env:
           COOLIFY_URL: ${{ vars.COOLIFY_URL }}
@@ -1610,7 +1445,7 @@ jobs:
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
           # A reused image reports the commit it was validated at, with this tag's tree.
           DEPLOY_COMMIT: ${{ needs.resolve.outputs.commit }}
-        run: node scripts/deploy-coolify.mjs
+        run: node scripts/release/deploy-coolify.mjs
       - name: Verify installation update and execution readiness
         env:
           CAIRN_RELEASE_SSH_HOST: ${{ vars.CAIRN_RELEASE_SSH_HOST }}
@@ -1618,31 +1453,4 @@ jobs:
           CAIRN_RELEASE_SSH_KNOWN_HOSTS: ${{ vars.CAIRN_RELEASE_SSH_KNOWN_HOSTS }}
           CAIRN_RELEASE_SSH_KEY: ${{ secrets.CAIRN_RELEASE_SSH_KEY }}
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
-        run: node scripts/production-release.mjs verify
-
-  plan-storage:
-    name: Plan storage layout and version fence
-    if: github.event_name == 'workflow_dispatch' && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '') && inputs.plan-storage-reference != ''
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          install: false
-      - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
-      - name: Install compilation dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
-      - name: Qualify two actual source revisions on synthetic databases
-        env:
-          PLAN_STORAGE_OUTPUT: ${{ runner.temp }}/plan-storage-evidence
-          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
-        run: node scripts/qualify-plan-storage.mjs "$PLAN_STORAGE_REFERENCE"
-      - uses: actions/upload-artifact@v7.0.1
-        if: always()
-        with:
-          name: plan-storage-qualification
-          path: ${{ runner.temp }}/plan-storage-evidence/
-          if-no-files-found: error
+        run: node scripts/release/production-release.mjs verify

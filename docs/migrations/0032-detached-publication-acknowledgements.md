@@ -1,5 +1,9 @@
 # 0032: Detached environment publication acknowledgements
 
+This guide describes a historical migration in the schema-37 manager at
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 An expired environment's ambiguous publication acknowledgement can remain pending
 while a fresh environment of the same conversation runs on another node. The old
 publication keeps its shared-object references until its identity is durably fenced.

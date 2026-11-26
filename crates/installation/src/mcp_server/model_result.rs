@@ -8,7 +8,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-pub(super) const LIMIT: usize = 1024 * 1024;
+pub(super) const LIMIT: usize = cairn_code_mode::MODEL_RESULT_LIMIT;
 
 const NOTICE: &str = "Tool result truncated to the 1 MiB encoded response budget. The original tool outcome is preserved. Omitted data was not retained; do not repeat a side-effecting operation to recover it.";
 

@@ -50,6 +50,7 @@ async function navigationSetup() {
   })
   vi.stubGlobal('fetch', fetch)
   const api = await import('../src/api')
+  const beaconSession = await import('../src/beacon-session')
   const transfer = Promise.withResolvers<string | undefined>()
   const handoff = vi.fn(() => transfer.promise)
   const imports: Record<string, any> = {
@@ -60,6 +61,7 @@ async function navigationSetup() {
     },
     'vue-router': { useRouter: () => ({}) },
     './api': api,
+    './beacon-session': beaconSession,
     './beacon-location': {
       beaconOrigin: location.origin,
       centralAccount: true,

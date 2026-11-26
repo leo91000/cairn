@@ -6,7 +6,7 @@ import {
   observeAdmissionWaits,
   readAdmissionOccurrence,
   readAdmissionTransition,
-} from '../admission-wait.mjs'
+} from '../ops/admission-wait.mjs'
 
 const origin = 1700000000000
 

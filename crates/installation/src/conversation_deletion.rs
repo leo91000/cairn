@@ -1,5 +1,4 @@
 //! Retryable conversation deletion and disk cleanup. No archival or data export.
-pub(crate) mod legacy_staging;
 pub(crate) mod retired;
 
 use crate::{
@@ -502,13 +501,12 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
     s.store.transaction(move |db| forget(db, &cid, &run)).await
 }
 
-/// Forget legacy disk metadata locally. Expiration never contacts an old bucket.
+/// Forget retired disk metadata locally.
 pub(crate) async fn retire_disk_metadata(s: &Service, run: &str) -> Result<()> {
     if run.is_empty() {
         return Ok(());
     }
     crate::validation::uuid(run)?;
-    crate::nodes::retired_publications::retire_run(s, run).await?;
     remove(&s.config.data_dir.join("node-backups").join(run)).await?;
 
     let run = run.to_owned();
@@ -524,20 +522,6 @@ pub(crate) async fn retire_disk_metadata(s: &Service, run: &str) -> Result<()> {
                 }
             }
 
-            db.0.execute(
-                "DELETE FROM direct_journal_acknowledgements WHERE run_id=?1",
-                [&run],
-            )?;
-            db.0.execute(
-                "DELETE FROM shared_references WHERE publication IN \
-                 (SELECT id FROM shared_publications WHERE run_id=?1)",
-                [&run],
-            )?;
-            db.0.execute("DELETE FROM shared_publications WHERE run_id=?1", [&run])?;
-            db.0.execute(
-                "DELETE FROM direct_read_authorizations WHERE run_id=?1",
-                [&run],
-            )?;
             Ok(())
         })
         .await
@@ -738,90 +722,42 @@ mod retirement_tests {
     }
 
     #[tokio::test]
-    async fn expiration_retires_local_metadata_without_changing_remote_deletions() {
-        use crate::node_fixture::StoreNodeFixture;
-
-        fn remote_metadata(db: &mut Db<'_>) -> Result<Value> {
-            let objects = db.json_rows(
-                "SELECT json_object('id',id,'destination',destination,'hash',hash,'size',size,
-                 'location',location,'state',state,'unusedAt',unused_at,'retryAt',retry_at)
-                 FROM shared_objects ORDER BY id",
-                [],
-            )?;
-            let deletions = db.json_rows(
-                "SELECT json_object('id',id,'location',location,'key',key,'prefix',prefix,
-                 'retryAt',retry_at) FROM remote_deletions ORDER BY id",
-                [],
-            )?;
-            Ok(json!({ "objects": objects, "deletions": deletions }))
-        }
-
+    async fn expiration_retires_local_disk_metadata() {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::common::config(root.path()))
-            .await
-            .unwrap();
-        let legacy_node = crate::config::id();
-        service
-            .store
-            .put_node_fixture(json!({
-                "id": legacy_node,
-                "local": false,
-                "revoked": true
-            }))
             .await
             .unwrap();
         let retired_run = crate::config::id();
         let retained_run = crate::config::id();
         let (retired, retained) = (retired_run.clone(), retained_run.clone());
-        service.store.transaction(move |db| {
-            db.0.execute_batch(
-                "INSERT INTO shared_objects VALUES('exclusive','legacy','exclusive',4096,'{}','ready',NULL,0);
-                 INSERT INTO shared_objects VALUES('shared','legacy','shared',4096,'{}','ready',NULL,0);
-                 INSERT INTO remote_deletions VALUES('existing','{}','existing-key',1,7);",
-            )?;
-            for run in [&retired, &retained] {
-                let backup = json!({
-                    "id": format!("node-backups:{run}"),
-                    "runId": run,
-                    "destination": "s3"
-                });
-                let grant = json!({
-                    "id": format!("node-disk-grants:{run}"),
-                    "runId": run
-                });
-                db.put("node-backups", &backup)?;
-                db.put("node-disk-grants", &grant)?;
-                db.0.execute("INSERT INTO shared_publications VALUES(?1,?1)", [run])?;
-                db.0.execute("INSERT INTO shared_references VALUES(?1,'shared')", [run])?;
-                db.0.execute("INSERT INTO direct_journal_acknowledgements(publication,run_id,node_id,retired) VALUES(?1,?1,?2,0)", rusqlite::params![run, legacy_node])?;
-                db.0.execute("INSERT INTO direct_read_authorizations VALUES(?1,'shared','shared',?1)", [run])?;
-            }
-            db.0.execute("INSERT INTO shared_references VALUES(?1,'exclusive')", [&retired])?;
-            Ok(())
-        }).await.unwrap();
-        for kind in ["node-backups", "node-disk-grants"] {
-            for run in [&retired_run, &retained_run] {
-                let record = format!("{kind}:{run}");
-                assert!(
-                    service.store.get(kind, &record).await.unwrap().is_some(),
-                    "{record}"
-                );
-            }
-        }
-        let remote_before = service.store.read(remote_metadata).await.unwrap();
+        service
+            .store
+            .transaction(move |db| {
+                for run in [&retired, &retained] {
+                    let backup = json!({
+                        "id": format!("node-backups:{run}"),
+                        "runId": run,
+                        "destination": "local"
+                    });
+                    let grant = json!({
+                        "id": format!("node-disk-grants:{run}"),
+                        "runId": run
+                    });
+                    db.put("node-backups", &backup)?;
+                    db.put("node-disk-grants", &grant)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
         let staging = service.config.data_dir.join("node-backups");
         for run in [&retired_run, &retained_run] {
             let directory = staging.join(run);
             tokio::fs::create_dir_all(&directory).await.unwrap();
-            tokio::fs::write(directory.join("metadata"), b"legacy staging")
+            tokio::fs::write(directory.join("metadata"), b"staging")
                 .await
                 .unwrap();
         }
-        let operator_config = service.config.data_dir.join("storage-s3.json");
-        let operator_bytes = br#"{"bucket":"operator-owned"}"#;
-        tokio::fs::write(&operator_config, operator_bytes)
-            .await
-            .unwrap();
 
         retire_disk_metadata(&service, &retired_run).await.unwrap();
 
@@ -830,11 +766,7 @@ mod retirement_tests {
             tokio::fs::read(staging.join(&retained_run).join("metadata"))
                 .await
                 .unwrap(),
-            b"legacy staging"
-        );
-        assert_eq!(
-            tokio::fs::read(operator_config).await.unwrap(),
-            operator_bytes
+            b"staging"
         );
         for kind in ["node-backups", "node-disk-grants"] {
             let retired_record = format!("{kind}:{retired_run}");
@@ -856,29 +788,6 @@ mod retirement_tests {
                     .is_some()
             );
         }
-        service
-            .store
-            .read(move |db| {
-                for (table, column) in [
-                    ("shared_publications", "run_id"),
-                    ("shared_references", "publication"),
-                    ("direct_journal_acknowledgements", "run_id"),
-                    ("direct_read_authorizations", "run_id"),
-                ] {
-                    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column}=?1");
-                    for (run, expected) in [(&retired_run, 0), (&retained_run, 1)] {
-                        let remaining: i64 = db.0.query_row(&sql, [run], |row| row.get(0))?;
-                        assert_eq!(remaining, expected, "{table}: {run}");
-                    }
-                }
-                Ok(())
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            service.store.read(remote_metadata).await.unwrap(),
-            remote_before
-        );
         service.shutdown.cancel();
     }
 

@@ -82,7 +82,7 @@ APT repositories. All network groups additionally require `conntrack`: their
 unchanged shared suite uses its real CLI even for selected NAT scenarios. Android
 does not require it. Complete hosts make no package installation calls.
 
-For missing conntrack, [the fixed manifest](../scripts/ci-network-packages.json)
+For missing conntrack, [the fixed manifest](../scripts/ci/ci-network-packages.json)
 contains four original Ubuntu Noble amd64 packages, totaling 110,156 bytes.
 The dependency closure is conntrack, libmnl, libnetfilter-conntrack and
 libnfnetlink; libc and its loader remain host prerequisites, never replaced.

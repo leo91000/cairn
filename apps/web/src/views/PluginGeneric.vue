@@ -66,6 +66,14 @@ import {
   pluginSecrets,
   pluginSettings,
 } from '../plugin-form-values'
+import {
+  ACTIVITY_TONES as activityTones,
+  agentDisplayNames,
+  displayPluginValue as display,
+  pluginStepShown,
+  pluginStepSwitches,
+  CONNECTION_TONES as tones,
+} from '../plugin-generic-helpers'
 import { pluginCommand } from '../plugin-management'
 import {
   effortLabels,
@@ -150,12 +158,6 @@ const sharedKeys = computed(() => steps.value.filter(item => item.shared).flatMa
 // A package whose runs receive the instance's credentials gives each agent one instance.
 const onePerAgent = computed(() => Boolean(manifest.value?.runCredentials && Object.keys(manifest.value.runCredentials).some(key => key === 'files' || key === 'git')))
 const callbackShown = computed(() => steps.value.some(item => item.checklist?.some(task => task.copy === 'callbackUrl')))
-const activityTones = {
-  working: ['bg-soft text-accent', 'Working'],
-  replied: ['bg-[light-dark(#dff3ee,#163a33)] text-success', 'Replied'],
-  failed: ['bg-coral-soft text-coral', 'Not delivered'],
-  stopped: ['bg-hover text-muted', 'Stopped'],
-} as const
 
 /** What this instance's people could do through an agent, for the owner's warning. */
 function risks(agent: Agent) {
@@ -195,11 +197,6 @@ watch(signInBasis, () => {
   void signIn.cancel()
   void complete('credential')
 })
-const tones = {
-  ok: 'bg-[light-dark(#dff3ee,#163a33)] text-success',
-  muted: 'bg-hover text-muted',
-  coral: 'bg-coral-soft text-coral',
-}
 
 async function load() {
   catalog.value = await listPluginPackages(api, {})
@@ -220,16 +217,8 @@ async function action(operation: () => Promise<void>) {
   }
 }
 
-function display(value: unknown) {
-  if (Array.isArray(value))
-    return value.length ? value.join(', ') : '—'
-  if (typeof value === 'boolean')
-    return value ? 'On' : 'Off'
-  return value === undefined || value === null || value === '' ? '—' : String(value)
-}
-
 function agentNames(connection: PluginConnection) {
-  return (connection.agentIds ?? []).map(agent => state.agents.find(item => item.id === agent)?.name ?? 'Removed agent')
+  return agentDisplayNames(connection, state.agents)
 }
 
 function edit(connection: PluginConnection | null) {
@@ -414,15 +403,8 @@ function next() {
     step.value++
 }
 
-/** Fields the current step shows besides its presets' switches. */
-function stepShown(item: SetupStep) {
-  const shown = stepFields(item, fields.value)
-  return item.presets?.length ? shown.filter(field => field.type !== 'boolean') : shown
-}
-
-function switches(item: SetupStep) {
-  return stepFields(item, fields.value).filter(field => field.type === 'boolean')
-}
+const stepShown = (item: SetupStep) => pluginStepShown(item, fields.value)
+const switches = (item: SetupStep) => pluginStepSwitches(item, fields.value)
 
 /** Package guidance belongs with the credential and with choices the package fills. */
 function guided(item: SetupStep) {

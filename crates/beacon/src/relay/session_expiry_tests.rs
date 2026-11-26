@@ -257,7 +257,7 @@ async fn session_expiry_is_not_delayed_by_a_database_revocation_check() {
         biased;
 
         _ = watchdog => panic!("real HTTP/Postgres I/O stalled while Tokio time was frozen"),
-        _ = assertions => {},
+        () = assertions => {},
     }
     finished.send(()).unwrap();
     watchdog_thread.join().unwrap();

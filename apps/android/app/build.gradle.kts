@@ -18,7 +18,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-val releaseVersion = providers.environmentVariable("CAIRN_ANDROID_VERSION").orElse("0.52.2").get()
+val releaseVersion = providers.environmentVariable("CAIRN_ANDROID_VERSION").orElse("0.52.3").get()
 
 require(Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)").matches(releaseVersion))
 
@@ -199,7 +199,7 @@ val checkDebugAndroidTestDexSize by
         dependsOn("packageDebugAndroidTest")
         commandLine(
             "node",
-            rootProject.file("../../scripts/check-android-dex-size.mjs"),
+            rootProject.file("../../scripts/android/check-android-dex-size.mjs"),
             layout.buildDirectory
                 .file("outputs/apk/androidTest/debug/app-debug-androidTest.apk")
                 .get()

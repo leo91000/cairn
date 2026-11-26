@@ -9,7 +9,6 @@ import {
   writeChatList,
   writeHistory,
 } from '../src/history-cache'
-import { cacheSession } from '../src/use-live-run'
 
 vi.mock('../src/api', async () => {
   const { reactive } = await import('vue')
@@ -35,8 +34,7 @@ it('compares another installation\'s lists only with its own', async () => {
   const list = effect.run(() => useChatList())!
   publishChats([{ id: 'a', slug: '', createdAt: 50_000 } as ChatView])
 
-  Object.assign(state, { installationId: 'second' })
-  const second = await cacheScope(cacheSession())
+  const second = await cacheScope(`second:${state.csrf}`)
   await writeHistory(second, '/chats/b/stream', {
     version: 2,
     cursor: 0,
@@ -47,6 +45,8 @@ it('compares another installation\'s lists only with its own', async () => {
     savedAt: Date.now(),
   })
   await writeChatList(second, { chats: [{ id: 'b', slug: '', createdAt: 1 }] as ChatView[], planTurnsEnabled: false, savedAt: Date.now() })
+
+  Object.assign(state, { installationId: 'second' })
   await nextTick()
   // The first installation's list leaves at once; the second's saved list replaces it.
   expect(list.value).toEqual([])

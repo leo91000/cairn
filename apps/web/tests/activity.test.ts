@@ -319,8 +319,14 @@ describe('conversation activity', () => {
       createdAt: id,
       type,
       text: '',
-      legacyPlanApproval: true,
-      payload: { item: { id: name, type: 'proposed_plan', text: content } },
+      payload: {
+        item: {
+          id: name,
+          type: 'proposed_plan',
+          text: content,
+          request_id: 'request-a',
+        },
+      },
     })
     const completed = proposal(10, 'item.completed', 'old', 'Reviewed')
     for (const name of ['old', 'new']) {
@@ -364,7 +370,7 @@ describe('conversation activity', () => {
     expect(proposedPlanApproval([clarification, proposal(5, 'request-b')])).toBe('run:5')
     expect(proposedPlanApproval([proposal(5, 'request-b')])).toBe('run:5')
   })
-  it('requires a fresh proposal when a legacy request boundary is ambiguous', () => {
+  it('requires an authored request boundary to approve a proposal', () => {
     const user = (id: number, messageId: string): RunEvent => ({
       id,
       runId: 'run',
@@ -373,13 +379,12 @@ describe('conversation activity', () => {
       text: '',
       payload: { messageId },
     })
-    const legacyProposal: RunEvent = {
+    const unattributedProposal: RunEvent = {
       id: 3,
       runId: 'run',
       createdAt: 3,
       type: 'item.completed',
       text: '',
-      legacyPlanApproval: false,
       payload: { item: { id: 'plan', type: 'proposed_plan', text: 'Reviewed approach' } },
     }
     const template = codex.entries.find(card => card.content.kind === 'userMessage')!
@@ -391,12 +396,9 @@ describe('conversation activity', () => {
       content: { ...template.content, messageId: 'request-b' },
     }
     expect(
-      proposedPlanApproval([user(1, 'request-a'), user(2, 'request-b'), legacyProposal], [latestCard]),
+      proposedPlanApproval([user(1, 'request-a'), user(2, 'request-b'), unattributedProposal], [latestCard]),
     ).toBeUndefined()
-    // The loaded slice looks unambiguous, but only the server's run-wide decision may approve it.
-    expect(proposedPlanApproval([user(2, 'request-b'), legacyProposal], [latestCard])).toBeUndefined()
-    const serverApproved = { ...legacyProposal, id: 4, legacyPlanApproval: true }
-    expect(proposedPlanApproval([serverApproved])).toBe('run:4')
+    expect(proposedPlanApproval([unattributedProposal])).toBeUndefined()
   })
   it('approves completion after steering independently of display anchoring and page loading', () => {
     const started: RunEvent = {
@@ -413,14 +415,21 @@ describe('conversation activity', () => {
       createdAt: 11,
       type: 'chat.user',
       text: 'Clarification',
+      payload: { messageId: 'request-b' },
     }
     const completed: RunEvent = {
       ...started,
       id: 12,
       createdAt: 12,
       type: 'item.completed',
-      legacyPlanApproval: true,
-      payload: { item: { id: 'plan', type: 'proposed_plan', text: 'Clarified plan' } },
+      payload: {
+        item: {
+          id: 'plan',
+          type: 'proposed_plan',
+          text: 'Clarified plan',
+          request_id: 'request-b',
+        },
+      },
     }
     expect(proposedPlanApproval([steering, completed])).toBe('run:12')
     expect(proposedPlanApproval([started, steering, completed])).toBe('run:12')

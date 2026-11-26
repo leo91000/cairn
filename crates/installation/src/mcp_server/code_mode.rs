@@ -1,7 +1,5 @@
 //! A compact MCP surface over the installation's typed operations.
-mod worker;
-
-pub use worker::run as worker;
+pub use cairn_code_mode::run as worker;
 
 use super::{ToolResult, catalog, model_result, operations, resource_metadata};
 use crate::{
@@ -9,7 +7,7 @@ use crate::{
     service::Service,
     validation::{parse, text},
 };
-use serde::{Deserialize, Serialize};
+use cairn_code_mode::{Completed, Frame, MAX_FRAME};
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -23,14 +21,8 @@ use tokio::{
     sync::Semaphore,
 };
 
-const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_CALLS: usize = 64;
 const DEADLINE: Duration = Duration::from_secs(30);
-
-enum Completed {
-    Value(Value),
-    Truncated { value_bytes: usize },
-}
 
 /// Execution identity stays in the manager and never enters the JavaScript worker.
 #[derive(Clone)]
@@ -195,36 +187,6 @@ impl CodeMode {
         let _ = child.wait().await;
         result
     }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum Frame {
-    Start {
-        code: String,
-        input: Value,
-        names: Vec<String>,
-    },
-    Call {
-        name: String,
-        args: Value,
-    },
-    Reply {
-        value: Value,
-    },
-    Denied {
-        message: String,
-        status: u16,
-    },
-    Done {
-        value: Value,
-    },
-    Truncated {
-        value_bytes: usize,
-    },
-    Failure {
-        message: String,
-    },
 }
 
 async fn write(input: &mut tokio::process::ChildStdin, frame: &Frame) -> Result<()> {

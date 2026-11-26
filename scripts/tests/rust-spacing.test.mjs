@@ -10,7 +10,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { spaceRustDeclarations } from '../rust-spacing.mjs'
+import { spaceRustDeclarations } from '../dev/rust-spacing.mjs'
 
 describe('rust declaration spacing', () => {
   it('separates declarations while keeping attributes and documentation attached', () => {
@@ -58,7 +58,7 @@ describe('rust declaration spacing', () => {
 
   it('checks without writing, fixes tracked and new files, and leaves the index untouched', () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'rust-spacing-'))
-    const script = fileURLToPath(new URL('../rust-spacing.mjs', import.meta.url))
+    const script = fileURLToPath(new URL('../dev/rust-spacing.mjs', import.meta.url))
     const source = 'struct A;\nstruct B;\n'
     const tracked = path.join(directory, 'tracked.rs')
     const untracked = path.join(directory, 'new.rs')

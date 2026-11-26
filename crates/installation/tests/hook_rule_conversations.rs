@@ -1093,56 +1093,6 @@ async fn the_conversation_cap_suspends_a_rule_that_starts_too_many() {
     assert_eq!(current["blocks"][0]["kind"], "budgetExhausted", "{current}");
 }
 
-#[test]
-fn version_34_adds_the_conversation_tables_and_reopens_without_changing_them() {
-    let root = tempfile::tempdir().unwrap();
-    drop(cairn_installation::store::Store::open(root.path()).unwrap());
-    let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
-    db.execute_batch(
-        "DROP TABLE background_jobs;
-         DROP TABLE hook_rule_conversations;
-         DROP TABLE hook_rule_conversation_values;
-         DROP TABLE hook_rule_turn_origins;
-         DROP TABLE hook_rule_chain_depths;
-         DROP TABLE hook_rule_task_depths;
-         DROP TABLE hook_rule_run_depths;
-         DROP TABLE hook_rule_reported_questions;
-         DROP TABLE hook_rule_question_order;
-         DROP TABLE hook_rule_author_triggerings;
-         DROP TABLE hook_rule_conversation_counts;
-         PRAGMA user_version=34;",
-    )
-    .unwrap();
-    for _ in 0..2 {
-        drop(cairn_installation::store::Store::open(root.path()).unwrap());
-        assert_eq!(
-            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
-                .unwrap(),
-            37
-        );
-        for table in [
-            "hook_rule_conversations",
-            "hook_rule_conversation_values",
-            "hook_rule_turn_origins",
-            "hook_rule_chain_depths",
-            "hook_rule_task_depths",
-            "hook_rule_run_depths",
-            "hook_rule_reported_questions",
-            "hook_rule_question_order",
-            "hook_rule_author_triggerings",
-            "hook_rule_conversation_counts",
-        ] {
-            assert_eq!(
-                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .unwrap(),
-                0
-            );
-        }
-    }
-}
-
 /// A person writes in the conversation from the apps.
 async fn person_sends(f: &Fixture, chat: &str, text: &str) -> String {
     let id = uuid::Uuid::new_v4().to_string();

@@ -182,11 +182,13 @@ A message starts work with the target agent's permissions.
 
 To approve a reviewed approach with the same freshness check as the apps, supply
 `message.planApproval: {sourceId: "<runId>:<completed-event-id>", revision: "<chat-revision>"}`.
-Use the latest completed root `proposed_plan` event from `get_run`/`read_run_content`,
-not a folded presentation ID, native tool ID or child proposal. The manager checks
-this identity and revision atomically with queue insertion and refuses stale
-approvals. Retried accepted message IDs keep their original result. Omit this
-precondition for freely composed ordinary messages.
+Use the raw event ID of the latest completed root `proposed_plan` event from
+`get_run` or `read_run_content`. Its `payload.item.request_id` must identify the
+latest authored request. If a historical proposal has no request ID, request a
+fresh Plan proposal before approving. The manager checks the identity and
+revision atomically with queue insertion and refuses stale approvals. Retried
+accepted message IDs keep their original result. Omit this precondition for
+freely composed ordinary messages.
 
 | Scope | Conversation operations |
 | --- | --- |

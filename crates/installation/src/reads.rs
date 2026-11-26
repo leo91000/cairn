@@ -22,7 +22,6 @@ use serde_json::Value;
 use sql::{ReadKind, StoredDismissal};
 use std::collections::HashMap;
 
-pub(crate) mod migration;
 pub mod sql;
 
 const MAX_ITEMS: usize = 200;

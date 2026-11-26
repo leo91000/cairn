@@ -539,54 +539,6 @@ async fn members_triggerings_need_their_membership_and_hide_details_from_others(
     assert_eq!(detail(&f, MEMBER, triggering).await["status"], "stopped");
 }
 
-#[test]
-fn version_32_adds_the_engine_tables_and_reopens_without_changing_them() {
-    let root = tempfile::tempdir().unwrap();
-    drop(cairn_installation::store::Store::open(root.path()).unwrap());
-    let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
-    db.execute_batch(
-        "DROP TABLE background_jobs;
-         DROP TABLE hook_rule_steps;
-         DROP TABLE hook_rule_triggerings;
-         DROP TABLE hook_rule_values;
-         DROP TABLE hook_rule_quiet_hours;
-         DROP TABLE hook_rule_receipts;
-         DROP TABLE hook_rule_admissions;
-         PRAGMA user_version=32;",
-    )
-    .unwrap();
-
-    for _ in 0..2 {
-        drop(cairn_installation::store::Store::open(root.path()).unwrap());
-        assert_eq!(
-            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
-                .unwrap(),
-            37
-        );
-        for table in [
-            "hook_rule_triggerings",
-            "hook_rule_steps",
-            "hook_rule_values",
-            "hook_rule_quiet_hours",
-            "hook_rule_receipts",
-            "hook_rule_admissions",
-        ] {
-            assert_eq!(
-                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .unwrap(),
-                0
-            );
-        }
-        assert_eq!(
-            db.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
-                .unwrap(),
-            "ok"
-        );
-    }
-}
-
 #[tokio::test]
 async fn a_service_retry_delay_longer_than_an_hour_is_respected() {
     let f = granted().await;

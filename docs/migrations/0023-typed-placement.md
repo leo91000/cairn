@@ -1,5 +1,9 @@
 # Installation database 22 → 23
 
+This guide describes a historical migration in the schema-37 manager at
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 `Store::open` upgrades the version-22 placement state before starting its actors or
 serving requests. Versions 11–21 first use their existing sequential startup conversions to reach
 version 22. Stop the old manager

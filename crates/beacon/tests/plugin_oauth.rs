@@ -85,7 +85,7 @@ async fn one_beacon_callback_routes_two_installations_and_rejects_altered_state(
             .unwrap(),
         second.clone(),
         stop.clone(),
-        Default::default(),
+        cairn_installation::direct::DirectConnections::default(),
     ));
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {

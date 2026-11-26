@@ -13,7 +13,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const launcher = fileURLToPath(new URL('../test-backend.mjs', import.meta.url))
+const launcher = fileURLToPath(new URL('../dev/test-backend.mjs', import.meta.url))
 
 function invoke(args, status = 0, buildStatus = 0, threads, wrongFixture = false) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-backend-runner-'))

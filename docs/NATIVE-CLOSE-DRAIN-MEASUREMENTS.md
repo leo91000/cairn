@@ -1,8 +1,8 @@
 # Native close drainage under unrelated pool contention
 
-[ADR-0084](adr/0084-native-attempt-access-drain.md) narrows a synchronization
-barrier. It does not change disk or object encoding, network transfer, reserve,
-quota, grant, publication receipt, physical unmount or retirement algorithms.
+[ADR-0084](adr/0084-native-attempt-access-drain.md) scopes close drainage to
+the affected attempt. The benchmark compares that barrier with the old barrier
+that acquired the shared storage pool gate.
 
 ## Reproduce on disposable CI
 
@@ -11,8 +11,8 @@ the full workspace suite. Its isolated nextest process prints one
 `NATIVE_CLOSE_GATE_MEASUREMENT` JSON record. To select only that measurement:
 
 ```sh
-node scripts/test-backend.mjs --nextest -p cairn-installation --lib \
-  -E 'test(scoped_close_contention_measurement)' --no-capture
+pnpm test:backend --nextest --workspace --lib \
+  -E 'package(=cairn-installation) & test(scoped_close_contention_measurement)' --no-capture
 ```
 
 Eight alternating reference/candidate pairs use the same real process-safe pool
@@ -24,12 +24,10 @@ per-file `POSIX_FADV_DONTNEED` hint, immediate warm read, process CPU, file byte
 and content hash. Process CPU is meaningful only in an isolated test process.
 The record includes CI image, kernel, CPU count and workload conditions.
 
-The first read is cold-hinted: successful advice does not prove page-cache
-eviction. There is no global cache drop, block-device probe, production network
-measurement or actual ublk retirement in this fixture. Raw file bytes are not
-encoded S3 object bytes. Object encoding is unchanged and is qualified by the
-existing reference/candidate native storage workflow, separately from this
-coordination measurement.
+The first read uses a per-file cold-cache hint. Successful advice leaves
+actual page-cache eviction uncertain. The fixture measures local host-file
+bytes and coordination time. The disposable native storage workflow exercises
+ublk, physical retirement and systemd ownership separately.
 
 The correctness claims come from barriers and state, rather than an fsync SLA:
 unrelated pool ownership cannot block the initial close drain; same-attempt

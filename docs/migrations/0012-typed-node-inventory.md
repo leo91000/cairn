@@ -1,5 +1,9 @@
 # Installation database 11 → 12
 
+This guide describes a historical migration in the schema-37 manager at
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 The installation upgrades version 11 automatically during `Store::open`, before
 starting database actors or serving requests. Stop the old manager and retain a
 consistent backup of `manager.db` and its WAL before upgrading an installation.

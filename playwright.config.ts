@@ -1,6 +1,6 @@
 import process from 'node:process'
 import { defineConfig, devices } from '@playwright/test'
-import { isolateTestCredentials } from './scripts/test-environment.mjs'
+import { isolateTestCredentials } from './scripts/dev/test-environment.mjs'
 
 isolateTestCredentials()
 
@@ -94,14 +94,14 @@ export default defineConfig({
     { name: 'journeys-signal', testMatch: 'signal.spec.ts' },
     { name: 'layout-webkit-signal', testMatch: 'signal.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-unread', testMatch: 'unread.spec.ts' },
-    { name: 'journeys-chats', testMatch: 'chats.spec.ts' },
+    { name: 'journeys-chats', testMatch: ['chats.spec.ts', 'chats-waits-and-teams.spec.ts', 'chats-lifecycle.spec.ts'] },
     { name: 'journeys-installation-subdomains', testMatch: 'installation-subdomains.spec.ts' },
     { name: 'layout-webkit-installation-drafts', testMatch: 'installation-subdomains.spec.ts', use: { browserName: 'webkit' } },
     { name: 'journeys-chat-switch', testMatch: ['chat-switch.spec.ts', 'readable-slugs.spec.ts'] },
     { name: 'layout-webkit-chat-switch', testMatch: 'chat-switch.spec.ts', use: { browserName: 'webkit' } },
     { name: 'journeys-chat-attachments', testMatch: 'chat-attachments.spec.ts' },
     { name: 'layout-webkit-chat-attachments', testMatch: 'chat-attachments.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
-    { name: 'layout-webkit-chats', testMatch: 'chats.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
+    { name: 'layout-webkit-chats', testMatch: ['chats.spec.ts', 'chats-waits-and-teams.spec.ts', 'chats-lifecycle.spec.ts'], use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-side-questions', testMatch: 'side-questions.spec.ts' },
     { name: 'layout-webkit-side-questions', testMatch: 'side-questions.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'layout-chromium-scrolling', testMatch: 'scrolling.spec.ts' },

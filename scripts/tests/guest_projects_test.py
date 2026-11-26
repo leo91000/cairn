@@ -7,7 +7,7 @@ import subprocess
 def main():
     root = Path(__file__).resolve().parent.parent.parent
     build = subprocess.run(
-        ["node", "scripts/test-backend.mjs", "--test", "guest_projects", "--no-run", "--message-format=json"],
+        ["node", "scripts/dev/test-backend.mjs", "--test", "guest_projects", "--no-run", "--message-format=json"],
         cwd=root, check=True, text=True, stdout=subprocess.PIPE,
     )
     executable = next(

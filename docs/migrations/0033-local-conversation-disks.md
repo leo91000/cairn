@@ -1,5 +1,9 @@
 # 0033 — Local conversation disks
 
+This guide describes a historical migration in the schema-37 manager at
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 The manager retires S3-dependent working environments at startup, before any
 worker recovery or admission. This applies to conversations and standalone mission
 runs. It uses the detachment and background retirement queue of

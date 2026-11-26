@@ -1,5 +1,9 @@
 # Installation database 15 → 16
 
+This historical migration and its tests remain available at commit
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 `Store::open` upgrades version 15 before starting database actors or serving
 requests. The upgrade uses one immediate SQLite transaction. As for other
 installation upgrades, stop the previous manager and retain a consistent backup
@@ -60,11 +64,11 @@ group results, run continuation snapshots, absence of reactivation and rollback.
 
 ## Private Store-only rehearsal
 
-The test-only `browser_fixture` binary supports `upgradeStoreCopy` before any
-Config, Service, Vault, credential refresh or network setup. Build it from the
-reviewed source (`cargo build --locked -p cairn-installation --example browser_fixture`)
-or use that exact source's full-CI `browser-backend` artifact. It is not included
-in production images and adds no service endpoint.
+Build the test-only `browser_fixture` binary from the historical commit above
+(`cargo build --locked -p cairn-installation --example browser_fixture`) or use
+that commit's full-CI `browser-backend` artifact. That revision's
+`upgradeStoreCopy` runs before Config, Service, Vault, credential refresh and
+network setup. It opens a schema-15 copy and upgrades it to schema 37.
 
 Use only a private, consistent **offline copy** of the installation database,
 with the original backup retained unchanged. Never point this operation at the

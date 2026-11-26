@@ -12,7 +12,7 @@ runs:
       shell: bash
       env:
         OBSERVATION_PHASE: ${{ inputs.phase }}
-      run: node scripts/ci-rust-build-observation.mjs "$OBSERVATION_PHASE" "$RUNNER_TEMP/cairn-rust-observation/$OBSERVATION_PHASE.json"
+      run: node scripts/ci/ci-rust-build-observation.mjs "$OBSERVATION_PHASE" "$RUNNER_TEMP/cairn-rust-observation/$OBSERVATION_PHASE.json"
     - uses: actions/upload-artifact@v7.0.1
       if: always()
       continue-on-error: true

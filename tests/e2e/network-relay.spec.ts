@@ -6,7 +6,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, expect, test } from '@playwright/test'
-import { closeNetworkFixture, networkPhaseDiagnostics } from '../../scripts/network-phase-diagnostics.mjs'
+import { closeNetworkFixture, networkPhaseDiagnostics } from '../../scripts/ci/network-phase-diagnostics.mjs'
 import { beaconRelayFixture } from './beacon-relay-fixture'
 import { captureNetworkTransport, networkTransportDiagnostics } from './network-transport-diagnostics'
 

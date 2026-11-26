@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseDeviceSample, waitForDeviceReady } from '../android-device-ready.mjs'
+import { parseDeviceSample, waitForDeviceReady } from '../android/android-device-ready.mjs'
 
 function wire({
   step = 0,

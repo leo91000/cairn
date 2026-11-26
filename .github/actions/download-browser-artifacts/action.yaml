@@ -1,0 +1,24 @@
+name: Download browser build and backend fixtures
+description: Download the built frontend and Rust fixture binaries and mark the requested binaries executable.
+inputs:
+  binaries:
+    description: Space-separated paths under target/debug/ to mark executable.
+    default: target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture target/debug/examples/beacon_sql_fixture
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v8.0.1
+      with:
+        name: browser-build
+        path: dist/
+    - uses: actions/download-artifact@v8.0.1
+      with:
+        name: browser-backend
+        path: target/debug/
+    - name: Mark downloaded backend binaries executable
+      shell: bash
+      env:
+        BINARIES: ${{ inputs.binaries }}
+      run: |
+        read -r -a binaries <<< "$BINARIES"
+        chmod +x "${binaries[@]}"

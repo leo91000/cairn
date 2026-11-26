@@ -100,7 +100,7 @@ impl OAuthProvider {
         url.set_query(None);
         url.set_fragment(None);
         url.path_segments_mut()
-            .map_err(|_| unavailable())?
+            .map_err(|()| unavailable())?
             .pop_if_empty()
             .pop()
             .push("applications")
@@ -725,6 +725,7 @@ pub(super) async fn google_credential(
     headers: HeaderMap,
     Json(input): Json<GoogleCredential>,
 ) -> Result<Response, ApiError> {
+    use jwt_simple::prelude::*;
     if name != "google" || input.credential.len() > 16_384 {
         return Err(rejected());
     }
@@ -739,7 +740,6 @@ pub(super) async fn google_credential(
         }
     }
 
-    use jwt_simple::prelude::*;
     let metadata = Token::decode_metadata(&input.credential).map_err(|_| rejected())?;
     let kid = metadata.key_id().ok_or_else(rejected)?;
     let client = reqwest::Client::builder()

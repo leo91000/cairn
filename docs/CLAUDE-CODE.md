@@ -1,6 +1,6 @@
 # Claude Code
 
-Léo can run the official Claude Code CLI alongside Codex. Claude accounts are
+Cairn can run the official Claude Code CLI alongside Codex, OpenCode and Antigravity. Claude accounts are
 added, selected and limited like Codex accounts: see [coding-agent accounts](AGENT-ACCOUNTS.md)
 for sign-in, usage windows, parallel runs, credentials and failover.
 
@@ -22,27 +22,27 @@ Switching back also starts a fresh session so the intervening work is included.
 Native session IDs, pending tool calls and hidden reasoning are not transferred.
 
 Resuming a saved Claude session sends a fresh protocol message ID while keeping
-the original Léo message and completion receipt. Claude ignores IDs already in
+the original Cairn message and completion receipt. Claude ignores IDs already in
 its transcript, so replaying the original ID would acknowledge the request without
 continuing it. Completed receipts are replayed without starting another model turn.
 
-Before resuming, Léo checks the selected session's generated `session-env/<session-id>/*.sh`
+Before resuming, Cairn checks the selected session's generated `session-env/<session-id>/*.sh`
 files for NUL bytes. Corrupted files block launch with an error identifying the file.
-If Claude reports the same shell initialization failure during a turn, Léo stops
+If Claude reports the same shell initialization failure during a turn, Cairn stops
 that process and marks the attempt failed instead of accepting a later successful
 turn result. The error's raw environment exports are not included in the activity
 log, and no completion receipt is written for that attempt.
 
 Repair the affected script in the conversation's retained Claude home, then continue
 the same conversation: its next turn, whether resumed or started by a new message,
-starts a fresh process so cached corrupted text is discarded. Léo preserves the script, transcript and workspace; it does not guess
+starts a fresh process so cached corrupted text is discarded. Cairn preserves the script, transcript and workspace; it does not guess
 replacement shell code, delete hooks, or retry automatically. This detects and
 contains corruption but does not identify or repair the cause of the invalid bytes.
 
 Private question answers and raw tool outputs are excluded from the transfer.
 For long chats, the transfer includes up to 200 recent transcript entries and
 100,000 characters, plus an excerpt of the initial request when earlier history
-is omitted. The full visible history stays available in Léo. Previous attachments
+is omitted. The full visible history stays available in Cairn. Previous attachments
 remain in the retained input directory. Model and effort defaults are reset when
 changing providers; the agent's global configuration is unchanged.
 
@@ -57,11 +57,11 @@ release its resources while waiting. See the official
 
 The adapter correlates SDK background notifications with the current session.
 Claude's turn results can cover several user messages, or background notifications
-unrelated to the current prompt. Léo correlates completion with consumed message
+unrelated to the current prompt. Cairn correlates completion with consumed message
 IDs and keeps the process alive while non-ambient background tasks and their
 follow-up responses are pending. This SDK work remains part of the
 running conversation. Ambient watchers do not keep a run open.
-When Claude finishes responding and only those tasks keep the run open, Léo emits
+When Claude finishes responding and only those tasks keep the run open, Cairn emits
 `turn.waiting` with each task's description, and an empty list once they finish.
 The conversation then shows « Veille » instead of the working indicator, and the
 activity heartbeat reports `waiting_for_background` with the number of tasks.
@@ -70,7 +70,7 @@ from being repeated after a restart.
 
 ## Engine status and subagent identity
 
-Léo reads Claude Code's structured stream-json frames rather than its wording. Each
+Cairn reads Claude Code's structured stream-json frames rather than its wording. Each
 kind of wait stays separate:
 
 - **Engine retry.** `system/api_retry` becomes `engine.retry`: attempt, retry budget,
@@ -102,7 +102,7 @@ kind of wait stays separate:
   per window, which counts as a new refusal. A refusal after an answered request with no
   such repeat falls back to recognizing Claude's wording.
 - **Cairn durable wait.** Account waits, `wait_for` and automatic retries are Cairn's
-  own. They release the execution's resources. Léo does not enable Claude's unattended
+  own. They release the execution's resources. Cairn does not enable Claude's unattended
   `CLAUDE_CODE_RETRY_WATCHDOG`, which would keep the process waiting for a usage window
   instead of releasing it.
 - **Notices.** `system/informational` becomes `engine.notice` with its level, cut at
@@ -116,8 +116,8 @@ kind of wait stays separate:
 
 `session_state_changed` is opt-in (`CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`) and
 not enabled. Completion stays correlated with result messages and consumed message
-IDs. Léo answers permission requests itself, so `requires_action` would add no state.
-Frames Léo does not know, including future ones, are ignored.
+IDs. Cairn answers permission requests itself, so `requires_action` would add no state.
+Frames Cairn does not know, including future ones, are ignored.
 
 Subagents are followed by the tool use that started them and by their task ID. Claude
 Code 2.1.292 and later add `agent_id` to a subagent's messages (equal to its task ID,
@@ -145,7 +145,7 @@ steps. The minimum supported CLI stays **2.1.280**: older frames without these f
 keep the earlier correlation, and the fixtures cover both shapes. The events reach the
 public MCP and `cairn_installation` through `get_run`.
 
-Léo asks Claude Code for its context usage with the stream-json control request
+Cairn asks Claude Code for its context usage with the stream-json control request
 `get_context_usage` (`detail: "summary"`, answered locally without a model call), then
 measures each main-thread response's prompt (`input`, cache creation and cache read
 tokens). Automatic compactions (`compact_boundary`) show as a divider in the conversation.
@@ -160,7 +160,7 @@ work and verify external effects before continuing.
 
 The design review used [T3 Code](https://github.com/pingdotgg/t3code/tree/f5ef0ddb90a8c36584e181b1913e7b8a5df30ffc),
 under its MIT license. Its provider reactor separates visible threads from native
-sessions, but explicitly rejects switching drivers on an existing thread. Léo's
+sessions, but explicitly rejects switching drivers on an existing thread. Cairn's
 context transfer is an independent implementation, not a port of a T3 Code feature.
 No T3 Code runtime dependency or source code is included.
 
@@ -170,12 +170,12 @@ The manager and guest images include unmodified Claude Code from Anthropic's
 stable release channel, resolved for each image build (see
 [tool versions](CLI-UPDATES.md)); `/health` reports the exact version.
 For development, install that release and set `CLAUDE_BIN` if it is outside PATH.
-The CLI owns the interactive login flow and each account’s private state. Léo never
+The CLI owns the interactive login flow and each account’s private state. Cairn never
 exposes access/refresh tokens through its public API. Identity responses are
 restricted to connected state, email and subscription type. There is no API-key
 fallback and no change to the selected provider or subscription billing.
 
-Léo clears inherited Anthropic API-key, bearer-token, cloud-provider, and alternate
+Cairn clears inherited Anthropic API-key, bearer-token, cloud-provider, and alternate
 OAuth environment overrides from subscription executions. Sign-in and logout are
 performed with `claude auth login --claudeai` and `claude auth logout`.
 
@@ -185,10 +185,10 @@ YOLO remains the default and runs within the existing private microVM boundary.
 Workspace-write and read-only agents enable Claude’s Bash sandbox with
 `failIfUnavailable` and no unsandboxed fallback. The images include Bubblewrap and
 socat. Read-only also denies edit tools and retains read-only project mounts.
-Only the agent’s configured MCP connections are supplied; HTTP tools keep Léo’s
+Only the agent’s configured MCP connections are supplied; HTTP tools keep Cairn’s
 server-enforced grants, and excluded command-MCP tools are denied explicitly.
 Shared/project Claude settings are disabled for the managed invocation. Selected
-Léo skills and instructions are supplied through the existing run context.
+Cairn skills and instructions are supplied through the existing run context.
 
 A plan turn (see [chats](chats.md#plan-turns)) starts Claude with
 `--permission-mode plan`, never `--dangerously-skip-permissions`, even for YOLO
@@ -214,7 +214,7 @@ refuses to start and the turn fails with an explicit error.
 
 This is programmatic Claude Code usage. Anthropic’s June 15 update currently says
 that the proposed separate SDK billing change is paused and subscription-backed
-SDK/CLI usage still draws from subscription limits. Léo does not promise permanent
+SDK/CLI usage still draws from subscription limits. Cairn does not promise permanent
 pricing or add paid fallback. Consult [Anthropic’s current billing guidance](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan).
 
 Hosting follows the [Claude Code hosting and credential rules](https://code.claude.com/docs/en/legal-and-compliance): the binary stays unmodified and sign-in completes through Anthropic’s own flow using the owner’s account. The implementation uses the [official streaming CLI](https://code.claude.com/docs/en/headless) and its SDK control protocol.

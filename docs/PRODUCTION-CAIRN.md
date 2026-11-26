@@ -58,43 +58,31 @@ work and update separately through their existing host supervisor.
 
 ## Data-preserving upgrades
 
-Installation database version 11 upgrades automatically to version 12 at manager
-startup through the [typed inventory migration](migrations/0012-typed-node-inventory.md).
-Direct-storage releases then continue to version 13 through a separate
-[coordination metadata migration](migrations/0013-direct-node-storage.md).
-Version 13 then upgrades to version 14 through the
-[typed account pool migration](migrations/0014-typed-account-pool.md), preserving
-account identities, quota state, order, encrypted credentials and references.
-Version 14 then upgrades to 15 through the
-[typed conversation migration](migrations/0015-typed-conversations.md).
-Version 15 then upgrades to 16 through the
-[typed questions and waits migration](migrations/0016-typed-questions-and-waits.md).
-Version 16 then upgrades to 17 through the
-[attachment reservation migration](migrations/0017-attachment-reservations.md).
-Version 17 then upgrades to 18 through the
-[per-account read state migration](migrations/0018-personal-read-state.md).
-Version 18 upgrades to 19 through the [run projections migration](migrations/0019-run-projections.md).
-Version 19 upgrades to 20 by adding plugin hook tables.
-Version 20 upgrades to 21 through the [writer-owned progress migration](migrations/0021-run-progress.md).
-Version 21 upgrades to 22 through the [timeline projection migration](migrations/0022-timeline-projection.md), replaying retained events.
-Version 22 upgrades to 23 through the [typed placement migration](migrations/0023-typed-placement.md).
-Version 23 upgrades to 24 through the [plugin contribution grant migration](migrations/0024-plugin-contribution-grants.md).
-Version 24 upgrades to 25 through the coding-agent configuration migration.
-Version 25 upgrades to 26 through the
-[typed deliverable and skill source migration](migrations/0026-typed-deliverables-and-skill-sources.md).
-Version 26 upgrades to 27 through the [plan request migration](migrations/0027-plan-requests.md).
-Stop the old manager and retain a consistent database/WAL backup first. Keep the
-installation identity, configuration, data roots, node state and object storage.
-The migration preserves node identities, credentials, configuration and references;
-conversion failures leave the original version available for repair and retry. Earlier
-layouts need their explicit migrations; do not replace a migration with a schema
-version edit or a data reset. Deploy matching manager, runner, node and guest
-versions before resuming work.
+New installations create schema 38. An existing installation must start from
+schema 37 after a successful start with a manager that completed
+[local-disk retirement](migrations/0033-local-conversation-disks.md).
+Let that manager finish cleaning up abandoned backend conversion copies before
+stopping it. When present, `backend-migration-staging` in the manager data
+directory must be empty. The schema-38 manager refuses an occupied staging
+directory so the old manager can finish the cleanup.
+The schema-38 upgrade drops retired remote-disk coordination tables in one
+transaction. The working files and retirement queue for local disks stay in
+place. Historical database migrations are available in earlier releases.
+For schemas 11–36, use a compatible schema-37 release such as Cairn v0.80.0
+and verify a successful start before attempting the schema-38 upgrade. Use
+the documented upgrade path for installations older than schema 11.
 
-Beacon has its own Postgres migration ledger. Validate its compatibility before
-promotion; this installation migration neither resets Beacon nor authorizes
-discarding accounts. A historical incompatible ledger requires a separately
-prepared data-preserving migration before rollout. See
+Before either upgrade, stop the manager and retain a consistent database/WAL
+backup. Preserve the installation identity, configuration, data roots and
+node state. Before an S3-era upgrade, save working files that depend on remote
+storage and retain the corresponding bucket for rollback. Run matching manager,
+runner, node and guest versions. Schema-37 managers refuse schema 38, so rollback
+requires restoring the corresponding pre-upgrade backup.
+
+Beacon has its own Postgres migration ledger. The installation schema upgrade
+leaves Beacon data intact. Validate ledger compatibility before promotion.
+A historical incompatible ledger requires a separately prepared data-preserving
+migration before rollout. See
 [Beacon database compatibility](BEACON.md#next-release-recreate-the-beacon-database).
 
 ### Private installation upgrade rehearsal
@@ -106,7 +94,14 @@ remain necessary; historical production shapes also need this private check.
 1. Retain an untouched, private source backup. Use SQLite's backup API or a
    coordinated stopped-manager backup that preserves the database and its WAL.
    Copying only a live `manager.db` file is not a consistent backup. Record its
-   schema version and checksum; keep directories owner-only and files private.
+   schema version and checksum. Keep directories owner-only and files private.
+   For schema 37, verify `backend-migration-staging` on the stopped manager's
+   data volume before rehearsing the database copy. Record its aggregate state
+   as absent or as a real, empty directory. If a real staging directory contains
+   abandoned copies, let the schema-37 manager finish cleaning it up. A symlink,
+   non-directory entry or unreadable staging path requires the operator to repair
+   the path or its permissions. Verify the staging state with the manager stopped
+   before retrying the upgrade.
 2. Make a separate writable rehearsal copy containing `manager.db`. Never pass
    the live installation directory or the untouched source backup to the helper.
    Keep all database copies on the installation host; do not upload them to CI,
@@ -125,11 +120,11 @@ remain necessary; historical production shapes also need this private check.
    This operation writes the supplied copy. It requires an existing `manager.db`
    and opens the Store without configuration loading, Service, Vault or credential
    refresh. It does not start a manager or verify application readiness.
-4. Require the expected `versionBefore` and `versionAfter`, `quickCheck: "ok"`
-   and `foreignKeyCheck: "ok"`. Reopen the migrated copy to confirm its resulting
-   schema version and verify the untouched source checksum is unchanged. Retain
-   only aggregate verdicts and source/artifact identities in public evidence;
-   keep database contents, credentials and private paths out of published logs.
+4. Require `versionBefore: 37`, `versionAfter: 38`, `quickCheck: "ok"`
+   and `foreignKeyCheck: "ok"` for this upgrade. Reopen the copy to confirm
+   schema 38 and verify the untouched source checksum. Retain only aggregate
+   verdicts and source and artifact identities in public evidence. Keep database
+   contents, credentials and private paths out of published logs.
    A failure blocks the tag: preserve the private copies and repair the migration.
 
 This rehearsal does not replace the pre-upgrade backup or the post-deployment
@@ -138,8 +133,8 @@ readiness checks. It creates no automatic release archive or restore point.
 ## Réinstallation complète
 
 Cette procédure destructive est réservée à une demande explicite d’effacement et
-de réinstallation. Elle ne fait pas partie d’une release ordinaire ni de la migration
-11 → 12 ci-dessus. Ne pas l’utiliser pour réparer un échec de migration en conservant
+de réinstallation. Les mises à jour ordinaires suivent la procédure de sauvegarde
+et de migration ci-dessus. Ne pas l’utiliser pour réparer un échec de migration en conservant
 les données.
 
 1. Arrêter les timers de mise à jour, le manager, le runner et toutes les nodes.

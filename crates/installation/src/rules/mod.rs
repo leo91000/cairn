@@ -8,12 +8,12 @@
 mod capability;
 mod catalog;
 pub mod engine;
-pub(crate) mod evaluate;
-pub(crate) mod formula;
 pub(crate) mod interpreter;
 pub(crate) mod storage;
 pub(crate) mod templates;
 pub(crate) mod validation;
+
+pub(crate) use cairn_rules_eval::{evaluate, formula};
 
 pub(crate) use capability::{RULE_OPERATIONS, RuleOperation, rule_operation};
 pub(crate) use storage::SCHEMA;

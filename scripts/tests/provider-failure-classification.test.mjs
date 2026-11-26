@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { classifyFailure } from '../provider-failure-classification.mjs'
+import { classifyFailure } from '../ci/provider-failure-classification.mjs'
 
 describe('health-watch provider failure classification', () => {
   it('recognizes the exact provider model-capacity message', () => {

@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer'
 import { describe, expect, it } from 'vitest'
-import { androidVersion, updateManifest } from '../android-release.mjs'
+import { androidVersion, updateManifest } from '../android/android-release.mjs'
 
 describe('android tag distribution', () => {
   it('assigns increasing codes above the old debug builds', () => {

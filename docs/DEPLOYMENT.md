@@ -133,7 +133,7 @@ linux/amd64 only.
 
 ```sh
 revision=$(git rev-parse --verify HEAD) \
-  && versions=$(node scripts/cli-updates.mjs build-versions) \
+  && versions=$(node scripts/release/cli-updates.mjs build-versions) \
   && node -e 'for (const [key, value] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${key.includes("-") ? key.replace("-", "_").toUpperCase() : `${key.toUpperCase()}_VERSION`}=${value}`)' "$versions" \
   | xargs docker compose build --build-arg "VCS_REF=$revision" \
   && docker compose up -d
@@ -432,7 +432,7 @@ Publish the JSON, logs and screenshots to durable private artifact storage. Then
 from the trusted operator environment (not the Intel host), record the result:
 
 ```sh
-node scripts/nested-android-validation.mjs record /path/to/intel.json https://<durable-report-url>
+node scripts/android/nested-android-validation.mjs record /path/to/intel.json https://<durable-report-url>
 ```
 
 The recorded commit status documents the result; CI does not wait for it.
@@ -446,8 +446,8 @@ Deploy matching current Beacon and installation binaries. Follow the
 [Beacon database compatibility runbook](BEACON.md#next-release-recreate-the-beacon-database)
 before promotion. Historical incompatible migration ledgers need a separately
 prepared data-preserving migration; routine releases do not reset Beacon or
-installation data. Version-11 installations use the
-[automatic inventory upgrade](migrations/0012-typed-node-inventory.md).
+installation data. For older installation databases, follow the
+[data-preserving installation upgrade](PRODUCTION-CAIRN.md#data-preserving-upgrades).
 A protocol mismatch requires an update and prevents reconnection. Rollback also
 requires a matching binary set and a database created by that Beacon version;
 keep access closed until the set is consistent.

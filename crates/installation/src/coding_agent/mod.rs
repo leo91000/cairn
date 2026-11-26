@@ -1,10 +1,17 @@
 //! Native execution differences between coding agents. Account selection, workspace
 //! ownership and execution lifecycle stay in their existing shared services.
 mod antigravity;
+pub mod antigravity_runtime;
 mod claude;
+pub mod claude_process;
+pub mod claude_session;
 mod codex;
+pub(crate) mod codex_background;
+pub(crate) mod codex_login;
+pub mod codex_process;
 pub mod mcp;
 mod opencode;
+pub mod opencode_runtime;
 
 use crate::{
     accounts::Lease,

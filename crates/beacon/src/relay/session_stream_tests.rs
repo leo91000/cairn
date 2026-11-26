@@ -44,7 +44,7 @@ async fn with_frozen_time(assertions: impl Future<Output = ()>) {
         biased;
 
         _ = watchdog => panic!("real HTTP/Postgres I/O stalled while Tokio time was frozen"),
-        _ = assertions => {},
+        () = assertions => {},
     }
     finished.send(()).unwrap();
     watchdog_thread.join().unwrap();

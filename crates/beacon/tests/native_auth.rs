@@ -63,7 +63,7 @@ async fn credential_manager_google_uses_the_existing_verified_email_account_and_
             ),
         )
         .await
-        .unwrap()
+        .unwrap();
     });
     let app = Fixture::with_oauth(cairn_beacon::OAuthProviders {
         google: Some(cairn_beacon::OAuthProvider {

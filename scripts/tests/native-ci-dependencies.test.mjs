@@ -146,13 +146,13 @@ exec ${realSetsid} "$@"
   const workSeconds = faultWorkSeconds ?? (fault === 'controller-crash' ? 2 : interruptSignal && !cancelMarkerFailure ? 5 : exercisesDeadline ? fixtureWorkSeconds : undefined)
   const phaseSeconds = workSeconds === undefined ? {} : { [deadlinePhase]: workSeconds }
   const cancelFault = cancelMarkerFailure ? `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module'; const mkdir = fs.mkdirSync; fs.mkdirSync = function(candidate, ...args) { if (candidate.endsWith('owner.sock.cancel')) throw new Error('fixture metadata refusal'); return mkdir.call(this, candidate, ...args); }; syncBuiltinESMExports();` : ''
-  const driver = `${cancelFault} import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: ${JSON.stringify(phaseSeconds)}, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
+  const driver = `${cancelFault} import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/ci/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: ${JSON.stringify(phaseSeconds)}, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
   const unsupportedProfile = !['native', 'android-network'].includes(profile)
   const useDriver = fault || closeOutput || blockedOutput || throwingMarker
-  const androidCommand = 'node scripts/install-native-ci-dependencies.mjs --profile android-network'
+  const androidCommand = 'node scripts/ci/install-native-ci-dependencies.mjs --profile android-network'
   const command = interruptSignal || unsupportedProfile || useDriver ? process.execPath : '/bin/bash'
   const args = (interruptSignal && interruptPhase === 'descendant') || unsupportedProfile
-    ? [fileURLToPath(new URL('scripts/install-native-ci-dependencies.mjs', root)), '--profile', profile]
+    ? [fileURLToPath(new URL('scripts/ci/install-native-ci-dependencies.mjs', root)), '--profile', profile]
     : useDriver
       ? ['--input-type=module', '-e', driver]
       : ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', profile === 'android-network' ? androidCommand : setup.run]
@@ -601,12 +601,12 @@ describe('native CI dependency setup', () => {
   it('uses the same bounded installer in all native dependency callers with the same package set', () => {
     for (const name of ['rust-check', 'backend', 'cli-qualification', 'backend-migration-qualification', 'node-checks']) {
       const step = workflow.jobs[name].steps.find(step => step.name === 'Install native test dependencies')
-      expect(step.run).toBe('node scripts/install-native-ci-dependencies.mjs')
+      expect(step.run).toBe('node scripts/ci/install-native-ci-dependencies.mjs')
       expect(step['timeout-minutes']).toBe(10)
     }
 
     const android = workflow.jobs['android-direct'].steps.find(step => step.name === 'Prepare the native Android network toolchain')
-    expect(android.run).toBe('node scripts/prepare-network-tools.mjs android-direct')
+    expect(android.run).toBe('node scripts/ci/prepare-network-tools.mjs android-direct')
     expect(workflow.jobs['android-direct'].steps.some(step => step.run?.includes('install-native-ci-dependencies'))).toBe(false)
     expect(workflow.jobs['android-direct']['timeout-minutes']).toBe(20)
   })

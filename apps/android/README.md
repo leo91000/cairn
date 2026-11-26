@@ -199,7 +199,7 @@ The Android workflow does not deploy the server or publish to Google Play.
 
 Device tests run on Android 16 emulators in parallel shards. Each shard boots while
 the `build` job compiles, then installs the prebuilt APKs and runs its share through
-`scripts/android-device-tests.mjs` (no Gradle on the device jobs). Shards are balanced
+`scripts/android/android-device-tests.mjs` (no Gradle on the device jobs). Shards are balanced
 with `device-test-timings.json`; refresh it from the `cairn-android-device-timings`
 artifact when tests are added or slow down. Stale timings only unbalance shards:
 every test still runs. Pull requests skip classes marked `@RobolectricTwin`, whose

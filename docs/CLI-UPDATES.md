@@ -1,7 +1,7 @@
 # Agent tool versions
 
 Every application CI run, including tag releases, uses
-`node scripts/cli-updates.mjs build-versions` to resolve the agent tool versions
+`node scripts/release/cli-updates.mjs build-versions` to resolve the agent tool versions
 before deciding whether to reuse an image. It prints JSON and, when
 `GITHUB_OUTPUT` is set, appends the exact `codex`, `gh`, `claude`, `opencode` and
 `antigravity` outputs consumed by `ci.yaml`, plus `antigravity-url` and
@@ -121,9 +121,9 @@ production, the CLIs may still contact their vendors' public endpoints:
 
 The `resolve` job reads the served versions from the configuration of the
 installation image production reports at `CAIRN_BEACON_ORIGIN/install/release`
-(`scripts/served-tools.mjs`), and checks registry content against its digest.
+(`scripts/release/served-tools.mjs`), and checks registry content against its digest.
 Images built before an engine was resolved record no version; they shipped its
-`legacy` release in `scripts/cli-updates.mjs` (Claude Code 2.1.280, OpenCode
+`legacy` release in `scripts/release/cli-updates.mjs` (Claude Code 2.1.280, OpenCode
 1.19.0). When production or the registry cannot be read, no version is guessed:
 the rollback checks are skipped with a warning, and the evidence records
 `served: null`. Such evidence is never reused, and a tag fails at once, before
@@ -157,7 +157,7 @@ See [installation updates](INSTALLATION.md#automatic-approved-updates) and the
 A new channel release ships through the normal validated build and its automated
 checks above. A release that fails them blocks validation. There is no hold or
 override setting: the remedy is a reviewed change that adapts the adapter, or that
-sets the engine's `channel` in `scripts/cli-updates.mjs` to the last working
+sets the engine's `channel` in `scripts/release/cli-updates.mjs` to the last working
 version until it does. npm serves an exact version at the same URL as a dist-tag,
 so the same validation applies.
 
@@ -168,7 +168,8 @@ channel between qualifications:
   `get_usage`, token rotation against the endpoint, and subscription inference.
 - The native turn runs with YOLO access and calls no tool. Apart from plan turns,
   how a release applies the sandbox settings of restricted agents (`settings` in
-  `claude_process.rs`), the `--permission-prompt-tool` approval flow, and MCP tool
+  `crates/installation/src/coding_agent/claude_process/protocol.rs`), the
+  `--permission-prompt-tool` approval flow, and MCP tool
   calls under `--strict-mcp-config` has no per-release native check. Production
   runner isolation still applies.
 

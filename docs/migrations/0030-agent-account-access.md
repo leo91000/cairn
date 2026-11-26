@@ -1,5 +1,9 @@
 # 0030 — Account access to agents
 
+This historical migration and its tests remain available at commit
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 Version 29 upgrades to 30 automatically in `Store::open`, before the SQL actors
 start ([ADR-0075](../adr/0075-plugin-hooks-rules-and-scoped-grants.md), « Accès des
 comptes aux agents »).
@@ -34,8 +38,8 @@ observations after the first one cannot repeat the rollout or restore a revoked
 grant.
 
 A failure leaves the schema, KV and version intact at 29. A successful upgrade
-has no downgrade path. Intermediate 11 → 29 migrations remain supported and retain
-their own transaction boundaries.
+has no downgrade path. The historical manager applies each intermediate
+migration from schemas 11 → 29 in its own transaction.
 
 `agent_access` covers the first snapshot after a delayed observation, joins and
 re-invitations during the gap, later memberships being excluded, pending owner

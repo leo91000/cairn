@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-SPEC = importlib.util.spec_from_file_location("coverage", pathlib.Path(__file__).parents[1] / "log-coverage.py")
+SPEC = importlib.util.spec_from_file_location("coverage", pathlib.Path(__file__).parents[1] / "ops" / "log-coverage.py")
 coverage = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(coverage)
 START = coverage.timestamp("2026-10-31T10:24:19Z")
