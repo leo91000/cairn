@@ -46,9 +46,10 @@ See [microVM requirements and architecture](docs/MICROVMS.md).
 ```sh
 cp .env.example .env
 # Configure CAIRN_BEACON_ORIGIN for Beacon.
-versions=$(node scripts/cli-updates.mjs build-versions) \
-  && node -e 'for (const [tool, version] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${tool.toUpperCase()}_VERSION=${version}`)' "$versions" \
-  | xargs docker compose build \
+revision=$(git rev-parse --verify HEAD) \
+  && versions=$(node scripts/cli-updates.mjs build-versions) \
+  && node -e 'for (const [key, value] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${key.includes("-") ? key.replace("-", "_").toUpperCase() : `${key.toUpperCase()}_VERSION`}=${value}`)' "$versions" \
+  | xargs docker compose build --build-arg "VCS_REF=$revision" \
   && docker compose up -d
 # Approve the printed device code in the beacon app.
 docker compose exec manager cairn claim
