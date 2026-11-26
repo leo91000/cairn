@@ -647,7 +647,7 @@ class LiveTest {
     fun `conversations that leave the list name the saved copies to forget`() {
         val list = listOf(Chat(id = "a"), Chat(id = "b c", runId = "r1"), Chat(id = "d"))
         assertEquals(
-            listOf("/chats/b%20c/stream", "/runs/r1/stream"),
+            listOf("/chats/b%20c/stream"),
             leftChatPaths(list, listOf(Chat(id = "d"), Chat(id = "a"))),
         )
         assertEquals(emptyList<String>(), leftChatPaths(null, list))

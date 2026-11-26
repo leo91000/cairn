@@ -130,8 +130,10 @@ and headroom; web accounts conservatively in UTF-16 bytes, Android in UTF-8 byte
 An evicted prefix remains available from server pagination. Evicting a prefix also
 invalidates its reading position. Logout and a changed cache revision still invalidate
 every saved conversation. A conversation that leaves the server's list (deleted, or no
-longer shared) loses only its own saved copy, on web and Android; the web also compares
-the server's first list with the list it saved last.
+longer shared) loses its own saved copy on web and Android, and every saved run log goes
+with it, since a run does not name its conversation; the web also compares the server's
+first list with the list it saved last. Signing out of the web also deletes the earlier
+`cairn-history-v2` store.
 
 Activity groups contain at most 30 visible folded calls. Global event-ID gaps and
 hidden events do not count toward that limit. Existing full groups keep their

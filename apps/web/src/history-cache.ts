@@ -286,6 +286,30 @@ export function clearHistoryCache() {
   }))
 }
 
+/**
+ * Drops every saved run log of a session. A run does not name its conversation, so a deleted
+ * conversation's earlier runs cannot be told apart; a run log opens from its stream again.
+ */
+export function removeRunLogs(scope: string) {
+  const prefix = `${scope}:/runs/`
+  for (const key of [...memory.keys()]) {
+    if (key.startsWith(prefix))
+      memory.delete(key)
+  }
+
+  return enqueue(() => transaction<void>('readwrite', (store) => {
+    store.delete(IDBKeyRange.bound(prefix, `${prefix}\uFFFF`))
+  }))
+}
+
+/** On sign-out, the saved conversations of earlier bundles go too: their tabs are signed out. */
+export function clearEarlierHistory() {
+  try {
+    indexedDB.deleteDatabase('cairn-history-v2')
+  }
+  catch { /* Storage may be unavailable; nothing was saved then. */ }
+}
+
 export function recentHistory(value: CachedHistory): CachedHistory {
   let size = JSON.stringify(value.state).length * 2 + 4096
   const activeWaits = new Set(value.entries.filter(card => card.content.kind === 'notice'

@@ -256,11 +256,23 @@ function label(item: FilItem) {
   return item.subtitle
 }
 
-// A conversation about to open is read from storage first, so it shows with the click.
-function warm(item: FilItem) {
-  if (item.chatId && item.to.startsWith('/chats/'))
-    void warmHistory(`${decodeURIComponent(item.to)}/stream`).catch(() => {})
+// A conversation about to open is read from storage first, so it shows with the click. A
+// pointer resting on a row reads it; one sweeping across the Fil does not.
+let warmTimer: ReturnType<typeof setTimeout> | undefined
+
+function warm(item: FilItem, delay = 0) {
+  clearTimeout(warmTimer)
+  if (!item.chatId || !item.to.startsWith('/chats/'))
+    return
+  const path = `${decodeURIComponent(item.to)}/stream`
+  warmTimer = setTimeout(() => void warmHistory(path).catch(() => {}), delay)
 }
+
+function unwarm() {
+  clearTimeout(warmTimer)
+}
+
+onBeforeUnmount(unwarm)
 
 function open(item: FilItem) {
   unpeek()
@@ -531,7 +543,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
             @click="open(item)"
             @mouseenter="peek(item, $event)"
             @mouseleave="leavePeek"
-            @pointerenter="warm(item)"
+            @pointerenter="warm(item, 120)"
+            @pointerleave="unwarm"
             @pointerdown="warm(item)"
             @focus="peek(item, $event); warm(item)"
             @blur="leavePeek"

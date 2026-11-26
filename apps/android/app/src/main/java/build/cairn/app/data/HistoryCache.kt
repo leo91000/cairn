@@ -231,6 +231,45 @@ class HistoryCache(
             }
         }
 
+    /**
+     * Drops every saved run log. A run does not name its conversation, so a deleted conversation's
+     * earlier runs cannot be told apart; a run log opens from its stream again, as on the web.
+     */
+    suspend fun removeRunLogs() =
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                fun runLog(value: CachedHistory?) =
+                    value != null && value.state.chat == null && value.state.run != null
+                val keys =
+                    memory.filterValues { runLog(it.value) }.keys +
+                        synchronized(pendingLock) {
+                            pending.filterValues { runLog(it.value) }.keys
+                        } +
+                        root
+                            .listFiles()
+                            .orEmpty()
+                            .filter { it.isFile && '.' !in it.name && it.name !in memory }
+                            .filter { file ->
+                                runLog(
+                                    runCatching {
+                                        wireJson.decodeFromString<CachedHistory>(
+                                            String(
+                                                unseal(file.name, file.readBytes()),
+                                                Charsets.UTF_8,
+                                            )
+                                        )
+                                    }
+                                        .getOrNull()
+                                )
+                            }
+                            .map { it.name }
+                for (key in keys) {
+                    synchronized(pendingLock) { pending.remove(key) }
+                    removeLocked(key)
+                }
+            }
+        }
+
     suspend fun clear() =
         withContext(Dispatchers.IO) {
             lock.withLock {

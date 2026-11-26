@@ -147,6 +147,7 @@ fun rememberLive(
                                                     saved,
                                                 )
                                             )
+                                            vm.historyCache.removeRunLogs()
                                         }
                                     // Only the server's own complete state replaces the copy, as
                                     // on the web; a reconnect keeps saying it is updating.

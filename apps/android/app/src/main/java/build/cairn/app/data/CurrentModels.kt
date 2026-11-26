@@ -102,16 +102,12 @@ fun nextLiveState(previous: LiveState?, state: LiveState?, changes: ChatChanges?
 
 /**
  * The saved stream paths of conversations that left the list: deleted, or no longer shared. Their
- * saved copies go, with their run log, as on the web.
+ * saved copies go, as on the web, with every saved run log (`HistoryCache.removeRunLogs`).
  */
 fun leftChatPaths(previous: List<Chat>?, chats: List<Chat>?): List<String> {
     if (previous == null || chats == null) return emptyList()
     val listed = chats.mapTo(HashSet()) { it.id }
-    return previous
-        .filter { it.id !in listed }
-        .flatMap { chat ->
-            listOfNotNull(savedChatPath(chat.id), chat.runId?.let { "/runs/${segment(it)}/stream" })
-        }
+    return previous.filter { it.id !in listed }.map { savedChatPath(it.id) }
 }
 
 /** Where a conversation opened by its identifier is saved. */

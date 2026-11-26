@@ -59,6 +59,7 @@ it('forgets the saved copies of conversations that leave the server list', async
   publishChats([kept])
   await vi.waitFor(() => expect(peekHistory(scope, '/chats/gone-slug/stream')).toBeUndefined())
   expect(peekHistory(scope, '/chats/gone/stream')).toBeUndefined()
+  // Run logs do not name their conversation: every saved one goes.
   expect(peekHistory(scope, '/runs/gone-run/stream')).toBeUndefined()
   expect(peekHistory(scope, '/chats/kept/stream')).toBeDefined()
 })

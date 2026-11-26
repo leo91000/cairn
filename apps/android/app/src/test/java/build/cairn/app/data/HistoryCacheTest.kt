@@ -36,6 +36,27 @@ class HistoryCacheTest {
         )
 
     @Test
+    fun `run logs go while conversations and the list stay`() = runBlocking {
+        val run = Run(id = "r", status = "succeeded", taskId = "")
+        cache()
+            .save(
+                "conversation",
+                record().copy(state = LiveState(run = run, chat = Chat(id = "c"))),
+                true,
+            )
+        cache().save("list", record().copy(state = LiveState(chats = listOf(Chat(id = "c")))), true)
+        cache().save("run log", record().copy(state = LiveState(run = run)), true)
+        val retained = cache()
+        retained.save("retained run log", record().copy(state = LiveState(run = run)), false)
+        retained.removeRunLogs()
+        assertNull(retained.read("retained run log"))
+        val reopened = cache()
+        assertNull(reopened.read("run log"))
+        assertNotNull(reopened.read("conversation"))
+        assertNotNull(reopened.read("list"))
+    }
+
+    @Test
     fun `a saved conversation stores its chat run once and reads it back`() = runBlocking {
         val run = Run(id = "r", status = "succeeded", taskId = "")
         val saved = record().copy(state = LiveState(run = run, chat = Chat(id = "c", run = run)))

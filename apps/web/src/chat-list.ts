@@ -5,6 +5,7 @@ import {
   cacheScope,
   readChatList,
   removeHistory,
+  removeRunLogs,
   writeChatList,
 } from './history-cache'
 import { cacheSession, useLiveRun } from './use-live-run'
@@ -21,12 +22,14 @@ let served = false
 /** The server's list waiting to be saved: saving serializes it, at most every few seconds. */
 let unsaved: { session: string, chats: ChatView[], planTurnsEnabled: boolean } | undefined
 let saveTimer: ReturnType<typeof setTimeout> | undefined
+let lastSaved: ChatView[] | undefined
 const SAVE_DELAY = 2000
 
 function saveList() {
   saveTimer = undefined
   const list = unsaved
   unsaved = undefined
+  lastSaved = list?.chats
   if (!list || !state.authenticated || state.signingOut || list.session !== cacheSession())
     return
   void cacheScope(list.session)
@@ -36,7 +39,7 @@ function saveList() {
 
 // A conversation that leaves the server's list was deleted or is no longer shared with this
 // person: its saved copies go too, under the slug and the identifier it may be opened by, and
-// its run log.
+// the saved run logs, among which its earlier runs cannot be told apart.
 function forgetRemoved(previous: ChatView[], chats: ChatView[]) {
   const listed = new Set(chats.map(chat => chat.id))
   const removed = previous.filter(chat => !listed.has(chat.id))
@@ -46,9 +49,9 @@ function forgetRemoved(previous: ChatView[], chats: ChatView[]) {
     for (const chat of removed) {
       for (const key of new Set([chat.slug || chat.id, chat.id]))
         void removeHistory(scope, `/chats/${key}/stream`)
-      if (chat.runId)
-        void removeHistory(scope, `/runs/${chat.runId}/stream`)
     }
+
+    void removeRunLogs(scope)
   }).catch(() => {})
 }
 
@@ -62,7 +65,8 @@ export function publishChats(chats: ChatView[], options: { saved?: boolean, plan
   chatList.value = chats
   chatPlanEnabled.value = options.planTurnsEnabled === true
   known = true
-  if (options.saved)
+  // A snapshot that keeps the same list saves nothing again.
+  if (options.saved || chats === unsaved?.chats || chats === lastSaved)
     return
   unsaved = { session: cacheSession(), chats, planTurnsEnabled: options.planTurnsEnabled === true }
   saveTimer ??= setTimeout(saveList, SAVE_DELAY)
@@ -104,6 +108,7 @@ export function useChatList() {
     known = false
     served = false
     unsaved = undefined
+    lastSaved = undefined
     clearTimeout(saveTimer)
     saveTimer = undefined
   })
