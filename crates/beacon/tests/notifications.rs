@@ -1598,14 +1598,14 @@ async fn removing_a_member_waits_for_an_admitted_send_and_prevents_the_next_send
     .fetch_one(&relay.app.pool)
     .await
     .unwrap();
-    let request = request(
+    let removal_request = request(
         &relay.app,
         &relay.cookie,
         &relay.session,
         Method::DELETE,
         &format!("/api/installations/{installation}/sharing/members/{member}"),
     );
-    let removal = tokio::spawn(async move { request.send().await });
+    let removal = tokio::spawn(async move { removal_request.send().await });
     relay.app.wait_for_blocked_request(push_pid).await;
 
     // Queue the next event once revocation is waiting on the admitted send.
