@@ -118,6 +118,24 @@ impl Catalogs {
         self.entries.lock().unwrap().remove(id);
     }
 
+    pub(crate) fn invalidate_matching(
+        &self,
+        id: &str,
+        revision: u64,
+        credentials: Option<blake3::Hash>,
+    ) {
+        let mut entries = self.entries.lock().unwrap();
+        if entries.get(id).is_some_and(|entry| {
+            entry.identity
+                == Identity {
+                    revision,
+                    credentials,
+                }
+        }) {
+            entries.remove(id);
+        }
+    }
+
     /// Update the entry that requested refresh. A newer cold or management
     /// discovery and an invalidated entry both take precedence.
     fn apply_refresh(
@@ -595,35 +613,38 @@ mod tests {
         let release = Arc::new(Notify::new());
         let close_entered = Arc::new(Notify::new());
         let close_release = Arc::new(Notify::new());
-        let listings = Arc::new(AtomicUsize::new(0));
         let sessions = Arc::new(AtomicUsize::new(0));
         let router = Router::new().route(
             "/mcp",
             post({
                 let (entered, release) = (entered.clone(), release.clone());
                 move |incoming: HeaderMap, Json(request): Json<Value>| {
-                    let (entered, release, listings, sessions) =
-                        (entered.clone(), release.clone(), listings.clone(), sessions.clone());
+                    let (entered, release, sessions) =
+                        (entered.clone(), release.clone(), sessions.clone());
                     async move {
                         let mut headers = HeaderMap::new();
+                        let session_id = incoming.get("mcp-session-id").and_then(|value| value.to_str().ok());
                         let result = match text(&request, "method") {
                             "server/discover" => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
                             "initialize" => {
                                 let session = sessions.fetch_add(1, Ordering::Relaxed) + 1;
                                 headers.insert("mcp-session-id", session.to_string().parse().unwrap());
+                                if session == 5 {
+                                    return (headers, " ".repeat(MAX_CATALOG_BYTES + 1)).into_response();
+                                }
                                 json!({
                                     "protocolVersion": crate::mcp_client::LEGACY,
                                     "capabilities": { "tools": {} },
                                 })
                             }
                             "notifications/initialized" => {
-                                if incoming.get("mcp-session-id").is_some_and(|id| id == "5") {
+                                if session_id == Some("6") {
                                     return StatusCode::FORBIDDEN.into_response();
                                 }
                                 return StatusCode::ACCEPTED.into_response();
                             }
                             "tools/list" => {
-                                let name = if listings.fetch_add(1, Ordering::Relaxed) > 0 {
+                                let name = if matches!(session_id, Some("2" | "4")) {
                                     entered.notify_one();
                                     release.notified().await;
                                     "updated_fixture"
@@ -634,7 +655,12 @@ mod tests {
                                     "tools": [{ "name": name, "inputSchema": { "type": "object" } }],
                                 })
                             }
-                            "tools/call" => json!({ "content": [{ "type": "text", "text": "live" }] }),
+                            "tools/call" => {
+                                if session_id == Some("8") {
+                                    return StatusCode::FORBIDDEN.into_response();
+                                }
+                                json!({ "content": [{ "type": "text", "text": "live" }] })
+                            }
                             method => panic!("unexpected MCP method {method}"),
                         };
                         (headers, Json(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }))).into_response()
@@ -645,7 +671,8 @@ mod tests {
                 move |headers: HeaderMap| {
                     let (entered, release) = (entered.clone(), release.clone());
                     async move {
-                        if headers.get("mcp-session-id").is_some_and(|id| id == "2" || id == "4" || id == "5") {
+                        let session = headers.get("mcp-session-id").and_then(|value| value.to_str().ok());
+                        if matches!(session, Some("2" | "4" | "5" | "6" | "8")) {
                             entered.notify_one();
                             release.notified().await;
                         }
@@ -657,6 +684,7 @@ mod tests {
         let (listener, address) = crate::common::bind().await;
         let upstream = crate::common::serve(listener, router);
         let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("home")).unwrap();
         let s = Service::new(crate::common::config(root.path()))
             .await
             .unwrap();
@@ -775,9 +803,50 @@ mod tests {
         );
         tokio::time::timeout(Duration::from_secs(3), close_entered.notified())
             .await
+            .expect("an oversize initialize body must still close the session from its headers");
+        assert!(s.mcps.gateway_catalogs.get(id, identity).is_some());
+        close_release.notify_one();
+        wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
+
+        let access = Access::for_grant(&s, id, bearer).await.unwrap();
+        let (previous, _) = s.mcps.gateway_catalogs.get(id, identity).unwrap();
+        refresh_in_background(
+            s.clone(),
+            access,
+            identity,
+            previous,
+            Duration::from_secs(3),
+        );
+        tokio::time::timeout(Duration::from_secs(3), close_entered.notified())
+            .await
             .expect("the denied initialization must close its legacy session");
         assert!(s.mcps.gateway_catalogs.get(id, identity).is_none());
         close_release.notify_one();
+        wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
+
+        assert_eq!(
+            list(&s, id, bearer).await.unwrap()["tools"][0]["name"],
+            "fixture"
+        );
+        let mut denied_live = std::pin::pin!(super::super::proxy(
+            &s,
+            id,
+            bearer,
+            "tools/call",
+            json!({ "name": "fixture", "arguments": {} }),
+        ));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                () = close_entered.notified() => {}
+                result = &mut denied_live => panic!("the denied call closed before the test could observe it: {result:?}"),
+            }
+        }).await.unwrap();
+        assert!(s.mcps.gateway_catalogs.get(id, identity).is_none());
+        close_release.notify_one();
+        assert_eq!(
+            denied_live.await.unwrap_err().message,
+            "MCP request failed."
+        );
         upstream.abort();
     }
 }

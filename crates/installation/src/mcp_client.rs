@@ -16,7 +16,7 @@ use reqwest::{
     header::{HeaderMap, HeaderValue},
 };
 use serde_json::{Map, Value, json};
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::time::{Instant, timeout_at};
 
 pub const MODERN: &str = "2026-07-28";
@@ -90,6 +90,14 @@ struct HttpTransport {
     bearer: String,
     session: Option<String>,
     response_budget: Option<usize>,
+    catalogue: Option<LiveCatalogue>,
+}
+
+struct LiveCatalogue {
+    mcps: Arc<crate::mcps::Mcps>,
+    id: String,
+    revision: u64,
+    credentials: Option<blake3::Hash>,
 }
 
 impl Client {
@@ -159,21 +167,21 @@ impl Client {
         let authorize = authorize.for_service(s);
         let refreshable =
             |secrets: &McpSecrets| server.uses_oauth() && !secrets.refresh_token().is_empty();
-        let mut secrets = s.mcps.server_secrets(s, &server.id).await?;
+        let (mut secrets, mut credentials) = s.mcps.server_credentials(s, &server.id).await?;
         let expired = secrets
             .token_expires_at
             .is_some_and(|time| time <= crate::config::now());
         if expired && refreshable(&secrets) {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
-            secrets = s.mcps.server_secrets(s, &server.id).await?;
+            (secrets, credentials) = s.mcps.server_credentials(s, &server.id).await?;
         }
         authorize.recheck().await?;
-        let first = Self::open(s, server, &secrets, authorize.clone()).await;
+        let first = Self::open(s, server, &secrets, credentials, authorize.clone()).await;
         if first.as_ref().is_err_and(Error::is_unauthorized) && refreshable(&secrets) {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
-            let secrets = s.mcps.server_secrets(s, &server.id).await?;
+            let (secrets, credentials) = s.mcps.server_credentials(s, &server.id).await?;
             authorize.recheck().await?;
-            return Self::open(s, server, &secrets, authorize.clone()).await;
+            return Self::open(s, server, &secrets, credentials, authorize).await;
         }
         first
     }
@@ -226,14 +234,20 @@ impl Client {
         s: &Service,
         server: &McpServer,
         secrets: &McpSecrets,
+        credentials: Option<blake3::Hash>,
         authorize: Authorization,
     ) -> Result<Self> {
         let authorization = Some(authorize);
-        let mut client = Self::new(
-            Self::transport(s, server, secrets, &authorization).await?,
-            MODERN,
-            authorization,
-        );
+        let mut transport = Self::transport(s, server, secrets, &authorization).await?;
+        if let Transport::Http(http) = &mut transport {
+            http.catalogue = Some(LiveCatalogue {
+                mcps: s.mcps.clone(),
+                id: server.id.clone(),
+                revision: server.revision,
+                credentials,
+            });
+        }
+        let mut client = Self::new(transport, MODERN, authorization);
         match client.probe_modern().await {
             Ok(true) => Ok(client),
             Ok(false) => client.initialize_legacy(s, server, secrets).await,
@@ -326,6 +340,7 @@ impl Client {
                 bearer: bearer.into(),
                 session: None,
                 response_budget: None,
+                catalogue: None,
             }));
         }
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
@@ -514,8 +529,15 @@ impl HttpTransport {
         headers(&self.bearer, protocol, self.session.as_deref())
     }
 
-    async fn post(&mut self, headers: HeaderMap, frame: &Frame) -> Result<network::Response> {
+    async fn post(
+        &mut self,
+        headers: HeaderMap,
+        frame: &Frame,
+        legacy_initialize: bool,
+    ) -> Result<network::Response> {
         let body = serde_json::to_vec(frame)?;
+        let session = &mut self.session;
+        let catalogue = &self.catalogue;
         let response = network::fetch_with_response_limit(
             &self.url,
             Method::POST,
@@ -523,6 +545,27 @@ impl HttpTransport {
             Some(body),
             self.allow_private,
             self.response_budget,
+            |status, headers| {
+                if matches!(status, 401 | 403)
+                    && let Some(catalogue) = catalogue
+                {
+                    catalogue.mcps.gateway_catalogs.invalidate_matching(
+                        &catalogue.id,
+                        catalogue.revision,
+                        catalogue.credentials,
+                    );
+                }
+                if legacy_initialize
+                    && (200..300).contains(&status)
+                    && let Some(value) = headers
+                        .get("mcp-session-id")
+                        .and_then(|value| value.to_str().ok())
+                {
+                    // Successful headers can allocate an upstream session
+                    // even if the initialize body times out or is too large.
+                    *session = Some(value.to_owned());
+                }
+            },
         )
         .await?;
         if let Some(remaining) = &mut self.response_budget {
@@ -550,9 +593,10 @@ impl HttpTransport {
                 headers.insert("mcp-name", value);
             }
         }
+        let legacy_initialize = !modern && method == "initialize";
         let method = method.to_owned();
         let frame = Frame::strict(Message::Request { id, method, params });
-        let response = self.post(headers, &frame).await?;
+        let response = self.post(headers, &frame, legacy_initialize).await?;
         check_status(response.status)?;
         if !modern
             && let Some(value) = response
@@ -573,7 +617,7 @@ impl HttpTransport {
     async fn notify(&mut self, protocol: &str, method: &str, params: Value) -> Result<()> {
         let method = method.to_owned();
         let frame = Frame::strict(Message::Notification { method, params });
-        let response = self.post(self.headers(protocol)?, &frame).await?;
+        let response = self.post(self.headers(protocol)?, &frame, false).await?;
         match response.status {
             200..=299 => Ok(()),
             401 | 403 => Err(Error::coded(
@@ -602,6 +646,7 @@ impl HttpTransport {
                 None,
                 self.allow_private,
                 self.response_budget.map(|_| 4096),
+                |_, _| {},
             ),
         )
         .await;

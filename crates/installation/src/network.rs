@@ -118,7 +118,7 @@ pub async fn fetch(
     body: Option<Vec<u8>>,
     allow_private: bool,
 ) -> Result<Response> {
-    fetch_with_response_limit(url, method, headers, body, allow_private, None).await
+    fetch_with_response_limit(url, method, headers, body, allow_private, None, |_, _| {}).await
 }
 
 pub(crate) async fn fetch_with_response_limit(
@@ -128,6 +128,7 @@ pub(crate) async fn fetch_with_response_limit(
     body: Option<Vec<u8>>,
     allow_private: bool,
     response_limit: Option<usize>,
+    on_headers: impl FnOnce(u16, &reqwest::header::HeaderMap) + Send,
 ) -> Result<Response> {
     const MAX_RESPONSE: usize = 8 * 1024 * 1024;
     let url = url::Url::parse(url).map_err(|_| Error::bad("Unsupported MCP endpoint."))?;
@@ -186,6 +187,7 @@ pub(crate) async fn fetch_with_response_limit(
         }
         let status = response.status().as_u16();
         let headers = response.headers().clone();
+        on_headers(status, &headers);
         if response_limit.is_some() && matches!(status, 401 | 403) {
             // Discovery uses the status and does not need an error document.
             return Ok(Response {

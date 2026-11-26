@@ -261,6 +261,14 @@ impl Mcps {
     }
 
     pub async fn server_secrets(&self, s: &Service, id: &str) -> Result<McpSecrets> {
+        Ok(self.server_credentials(s, id).await?.0)
+    }
+
+    pub(crate) async fn server_credentials(
+        &self,
+        s: &Service,
+        id: &str,
+    ) -> Result<(McpSecrets, Option<blake3::Hash>)> {
         let id = id.to_owned();
         let ciphertext = s
             .store
@@ -270,10 +278,11 @@ impl Mcps {
             })
             .await?;
         match ciphertext {
-            Some(bytes) => Ok(serde_json::from_slice(
-                &s.vault.decrypt_bytes(&id, &bytes)?,
-            )?),
-            None => Ok(McpSecrets::default()),
+            Some(bytes) => Ok((
+                serde_json::from_slice(&s.vault.decrypt_bytes(&id, &bytes)?)?,
+                Some(blake3::hash(&bytes)),
+            )),
+            None => Ok((McpSecrets::default(), None)),
         }
     }
 
@@ -608,7 +617,7 @@ impl Mcps {
             .as_ref()
             .err()
             .filter(|error| {
-                error.is_unauthorized() || crate::mcp_client::upstream_access_denied(error)
+                error.is_unauthorized() && !crate::mcp_client::upstream_access_denied(error)
             })
             .map(|_| server.id.clone());
         match result {
