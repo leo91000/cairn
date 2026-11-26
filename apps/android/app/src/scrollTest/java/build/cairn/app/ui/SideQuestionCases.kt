@@ -7,6 +7,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -458,6 +459,38 @@ abstract class SideQuestionCases {
         }
         assertTrue(side.open)
         assertEquals("", side.itemId)
+    }
+
+    @Test
+    fun keyboardFocusFollowsTheSideQuestionButtonBetweenPlacements() {
+        val side = SideQuestionState()
+        val working = WorkingStep("Omni travaille", "", null)
+        var placement by mutableStateOf(SideQuestionPlacement.Working)
+        compose.setContent {
+            CairnTheme {
+                val focus = rememberSideQuestionButtonFocus(placement)
+                val currentChat = chat(canAsk = true)
+                Column {
+                    if (placement == SideQuestionPlacement.Header) {
+                        SideQuestionButton(currentChat, side, focus, size = 40.dp)
+                    } else {
+                        WorkingIndicator(
+                            working,
+                            action = {
+                                SideQuestionButton(currentChat, side, focus)
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        val button = compose.onNodeWithTag("side-question-button")
+        compose.onRoot().performKeyInput { pressKey(Key.Tab) }
+        button.assertIsFocused()
+        placement = SideQuestionPlacement.Header
+        button.assertIsFocused()
+        placement = SideQuestionPlacement.Working
+        button.assertIsFocused()
     }
 
     @Test

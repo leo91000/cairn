@@ -17,9 +17,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -226,6 +230,32 @@ private fun engine(provider: String?) =
 
 internal fun hasSideQuestionAction(chat: Chat?): Boolean =
     chat != null && (chat.canAskSideQuestion || chat.sideQuestions.isNotEmpty())
+
+internal enum class SideQuestionPlacement {
+    Working,
+    Header,
+    FullscreenHeader,
+}
+
+/** Keep keyboard focus when the visible side-question button moves between placements. */
+@Composable
+internal fun rememberSideQuestionButtonFocus(placement: SideQuestionPlacement?): Modifier {
+    val requester = remember { FocusRequester() }
+    var focused by remember { mutableStateOf(false) }
+    var placed by remember { mutableStateOf<SideQuestionPlacement?>(null) }
+    // Take the snapshot before Compose detaches the outgoing focus target.
+    val restoreFocus = focused
+    LaunchedEffect(placement) {
+        if (placement != null && restoreFocus) {
+            withFrameNanos {}
+            // The working row may be outside the visible history and have no focus target.
+            if (placed == placement) requester.requestFocus()
+        }
+    }
+    return Modifier.focusRequester(requester)
+        .onFocusChanged { focused = it.isFocused }
+        .onPlaced { placed = placement }
+}
 
 internal class SideQuestionStatus(chat: Chat, side: SideQuestionState) {
     val pending = chat.sideQuestions.any { it.status == "pending" }

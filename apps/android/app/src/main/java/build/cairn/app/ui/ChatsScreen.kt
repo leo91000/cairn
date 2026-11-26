@@ -682,6 +682,14 @@ internal fun ChatPage(
             !live.catchingUp &&
             // The bar already shows the subagents it waits for.
             !(subagentBar && working.subagents)
+    val sidePlacement =
+        when {
+            sideStatus == null -> null
+            showWorkingIndicator -> SideQuestionPlacement.Working
+            fullscreen -> SideQuestionPlacement.FullscreenHeader
+            else -> SideQuestionPlacement.Header
+        }
+    val sideButtonFocus = key(id) { rememberSideQuestionButtonFocus(sidePlacement) }
     val conversationError = conversationError(chat, readOnly)
     val error = conversationError?.takeUnless {
         quota != null && (isQuotaMessage(it) || it == quota.message)
@@ -1207,7 +1215,13 @@ internal fun ChatPage(
                         },
                     ) {
                         if (sideChat != null && sideStatus != null && !showWorkingIndicator)
-                            SideQuestionButton(sideChat, side, size = 40.dp, status = sideStatus)
+                            SideQuestionButton(
+                                sideChat,
+                                side,
+                                sideButtonFocus,
+                                size = 40.dp,
+                                status = sideStatus,
+                            )
                         val files = live.state?.artifacts?.size ?: 0
                         if (id != null) {
                             Box {
@@ -1430,7 +1444,13 @@ internal fun ChatPage(
                             style = MaterialTheme.typography.titleSmall,
                         )
                         if (sideChat != null && sideStatus != null && !showWorkingIndicator)
-                            SideQuestionButton(sideChat, side, size = 40.dp, status = sideStatus)
+                            SideQuestionButton(
+                                sideChat,
+                                side,
+                                sideButtonFocus,
+                                size = 40.dp,
+                                status = sideStatus,
+                            )
                         ActionIcon("Quitter le plein écran", Icons.Default.Close) {
                             fullscreen = false
                         }
@@ -1706,10 +1726,10 @@ internal fun ChatPage(
                                     }
                                 }
                         }
-                        if (live.catchingUp && id != null) {
-                            OpeningOutline(live.error ?: live.status, Modifier.weight(1f))
-                        } else {
-                            Box(Modifier.weight(1f).fillMaxWidth()) {
+                        Box(Modifier.weight(1f).fillMaxWidth()) {
+                            if (live.catchingUp && id != null) {
+                                OpeningOutline(live.error ?: live.status, Modifier.fillMaxSize())
+                            } else {
                                 LazyColumn(
                                     Modifier.fillMaxSize()
                                         .historyVisibility(positionReady)
@@ -1985,6 +2005,7 @@ internal fun ChatPage(
                                                             SideQuestionButton(
                                                                 sideChat,
                                                                 side,
+                                                                sideButtonFocus,
                                                                 status = sideStatus,
                                                             )
                                                         }
@@ -1992,7 +2013,6 @@ internal fun ChatPage(
                                             )
                                         }
                                 }
-                                if (selected) SideQuestionAnnouncement(sideStatus)
                                 HistoryStatus(
                                     live,
                                     listState,
@@ -2005,6 +2025,7 @@ internal fun ChatPage(
                                     follow = true
                                 }
                             }
+                            if (selected) SideQuestionAnnouncement(sideStatus)
                         }
                         if (!fullscreen) requestPlan?.let { PlanBar(it) }
                         if (subagentBar) SubagentBar(currentSubagents, active, openSubagent)
