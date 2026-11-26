@@ -396,7 +396,7 @@ test('a Codex reply answers side questions from its running turn', async ({ page
   await expect(message).toBeVisible()
   await message.getByRole('button', { name: 'Ask about this reply' }).click()
   const panel = page.getByRole('dialog', { name: 'Side questions' })
-  await expect(panel.getByText(/^Codex answers in a single reply\./)).toBeVisible()
+  await expect(panel.getByText('Codex answers in a single reply. If it tries to run a tool')).toBeVisible()
   await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why trace the boundaries first?')
   await panel.getByRole('button', { name: 'Ask', exact: true }).click()
   await expect(panel.getByText('Side answer: Why trace the boundaries first?')).toBeVisible()
