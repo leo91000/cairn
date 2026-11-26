@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewModelScope
 import build.cairn.app.data.*
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
@@ -132,14 +133,15 @@ fun rememberLive(
                                         olderError = null
                                     // A conversation that leaves the list was deleted or is no
                                     // longer shared: its saved copy goes too, as on the web. The
-                                    // cache lock never delays the list on screen.
+                                    // cache lock never delays the list on screen, and leaving the
+                                    // screen does not cancel the removal.
                                     val left =
                                         if (path == "/chats/stream")
                                             leftChatPaths(value.state?.chats, it.state?.chats)
                                         else emptyList()
                                     value = pages.display(it)
                                     if (left.isNotEmpty())
-                                        scope.launch {
+                                        vm.viewModelScope.launch {
                                             for (saved in left) vm.historyCache.remove(
                                                 vm.historyCache.key(
                                                     api.cacheScope,

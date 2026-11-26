@@ -8,6 +8,7 @@ import {
 import {
   cacheScope,
   clearHistoryCache,
+  forgetHistory,
   knownScope,
   peekHistory,
   readChatList,
@@ -201,4 +202,12 @@ it('retains an older active background wait when the history suffix is trimmed',
   expect(saved?.events.map(event => event.id)).toEqual([3, 4])
   expect(saved?.entries).toEqual([wait])
   expect(saved).toMatchObject({ oldest: 3, hasOlder: true })
+})
+it('never saves a forgotten conversation again in this page', async () => {
+  await writeHistory('session', '/chats/gone/stream', record())
+  await forgetHistory('session', '/chats/gone/stream')
+  await writeHistory('session', '/chats/gone/stream', record())
+  expect(await readHistory('session', '/chats/gone/stream')).toBeUndefined()
+  await writeHistory('session', '/chats/kept/stream', record())
+  expect(await readHistory('session', '/chats/kept/stream')).toBeDefined()
 })

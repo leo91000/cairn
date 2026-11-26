@@ -19,6 +19,8 @@ export interface CachedHistory {
 }
 // Serialized entries: a read parses its own copy, and trimming needs no re-serialization.
 const memory = new Map<string, { text: string, size: number }>()
+// Conversations deleted while this page is open: a reader leaving one never saves it again.
+const forgotten = new Set<string>()
 const scopes = new Map<string, string>()
 const MAX_ENTRY = 4 * 1024 * 1024
 const MAX_HISTORY = 3 * 1024 * 1024
@@ -121,9 +123,12 @@ function remember(key: string, text: string) {
   memory.delete(key)
   memory.set(key, { text, size: text.length * 2 })
   let total = 0
-  for (const [index, [id, item]] of [...memory].reverse().entries()) {
+  let count = 0
+  for (const [id, item] of [...memory].reverse()) {
     total += item.size
-    if (total > MAX_TOTAL || index >= MAX_COUNT)
+    if (!id.endsWith(`:${LIST}`))
+      count++
+    if (total > MAX_TOTAL || count > MAX_COUNT)
       memory.delete(id)
   }
 }
@@ -191,7 +196,7 @@ export async function readHistory(scope: string, path: string): Promise<CachedHi
 export function writeHistory(scope: string, path: string, value: CachedHistory) {
   const key = `${scope}:${path}`
   const current = epoch
-  if (!valid(value))
+  if (!valid(value) || forgotten.has(key))
     return removeHistory(scope, path)
   value = saved(value)
   let text = JSON.stringify(value)
@@ -272,6 +277,12 @@ export function writeChatList(scope: string, value: SavedChatList) {
   })
 }
 
+/** Removes a deleted conversation's saved copy for good: this page never saves it again. */
+export function forgetHistory(scope: string, path: string) {
+  forgotten.add(`${scope}:${path}`)
+  return removeHistory(scope, path)
+}
+
 export function removeHistory(scope: string, path: string) {
   const key = `${scope}:${path}`
   memory.delete(key)
@@ -283,6 +294,7 @@ export function removeHistory(scope: string, path: string) {
 export function clearHistoryCache() {
   epoch++
   memory.clear()
+  forgotten.clear()
   return enqueue(() => transaction<void>('readwrite', (store) => {
     store.clear()
   }))

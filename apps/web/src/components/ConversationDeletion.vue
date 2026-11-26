@@ -3,7 +3,7 @@ import type { ChatView } from '../../../../packages/contracts/chats'
 import { ref } from 'vue'
 import { deleteChat } from '../../../../packages/contracts/generated/deleteChat'
 import { api, state } from '../api'
-import { cacheScope, removeHistory, removeRunLogs } from '../history-cache'
+import { cacheScope, forgetHistory, removeRunLogs } from '../history-cache'
 import { cacheSession } from '../use-live-run'
 import Modal from './Modal.vue'
 import UiButton from './UiButton.vue'
@@ -27,7 +27,7 @@ async function remove() {
     const scope = await cacheScope(cacheSession()).catch(() => undefined)
     for (const key of new Set([props.chat.slug || props.chat.id, props.chat.id])) {
       if (scope)
-        void removeHistory(scope, `/chats/${key}/stream`)
+        void forgetHistory(scope, `/chats/${key}/stream`)
     }
 
     if (scope)

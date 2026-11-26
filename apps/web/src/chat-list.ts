@@ -3,8 +3,8 @@ import { onScopeDispose, ref, watch } from 'vue'
 import { state } from './api'
 import {
   cacheScope,
+  forgetHistory,
   readChatList,
-  removeHistory,
   removeRunLogs,
   writeChatList,
 } from './history-cache'
@@ -48,7 +48,7 @@ function forgetRemoved(previous: ChatView[], chats: ChatView[]) {
   void cacheScope(cacheSession()).then((scope) => {
     for (const chat of removed) {
       for (const key of new Set([chat.slug || chat.id, chat.id]))
-        void removeHistory(scope, `/chats/${key}/stream`)
+        void forgetHistory(scope, `/chats/${key}/stream`)
     }
 
     void removeRunLogs(scope)
