@@ -632,15 +632,27 @@ impl Mcps {
                 if !cache_discovery {
                     return Ok(None);
                 }
-                let credentials = db
-                    .mcp_credentials(&server.id)?
-                    .map(|bytes| blake3::hash(&bytes));
+                let credentials = db.mcp_credentials(&server.id)?;
                 Ok(Some((server, credentials)))
             })
             .await?;
         if let Some((server, credentials)) = cache {
-            self.gateway_catalogs
-                .remember_management_discovery(server, credentials);
+            let fingerprint = credentials.as_deref().map(blake3::hash);
+            let expires_at = match credentials {
+                Some(bytes) if server.uses_oauth() => s
+                    .vault
+                    .decrypt_bytes(&server.id, &bytes)
+                    .and_then(|raw| serde_json::from_slice::<McpSecrets>(&raw).map_err(Error::from))
+                    .map(|secrets| secrets.token_expires_at),
+                _ => Ok(None),
+            };
+            if let Ok(expires_at) = expires_at {
+                self.gateway_catalogs.remember_management_discovery(
+                    server,
+                    fingerprint,
+                    expires_at,
+                );
+            }
         }
         if let Some(id) = revoked {
             self.gateway_catalogs.invalidate(&id);

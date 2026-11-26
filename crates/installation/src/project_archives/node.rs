@@ -148,7 +148,7 @@ pub(crate) async fn stage(
         }
         return Ok(None);
     }
-    let _disk = await_preparation(
+    let storage_guard = await_preparation(
         stop,
         crate::native::disk::observed_lock(
             &crate::native::state_dir(),
@@ -189,7 +189,7 @@ pub(crate) async fn stage(
             return Ok(Some(key.to_owned()));
         }
     }
-    let _guard = await_preparation(stop, async { Ok(lock().lock().await) }).await?;
+    let archive_guard = await_preparation(stop, async { Ok(lock().lock().await) }).await?;
     let data = crate::nodes::node_data_dir();
     clean_interrupted_downloads(&data).await?;
     let pins = root.join("project-archives");
@@ -262,6 +262,8 @@ pub(crate) async fn stage(
         crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id)).await?;
     }
     check_preparing(stop)?;
+    drop(archive_guard);
+    drop(storage_guard);
     if let Some(disk_mib) = base_disk_mib {
         let _ = crate::native::bases::request(
             "warm",

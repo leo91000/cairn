@@ -38,6 +38,7 @@ struct Entry {
     tools: Arc<Vec<Value>>,
     discovered_at: Instant,
     refresh_at: Instant,
+    credential_expires_at: Option<i64>,
 }
 
 #[derive(Default)]
@@ -73,7 +74,12 @@ impl Catalogs {
         let now = Instant::now();
         let mut entries = self.entries.lock().unwrap();
         let entry = entries.get_mut(id)?;
-        if entry.identity != identity || now.duration_since(entry.discovered_at) >= EXPIRES_AFTER {
+        if entry.identity != identity
+            || now.duration_since(entry.discovered_at) >= EXPIRES_AFTER
+            || entry
+                .credential_expires_at
+                .is_some_and(|expires| expires <= crate::config::now())
+        {
             return None;
         }
 
@@ -86,7 +92,13 @@ impl Catalogs {
         Some((entry.tools.clone(), refresh))
     }
 
-    fn insert(&self, id: String, identity: Identity, tools: Arc<Vec<Value>>) {
+    fn insert(
+        &self,
+        id: String,
+        identity: Identity,
+        tools: Arc<Vec<Value>>,
+        credential_expires_at: Option<i64>,
+    ) {
         if !encoded_size(tools.as_ref()).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES) {
             self.invalidate(&id);
             return;
@@ -110,6 +122,7 @@ impl Catalogs {
                 tools,
                 discovered_at: now,
                 refresh_at: now + REFRESH_AFTER,
+                credential_expires_at,
             },
         );
     }
@@ -178,6 +191,7 @@ impl Catalogs {
         &self,
         server: McpServer,
         credentials: Option<blake3::Hash>,
+        credential_expires_at: Option<i64>,
     ) {
         if validate(&server.tools).is_ok() {
             self.insert(
@@ -187,6 +201,7 @@ impl Catalogs {
                     credentials,
                 },
                 Arc::new(server.tools),
+                credential_expires_at,
             );
         } else {
             self.invalidate(&server.id);
@@ -271,7 +286,7 @@ pub(super) async fn list(s: &Arc<Service>, id: &str, bearer: &str) -> Result<Val
         return Ok(result);
     }
 
-    let tools = discover(s, &access, identity).await?;
+    let tools = discover(s, &access).await?;
     Ok(access.listing(&tools))
 }
 
@@ -341,18 +356,15 @@ fn refresh_in_background(
             };
 
             timing.next("publish");
-            match result {
-                Ok(tools)
-                    if validate(&tools).is_ok()
-                        && timeout_at(deadline, authorize.recheck())
-                            .await
-                            .is_ok_and(|result| result.is_ok()) =>
-                {
-                    s.mcps
-                        .gateway_catalogs
-                        .apply_refresh(id, expected, &previous, Some(tools));
-                }
-                _ => {}
+            if let Ok(tools) = result
+                && validate(&tools).is_ok()
+                && timeout_at(deadline, authorize.recheck())
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+            {
+                s.mcps
+                    .gateway_catalogs
+                    .apply_refresh(id, expected, &previous, Some(tools));
             }
             timing.next("close");
             if let Some(client) = client {
@@ -387,28 +399,32 @@ async fn read_tools(
     Ok(tools)
 }
 
-async fn discover(
-    s: &Arc<Service>,
-    access: &Access,
-    identity: Identity,
-) -> Result<Arc<Vec<Value>>> {
+async fn discover(s: &Arc<Service>, access: &Access) -> Result<Arc<Vec<Value>>> {
     let mut timing =
         crate::performance::Operation::new("mcp_gateway_discovery", &access.server.id, "connect");
     let result = async {
         let client =
             Client::connect_server_live(s, &access.server, access.authority.clone()).await?;
-        read_tools(client, &mut timing).await
+        let credential = client.catalogue_credential();
+        read_tools(client, &mut timing)
+            .await
+            .map(|tools| (tools, credential))
     }
     .await;
     timing.next("recheck");
     let current = access.identity(s).await?;
     match result {
-        Ok(tools) => {
+        Ok((tools, credential)) => {
             let tools = Arc::new(tools);
-            if current == identity {
-                s.mcps
-                    .gateway_catalogs
-                    .insert(access.server.id.clone(), identity, tools.clone());
+            if let Some(credential) = credential
+                && credential.fingerprint == current.credentials
+            {
+                s.mcps.gateway_catalogs.insert(
+                    access.server.id.clone(),
+                    current,
+                    tools.clone(),
+                    credential.expires_at,
+                );
             }
             timing.finish();
             Ok(tools)
@@ -554,7 +570,7 @@ mod tests {
             credentials: Some(blake3::hash(b"fixture credential record")),
         };
         let tools = Arc::new(vec![json!({ "name": "read" })]);
-        catalogs.insert("fixture".into(), identity, tools.clone());
+        catalogs.insert("fixture".into(), identity, tools.clone(), None);
 
         let (cached, refresh) = catalogs.get("fixture", identity).unwrap();
         assert!(Arc::ptr_eq(&cached, &tools));
@@ -599,6 +615,23 @@ mod tests {
             .get_mut("fixture")
             .unwrap()
             .discovered_at -= EXPIRES_AFTER;
+        assert!(catalogs.get("fixture", identity).is_none());
+    }
+
+    #[test]
+    fn oauth_expiry_ends_cache_validity_without_a_credential_write() {
+        let catalogs = Catalogs::default();
+        let identity = Identity {
+            revision: 1,
+            credentials: Some(blake3::hash(b"fixture credential record")),
+        };
+        let tools = Arc::new(vec![json!({ "name": "read" })]);
+        catalogs.insert(
+            "fixture".into(),
+            identity,
+            tools,
+            Some(crate::config::now()),
+        );
         assert!(catalogs.get("fixture", identity).is_none());
     }
 

@@ -91,11 +91,25 @@ struct HttpTransport {
     session: Option<String>,
     response_budget: Option<usize>,
     on_access_denied: Option<DenialCallback>,
+    catalogue_credential: Option<CatalogueCredential>,
 }
 
 type DenialCallback = Box<dyn Fn() + Send + Sync>;
 
+#[derive(Clone, Copy)]
+pub(crate) struct CatalogueCredential {
+    pub(crate) fingerprint: Option<blake3::Hash>,
+    pub(crate) expires_at: Option<i64>,
+}
+
 impl Client {
+    pub(crate) fn catalogue_credential(&self) -> Option<CatalogueCredential> {
+        match &self.transport {
+            Transport::Http(http) => http.catalogue_credential,
+            Transport::Stdio(_) => None,
+        }
+    }
+
     /// Connects with the stored credentials, refreshing OAuth tokens that expired
     /// or that the server rejects.
     pub async fn connect_server(s: &Service, server: &McpServer) -> Result<Self> {
@@ -237,6 +251,14 @@ impl Client {
         let authorization = Some(authorize);
         let mut transport = Self::transport(s, server, secrets, &authorization).await?;
         if let Transport::Http(http) = &mut transport {
+            http.catalogue_credential = Some(CatalogueCredential {
+                fingerprint: credentials,
+                expires_at: if server.uses_oauth() {
+                    secrets.token_expires_at
+                } else {
+                    None
+                },
+            });
             let mcps = Arc::clone(&s.mcps);
             let (id, revision) = (server.id.clone(), server.revision);
             http.on_access_denied = Some(Box::new(move || {
@@ -335,6 +357,7 @@ impl Client {
                 session: None,
                 response_budget: None,
                 on_access_denied: None,
+                catalogue_credential: None,
             }));
         }
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());

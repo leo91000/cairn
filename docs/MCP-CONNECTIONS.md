@@ -117,7 +117,8 @@ calls and other forwarded operations open an upstream session with bounded
 requests and an 8 MB response limit. Calls time out after 60 seconds.
 
 The gateway can serve `tools/list` from a validated catalogue held in manager
-memory for up to five minutes. A cached listing becomes eligible for a
+memory for up to five minutes, capped by the recorded OAuth access token
+expiry. A cached listing becomes eligible for a
 background refresh after one minute. The refresh uses the current credential
 snapshot and can run while tools are called. Live requests handle OAuth token
 rotation. Background refresh has a fixed request deadline, page and HTTP
