@@ -169,9 +169,10 @@ let generation = 0
 // press. A press that ends without a click on that control lets the check through, and none is
 // held longer than this after it answers or, without an answer yet, after the release.
 const PRESS_HOLD = 2000
-// Controls a click activates; other presses, such as dragging a slider, have no click to protect.
-const CLICKABLE = 'button, a[href], summary, label, input[type="checkbox"], input[type="radio"], [role="button"], [role="menuitem"], [role="option"], [role="tab"]'
-const FIELD = 'input:not([type="checkbox"], [type="radio"]), select, textarea'
+// Controls a press ends with a click on, which a tap delivers last. Dragging a slider has no click
+// to protect.
+const CLICKABLE = 'button, a[href], summary, label, input, select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"]'
+const SLIDER = 'input[type="range"]'
 let pressedPointerId: number | undefined
 let pressedElement: Element | undefined
 let held: (() => void) | undefined
@@ -198,10 +199,16 @@ function releasePress() {
 }
 
 function startPress(event: PointerEvent) {
-  const target = event.target instanceof Element ? event.target : null
-  const control = target?.closest(FIELD) ? null : target?.closest(CLICKABLE)
-  if (event.button !== 0 || !event.isPrimary || !control || control.matches(':disabled'))
+  if (!event.isPrimary)
     return
+  const target = event.target instanceof Element ? event.target : null
+  const control = target?.closest(SLIDER) ? null : target?.closest(CLICKABLE)
+  // A held check waits for this press's click; any other press ends an earlier one that had none.
+  if (event.button !== 0 || !control || control.matches(':disabled')) {
+    releasePress()
+    return
+  }
+
   pressedPointerId = event.pointerId
   pressedElement = control
 }

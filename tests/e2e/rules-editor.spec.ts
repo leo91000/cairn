@@ -561,7 +561,7 @@ test('a check answering while a slider is pressed is applied at once', async ({ 
     await signIn(page)
     const status = page.getByRole('status').filter({ hasText: /Checking|Ready/ })
     await expect(status).toHaveText('Checking…')
-    // A drag ends without a click, so there is no press to protect; a synthetic press leaves the value as it is.
+    // Dragging a slider has no click to protect. A synthetic press leaves its value as it is.
     await page.getByRole('slider', { name: /Triggerings that act/ })
       .dispatchEvent('pointerdown', {
         pointerId: 7,
@@ -632,6 +632,28 @@ test('a check answering during a press waits for its click on a phone', async ({
     await page.mouse.up()
     await expect(page.getByRole('menuitem', { name: /The author is one/ })).toBeVisible()
     await expect(status).toHaveText(/to fix/)
+  }
+  finally {
+    validation.current.resolve()
+  }
+})
+
+test('a check answering during a press is applied when the press is released elsewhere', async ({ page, workspace }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const { add, status, validation } = await openConditionStep(page, workspace)
+
+  try {
+    const before = (await add.boundingBox())!
+    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
+    await page.mouse.down()
+    await answerCheck(page, validation)
+    await expect(status).toHaveText('Checking…')
+    // Released over the sheet above the button: there is no click on it to protect.
+    await page.mouse.move(before.x + before.width / 2, before.y - 40)
+    await page.mouse.up()
+    // Well before a held check would be let through.
+    await expect(status).toHaveText(/to fix/, { timeout: 1000 })
+    await expect(page.getByRole('menuitem', { name: /The author is one/ })).toHaveCount(0)
   }
   finally {
     validation.current.resolve()
