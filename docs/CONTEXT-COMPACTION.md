@@ -120,7 +120,7 @@ it is not queued, acknowledged or added to the transcript.
   - Chat state and availability are covered in `chats::tests`, worker persistence in
     `worker::output::tests`, and MCP parity in `tests/installation_mcp.rs`.
 - **Clients.**
-  - Web: `context-usage.test.ts`, plus the Chromium journeys in `tests/e2e/chats.spec.ts`
+  - Web: `context-usage.test.ts`, plus the Chromium journeys in `tests/e2e/chats-lifecycle.spec.ts`
     on desktop and phone widths.
   - Android: `ContextUsageTest` and `ContextCompactionJourneyTest`.
 - **Engine protocol evidence.**

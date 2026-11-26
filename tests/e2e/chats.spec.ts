@@ -505,7 +505,7 @@ isolatedWorkspaceTest('a transient agent error shows a retry countdown and resum
   await expect(failure).toHaveCount(1)
 })
 
-test('cancelling automatic recovery pauses the conversation and preserves its work', async ({ page, workspace }) => {
+isolatedWorkspaceTest('cancelling automatic recovery pauses the conversation and preserves its work', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
     id: randomUUID(),
