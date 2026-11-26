@@ -7,7 +7,7 @@ use crate::{
     skills::atomic_write,
     validation::text,
 };
-use futures_util::{StreamExt, stream::FuturesUnordered};
+use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::{
@@ -1181,7 +1181,7 @@ impl Chat<'_> {
             .await
     }
 
-    fn ask_side(&mut self, side: &Value) {
+    async fn ask_side(&mut self, side: &Value) -> Result<()> {
         let question = text(side, "id").to_owned();
         let rpc = self.session.rpc.clone();
         let request = rpc.next_id();
@@ -1198,6 +1198,11 @@ impl Chat<'_> {
                 .await;
             (question, result)
         }));
+        // Send the request now, so that a withdrawal or the turn's end always follows it.
+        while let Some(Some((question, result))) = self.samples.next().now_or_never() {
+            self.side_settled(question, result).await?;
+        }
+        Ok(())
     }
 
     /// Withdraws a side question silently. Its sample settles as cancelled.
@@ -1465,7 +1470,7 @@ impl Chat<'_> {
                     continue;
                 }
                 if asking {
-                    self.ask_side(&message["sideQuestion"]);
+                    self.ask_side(&message["sideQuestion"]).await?;
                 } else {
                     self.withdraw_side(text(&message, "sideQuestionId")).await?;
                 }

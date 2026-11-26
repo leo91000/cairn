@@ -307,7 +307,7 @@ internal fun ColumnScope.SideQuestionPanel(
             )
         else if (chat.provider == "codex")
             Text(
-                "Codex répond en un seul message. S’il tente d’utiliser un outil à la place, l’outil ne s’exécute pas et la question échoue.",
+                "Codex répond en un seul message. S’il tente d’exécuter un outil, comme une commande, l’outil ne s’exécute pas et la question échoue. Une recherche web activée pour l’agent peut quand même s’exécuter sur les serveurs d’OpenAI pendant ce message ; elle est en lecture seule.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

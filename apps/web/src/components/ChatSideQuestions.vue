@@ -259,7 +259,7 @@ defineExpose({ ask, show, unreachable })
         Antigravity answers from the conversation recorded up to its last finished step, not the step in progress.
       </p>
       <p v-else-if="provider === 'codex'" class="text-xs leading-relaxed text-muted">
-        Codex answers in a single reply. If it tries to use a tool instead, the tool does not run and the question fails.
+        Codex answers in a single reply. If it tries to run a tool, such as a command, the tool does not run and the question fails. A web search enabled for the agent can still run on OpenAI’s servers within that reply; it is read-only.
       </p>
       <form v-if="canAsk" class="space-y-3" @submit.prevent="send">
         <button

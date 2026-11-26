@@ -48,4 +48,5 @@ file was created), dropped the withdrawn question, and kept every side question 
 their saved session.
 
 Servers that report `codex` as the reason (ADR-0081) remain decodable; this server
-reports `codex-release` only for a Codex release before 0.172.0.
+reports `codex-release` when a Codex adapter declines side questions, as it does for a
+release before 0.172.0 or one whose version it cannot read.

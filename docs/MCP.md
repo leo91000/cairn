@@ -255,11 +255,12 @@ reply's stored event ID as a decimal string in `question.replyEventId` to distin
 reused item IDs; it must identify an agent message in this conversation's run. If omitted, a unique item ID is resolved and its event is saved; ambiguous IDs are refused. It requires
 `canAskSideQuestion`, reported by `get_chat`, `list_chats` and
 `list_chat_side_questions` with `sideQuestionReason` (and its code,
-`sideQuestionUnavailable`) when false: Claude Code must be
-working on a reply. Codex and OpenCode conversations never take one. Supply
+`sideQuestionUnavailable`) when false: Claude Code 2.1.308 or later, Codex 0.172.0
+or later or Antigravity must be working on a reply. OpenCode conversations never take
+one. Supply
 a UUID in `question.id`; identical retries return the retained question. After it is pruned, reuse of its ID is refused. The answer, or why there is
 none, appears in `list_chat_side_questions`. `cancel_chat_side_question` withdraws
-one that is still pending. Neither steers the reply or changes the queue. Claude denies attempted tools, but an operator’s managed-policy hooks may run before denial and can have side effects; withdrawal cannot undo effects already performed.
+one that is still pending. Neither steers the reply or changes the queue. Claude denies attempted tools, but an operator’s managed-policy hooks may run before denial and can have side effects; withdrawal cannot undo effects already performed. Codex fails a question whose answer attempts a tool, but a web search enabled for the agent can still run, read-only, on OpenAI’s servers.
 
 `delete_chat` uses the apps' deletion lifecycle. Busy chats require `confirm: true`
 to stop execution and cancel messages/questions. Existing cleanup rules may
