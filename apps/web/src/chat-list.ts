@@ -45,8 +45,9 @@ function saveList() {
 function forgetRemoved(previous: ChatView[], chats: ChatView[], spareRecent = false) {
   const listed = new Set(chats.map(chat => chat.id))
   // A list another tab saved may hold a conversation created after the server list read here:
-  // only one older than the newest the server lists, by the server's clock, is gone then.
-  const newest = Math.max(0, ...chats.map(chat => chat.createdAt))
+  // only one older than the newest the server lists, by the server's clock, is gone then. With
+  // nothing listed, every saved conversation is gone.
+  const newest = chats.length ? Math.max(...chats.map(chat => chat.createdAt)) : Number.POSITIVE_INFINITY
   const removed = previous.filter(chat => !listed.has(chat.id) && (!spareRecent || chat.createdAt < newest - RECENT))
   if (!removed.length)
     return
@@ -64,8 +65,9 @@ function forgetRemoved(previous: ChatView[], chats: ChatView[], spareRecent = fa
 export function publishChats(chats: ChatView[], options: { saved?: boolean, planTurnsEnabled?: boolean } = {}) {
   if (options.saved && known)
     return
+  // The first server list may follow a saved one, perhaps saved by another tab.
   if (!options.saved && known)
-    forgetRemoved(chatList.value, chats)
+    forgetRemoved(chatList.value, chats, !served)
   served ||= !options.saved
   chatList.value = chats
   chatPlanEnabled.value = options.planTurnsEnabled === true

@@ -276,7 +276,7 @@ class HistoryCache(
      * once, at the first removal, and a marker records it.
      */
     private fun dropUnnamedRunLogs() {
-        val marker = File(root, ".run-logs-named")
+        val marker = File(root, RUN_LOGS_NAMED)
         if (marker.exists()) return
         root
             .listFiles()
@@ -313,6 +313,11 @@ class HistoryCache(
                 written.clear()
                 dirty.clear()
                 root.listFiles()?.forEach { it.delete() }
+                // Nothing saved before run logs were named apart remains.
+                runCatching {
+                    root.mkdirs()
+                    File(root, RUN_LOGS_NAMED).createNewFile()
+                }
             }
         }
 
@@ -397,6 +402,9 @@ class HistoryCache(
     companion object {
         /** A saved conversation holds its own history only, so many fit the byte budget. */
         private const val MAX_COUNT = 60
+
+        /** Marks a cache whose run logs are all named apart. */
+        private const val RUN_LOGS_NAMED = ".run-logs-named"
 
         fun encrypted(context: Context): HistoryCache {
             fun key(): SecretKey {

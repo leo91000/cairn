@@ -94,3 +94,25 @@ it('forgets what left the list since it was saved when the server list arrives f
   effect.stop()
   vi.unstubAllGlobals()
 })
+
+it('spares recent conversations of a saved list shown before the server list, unless nothing is listed', async () => {
+  vi.resetModules()
+  const { publishChats } = await import('../src/chat-list')
+  const history = await import('../src/history-cache')
+  const scope = await history.cacheScope('test-session')
+  for (const path of ['/chats/gone/stream', '/chats/newer/stream'])
+    await history.writeHistory(scope, path, saved())
+  const gone = { id: 'gone', slug: '', createdAt: 1 } as ChatView
+  const kept = { id: 'kept', slug: '', createdAt: 20_000 } as ChatView
+  const newer = { id: 'newer', slug: '', createdAt: 25_000 } as ChatView
+
+  publishChats([gone, kept, newer], { saved: true })
+  publishChats([kept])
+  await vi.waitFor(() => expect(history.peekHistory(scope, '/chats/gone/stream')).toBeUndefined())
+  expect(history.peekHistory(scope, '/chats/newer/stream')).toBeDefined()
+
+  // The server's own lists only move forward, and an empty one leaves nothing to spare.
+  publishChats([kept, newer])
+  publishChats([])
+  await vi.waitFor(() => expect(history.peekHistory(scope, '/chats/newer/stream')).toBeUndefined())
+})

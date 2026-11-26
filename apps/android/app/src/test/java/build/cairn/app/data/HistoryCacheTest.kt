@@ -85,6 +85,17 @@ class HistoryCacheTest {
     }
 
     @Test
+    fun `a cleared cache never reads its files again to find older run logs`() = runBlocking {
+        val run = Run(id = "r", status = "succeeded", taskId = "")
+        val cache = cache()
+        cache.clear()
+        // Only a file from before the clear could be an unnamed run log; this one is not read.
+        cache.save("unnamed", record().copy(state = LiveState(run = run)), true)
+        cache.removeRunLogs("origin", "session")
+        assertNotNull(cache().read("unnamed"))
+    }
+
+    @Test
     fun `a forgotten conversation is never saved again until the cache is cleared`() = runBlocking {
         val cache = cache()
         cache.save("gone", record(), true)
