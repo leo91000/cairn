@@ -15,13 +15,10 @@ import Icon from './Icon.vue'
 // `drawer` opens a panel along the right edge, and a bottom sheet on phones like `sheet`.
 // `headless` names the dialog without a title bar; the content draws its own heading.
 // `workbench` fills most of the viewport for editors with their own layout, and all of it on phones.
-// `steady` keeps its full height while open: content that appears later, such as validation
-// messages, never moves the controls above it under a press.
 const props = defineProps<{
   title: string
   wide?: boolean
   workbench?: boolean
-  steady?: boolean
   sheet?: boolean
   drawer?: boolean
   headless?: boolean
@@ -49,7 +46,7 @@ onBeforeUnmount(() => {
       class="modal m-auto border border-line rounded-[15px] max-w-[min(560px,_calc(100vw_-_28px))] w-full max-h-[calc(100dvh_-_32px_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] bg-raised text-ink [box-shadow:0_25px_90px_light-dark(#12112335,_#00000035)] p-0"
       :aria-labelledby="headless ? undefined : titleId"
       :aria-label="headless ? title : undefined"
-      :class="{ wide, drawer, workbench, steady, 'mobile-sheet': sheet || drawer }"
+      :class="{ wide, drawer, workbench, 'mobile-sheet': sheet || drawer }"
       @cancel.prevent="emit('close')"
       @click="
         (e) => {
@@ -102,13 +99,6 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
 }
-.steady {
-  height: calc(100dvh - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-}
-.steady .modal-inner {
-  height: 100%;
-  max-height: none;
-}
 .workbench {
   max-width: min(1320px, calc(100vw - 40px));
   height: min(900px, calc(100dvh - 40px));
@@ -156,8 +146,6 @@ onBeforeUnmount(() => {
     padding-bottom: env(safe-area-inset-bottom);
   }
   .mobile-sheet .modal-head { padding: 16px 20px 8px; border-bottom: 0; }
-  .mobile-sheet.steady { height: calc(100dvh - env(safe-area-inset-top) - 16px); }
-  .mobile-sheet.steady .modal-inner { max-height: none; }
   .workbench {
     inset: 0;
     margin: 0;

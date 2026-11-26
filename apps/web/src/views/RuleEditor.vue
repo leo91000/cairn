@@ -164,6 +164,41 @@ function chooseTrigger(key: string) {
 let timer: ReturnType<typeof setTimeout> | undefined
 let generation = 0
 
+// A check that answers during a press waits for its release: its status and messages change the
+// layout, which would move the pressed control from under the pointer and lose the press. A press
+// that never reports its end holds a check at most this long.
+const PRESS_HOLD = 2000
+let pressing = false
+let held: (() => void) | undefined
+let heldTimer: ReturnType<typeof setTimeout> | undefined
+
+function afterPress(apply: () => void) {
+  if (!pressing) {
+    apply()
+    return
+  }
+
+  held = apply
+  clearTimeout(heldTimer)
+  heldTimer = setTimeout(releaseHeld, PRESS_HOLD)
+}
+
+function releaseHeld() {
+  clearTimeout(heldTimer)
+  const apply = held
+  held = undefined
+  apply?.()
+}
+
+const pressStarted = () => pressing = true
+
+// In a later task, so the click that ends the press reaches its control first.
+function pressEnded() {
+  pressing = false
+  if (held)
+    setTimeout(releaseHeld)
+}
+
 function scheduleValidation(value: HookRuleDefinition | null, delay = 350) {
   if (!value)
     return
@@ -173,12 +208,13 @@ function scheduleValidation(value: HookRuleDefinition | null, delay = 350) {
   validationError.value = ''
   checking.value = true
   timer = setTimeout(async () => {
+    let apply: () => void
     try {
       const local = ruleJsonDraftProblems(value)
       const output = local.length
         ? { valid: false, problems: local, warnings: [] }
         : await validateHookRule(api, { definition: value, ruleId: rule.value?.id ?? id.value })
-      if (!disposed && current === generation) {
+      apply = () => {
         validated.value = true
         validationError.value = ''
         problems.value = output.problems
@@ -186,12 +222,16 @@ function scheduleValidation(value: HookRuleDefinition | null, delay = 350) {
       }
     }
     catch (e) {
-      if (!disposed && current === generation)
-        validationError.value = (e as Error).message
+      apply = () => validationError.value = (e as Error).message
     }
-    finally {
-      if (!disposed && current === generation)
+
+    if (!disposed && current === generation) {
+      afterPress(() => {
+        if (disposed || current !== generation)
+          return
+        apply()
         checking.value = false
+      })
     }
   }, delay)
 }
@@ -335,6 +375,9 @@ async function saveDraftOverLatest() {
 }
 
 onMounted(() => {
+  window.addEventListener('pointerdown', pressStarted, true)
+  window.addEventListener('pointerup', pressEnded, true)
+  window.addEventListener('pointercancel', pressEnded, true)
   wideQuery.addEventListener('change', onWide)
   window.addEventListener('beforeunload', beforeUnload)
   void load()
@@ -363,6 +406,10 @@ onBeforeUnmount(() => {
   disposed = true
   generation++
   clearTimeout(timer)
+  clearTimeout(heldTimer)
+  window.removeEventListener('pointerdown', pressStarted, true)
+  window.removeEventListener('pointerup', pressEnded, true)
+  window.removeEventListener('pointercancel', pressEnded, true)
   wideQuery.removeEventListener('change', onWide)
   window.removeEventListener('beforeunload', beforeUnload)
 })
@@ -630,7 +677,6 @@ onBeforeUnmount(() => {
       v-if="!wide && selectedNode && selected"
       title="Edit step"
       sheet
-      steady
       headless
       @close="selected = null"
     >

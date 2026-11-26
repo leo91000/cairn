@@ -360,7 +360,15 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
         </div>
       </div>
     </div>
-    <!-- Validation answers after an edit: its messages follow the button, which stays put. -->
+    <p
+      v-for="(problem, at) in problems.filter(problem => problem.path === path && (model.type === 'all' || model.type === 'any'))"
+      :key="at"
+      class="m-0! text-xs font-semibold text-coral"
+      role="alert"
+    >
+      {{ problem.message }}
+    </p>
+    <small v-for="problem in problemsAt(`${path}/conditions`).filter((_, i) => i < 1 && !group?.conditions.length)" :key="problem" class="text-xs font-semibold text-coral">{{ problem }}</small>
     <div class="relative">
       <button
         type="button"
@@ -417,14 +425,5 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
         </button>
       </div>
     </div>
-    <p
-      v-for="(problem, at) in problems.filter(problem => problem.path === path && (model.type === 'all' || model.type === 'any'))"
-      :key="at"
-      class="m-0! text-xs font-semibold text-coral"
-      role="alert"
-    >
-      {{ problem.message }}
-    </p>
-    <small v-for="problem in problemsAt(`${path}/conditions`).filter((_, i) => i < 1 && !group?.conditions.length)" :key="problem" class="text-xs font-semibold text-coral">{{ problem }}</small>
   </div>
 </template>

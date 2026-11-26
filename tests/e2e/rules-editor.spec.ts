@@ -534,10 +534,12 @@ test('loop insertion stays reachable when validation finishes during a press', a
     expect(position).not.toBeNull()
     await page.mouse.move(position!.x + position!.width / 2, position!.y + position!.height / 2)
     await page.mouse.down()
+    const answered = page.waitForResponse('**/api/hook-rules/validate')
     validation.resolve()
-    await expect(status).toHaveText('Ready')
+    await answered
     await page.mouse.up()
     await expect(page.getByRole('menuitem', { name: /Remember a value/ })).toBeVisible()
+    await expect(status).toHaveText('Ready')
     await expect(page.getByRole('menuitem', { name: /^Wait/ })).toHaveCount(0)
   }
   finally {
@@ -545,7 +547,7 @@ test('loop insertion stays reachable when validation finishes during a press', a
   }
 })
 
-test('a condition press stays on its button when validation answers during it on a phone', async ({ page, workspace }) => {
+test('a check answering during a press waits for its release on a phone', async ({ page, workspace }) => {
   await page.setViewportSize({ width: 390, height: 844 })
 
   const fixture = await rulesFixture(workspace)
@@ -563,14 +565,13 @@ test('a condition press stays on its button when validation answers during it on
     const status = page.locator('[role="status"]', { hasText: /Checking|to fix|Ready/ })
     await expect(status).toHaveText(/to fix|Ready/)
 
-    // The new step is checked while the condition button is pressed; the check then adds
-    // its messages to the step sheet.
+    // The new step is checked while Add a condition is pressed. Its messages grow the step
+    // sheet, so they wait for the release instead of moving the button under the pointer.
     validation = Promise.withResolvers<void>()
     await page.getByRole('button', { name: 'Add the first step', exact: true }).click()
     await page.getByRole('menuitem', { name: /If \/ otherwise/ }).click()
     await expect(status).toHaveText('Checking…')
     const add = page.getByRole('button', { name: 'Add a condition', exact: true })
-    await expect(add).toBeVisible()
     // The sheet slides in first: press once it rests.
     let previous: number | undefined
     await expect.poll(async () => {
@@ -582,12 +583,16 @@ test('a condition press stays on its button when validation answers during it on
     const before = (await add.boundingBox())!
     await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
     await page.mouse.down()
+    const answered = page.waitForResponse('**/api/hook-rules/validate')
     validation.resolve()
-    await expect(status).toHaveText(/to fix/)
-    await expect(page.getByText(/Review \d+ validation message/)).toBeVisible()
+    await answered
+    // Give the answer time to reach the page: it is held, so nothing moves.
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 300)))
+    await expect(status).toHaveText('Checking…')
     expect((await add.boundingBox())!.y).toBe(before.y)
     await page.mouse.up()
     await expect(page.getByRole('menuitem', { name: /The author is one/ })).toBeVisible()
+    await expect(status).toHaveText(/to fix/)
   }
   finally {
     validation.resolve()
