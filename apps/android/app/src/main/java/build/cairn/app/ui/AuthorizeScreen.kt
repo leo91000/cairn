@@ -365,14 +365,20 @@ internal fun AuthorizeScreen(
                             Box(
                                 Modifier.size(48.dp)
                                     .clip(RoundedCornerShape(14.dp))
-                                    .background(Color(0xFFD97757)),
+                                    // Client names are self-declared: no brand colour.
+                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                                    .border(
+                                        1.dp,
+                                        MaterialTheme.colorScheme.outlineVariant,
+                                        RoundedCornerShape(14.dp),
+                                    ),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Text(
                                     initial(details.client.client_name),
                                     style = MaterialTheme.typography.titleLarge,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color.White,
+                                    color = MaterialTheme.colorScheme.onSurface,
                                 )
                             }
                             Spacer(Modifier.width(12.dp))

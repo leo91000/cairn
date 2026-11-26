@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import type { IconName } from '../icons'
 import type { SelectOption } from '../select'
-import { computed, onMounted, ref } from 'vue'
+import {
+  computed,
+  inject,
+  onMounted,
+  ref,
+} from 'vue'
 import { api, redirect } from '../api'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
 import AuthStage from '../components/AuthStage.vue'
@@ -20,8 +25,12 @@ import {
   Terminal,
   TriangleAlert,
 } from '../icons'
+import { installationKey } from '../installation-context'
 
 const props = defineProps<{ email?: string, embedded?: boolean }>()
+// Inside the workspace the beacon shell provides the signed-in account instead of a prop.
+const installation = inject(installationKey, null)
+const email = computed(() => props.email || installation?.current.value?.email || '')
 
 const parameters = Object.fromEntries(new URLSearchParams(location.search))
 const details = ref<{
@@ -48,7 +57,7 @@ const clientInitial = computed(() => {
   return (match?.[0] ?? 'M').toUpperCase()
 })
 const accountInitial = computed(() => {
-  const local = (props.email ?? '').split('@')[0] ?? ''
+  const local = email.value.split('@')[0] ?? ''
   const match = local.match(/[\p{L}\p{N}]/u)
   return (match?.[0] ?? 'C').toUpperCase()
 })
@@ -165,8 +174,7 @@ function handleConfirmed() {
       <div class="flex flex-col items-center text-center">
         <div class="mb-4 flex items-center justify-center gap-3.5" aria-hidden="true">
           <span
-            class="grid size-13 place-items-center rounded-[15px] font-heading text-xl font-bold text-white shadow-sm"
-            style="background: linear-gradient(135deg, var(--color-claude), color-mix(in srgb, var(--color-claude) 82%, #16151d));"
+            class="grid size-13 place-items-center rounded-[15px] border border-line bg-inset font-heading text-xl font-bold text-ink shadow-sm"
           >
             {{ details ? clientInitial : 'M' }}
           </span>

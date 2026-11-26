@@ -71,6 +71,20 @@ test('failed saves keep feedback visible above a scrolled MCP form', async ({ pa
   expect(saves).toBe(1)
 })
 
+test('a failed MCP OAuth callback explains the failure and returns to MCPs', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath('/mcps'))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+  await page.route(/\/mcps\/oauth\/callback$/, route => route.fulfill({ status: 400, json: { error: 'Authorization expired' } }))
+  await page.goto(workspacePath('/mcps/callback?code=stale&state=stale'))
+  await expect(page.getByText('Connection failed', { exact: true })).toBeVisible()
+  await expect(page.getByText('Authorization expired')).toBeVisible()
+  await expect(page.getByRole('main')).toHaveCount(1)
+  await page.getByRole('button', { name: 'Back to MCPs', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+})
+
 for (const pending of ['authorization', 'offer'] as const) {
   test(`OAuth navigation does not leave background polls running in the departing page (${pending} pending)`, async ({ page, workspace, browserName }) => {
     const name = `Slow OAuth (${pending})`

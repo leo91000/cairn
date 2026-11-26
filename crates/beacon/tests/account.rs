@@ -872,6 +872,11 @@ async fn native_github_handover_keeps_one_use_consent_and_requires_the_original_
             .next()
             .unwrap()
             .to_owned();
+        // Signal pages may style inline but never run script or post elsewhere.
+        assert_eq!(
+            callback.headers()["content-security-policy"],
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+        );
         let html = callback.text().await.unwrap();
         assert!(html.contains("application Cairn pour Android"));
         assert!(html.contains("alice@example.test"));
