@@ -329,7 +329,7 @@ class AuthorizeScreenTest {
     }
 
     @Test
-    fun `a link shared during a decision opens after that decision completes`() {
+    fun `a link shared during a decision waits behind that decision's return link`() {
         MockWebServer().use { server ->
             val consents = CopyOnWriteArrayList<String>()
             val release = CountDownLatch(1)
@@ -417,6 +417,16 @@ class AuthorizeScreenTest {
                 compose.onNodeWithText("Autoriser « Claude » ?").assertExists()
 
                 release.countDown()
+                compose.waitUntil(10_000) {
+                    compose.onAllNodesWithText("Accès autorisé").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNodeWithText("Retourner au client").performScrollTo().assertIsDisplayed()
+                assertEquals(secondUrl, incomingUrl)
+
+                compose
+                    .onNodeWithText("Examiner la nouvelle demande")
+                    .performScrollTo()
+                    .performClick()
                 compose.waitUntil(10_000) {
                     compose
                         .onAllNodesWithText("Autoriser « Autre assistant » ?")

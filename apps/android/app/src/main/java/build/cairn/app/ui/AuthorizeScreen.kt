@@ -103,6 +103,7 @@ internal fun AuthorizeScreen(
     sharedUrl: String = "",
     consentState: McpConsentState = viewModel(),
     close: (() -> Unit)? = null,
+    pendingShare: Boolean = false,
 ) {
     val credentials = accountCredentials()
     val context = LocalContext.current
@@ -329,6 +330,15 @@ internal fun AuthorizeScreen(
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                             ) {
                                 Text("Retourner au client")
+                            }
+                            if (pendingShare) {
+                                OutlinedButton(
+                                    onClick = { consentState.completed = null },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                                ) {
+                                    Text("Examiner la nouvelle demande")
+                                }
                             }
                             Text(
                                 "Vous pouvez révoquer cet accès à tout moment dans Paramètres.",
