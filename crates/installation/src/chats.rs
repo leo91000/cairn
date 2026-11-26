@@ -834,13 +834,17 @@ fn require_current_proposal(
         has_content,
         request_id,
     } = event.ok_or_else(stale)?;
-    let request_id = request_id.filter(|id| !id.is_empty()).ok_or_else(stale)?;
     if kind != "item.completed"
         || !has_content
         || approval.source_id != format!("{run_id}:{event_id}")
     {
         return Err(stale());
     }
+    let request_id = request_id.filter(|id| !id.is_empty()).ok_or_else(|| {
+        Error::conflict(
+            "This proposal has no authored request ID. Ask for a fresh Plan proposal before approving.",
+        )
+    })?;
     let latest_request: Option<(i64, Option<String>)> =
         db.0.query_row(
             "SELECT id,CASE WHEN json_type(payload,'$.messageId')='text'

@@ -2513,6 +2513,10 @@ async fn legacy_proposal_without_request_id_requires_a_fresh_proposal() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(
+        text(&body, "error").contains("Ask for a fresh Plan proposal"),
+        "{body}"
+    );
+    assert!(
         app.get(&path).await.1["messages"]
             .as_array()
             .unwrap()

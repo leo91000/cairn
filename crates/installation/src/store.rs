@@ -126,9 +126,20 @@ fn upgrade_compact_schema(writer: &mut Connection, directory: &Path) -> Result<(
     // The earlier startup marker only covers database detachment. Private
     // conversion copies may still be waiting for its background cleanup.
     let staging = directory.join("backend-migration-staging");
+    let staging_error = |operation: &str, error: std::io::Error| {
+        Error::new(
+            500,
+            format!(
+                "Could not {operation} backend-migration-staging or its parent in the manager data directory ({error}). Check the path, permissions and storage before upgrading."
+            ),
+        )
+    };
     let directory_to_sync = match std::fs::symlink_metadata(&staging) {
         Ok(metadata) if metadata.is_dir() => {
-            let empty = std::fs::read_dir(&staging)?.next().transpose()?.is_none();
+            let empty = std::fs::read_dir(&staging)
+                .and_then(|mut entries| entries.next().transpose())
+                .map_err(|error| staging_error("read", error))?
+                .is_none();
             empty.then_some(staging.as_path())
         }
         Ok(_) => {
@@ -137,7 +148,7 @@ fn upgrade_compact_schema(writer: &mut Connection, directory: &Path) -> Result<(
             ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(directory),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(staging_error("inspect", error)),
     }
     .ok_or_else(|| {
         Error::bad(
@@ -146,7 +157,9 @@ fn upgrade_compact_schema(writer: &mut Connection, directory: &Path) -> Result<(
     })?;
     // The previous manager could have stopped after unlinking the last copy
     // but before syncing the directory. Make that cleanup durable first.
-    std::fs::File::open(directory_to_sync)?.sync_all()?;
+    std::fs::File::open(directory_to_sync)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| staging_error("sync", error))?;
 
     // Drop the retired dependants before their referenced tables. The earlier
     // manager already detached S3 environments and queued local retirement.
@@ -1412,7 +1425,7 @@ mod schema_tests {
         drop(store);
 
         let file = root.path().join("manager.db");
-        let db = Connection::open(&file).unwrap();
+        let mut db = Connection::open(&file).unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON;
              CREATE TABLE shared_objects(id TEXT PRIMARY KEY);
@@ -1487,6 +1500,21 @@ mod schema_tests {
         );
         assert_eq!(std::fs::read(&staging).unwrap(), b"not a directory");
         assert!(db.table_exists(None, "shared_publications").unwrap());
+        let error = upgrade_compact_schema(&mut db, &file).unwrap_err();
+        assert_eq!(error.status, 500);
+        assert!(
+            error
+                .message
+                .contains("Could not inspect backend-migration-staging")
+        );
+        let missing = root.path().join("missing-data-directory");
+        let error = upgrade_compact_schema(&mut db, &missing).unwrap_err();
+        assert_eq!(error.status, 500);
+        assert!(
+            error
+                .message
+                .contains("Could not sync backend-migration-staging")
+        );
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
