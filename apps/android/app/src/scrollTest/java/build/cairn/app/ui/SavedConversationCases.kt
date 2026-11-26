@@ -174,7 +174,7 @@ abstract class SavedConversationCases {
                                     current = { savedIsCurrent(it, listOf(known)) },
                                 )
                             Text(live.events.lastOrNull()?.text ?: "Waiting for current output")
-                            if (live.stale) Text("Updating saved output")
+                            if (live.stale) Text("Updating saved output: ${live.status}")
                         }
                     }
                 }
@@ -191,14 +191,18 @@ abstract class SavedConversationCases {
                 compose.waitForIdle()
                 compose.waitUntil(10000) { requested.count == 0L }
                 compose.onNodeWithText("Saved output").assertIsDisplayed()
-                compose.onNodeWithText("Updating saved output").assertIsDisplayed()
+                compose
+                    .onNodeWithText("Updating saved output: $UPDATING_STATUS")
+                    .assertIsDisplayed()
 
                 release.countDown()
                 compose.waitUntil(10000) {
                     compose.onAllNodesWithText("Current output").fetchSemanticsNodes().isNotEmpty()
                 }
                 compose.onNodeWithText("Current output").assertIsDisplayed()
-                compose.onNodeWithText("Updating saved output").assertDoesNotExist()
+                compose
+                    .onNodeWithText("Updating saved output", substring = true)
+                    .assertDoesNotExist()
             } finally {
                 release.countDown()
                 compose.runOnIdle { mounted = false }

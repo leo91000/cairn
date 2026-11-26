@@ -13,6 +13,7 @@ import { api, ApiError, state } from './api'
 import {
   cacheScope,
   clearHistoryCache,
+  inMemory,
   knownScope,
   peekHistory,
   readHistory,
@@ -40,7 +41,7 @@ export async function warmHistory(path: string) {
     return
   const session = cacheSession()
   const scope = knownScope(session) ?? await cacheScope(session).catch(() => undefined)
-  if (scope && !peekHistory(scope, path))
+  if (scope && !inMemory(scope, path))
     await readHistory(scope, path)
 }
 
@@ -224,7 +225,9 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         if (signal?.aborted || disposed || current !== generation)
           return
         if (batch.state?.cacheRevision) {
-          const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
+          // Compact streams carry the history revision: a tab of an older bundle, which
+          // follows the trash revision under the previous key, never clears this one's cache.
+          const revisionKey = state.installationId ? `conversation-history-revision:${state.installationId}` : 'conversation-history-revision'
           try {
             if (localStorage.getItem(revisionKey) !== batch.state.cacheRevision) {
               void clearHistoryCache()

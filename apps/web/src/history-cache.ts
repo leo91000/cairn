@@ -141,6 +141,11 @@ function saved(value: CachedHistory): CachedHistory {
   }
 }
 
+/** Whether a conversation is held in this page, without reading it. */
+export function inMemory(scope: string, path: string) {
+  return memory.has(`${scope}:${path}`)
+}
+
 /** A conversation read in this page, available without waiting for storage. */
 export function peekHistory(scope: string, path: string): CachedHistory | undefined {
   try {

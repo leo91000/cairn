@@ -16,6 +16,8 @@ export const chatList = ref<ChatView[]>([])
 export const chatListCarried = ref(false)
 export const chatPlanEnabled = ref(false)
 let known = false
+// The list shown came from a server stream, not from storage.
+let served = false
 /** The server's list waiting to be saved: saving serializes it, at most every few seconds. */
 let unsaved: { session: string, chats: ChatView[], planTurnsEnabled: boolean } | undefined
 let saveTimer: ReturnType<typeof setTimeout> | undefined
@@ -53,6 +55,7 @@ export function publishChats(chats: ChatView[], options: { saved?: boolean, plan
     return
   if (!options.saved && known)
     forgetRemoved(chatList.value, chats)
+  served ||= !options.saved
   chatList.value = chats
   chatPlanEnabled.value = options.planTurnsEnabled === true
   known = true
@@ -69,7 +72,7 @@ async function restoreList() {
   if (!saved || session !== cacheSession() || !state.authenticated || state.signingOut)
     return
   // The server's list may have arrived first: what left it since the save goes too.
-  if (known)
+  if (served)
     forgetRemoved(saved.chats, chatList.value)
   else
     publishChats(saved.chats, { saved: true, planTurnsEnabled: saved.planTurnsEnabled })
@@ -95,6 +98,7 @@ export function useChatList() {
     chatList.value = []
     chatPlanEnabled.value = false
     known = false
+    served = false
     unsaved = undefined
     clearTimeout(saveTimer)
     saveTimer = undefined

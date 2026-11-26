@@ -193,7 +193,13 @@ fun rememberLive(
             }
         }
     }
-    val visible = if (stale) value.copy(stale = true) else value
+    // An outdated copy says it is updating, even when it came from an earlier live snapshot.
+    val visible =
+        when {
+            !stale -> value
+            value.status == LIVE_STATUS -> value.copy(stale = true, status = UPDATING_STATUS)
+            else -> value.copy(stale = true)
+        }
     return visible.copy(
         loadingOlder = loadingOlder,
         olderError = olderError,
