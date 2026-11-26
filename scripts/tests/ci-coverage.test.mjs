@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import process from 'node:process'
 import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
@@ -11,12 +13,40 @@ import {
 import { nextestArtifact } from '../ci/install-nextest-ci.mjs'
 
 const quality = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
+const storage = parse(readFileSync(new URL('../../.github/workflows/ci-storage.yaml', import.meta.url), 'utf8'))
 const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml', import.meta.url), 'utf8'))
 const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.meta.url), 'utf8'))
 const webkitRegression = parse(readFileSync(new URL('../../.github/workflows/webkit-dependency-regression.yaml', import.meta.url), 'utf8'))
 const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
+  it('rejects invalid direct storage qualification inputs before setup', () => {
+    const guard = storage.jobs['storage-development'].steps.find(step => step.name === 'Require a non-publishing development dispatch')
+    const runGuard = overrides => spawnSync('bash', ['-eo', 'pipefail', '-c', guard.run], {
+      env: {
+        PATH: process.env.PATH,
+        VALIDATION_ONLY: 'true',
+        BACKEND_ONLY: 'false',
+        DIAGNOSTIC_CANDIDATE: '',
+        DIAGNOSTIC_REFERENCE: '',
+        ...overrides,
+      },
+      encoding: 'utf8',
+    })
+
+    expect(runGuard({}).status).toBe(0)
+    for (const invalid of [
+      { VALIDATION_ONLY: 'false' },
+      { BACKEND_ONLY: 'true' },
+      { DIAGNOSTIC_CANDIDATE: 'a'.repeat(40) },
+      { DIAGNOSTIC_REFERENCE: 'b'.repeat(40) },
+    ]) {
+      const result = runGuard(invalid)
+      expect(result.status, JSON.stringify(invalid)).toBe(1)
+      expect(result.stdout).toBe('')
+    }
+  })
+
   it('runs the dedicated WebKit regression for edits to its Playwright image check', () => {
     const imageCheck = './.github/actions/check-playwright-image'
     expect(webkitRegression.jobs.webkit.steps.some(step => step.uses === imageCheck)).toBe(true)

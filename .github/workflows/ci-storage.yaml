@@ -39,8 +39,10 @@ jobs:
           DIAGNOSTIC_CANDIDATE: ${{ inputs.diagnostic-candidate }}
           DIAGNOSTIC_REFERENCE: ${{ inputs.diagnostic-reference }}
         run: |
-          test "$VALIDATION_ONLY" = true && test "$BACKEND_ONLY" = false
-          test -z "$DIAGNOSTIC_CANDIDATE" && test -z "$DIAGNOSTIC_REFERENCE"
+          test "$VALIDATION_ONLY" = true
+          test "$BACKEND_ONLY" = false
+          test -z "$DIAGNOSTIC_CANDIDATE"
+          test -z "$DIAGNOSTIC_REFERENCE"
           git rev-parse HEAD
       - uses: ./.github/actions/setup-pnpm
         with:
