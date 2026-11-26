@@ -278,7 +278,8 @@ struct Chat<'a> {
     turn_recorded: bool,
     /// Codex is compacting the running turn's context: new side questions wait.
     side_compacting: bool,
-    /// The turn ended: samples still failing were cut short by it.
+    /// The turn completed: Cairn withdraws the samples still running, which Codex would
+    /// otherwise finish, and a sample failing now was cut short by that end.
     closing_sides: bool,
     /// Side questions Codex is answering, with the ID of their `thread/sample` request.
     sides: HashMap<String, u64>,
@@ -1198,7 +1199,7 @@ impl Chat<'_> {
                 .await;
             (question, result)
         }));
-        // Send the request now, so that a withdrawal or the turn's end always follows it.
+        // Send the request now, so that a withdrawal or the turn's end normally follows it.
         while let Some(Some((question, result))) = self.samples.next().now_or_never() {
             self.side_settled(question, result).await?;
         }
@@ -1214,10 +1215,18 @@ impl Chat<'_> {
     }
 
     async fn cancel_sample(&mut self, request: u64) -> Result<()> {
+        let params = json!({ "requestId": request });
+        // Once the turn completed, stopping the reply must not make it fail: the
+        // withdrawal no longer waits on the stop signal.
+        let cancelled = if self.closing_sides {
+            self.session
+                .rpc
+                .request("thread/sample/cancel", params)
+                .await
+        } else {
+            self.request("thread/sample/cancel", params).await
+        };
         // A sample that already finished has nothing left to cancel.
-        let cancelled = self
-            .request("thread/sample/cancel", json!({ "requestId": request }))
-            .await;
         match cancelled {
             Err(error) if error.status == 409 => Err(error),
             _ => Ok(()),
@@ -1243,7 +1252,7 @@ impl Chat<'_> {
                     )
                     .await;
             }
-            // Codex fails the samples of a turn that ended.
+            // Cut short by the turn's end, or by its withdrawal then.
             Err(_) if self.closing_sides => {
                 return self
                     .side_failed(&question, crate::chats::side_questions::EXPIRED)
