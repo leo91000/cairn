@@ -547,8 +547,8 @@ async fn native_stop_controls_remain_available_without_host_admission() {
         node["nativeEnabled"] = false.into();
         node["nativeAccounts"] = json!([]);
         f.service.store.put_node_fixture(node).await.unwrap();
-        // The synthetic Beacon has no native-authority endpoint. A refresh
-        // would fail; execution-reducing controls must not depend on it.
+        // Execution-reducing controls must succeed when a refresh would fail.
+        common::relay_fixture::native_authority_unavailable(&f.service).await;
         f.service
             .store
             .set(
@@ -581,6 +581,15 @@ async fn native_stop_controls_remain_available_without_host_admission() {
             assert_eq!(run["status"], "cancelled");
         }
         if action == "pause" {
+            f.service
+                .store
+                .set(
+                    "native-authority",
+                    json!({ "observedAt": now(), "accounts": { OTHER: {} } }),
+                    None,
+                )
+                .await
+                .unwrap();
             let (status, response) = f
                 .call(&f.other, "POST", &path, json!({ "paused": false }))
                 .await;
@@ -1555,10 +1564,10 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
         "budget": { "slots": 1, "limits": f.node["limits"] },
         "pool": { "capacity": 1 },
     });
-    let send = |body: Value| {
+    let send = |path: &str, body: Value| {
         let request = Request::builder()
             .method("POST")
-            .uri("/internal/nodes/heartbeat")
+            .uri(path)
             .header("host", common::HOST)
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/json")
@@ -1566,8 +1575,19 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
             .unwrap();
         common::send(&f.router, request)
     };
-    // The last proof remains valid while Beacon refresh is unavailable. A
-    // heartbeat may renew work, but cannot extend this proof's deadline.
+    let plans = f.service.config.data_dir.join("runner-plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    std::fs::write(
+        plans.join(format!("{attempt}.json")),
+        json!({ "runId": run["id"], "backend": "native" }).to_string(),
+    )
+    .unwrap();
+    let workspace = format!("/internal/node-workspace/{attempt}/plan");
+    let heartbeat_path = "/internal/nodes/heartbeat";
+
+    // During a Beacon outage, the cached proof can renew existing work up to
+    // its deadline. Removing the local grant still blocks renewal and access.
+    common::relay_fixture::native_authority_unavailable(&f.service).await;
     f.service
         .store
         .set(
@@ -1580,13 +1600,15 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
         )
         .await
         .unwrap();
-    let first = read_json(send(heartbeat.clone()).await).await;
+    let first = read_json(send(heartbeat_path, heartbeat.clone()).await).await;
     assert_eq!(first["leases"].as_array().unwrap().len(), 1);
     let remaining = first["leases"][0]["remainingMs"].as_u64().unwrap();
     assert!(
         remaining > 0 && remaining <= 30_000,
         "grant must retain the proof deadline: {first}"
     );
+    assert_eq!(send(&workspace, json!({})).await.status(), StatusCode::OK);
+
     let mut node = f
         .service
         .node_boundary(f.node["id"].as_str().unwrap())
@@ -1595,8 +1617,12 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
     assert_eq!(node["executionReady"], true);
     node["nativeAccounts"] = json!([]);
     f.service.store.put_node_fixture(node).await.unwrap();
-    let renewed = read_json(send(heartbeat).await).await;
+    let renewed = read_json(send(heartbeat_path, heartbeat).await).await;
     assert!(renewed["leases"].as_array().unwrap().is_empty());
+    assert_eq!(
+        send(&workspace, json!({})).await.status(),
+        StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]
