@@ -218,11 +218,7 @@ watch(session, (value) => {
   }
 
   if (!requested && value.installations.length && !claimPage && !invitationsPage && !authorizePage && !pluginCallbackPage) {
-    let remembered = ''
-    try {
-      remembered = sharedPreference(`cairn_installation_${value.account?.id}`) || localStorage.getItem(`cairn-current-installation:${value.account?.id}`) || ''
-    }
-    catch {}
+    const remembered = rememberedInstallation(value.account?.id)
 
     openInstallation(value.installations.find(item => item.id === remembered) || value.installations[0]!)
   }
@@ -239,6 +235,15 @@ watch(() => state.authenticated, (authenticated) => {
 })
 
 const accountRequest = (route: string, body?: unknown) => beaconAccountRequest(route, session.value?.csrf || '', body)
+
+function rememberedInstallation(accountId?: string) {
+  try {
+    return sharedPreference(`cairn_installation_${accountId}`) || localStorage.getItem(`cairn-current-installation:${accountId}`) || ''
+  }
+  catch {
+    return ''
+  }
+}
 
 async function loadSession() {
   busy.value = true
@@ -768,7 +773,11 @@ onMounted(async () => {
   <WebUpdateNotice />
   <PrivacyPolicy v-if="privacyPage" />
   <PluginOAuthCallback v-else-if="session?.authenticated && pluginCallbackPage" :parameters="pluginCallbackParameters" />
-  <Authorize v-else-if="session?.authenticated && authorizePage" :email="session.account?.email || ''" />
+  <Authorize
+    v-else-if="session?.authenticated && authorizePage"
+    :email="session.account?.email || ''"
+    :current-installation-id="rememberedInstallation(session.account?.id)"
+  />
   <div v-else-if="session?.authenticated && installation" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
     <!-- While an update is required the workspace is unavailable, so phones keep this bar. -->
     <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm phone:gap-2 phone:px-3" :class="{ 'phone:hidden': !installation.updateRequired && !state.protocolError }" aria-label="Current installation">

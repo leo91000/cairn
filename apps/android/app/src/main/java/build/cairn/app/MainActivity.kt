@@ -34,7 +34,10 @@ class MainActivity : ComponentActivity() {
         setTheme(R.style.Theme_Cairn)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        receive(intent)
+        // After process death the system redelivers the launch intent, whose share may already
+        // have been consumed; the share still waiting at that point is in the saved state.
+        receive(intent, share = savedInstanceState == null)
+        savedInstanceState?.getString(PENDING_SHARE)?.let { sharedUrl = it }
         setContent {
             val vm: CairnViewModel = viewModel()
             val preference by vm.theme.collectAsStateWithLifecycle(initialValue = "system")
@@ -77,6 +80,11 @@ class MainActivity : ComponentActivity() {
         receive(intent)
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(PENDING_SHARE, sharedUrl)
+    }
+
     override fun onStart() {
         super.onStart()
         frameMonitor.start()
@@ -87,14 +95,16 @@ class MainActivity : ComponentActivity() {
         super.onStop()
     }
 
-    private fun receive(intent: Intent) {
+    private fun receive(intent: Intent, share: Boolean = true) {
         notificationTarget(intent)?.let { target ->
             targetChat = target
             targetCacheScope = intent.getStringExtra("origin").orEmpty()
             targetAccount = intent.getStringExtra("account").orEmpty()
         }
-        if (intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
+        if (share && intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
             sharedUrl = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
         }
     }
 }
+
+private const val PENDING_SHARE = "pending-share"

@@ -259,6 +259,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       expect(Object.fromEntries(new URL(page.url()).searchParams)).toEqual(Object.fromEntries(parameters))
       await page.getByRole('combobox', { name: 'Installation', exact: true }).click()
       await page.getByRole('option', { name: 'OAuth claim machine', exact: true }).click()
+      await expect(page.getByTitle(`Signed in as ${email}`)).toBeVisible()
       await expect(page.getByText('Local app', { exact: true })).toBeVisible()
       await expect(page.getByRole('button', { name: 'Allow access', exact: true })).toBeDisabled()
       await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()

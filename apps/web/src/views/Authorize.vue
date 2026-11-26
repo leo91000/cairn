@@ -3,7 +3,6 @@ import type { IconName } from '../icons'
 import type { SelectOption } from '../select'
 import {
   computed,
-  inject,
   onMounted,
   ref,
 } from 'vue'
@@ -25,12 +24,9 @@ import {
   Terminal,
   TriangleAlert,
 } from '../icons'
-import { installationKey } from '../installation-context'
 
-const props = defineProps<{ email?: string, embedded?: boolean }>()
-// Inside the workspace the beacon shell provides the signed-in account instead of a prop.
-const installation = inject(installationKey, null)
-const email = computed(() => props.email || installation?.current.value?.email || '')
+const props = defineProps<{ email?: string, embedded?: boolean, currentInstallationId?: string }>()
+const email = computed(() => props.email || '')
 
 const parameters = Object.fromEntries(new URLSearchParams(location.search))
 const details = ref<{
@@ -65,6 +61,13 @@ const loading = ref(true)
 const error = ref('')
 const busy = ref(false)
 const installationId = ref('')
+
+// Default to the installation the account last used, as Android defaults to its current one.
+function defaultInstallation() {
+  const choices = details.value?.installations ?? []
+  return choices.find(item => item.id === props.currentInstallationId)?.id || choices[0]?.id || ''
+}
+
 const installationOptions = computed<SelectOption[]>(() => (details.value?.installations ?? []).map(item => ({
   value: item.id,
   label: item.name,
@@ -114,7 +117,7 @@ onMounted(async () => {
       method: 'POST',
       body: JSON.stringify(parameters),
     })
-    installationId.value = details.value?.installations?.[0]?.id || ''
+    installationId.value = defaultInstallation()
     confirmationRequired.value = Boolean(details.value?.confirmationRequired)
   }
   catch (e) {

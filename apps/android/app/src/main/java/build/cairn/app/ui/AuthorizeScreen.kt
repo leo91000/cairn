@@ -333,7 +333,11 @@ internal fun AuthorizeScreen(
                             }
                             if (pendingShare) {
                                 OutlinedButton(
-                                    onClick = { consentState.completed = null },
+                                    onClick = {
+                                        // Hide the decided request until the new one loads.
+                                        review = null
+                                        consentState.completed = null
+                                    },
                                     shape = RoundedCornerShape(12.dp),
                                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                                 ) {
