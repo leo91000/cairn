@@ -32,7 +32,6 @@ const relocatedCommands = new Map([
   ['test:backend', 'scripts/dev/test-backend.mjs'],
   ['generate:contracts', 'scripts/dev/generate-contracts.mjs'],
   ['check:contracts', 'scripts/dev/generate-contracts.mjs'],
-  ['pre-commit', 'scripts/dev/pre-commit.mjs'],
 ])
 
 function sameManifestAfterScriptMoves(observed, pinned) {

@@ -126,19 +126,23 @@ fn upgrade_compact_schema(writer: &mut Connection, directory: &Path) -> Result<(
     // The earlier startup marker only covers database detachment. Private
     // conversion copies may still be waiting for its background cleanup.
     let staging = directory.join("backend-migration-staging");
-    let staging_occupied = match std::fs::symlink_metadata(&staging) {
+    let directory_to_sync = match std::fs::symlink_metadata(&staging) {
         Ok(metadata) if metadata.is_dir() => {
-            std::fs::read_dir(staging)?.next().transpose()?.is_some()
+            let empty = std::fs::read_dir(&staging)?.next().transpose()?.is_none();
+            empty.then_some(staging.as_path())
         }
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(directory),
         Err(error) => return Err(error.into()),
-    };
-    if staging_occupied {
-        return Err(Error::bad(
-            "Legacy backend conversion cleanup is pending; complete it with a schema-37 manager before upgrading.",
-        ));
     }
+    .ok_or_else(|| {
+        Error::bad(
+            "Legacy backend conversion cleanup is pending; complete it with a schema-37 manager before upgrading.",
+        )
+    })?;
+    // The previous manager could have stopped after unlinking the last copy
+    // but before syncing the directory. Make that cleanup durable first.
+    std::fs::File::open(directory_to_sync)?.sync_all()?;
 
     // Drop the retired dependants before their referenced tables. The earlier
     // manager already detached S3 environments and queued local retirement.

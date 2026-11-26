@@ -73,7 +73,7 @@
     "yaml": "2.9.0"
   },
   "simple-git-hooks": {
-    "pre-commit": "node scripts/dev/pre-commit.mjs",
+    "pre-commit": "node scripts/pre-commit.mjs",
     "preserveUnused": true
   }
 }

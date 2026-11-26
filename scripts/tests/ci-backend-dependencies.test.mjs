@@ -145,7 +145,7 @@ it.each([false, true])('checks pinned manifests across script-only relocation, a
   const f = fixture()
   const manifest = f.meta['package.json']
   let historical = manifest.replace('scripts/ci/validate-pr.mjs', 'scripts/validate-pr.mjs')
-    .replaceAll(/scripts\/dev\/(rust-format|test-backend|generate-contracts|pre-commit)\.mjs/g, 'scripts/$1.mjs')
+    .replaceAll(/scripts\/dev\/(rust-format|test-backend|generate-contracts)\.mjs/g, 'scripts/$1.mjs')
   if (changedDependency)
     historical = historical.replace(/("tsx": ")[^"]+/, (_match, prefix) => `${prefix}0.0.0`)
 
