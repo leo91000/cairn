@@ -263,11 +263,11 @@ impl Controller {
         let mut receipt = None;
         let mut reconnects = 0u8;
         let mut reader = None;
-        loop {
+        let code = 'relay: loop {
             if let Some(receipt) = &receipt {
                 let receipt: &crate::background_jobs::controller::TurnReceipt = receipt;
                 if offset == receipt.log_end {
-                    return Ok(receipt.code);
+                    break receipt.code;
                 }
                 if offset > receipt.log_end {
                     return Err(Error::bad("Output crossed the turn boundary."));
@@ -290,7 +290,7 @@ impl Controller {
                     tokio::select! {
                         result = &mut *completion, if receipt.is_none() => {
                             let finished = result?;
-                            if offset == finished.log_end { return Ok(finished.code); }
+                            if offset == finished.log_end { break 'relay finished.code; }
                             if offset > finished.log_end { return Err(Error::bad("Output crossed the turn boundary.")); }
                             receipt = Some(finished);
                         }
@@ -329,7 +329,13 @@ impl Controller {
                 }
             }
             offset = next;
-        }
+        };
+
+        // Tokio stdio can still have a pending write after write_all returns.
+        // Drain both streams before the runner exits with the receipt's status.
+        stdout.flush().await?;
+        stderr.flush().await?;
+        Ok(code)
     }
 
     async fn stop(&self) {
@@ -1236,7 +1242,15 @@ mod physical_result_tests {
     async fn turn_completion_during_a_partial_log_frame_preserves_output() {
         use crate::background_jobs::controller::TurnReceipt;
         use axum::{Router, body::Body, routing::get};
-        use tokio::io::AsyncReadExt;
+        use tokio::io::BufWriter;
+        let mut first = format!(
+            "{}\n",
+            json!({
+                "offset": 3,
+                "event": { "type": "output", "stderr": true, "data": STANDARD.encode(b"diagnostic") }
+            })
+        )
+        .into_bytes();
         let packet = format!(
             "{}\n",
             json!({
@@ -1246,7 +1260,8 @@ mod physical_result_tests {
         )
         .into_bytes();
         let half = packet.len() / 2;
-        let (first, second) = (packet[..half].to_vec(), packet[half..].to_vec());
+        first.extend_from_slice(&packet[..half]);
+        let second = packet[half..].to_vec();
         let ready = std::sync::Arc::new(tokio::sync::Notify::new());
         let completed = std::sync::Arc::new(tokio::sync::Notify::new());
         let (r, c) = (ready.clone(), completed.clone());
@@ -1302,8 +1317,8 @@ mod physical_result_tests {
             })
         };
         tokio::pin!(completion);
-        let (mut output, mut reader) = tokio::io::duplex(64);
-        let mut errors = Vec::new();
+        let mut output = BufWriter::new(Vec::new());
+        let mut errors = BufWriter::new(Vec::new());
         let code = tokio::time::timeout(
             Duration::from_secs(3),
             controller.relay_turn(0, &mut completion, &mut output, &mut errors),
@@ -1312,11 +1327,8 @@ mod physical_result_tests {
         .unwrap()
         .unwrap();
         assert_eq!(code, 0);
-        drop(output);
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await.unwrap();
-        assert_eq!(bytes, b"hello");
-        assert!(errors.is_empty());
+        assert_eq!(output.get_ref(), b"hello");
+        assert_eq!(errors.get_ref(), b"diagnostic");
         server.abort();
     }
 }
