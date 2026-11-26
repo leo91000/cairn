@@ -22,11 +22,15 @@ pub mod storage;
 pub mod transport;
 pub mod workspace;
 
+#[cfg(test)]
+mod heartbeat_tests;
+
 use crate::{
     auth::{digest, token},
     config::{id, now},
     error::{Error, Result},
     http::{App, Input},
+    native::policy as native_policy,
     run_status::RunStatus,
     service::Service,
     storage::policy::Policy,
@@ -1315,10 +1319,12 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
         None
     };
     let node = transport::authenticate(s, &input.headers).await?;
-    let native = crate::native::policy::node_native(&s.node_boundary(&node).await?);
-    if matching_version && native {
-        crate::native::policy::refresh_for_heartbeat(s).await?;
-    }
+    let native = native_policy::node_native(&s.node_boundary(&node).await?);
+    let authority = if matching_version && native {
+        Some(native_policy::proof_for_heartbeat(s).await?)
+    } else {
+        None
+    };
     let expected = Expectations {
         data_root: s.config.data_dir.to_string_lossy().into_owned(),
         image: maintenance::release().ok().map(|release| release.image),
@@ -1327,7 +1333,9 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
     let body = input.body.clone();
     let reply = s
         .store
-        .transaction(move |db| record_heartbeat(db, &key, &body, capabilities, &expected))
+        .transaction(move |db| {
+            record_heartbeat(db, &key, &body, capabilities, &expected, authority.as_ref())
+        })
         .await??;
     for lease in &reply.leases {
         record_lease(s, &lease.id, lease.remaining_ms).await;
@@ -1341,6 +1349,7 @@ fn record_heartbeat(
     body: &Value,
     capabilities: Option<Value>,
     expected: &Expectations,
+    authority: Option<&native_policy::AuthorityProof>,
 ) -> Result<Result<HeartbeatReply>> {
     let node_id = db
         .kv(key)?
@@ -1403,7 +1412,7 @@ fn record_heartbeat(
     node.disk_growth_protocol = decode(disk_boundary["diskGrowthProtocol"].clone())?;
     node.disk_capacity = decode(disk_boundary["diskCapacity"].clone())?;
     db.save_node(&node)?;
-    let leases = renew_leases(db, &node_id, expected.lease_ms)?;
+    let leases = renew_leases(db, &node_id, expected.lease_ms, authority)?;
     Ok(Ok(HeartbeatReply {
         storage_policy: db
             .node_storage_configuration(&node_id)?
@@ -1446,7 +1455,14 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
 }
 
 /// Extends the leases of attempts this node still owns and may keep running.
-fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>> {
+fn renew_leases(
+    db: &Db<'_>,
+    node_id: &str,
+    lease_ms: u64,
+    authority: Option<&native_policy::AuthorityProof>,
+) -> Result<Vec<Lease>> {
+    let node = db.node_boundary(node_id)?.unwrap_or_default();
+    let native = native_policy::node_native(&node);
     let mut leases = Vec::new();
     for mut attempt in db.attempts()? {
         if attempt.node_id != node_id || !is_active_attempt(&attempt) {
@@ -1461,27 +1477,29 @@ fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>>
             && run["cancelRequestedAt"].is_null()
             && checkpoint["runnerId"] == attempt.id
             && agent_allows(&agent, node_id);
-        let native_allowed =
-            !crate::native::policy::node_native(&db.node_boundary(node_id)?.unwrap_or_default())
-                || crate::native::policy::allows(
-                    db,
-                    &run,
-                    &db.node_boundary(node_id)?.unwrap_or_default(),
-                )?;
-        if !owns_execution || !native_allowed {
+        if !owns_execution {
             continue;
         }
-        let lease_ms = if crate::native::policy::node_native(
-            &db.node_boundary(node_id)?.unwrap_or_default(),
-        ) {
-            lease_ms.min(crate::native::policy::lease_remaining_ms(db)?)
+
+        let proof = if native {
+            let Some(proof) = authority else {
+                continue;
+            };
+            if !native_policy::allows_with_proof(db, &run, &node, &agent, proof)? {
+                continue;
+            }
+            Some(proof)
         } else {
-            lease_ms
+            None
         };
+        let lease_started_at = now();
+        let lease_ms = proof.map_or(lease_ms, |proof| {
+            lease_ms.min(proof.lease_remaining_ms(lease_started_at))
+        });
         if lease_ms == 0 {
             continue;
         }
-        attempt.lease_expires_at = Some(now() + lease_ms as i64);
+        attempt.lease_expires_at = Some(lease_started_at + lease_ms as i64);
         attempt.lease_duration_ms = Some(attempt.lease_duration_ms.unwrap_or(0).max(lease_ms));
         db.save_attempt(&attempt)?;
         leases.push(Lease {

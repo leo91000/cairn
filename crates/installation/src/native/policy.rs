@@ -8,6 +8,8 @@ use crate::{
 use serde_json::{Value, json};
 
 const MAX_AUTHORITY_DEPTH: usize = 16;
+const AUTHORITY_TTL_MS: i64 = 60_000;
+const AUTHORITY_REFRESH_MS: i64 = 15_000;
 
 tokio::task_local! { pub static CALLER: Option<String>; }
 
@@ -88,12 +90,28 @@ fn explicit(list: &Value, id: &str) -> bool {
         .is_some_and(|values| values.iter().any(|value| value == id))
 }
 
-fn current_account(db: &Db<'_>, account: &str) -> Result<bool> {
-    let authority = db.kv("native-authority")?.unwrap_or_default();
-    Ok(authority["observedAt"]
-        .as_i64()
-        .is_some_and(|at| (0..=60_000).contains(&(crate::config::now() - at)))
-        && authority["accounts"].get(account).is_some())
+pub(crate) struct AuthorityProof(Value);
+
+impl AuthorityProof {
+    pub(crate) fn load(db: &Db<'_>) -> Result<Self> {
+        Ok(Self(db.kv("native-authority")?.unwrap_or_default()))
+    }
+
+    fn age_at(&self, now: i64) -> Option<i64> {
+        now.checked_sub(self.0["observedAt"].as_i64()?)
+            .filter(|age| *age >= 0)
+    }
+
+    fn current_account(&self, account: &str) -> bool {
+        self.age_at(crate::config::now())
+            .is_some_and(|age| age <= AUTHORITY_TTL_MS)
+            && self.0["accounts"].get(account).is_some()
+    }
+
+    pub(crate) fn lease_remaining_ms(&self, now: i64) -> u64 {
+        self.age_at(now)
+            .map_or(0, |age| (AUTHORITY_TTL_MS - age).max(0) as u64)
+    }
 }
 
 /// These fields are written only after authenticated input parsing. Unknown
@@ -276,7 +294,17 @@ pub fn allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
     let agent = db
         .agent_snapshot(crate::nodes::run_agent(run))?
         .unwrap_or_default();
-    allows_agent(db, run, node, &agent, Admission::Execution)
+    allows_with_proof(db, run, node, &agent, &AuthorityProof::load(db)?)
+}
+
+pub(crate) fn allows_with_proof(
+    db: &Db<'_>,
+    run: &Value,
+    node: &Value,
+    agent: &Value,
+    proof: &AuthorityProof,
+) -> Result<bool> {
+    allows_agent(db, run, node, agent, Admission::Execution, proof)
 }
 
 pub(crate) fn merge_plugin_grants(grant: &mut Value, previous: &Value) {
@@ -297,7 +325,12 @@ pub(crate) fn merge_plugin_grants(grant: &mut Value, previous: &Value) {
 
 /// A plugin delegates its saved native grant, never an external person's claimed
 /// Cairn identity. Lease renewal follows that live connection and its owner.
-fn plugin_grants_allow(db: &Db<'_>, scope: &Value, node: &Value) -> Result<bool> {
+fn plugin_grants_allow(
+    db: &Db<'_>,
+    scope: &Value,
+    node: &Value,
+    proof: &AuthorityProof,
+) -> Result<bool> {
     let grants = &scope["nativePluginGrants"];
     if grants.is_null() {
         return Ok(true);
@@ -305,7 +338,6 @@ fn plugin_grants_allow(db: &Db<'_>, scope: &Value, node: &Value) -> Result<bool>
     let Some(grants) = grants.as_array() else {
         return Ok(false);
     };
-    let authority = db.kv("native-authority")?.unwrap_or_default();
     for grant in grants {
         let Some(value) = db.plugin_instance(text(grant, "connectionId"))? else {
             return Ok(false);
@@ -320,8 +352,8 @@ fn plugin_grants_allow(db: &Db<'_>, scope: &Value, node: &Value) -> Result<bool>
             || connection.revision != grant["revision"]
             || !connection.allows(text(grant, "authorId"))
             || connection.agent_id != scope["snapshot"]["agent"]["id"]
-            || !current_account(db, owner)?
-            || authority["accounts"][owner]["accessId"]
+            || !proof.current_account(owner)
+            || proof.0["accounts"][owner]["accessId"]
                 != serde_json::to_value(&connection.owner_access_id)?
             || connection
                 .native_authority
@@ -344,7 +376,14 @@ fn authority_allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
     let agent = db
         .agent_snapshot(crate::nodes::run_agent(run))?
         .unwrap_or_default();
-    allows_agent(db, run, node, &agent, Admission::Authority)
+    allows_agent(
+        db,
+        run,
+        node,
+        &agent,
+        Admission::Authority,
+        &AuthorityProof::load(db)?,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -359,6 +398,7 @@ fn allows_agent(
     node: &Value,
     agent: &Value,
     admission: Admission,
+    proof: &AuthorityProof,
 ) -> Result<bool> {
     if !supports(agent, "native")
         || !supports(&run["snapshot"]["agent"], "native")
@@ -375,7 +415,7 @@ fn allows_agent(
         let Some(author) = run["snapshot"]["task"]["authorId"].as_str() else {
             return Ok(false);
         };
-        if !explicit(&node["nativeAccounts"], author) || !current_account(db, author)? {
+        if !explicit(&node["nativeAccounts"], author) || !proof.current_account(author) {
             return Ok(false);
         }
     }
@@ -390,7 +430,7 @@ fn allows_agent(
         if scope["nativeProvenanceUnknown"] == true
             || !explicit(&scope["nativeAuthorityNodes"], text(node, "id"))
             || principals(&scope).as_array().is_none_or(Vec::is_empty)
-            || !plugin_grants_allow(db, &scope, node)?
+            || !plugin_grants_allow(db, &scope, node, proof)?
         {
             return Ok(false);
         }
@@ -398,7 +438,7 @@ fn allows_agent(
             let Some(person) = person.as_str() else {
                 return Ok(false);
             };
-            if !explicit(&node["nativeAccounts"], person) || !current_account(db, person)? {
+            if !explicit(&node["nativeAccounts"], person) || !proof.current_account(person) {
                 return Ok(false);
             }
         }
@@ -691,26 +731,16 @@ pub(crate) fn run_authorization(
     move |db| authorize_run_in(db, &id, &source)
 }
 
-fn authority_age(value: &Value) -> Option<i64> {
-    value["observedAt"]
-        .as_i64()
-        .map(|at| crate::config::now() - at)
-        .filter(|age| *age >= 0)
-}
-
 pub async fn refresh(s: &Service) -> Result<()> {
     let _refresh = s.native_authority_refresh.lock().await;
     refresh_locked(s).await
 }
 
 async fn refresh_locked(s: &Service) -> Result<()> {
-    let recent = s
-        .store
-        .kv("native-authority")
-        .await?
-        .as_ref()
-        .and_then(authority_age)
-        .is_some_and(|age| age < 15_000);
+    let proof = s.store.read(|db| AuthorityProof::load(db)).await?;
+    let recent = proof
+        .age_at(crate::config::now())
+        .is_some_and(|age| age < AUTHORITY_REFRESH_MS);
     if recent {
         return Ok(());
     }
@@ -727,20 +757,20 @@ async fn refresh_locked(s: &Service) -> Result<()> {
     Ok(())
 }
 
-/// A still-valid proof can renew existing work while its refresh runs in the
-/// background. The lease writer caps grants at that proof's original deadline.
-pub(crate) async fn refresh_for_heartbeat(s: &Service) -> Result<()> {
-    let age = s
-        .store
-        .kv("native-authority")
-        .await?
-        .as_ref()
-        .and_then(authority_age);
-    if !age.is_some_and(|age| age < 60_000) {
-        return refresh(s).await;
-    }
-    if age.is_some_and(|age| age < 15_000) {
-        return Ok(());
+/// Capture the Beacon proof used by this heartbeat before starting a background
+/// refresh. The lease writer checks live local grants and caps renewals at this
+/// proof's deadline even if Beacon publishes a replacement in the meantime.
+pub(crate) async fn proof_for_heartbeat(s: &Service) -> Result<AuthorityProof> {
+    let proof = s.store.read(|db| AuthorityProof::load(db)).await?;
+    let Some(age) = proof
+        .age_at(crate::config::now())
+        .filter(|age| *age < AUTHORITY_TTL_MS)
+    else {
+        refresh(s).await?;
+        return s.store.read(|db| AuthorityProof::load(db)).await;
+    };
+    if age < AUTHORITY_REFRESH_MS {
+        return Ok(proof);
     }
     if let Ok(guard) = s.native_authority_refresh.clone().try_lock_owned() {
         let s = s.clone();
@@ -754,12 +784,7 @@ pub(crate) async fn refresh_for_heartbeat(s: &Service) -> Result<()> {
             }
         });
     }
-    Ok(())
-}
-
-pub(crate) fn lease_remaining_ms(db: &Db<'_>) -> Result<u64> {
-    let authority = db.kv("native-authority")?.unwrap_or_default();
-    Ok(authority_age(&authority).map_or(0, |age| 60_000_i64.saturating_sub(age).max(0) as u64))
+    Ok(proof)
 }
 
 pub async fn refresh_agent(s: &Service, agent: &str) -> Result<()> {
