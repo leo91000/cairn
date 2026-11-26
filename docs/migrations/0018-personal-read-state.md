@@ -1,5 +1,9 @@
 # 0018 — Per-account read state
 
+This historical migration and its tests remain available at commit
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 Version 17 upgrades to 18 automatically in `Store::open`, before the SQL actors
 start. The v17 fixture was produced by the real Store and Service at `f489e1a5`,
 starting with the synthetic v16 attachments fixture. It holds three accounts' read
