@@ -97,8 +97,11 @@ remain necessary; historical production shapes also need this private check.
    schema version and checksum. Keep directories owner-only and files private.
    For schema 37, verify `backend-migration-staging` on the stopped manager's
    data volume before rehearsing the database copy. Record its aggregate state
-   as absent or as a real, empty directory. An occupied directory, symlink or
-   unreadable path blocks the upgrade until the prior manager can finish cleanup.
+   as absent or as a real, empty directory. If a real staging directory contains
+   abandoned copies, let the schema-37 manager finish cleaning it up. A symlink,
+   non-directory entry or unreadable staging path requires the operator to repair
+   the path or its permissions. Verify the staging state with the manager stopped
+   before retrying the upgrade.
 2. Make a separate writable rehearsal copy containing `manager.db`. Never pass
    the live installation directory or the untouched source backup to the helper.
    Keep all database copies on the installation host; do not upload them to CI,
