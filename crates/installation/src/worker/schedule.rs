@@ -1013,6 +1013,11 @@ pub(super) fn finish_recovery(
             };
             let mut patch = Settled::failure(RunStatus::Failed, message).run_changes();
             patch.wakeup = Some(None);
+            if let Some(mut retry) = current.retry.clone()
+                && retry.next_attempt_at.take().is_some()
+            {
+                patch.retry = Some(Some(retry));
+            }
             db.change_run(id, patch)?;
             return Ok(false);
         }

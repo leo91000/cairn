@@ -3,6 +3,7 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - .github/actions/check-playwright-image/action.yaml
       - .github/workflows/ci.yaml
       - .github/workflows/pr.yaml
       - .github/workflows/webkit-dependency-regression.yaml

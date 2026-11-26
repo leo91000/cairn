@@ -13,9 +13,16 @@ import { nextestArtifact } from '../ci/install-nextest-ci.mjs'
 const quality = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
 const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml', import.meta.url), 'utf8'))
 const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.meta.url), 'utf8'))
+const webkitRegression = parse(readFileSync(new URL('../../.github/workflows/webkit-dependency-regression.yaml', import.meta.url), 'utf8'))
 const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
+  it('runs the dedicated WebKit regression for edits to its Playwright image check', () => {
+    const imageCheck = './.github/actions/check-playwright-image'
+    expect(webkitRegression.jobs.webkit.steps.some(step => step.uses === imageCheck)).toBe(true)
+    expect(webkitRegression.on.pull_request.paths).toContain(`${imageCheck.slice(2)}/action.yaml`)
+  })
+
   it('keeps opt-in VM qualification in a local Docker store without release effects', () => {
     const image = quality.jobs.image
     expect(image.if).toContain('inputs.vm-storage-qualification == true')

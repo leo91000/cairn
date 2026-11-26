@@ -343,9 +343,26 @@ fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
     for run in db.active_run_states()? {
         let id = &run.id;
         if run.status != RunStatus::Running {
+            let unbound_retry = run.status == RunStatus::Queued
+                && !run.recovery_pending
+                && run
+                    .retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.next_attempt_at.is_some())
+                && checkpoint::RunCheckpoint::load_in(db, id)?.is_some_and(|saved| {
+                    saved.managed()
+                        && saved.provider_failed()
+                        && !saved.has_provider_retry_reservation()
+                        && saved.pending_paid_admission.is_none()
+                });
             // Waiting was committed before fencing and release. A restart must
             // finish that cleanup even when the wakeup is still far away.
-            if run.status == RunStatus::Waiting || run.cancel_requested_at.is_some() {
+            // Recovery also settles a managed provider failure before an
+            // unbound retry can reach admission.
+            if run.status == RunStatus::Waiting
+                || run.cancel_requested_at.is_some()
+                || unbound_retry
+            {
                 db.change_run(
                     id,
                     crate::runs::RunChanges {
@@ -486,6 +503,63 @@ async fn observe_background_jobs(s: Arc<Service>) {
 mod tests {
     use super::*;
     use crate::{mission_fixture::MissionFixture, validation::text};
+
+    #[tokio::test]
+    async fn restart_recovers_unbound_managed_retries_before_admission() {
+        use crate::run_fixture::DbRunFixture;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let cause = crate::run_retry::Cause::classify(&json!({
+                    "code": "server_error", "message": "Provider unavailable",
+                }))
+                .unwrap();
+                let retry = crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap();
+                for (id, recovery_pending, owns_retry) in [
+                    ("fenced", false, false),
+                    ("pending-fence", true, false),
+                    ("attempt-bound", false, true),
+                ] {
+                    db.add_run_fixture(
+                        &json!({
+                            "id": id, "taskId": id, "status": "queued", "sessionId": "session",
+                            "retry": retry, "recoveryPending": recovery_pending,
+                        }),
+                        None,
+                    )?;
+                    let mut saved = checkpoint::RunCheckpoint::from_value(json!({
+                        "prepared": { "backend": "native", "isolated": true },
+                        "runnerId": "old-attempt", "remainingMs": null,
+                        "completed": false, "providerFailed": true, "lastError": cause.message,
+                        "retryCause": cause,
+                    }))?;
+                    if owns_retry {
+                        saved.provider_retry_reservation = Some("old-attempt".into());
+                    }
+                    saved.store_in(db, id)?;
+                }
+
+                restore_after_restart(db)?;
+                let bound = db.run_state("attempt-bound")?.unwrap();
+                assert!(!bound.recovery_pending);
+                assert_eq!(bound.retry, Some(retry));
+
+                for id in ["fenced", "pending-fence"] {
+                    assert!(db.run_state(id)?.unwrap().recovery_pending);
+                    let saved = checkpoint::RunCheckpoint::load_in(db, id)?.unwrap();
+                    assert!(!schedule::finish_recovery(db, id, Some(&saved))?);
+                    let failed = db.run_state(id)?.unwrap();
+                    assert_eq!(failed.status, RunStatus::Failed);
+                    assert!(!failed.recovery_pending);
+                    assert_eq!(failed.retry.unwrap().next_attempt_at, None);
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn restart_preserves_queued_turn_while_fencing_held_background_work() {
