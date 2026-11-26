@@ -169,6 +169,8 @@ let generation = 0
 // press. A press that ends without a click on that control lets the check through, and none is
 // held longer than this.
 const PRESS_HOLD = 2000
+// Controls a click activates; other presses, such as dragging a slider, have no click to protect.
+const CLICKABLE = 'button, a[href], summary, label, input[type="checkbox"], input[type="radio"], [role="button"], [role="menuitem"], [role="option"], [role="tab"]'
 let pressedPointerId: number | undefined
 let pressedElement: Element | undefined
 let held: (() => void) | undefined
@@ -195,10 +197,11 @@ function releasePress() {
 }
 
 function startPress(event: PointerEvent) {
-  if (event.button !== 0 || !event.isPrimary || !(event.target instanceof Element))
+  const control = event.target instanceof Element ? event.target.closest(CLICKABLE) : null
+  if (event.button !== 0 || !event.isPrimary || !control || control.matches(':disabled'))
     return
   pressedPointerId = event.pointerId
-  pressedElement = event.target
+  pressedElement = control
 }
 
 function finishPress(event: PointerEvent) {
@@ -207,8 +210,13 @@ function finishPress(event: PointerEvent) {
   const released = document.elementFromPoint(event.clientX, event.clientY)
   // Touch compatibility clicks may arrive after pointerup's next timer task, so a release on the
   // pressed control waits for its click. A release away from it has no click to protect.
-  if (!released || !pressedElement?.contains(released))
+  if (!released || !pressedElement?.contains(released)) {
     releasePress()
+    return
+  }
+
+  clearTimeout(heldTimer)
+  heldTimer = setTimeout(releasePress, PRESS_HOLD)
 }
 
 function releaseOnWindowBlur(event: FocusEvent) {

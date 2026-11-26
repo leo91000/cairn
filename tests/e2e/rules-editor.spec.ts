@@ -516,10 +516,10 @@ test('loop insertion stays reachable when validation finishes during a press', a
   await page.setViewportSize({ width: 390, height: 844 })
 
   const rule = await emptyLoopRule(workspace)
-  const validation = Promise.withResolvers<void>()
+  const validation = { current: Promise.withResolvers<void>() }
   await useRelayForHttpMocks(page)
   await page.route('**/api/hook-rules/validate', async (route) => {
-    await validation.promise
+    await validation.current.promise
     await route.continue()
   })
 
@@ -535,16 +535,15 @@ test('loop insertion stays reachable when validation finishes during a press', a
     expect(position).not.toBeNull()
     await page.mouse.move(position!.x + position!.width / 2, position!.y + position!.height / 2)
     await page.mouse.down()
-    const answered = page.waitForResponse('**/api/hook-rules/validate')
-    validation.resolve()
-    await answered
+    await answerCheck(page, validation)
+    await expect(status).toHaveText('Checking…')
     await page.mouse.up()
     await expect(page.getByRole('menuitem', { name: /Remember a value/ })).toBeVisible()
     await expect(status).toHaveText('Ready')
     await expect(page.getByRole('menuitem', { name: /^Wait/ })).toHaveCount(0)
   }
   finally {
-    validation.resolve()
+    validation.current.resolve()
   }
 })
 

@@ -55,7 +55,7 @@ most two seconds), so its status and messages never move the pressed control,
 as in the phone step sheet that grows upward when they appear. Android does not
 hold checks: its step sheet keeps a fixed height and starts at the top, so the
 step's fields stay in place, but the messages added below them move the
-"Terminer cette étape" button, and step cards behind the sheet gain a line of
+« Terminer cette étape » button, and step cards behind the sheet gain a line of
 points to fix. Saving creates a version.
 A state-only revision change is refreshed while preserving the draft. A newer
 saved definition can be reviewed, adopted or explicitly replaced by the draft
