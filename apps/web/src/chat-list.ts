@@ -22,7 +22,7 @@ let served = false
 /** The server's list waiting to be saved: saving serializes it, at most every few seconds. */
 let unsaved: { session: string, chats: ChatView[], planTurnsEnabled: boolean } | undefined
 let saveTimer: ReturnType<typeof setTimeout> | undefined
-let lastSaved: ChatView[] | undefined
+let lastSaved: { chats: ChatView[], planTurnsEnabled: boolean } | undefined
 // The server shares a list for up to a quarter second; this leaves ample margin.
 const RECENT = 10_000
 const SAVE_DELAY = 2000
@@ -31,7 +31,7 @@ function saveList() {
   saveTimer = undefined
   const list = unsaved
   unsaved = undefined
-  lastSaved = list?.chats
+  lastSaved = list
   if (!list || !state.authenticated || state.signingOut || list.session !== cacheSession())
     return
   void cacheScope(list.session)
@@ -72,10 +72,12 @@ export function publishChats(chats: ChatView[], options: { saved?: boolean, plan
   chatList.value = chats
   chatPlanEnabled.value = options.planTurnsEnabled === true
   known = true
-  // A snapshot that keeps the same list saves nothing again.
-  if (options.saved || chats === unsaved?.chats || chats === lastSaved)
+  // A snapshot that keeps the same list and Plan setting saves nothing again.
+  const planTurnsEnabled = options.planTurnsEnabled === true
+  const pending = unsaved ?? lastSaved
+  if (options.saved || (chats === pending?.chats && planTurnsEnabled === pending.planTurnsEnabled))
     return
-  unsaved = { session: cacheSession(), chats, planTurnsEnabled: options.planTurnsEnabled === true }
+  unsaved = { session: cacheSession(), chats, planTurnsEnabled }
   saveTimer ??= setTimeout(saveList, SAVE_DELAY)
 }
 

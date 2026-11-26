@@ -129,8 +129,9 @@ apart (at most every 2 seconds and when the page is hidden), and shows it until 
 stream delivers the server's list; Android's list stream keeps its own saved copy. The history suffix has a 3 MiB budget including state
 and headroom; web accounts conservatively in UTF-16 bytes, Android in UTF-8 bytes.
 An evicted prefix remains available from server pagination. Evicting a prefix also
-invalidates its reading position. Logout and a changed cache revision still invalidate
-every saved conversation. A conversation that leaves the server's list (deleted, or no
+invalidates its reading position. Logout, and for new clients a changed history revision
+(`historyRevision`; older clients follow `cacheRevision`), still invalidate every saved
+conversation. A conversation that leaves the server's list (deleted, or no
 longer shared) loses its own saved copy on web and Android, is not saved again while the page
 or app is open, and the session's saved run logs go with it, since a run does not name its
 conversation. Server lists only move forward, so a conversation missing from a

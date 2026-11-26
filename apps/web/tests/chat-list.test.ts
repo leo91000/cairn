@@ -116,3 +116,19 @@ it('spares recent conversations of a saved list shown before the server list, un
   publishChats([])
   await vi.waitFor(() => expect(history.peekHistory(scope, '/chats/newer/stream')).toBeUndefined())
 })
+
+it('saves the list again when only the Plan setting changes', async () => {
+  vi.resetModules()
+  vi.useFakeTimers()
+  const { publishChats } = await import('../src/chat-list')
+  const history = await import('../src/history-cache')
+  const scope = await history.cacheScope('test-session')
+  const chats = [{ id: 'kept', slug: '', createdAt: 1 }] as ChatView[]
+  publishChats(chats, { planTurnsEnabled: false })
+  await vi.advanceTimersByTimeAsync(2000)
+  expect(await history.readChatList(scope)).toMatchObject({ planTurnsEnabled: false })
+  publishChats(chats, { planTurnsEnabled: true })
+  await vi.advanceTimersByTimeAsync(2000)
+  expect(await history.readChatList(scope)).toMatchObject({ planTurnsEnabled: true })
+  vi.useRealTimers()
+})
