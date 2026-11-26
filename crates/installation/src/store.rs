@@ -131,7 +131,11 @@ fn upgrade_compact_schema(writer: &mut Connection, directory: &Path) -> Result<(
             let empty = std::fs::read_dir(&staging)?.next().transpose()?.is_none();
             empty.then_some(staging.as_path())
         }
-        Ok(_) => None,
+        Ok(_) => {
+            return Err(Error::bad(
+                "Legacy backend conversion staging path must be a real directory. Repair it before upgrading.",
+            ));
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(directory),
         Err(error) => return Err(error.into()),
     }
@@ -1460,6 +1464,36 @@ mod schema_tests {
         assert!(image.is_file());
         assert!(db.table_exists(None, "shared_publications").unwrap());
         std::fs::remove_file(image).unwrap();
+        std::fs::remove_dir(&staging).unwrap();
+
+        let target = root.path().join("other-directory");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &staging).unwrap();
+        let error = Store::open(root.path()).err().unwrap();
+        assert!(
+            error
+                .message
+                .contains("staging path must be a real directory")
+        );
+        assert_eq!(std::fs::read_link(&staging).unwrap(), target);
+        std::fs::remove_file(&staging).unwrap();
+
+        std::fs::write(&staging, b"not a directory").unwrap();
+        let error = Store::open(root.path()).err().unwrap();
+        assert!(
+            error
+                .message
+                .contains("staging path must be a real directory")
+        );
+        assert_eq!(std::fs::read(&staging).unwrap(), b"not a directory");
+        assert!(db.table_exists(None, "shared_publications").unwrap());
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            PRE_COMPACTION_DATABASE_VERSION
+        );
+        std::fs::remove_file(&staging).unwrap();
+        std::fs::create_dir(&staging).unwrap();
         drop(db);
 
         let compacted = Store::open(root.path()).unwrap();
