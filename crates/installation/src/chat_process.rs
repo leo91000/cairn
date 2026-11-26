@@ -1185,6 +1185,8 @@ impl Chat<'_> {
             "threadId": self.thread,
             "expectedTurnId": self.turn,
             "allowInProgressTurn": true,
+            // A withdrawn or expired question stops its model request too.
+            "interruptOnCancel": true,
             "prompt": format!("{SIDE_PROMPT}\n\n{}", text(side, "text")),
         });
         self.sides.insert(question.clone(), request);
@@ -1281,7 +1283,10 @@ impl Chat<'_> {
         self.side_available = false;
         // Codex's replies precede the turn's completion on its output, so each one that
         // arrived first is ready here, and settles while the reply still takes answers.
-        while let Some(Some((question, result))) = self.samples.next().now_or_never() {
+        // Unconstrained: an exhausted cooperative budget must not make a ready reply pending.
+        while let Some(Some((question, result))) =
+            tokio::task::unconstrained(self.samples.next()).now_or_never()
+        {
             self.side_settled(question, result).await?;
         }
         self.emit(json!({ "type": "chat.side.closed" })).await?;

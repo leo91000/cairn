@@ -154,11 +154,34 @@ fn settled<'a>(events: &'a [Value], id: &str) -> Option<&'a Value> {
 }
 
 /// What both engines must show.
-fn check(events: &[Value], workspace: &Path) {
+fn check(events: &[Value], workspace: &Path, output: &Path) {
     assert!(
         events.iter().any(|event| event["type"] == "turn.completed"),
         "{events:#?}"
     );
+    // Only side-question events carry a side question or its answer: none reaches the
+    // conversation's items or the reply.
+    let reply = std::fs::read_to_string(output).unwrap();
+    assert!(reply.contains(MAIN_REPLY), "{reply}");
+    for event in events {
+        if event["type"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("chat.side.")
+        {
+            continue;
+        }
+        let event = event.to_string();
+        for marker in [SIDE_REPLY, TEXT, TOOL, HOLD] {
+            assert!(
+                !event.contains(marker),
+                "{marker} reached the conversation: {event}"
+            );
+        }
+    }
+    for marker in [SIDE_REPLY, TEXT, TOOL, HOLD] {
+        assert!(!reply.contains(marker), "{marker} reached the reply");
+    }
     let answered = settled(events, ANSWERED).expect("the text side question did not settle");
     assert_eq!(answered["type"], "chat.side.answered", "{answered}");
     assert!(
@@ -396,7 +419,7 @@ async fn native_codex_answers_side_questions_without_tools_or_history() {
 
     result.unwrap();
     next_result.unwrap();
-    check(&events, &workspace);
+    check(&events, &workspace, &root.path().join("main.md"));
     let tool = settled(&events, TOOL_ID).unwrap();
     assert_eq!(tool["type"], "chat.side.failed", "{tool}");
     // Each side question saw the running turn's request.
@@ -630,7 +653,7 @@ async fn native_claude_answers_side_questions_without_tools_or_history() {
     );
 
     result.unwrap();
-    check(&events, &workspace);
+    check(&events, &workspace, &root.path().join("result.md"));
     assert!(
         transcripts
             .iter()
