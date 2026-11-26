@@ -14,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
@@ -34,6 +35,8 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.contentType
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -177,7 +180,11 @@ internal fun OtpCodeField(
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
         cursorBrush = SolidColor(Color.Transparent),
-        modifier = modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused },
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .semantics { contentType = ContentType.SmsOtpCode }
+                .onFocusChanged { focused = it.isFocused },
         decorationBox = { innerTextField ->
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(

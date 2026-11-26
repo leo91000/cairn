@@ -1004,7 +1004,7 @@ fn signal_oauth_html(lang: &str, title: &str, body: &str) -> String {
          .chip{{display:inline-block;padding:6px 14px;border-radius:999px;background:var(--inset);border:1px solid var(--line);font-size:13.5px;margin-bottom:14px;word-break:break-all}}\
          .note{{font-size:13.5px;color:var(--muted);margin-bottom:16px}}\
          .alert{{text-align:left;font-size:12.5px;line-height:1.5;color:var(--warn);background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:12px;padding:12px 14px;margin-bottom:18px}}\
-         .btn{{display:inline-flex;align-items:center;justify-content:center;width:100%;min-height:46px;padding:0 18px;border-radius:12px;border:0;font:600 14.5px/1 inherit;text-decoration:none;cursor:pointer}}\
+         .btn{{display:inline-flex;align-items:center;justify-content:center;width:100%;min-height:46px;padding:0 18px;border-radius:12px;border:0;font-family:inherit;font-size:14.5px;font-weight:600;line-height:1;text-decoration:none;cursor:pointer}}\
          .btn.primary{{background:var(--primary);color:#fff}}\
          .btn.primary:hover{{background:var(--primary-h)}}\
          .foot{{font-size:12.5px;color:var(--muted);margin-top:14px}}\

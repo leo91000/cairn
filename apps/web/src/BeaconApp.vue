@@ -1243,7 +1243,7 @@ onMounted(async () => {
       </div>
 
       <div v-if="hasAlternativeSignIn" class="auth-divider mb-5" aria-hidden="true">
-        or with email
+        or by email
       </div>
 
       <form class="grid gap-4" @submit.prevent="submit">

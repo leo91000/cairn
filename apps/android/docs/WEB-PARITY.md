@@ -17,7 +17,9 @@ and inline identity confirmation status driven by `/mcp/oauth/preview`'s
 renders a dedicated post-decision summary card; web also wraps `McpCallback` and
 `PluginOAuthCallback` in a shared Signal transition card while Android surfaces
 outbound MCP OAuth progress in a dedicated status card. Account sign-in and MCP
-authorization remain Beacon-managed UI actions; public MCP and `cairn_installation`
+authorization remain Beacon-managed UI actions. As on web, Android now opens a shared
+authorization link for any signed-in account; accounts that own no installation see why
+Allow is unavailable, and Beacon still enforces ownership. Public MCP and `cairn_installation`
 operations and authorization are unchanged.
 
 ## Shared diagram engine spec and mirrored modules (2026-11-26)
