@@ -17,6 +17,8 @@ import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.Dispatcher
@@ -316,6 +318,116 @@ class AuthorizeScreenTest {
                 assertEquals("inst-2", payload["installationId"]?.jsonPrimitive?.content)
                 assertEquals("true", payload["approved"]?.jsonPrimitive?.content)
             } finally {
+                try {
+                    compose.runOnIdle { mounted = false }
+                    compose.waitForIdle()
+                } finally {
+                    models.clear()
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a link shared during a decision opens after that decision completes`() {
+        MockWebServer().use { server ->
+            val consents = CopyOnWriteArrayList<String>()
+            val release = CountDownLatch(1)
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path.orEmpty().substringBefore('?')
+                        return when (path) {
+                            "/api/account/session" ->
+                                MockResponse()
+                                    .setBody(
+                                        """{"authenticated":true,"csrf":"csrf","account":{"id":"owner","email":"owner@example.test"},"installations":[{"id":"inst-1","name":"Maison","role":"owner","online":true}]}"""
+                                    )
+                            "/api/installations" ->
+                                MockResponse()
+                                    .setBody(
+                                        """[{"id":"inst-1","name":"Maison","role":"owner","online":true}]"""
+                                    )
+                            "/api/mcp/oauth/preview" -> {
+                                val clientId =
+                                    wireJson
+                                        .parseToJsonElement(request.body.readUtf8())
+                                        .jsonObject
+                                        .getValue("client_id")
+                                        .jsonPrimitive
+                                        .content
+                                val clientName =
+                                    if (clientId == "client-2") "Autre assistant" else "Claude"
+                                MockResponse()
+                                    .setBody(
+                                        """{"client":{"client_id":"$clientId","client_name":"$clientName","redirect_uri":"https://claude.ai/cb"},"scopes":["read"],"installations":[{"id":"inst-1","name":"Maison","role":"owner","online":true}],"confirmationRequired":false}"""
+                                    )
+                            }
+                            "/api/mcp/oauth/consent" -> {
+                                consents += request.body.readUtf8()
+                                release.await(10, TimeUnit.SECONDS)
+                                MockResponse()
+                                    .setBody("""{"redirect":"https://claude.ai/cb?code=ok"}""")
+                            }
+                            else -> MockResponse().setResponseCode(404).setBody("{}")
+                        }
+                    }
+                }
+            server.start()
+            val origin = server.url("/").toString()
+            val vault =
+                MemoryVault().apply {
+                    write(origin, "cairn_session=auth-cookie; Path=/; HttpOnly")
+                }
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    vault,
+                    beaconOrigin = origin,
+                )
+            val firstUrl =
+                "${origin.trimEnd('/')}/authorize?client_id=client-1&redirect_uri=https%3A%2F%2Fclaude.ai%2Fcb&response_type=code&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256&scope=read"
+            val models = ViewModelStore().apply { put("authorize-busy", vm) }
+            var mounted by mutableStateOf(true)
+            var incomingUrl by mutableStateOf(firstUrl)
+            try {
+                compose.setContent {
+                    if (mounted)
+                        CairnTheme {
+                            CairnApp(
+                                sharedUrl = incomingUrl,
+                                consumedShare = { incomingUrl = "" },
+                                vm = vm,
+                            )
+                        }
+                }
+                compose.waitUntil(10_000) {
+                    compose
+                        .onAllNodesWithText("Autoriser « Claude » ?")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Autoriser").performScrollTo().performClick()
+                compose.waitUntil(10_000) { consents.isNotEmpty() && vm.state.value.busy }
+
+                val secondUrl = firstUrl.replace("client-1", "client-2")
+                compose.runOnIdle { incomingUrl = secondUrl }
+                compose.waitForIdle()
+                assertEquals(secondUrl, incomingUrl)
+                compose.onNodeWithText("Autoriser « Claude » ?").assertExists()
+
+                release.countDown()
+                compose.waitUntil(10_000) {
+                    compose
+                        .onAllNodesWithText("Autoriser « Autre assistant » ?")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertEquals("", incomingUrl)
+                assertEquals(1, consents.size)
+                assertTrue(consents.first().contains("client-1"))
+            } finally {
+                release.countDown()
                 try {
                     compose.runOnIdle { mounted = false }
                     compose.waitForIdle()
