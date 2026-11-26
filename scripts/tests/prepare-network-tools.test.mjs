@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { prepareNetworkTools, requiredNetworkTools } from '../prepare-network-tools.mjs'
+import { prepareNetworkTools, requiredNetworkTools } from '../ci/prepare-network-tools.mjs'
 
 function host({
   missing = [],
@@ -48,7 +48,7 @@ function host({
 
 describe('real CI network preparation seam', () => {
   it('refuses CLI invocation outside CI before any privileged command', () => {
-    const cli = fileURLToPath(new URL('../prepare-network-tools.mjs', import.meta.url))
+    const cli = fileURLToPath(new URL('../ci/prepare-network-tools.mjs', import.meta.url))
     const result = spawnSync(process.execPath, [cli, 'network-bench'], { encoding: 'utf8', env: { CI: '', GITHUB_ACTIONS: '' } })
     expect(result.status).toBe(1)
     expect(result.stdout).toBe('')

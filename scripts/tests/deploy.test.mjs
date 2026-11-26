@@ -9,8 +9,8 @@ import {
   it,
 } from 'vitest'
 import { parse, stringify } from 'yaml'
-import { deploy } from '../deploy-coolify.mjs'
-import { firecrackerRunnerCompose, nativeRunnerCompose, persistentRunnerCompose } from '../runner-compose.mjs'
+import { deploy } from '../release/deploy-coolify.mjs'
+import { firecrackerRunnerCompose, nativeRunnerCompose, persistentRunnerCompose } from '../release/runner-compose.mjs'
 
 // eslint-disable-next-line no-template-curly-in-string -- Compose resolves this expression at deployment time.
 const nodeImage = '${CAIRN_IMAGE:-}'

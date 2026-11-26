@@ -13,7 +13,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { prepareRunProgress, runProgressSql } from './run-progress.mjs'
 
-const repo = fileURLToPath(new URL('..', import.meta.url))
+const repo = fileURLToPath(new URL('../..', import.meta.url))
 const dir = mkdtempSync(join(tmpdir(), 'progress-cost-'))
 try {
   const path = join(dir, 'manager.db')

@@ -29,7 +29,7 @@ use std::{
 use tokio::sync::Mutex;
 
 /// The oldest release whose stream-json protocol and hooks this adapter relies on.
-/// Each image build installs the release Google's manifests name (scripts/cli-updates.mjs).
+/// Each image build installs the release Google's manifests name (scripts/release/cli-updates.mjs).
 pub const MINIMUM: &str = "1.5.14";
 
 /// Account kinds, as saved in an account's model provider.

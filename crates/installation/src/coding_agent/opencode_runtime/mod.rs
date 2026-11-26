@@ -26,7 +26,7 @@ use tokio::{
 
 /// The oldest release whose HTTP session protocol this adapter speaks. Each image
 /// build installs OpenCode's latest release, which CI runs through this adapter's
-/// native test before validation (scripts/cli-updates.mjs).
+/// native test before validation (scripts/release/cli-updates.mjs).
 pub const MINIMUM: &str = "1.19.0";
 const LIMIT: usize = 16_000_000;
 

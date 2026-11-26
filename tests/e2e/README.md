@@ -82,5 +82,5 @@ existing backend fixture artifacts and is excluded from production images.
 CI qualifies the real TypeScript helper and distributed example against its
 disposable Postgres 17 service before the browser shard, covering raw multi-query
 batches, options, rollback, explicit commits and private failure output. Run
-`pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts` against a disposable database
+`pnpm exec tsx scripts/ci/qualify-beacon-sql-fixture.ts` against a disposable database
 after building the fixtures to exercise that same contract locally.

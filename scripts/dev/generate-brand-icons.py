@@ -4,12 +4,12 @@
 # ///
 """Regenerate Cairn raster icons from the committed Balise SVG sources.
 
-Run: uv run scripts/generate-brand-icons.py
+Run: uv run scripts/dev/generate-brand-icons.py
 """
 from pathlib import Path
 import cairosvg
 
-PUBLIC = Path(__file__).resolve().parents[1] / 'apps/web/public'
+PUBLIC = Path(__file__).resolve().parents[2] / 'apps/web/public'
 source = (PUBLIC / 'brand/cairn-app.svg').read_text()
 for name, size in [('icon-192.png', 192), ('icon-512.png', 512), ('apple-touch-icon.png', 180)]:
     cairosvg.svg2png(bytestring=source.encode(), write_to=str(PUBLIC / 'icons' / name), output_width=size, output_height=size)

@@ -55,7 +55,7 @@ async function main() {
   }
 
   if (role === 'backend')
-    execFileSync(process.execPath, ['scripts/backend-ci-phase-overlay.mjs', path.join(sources.candidate, 'scripts/test-backend.mjs')], { stdio: 'inherit' })
+    execFileSync(process.execPath, ['scripts/ci/backend-ci-phase-overlay.mjs', path.join(sources.candidate, 'scripts/dev/test-backend.mjs')], { stdio: 'inherit' })
   writeFileSync(path.join(output, 'source.json'), `${JSON.stringify({
     diagnosticOnly: true,
     clock,

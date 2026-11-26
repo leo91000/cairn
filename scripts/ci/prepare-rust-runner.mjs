@@ -296,7 +296,7 @@ export function prepareRustRunner(environment, dependencies = {}) {
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   try {
     if (process.argv.length !== 2)
-      throw new Error('Usage: node scripts/prepare-rust-runner.mjs (no arguments)')
+      throw new Error('Usage: node scripts/ci/prepare-rust-runner.mjs (no arguments)')
     console.log(JSON.stringify(prepareRustRunner(process.env)))
   }
   catch (error) {

@@ -16,7 +16,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { it, onTestFinished } from 'vitest'
 import { parse } from 'yaml'
-import { prepareBackendDependencies, verifyBackendDependencies } from '../ci-backend-dependencies.mjs'
+import { prepareBackendDependencies, verifyBackendDependencies } from '../ci/ci-backend-dependencies.mjs'
 
 function fixtureImports() {
   const sources = ['../../tests/fixtures/mcp-provider.ts', '../../tests/fixtures/mcp.mjs', '../../crates/installation/tests/mcps.rs']
@@ -339,7 +339,7 @@ it('keeps provisioning backend-only after setup and before the durable action/he
   const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
   const steps = workflow.jobs.backend.steps
   const setup = steps.findIndex(step => step.uses === './.github/actions/setup-pnpm')
-  const provision = steps.findIndex(step => step.run === 'node scripts/ci-backend-dependencies.mjs')
+  const provision = steps.findIndex(step => step.run === 'node scripts/ci/ci-backend-dependencies.mjs')
   const action = steps.findIndex(step => step.uses === './.github/actions/backend-durable-evidence')
   assert.ok(setup < provision && provision < action)
   assert.equal(steps[provision].if, 'inputs.ci-diagnostic == \'backend\'')

@@ -20,14 +20,14 @@ import {
   runAvatarDiagnostic,
   WORKER_BUILD_ARGS,
   workerIdentity,
-} from '../ci-avatar-authority-diagnostic.mjs'
+} from '../ci/ci-avatar-authority-diagnostic.mjs'
 import {
   avatarDiagnosticPayload,
   avatarWorkerProof,
   BACKEND_ARGS,
   BACKEND_COMMAND,
   backendDiagnosticCommand,
-} from '../ci-backend-durable.mjs'
+} from '../ci/ci-backend-durable.mjs'
 
 function fixture() {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-avatar-diagnostic-'))
@@ -35,10 +35,10 @@ function fixture() {
   const source = path.join(root, 'candidate')
   const output = path.join(root, 'evidence')
   const worker = path.join(source, 'target/debug/cairn')
-  for (const name of ['target/debug', 'scripts', 'crates/installation/tests/fixtures', 'crates/installation/src/agent_avatars'])
+  for (const name of ['target/debug', 'scripts/dev', 'crates/installation/tests/fixtures', 'crates/installation/src/agent_avatars'])
     mkdirSync(path.join(source, name), { recursive: true })
   mkdirSync(output)
-  for (const name of ['scripts/test-backend.mjs', 'crates/installation/tests/fixtures/plugin_grants.rs', 'crates/installation/src/agent_avatars/tests.rs', 'Cargo.lock'])
+  for (const name of ['scripts/dev/test-backend.mjs', 'crates/installation/tests/fixtures/plugin_grants.rs', 'crates/installation/src/agent_avatars/tests.rs', 'Cargo.lock'])
     writeFileSync(path.join(source, name), `immutable fixture ${name}`)
   const candidate = '3'.repeat(40)
   const calls = []
@@ -72,7 +72,7 @@ function fixture() {
 it('keeps the default full command exact and admits only the fixed named diagnostic', () => {
   assert.deepEqual(backendDiagnosticCommand(undefined, '/observer'), { command: BACKEND_COMMAND, args: BACKEND_ARGS })
   assert.deepEqual(backendDiagnosticCommand('full', '/observer'), { command: BACKEND_COMMAND, args: BACKEND_ARGS })
-  assert.deepEqual(backendDiagnosticCommand('avatar-authority', '/observer'), { command: 'node', args: ['/observer/scripts/ci-avatar-authority-diagnostic.mjs'] })
+  assert.deepEqual(backendDiagnosticCommand('avatar-authority', '/observer'), { command: 'node', args: ['/observer/scripts/ci/ci-avatar-authority-diagnostic.mjs'] })
   for (const value of ['', null, 'avatar-authority; command', '../shell', ['avatar-authority']])
     assert.throws(() => backendDiagnosticCommand(value, '/observer'))
   assert.throws(() => backendDiagnosticCommand('avatar-authority', 'relative'))
@@ -82,7 +82,7 @@ it('builds the matching worker before one exact package/lib invocation and recor
   const f = fixture()
   assert.equal(runAvatarDiagnostic(f.options), 0)
   assert.deepEqual(f.calls.map(call => [call.command, call.args]), [['cargo', WORKER_BUILD_ARGS], ['node', AVATAR_ARGS]])
-  assert.deepEqual(AVATAR_ARGS, ['scripts/test-backend.mjs', '--nextest', '-p', 'cairn-installation', '--lib', '--test-threads', '8', '--no-fail-fast', '--color', 'never', '--status-level', 'all', '-E', AVATAR_FILTER])
+  assert.deepEqual(AVATAR_ARGS, ['scripts/dev/test-backend.mjs', '--nextest', '-p', 'cairn-installation', '--lib', '--test-threads', '8', '--no-fail-fast', '--color', 'never', '--status-level', 'all', '-E', AVATAR_FILTER])
   assert.equal(AVATAR_FILTER, 'test(agent_avatars::tests::) | test(authorization::tests::) | test(authorization::jobs::tests::)')
   for (const call of f.calls) {
     assert.equal(call.settings.cwd, f.source)
@@ -186,12 +186,12 @@ it('exposes the selector only on the existing diagnostic action and retains norm
   assert.equal(action.env.BACKEND_DIAGNOSTIC_SELECTOR, '${{ inputs.backend-diagnostic-selector || \'full\' }}')
   const normal = yaml.jobs.backend.steps.find(step => step.name === 'Run backend tests across binaries with isolated credentials')
   assert.equal(normal.if, 'inputs.ci-diagnostic != \'backend\'')
-  assert.ok(normal.run.includes('node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level all'))
+  assert.ok(normal.run.includes('node scripts/dev/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level all'))
   assert.equal(yaml.jobs.backend['timeout-minutes'], 30)
 })
 
 it('refuses arbitrary entrypoint arguments before any build', () => {
-  const result = spawnSync(process.execPath, ['scripts/ci-avatar-authority-diagnostic.mjs', 'untrusted-command'], {
+  const result = spawnSync(process.execPath, ['scripts/ci/ci-avatar-authority-diagnostic.mjs', 'untrusted-command'], {
     cwd: path.resolve(new URL('../..', import.meta.url).pathname),
     env: { PATH: process.env.PATH, BACKEND_DIAGNOSTIC_SELECTOR: 'avatar-authority' },
     encoding: 'utf8',

@@ -1,6 +1,6 @@
 # Observing an admission wait
 
-`scripts/admission-wait.mjs` is a metadata-only helper for an external health
+`scripts/ops/admission-wait.mjs` is a metadata-only helper for an external health
 monitor. A queued conversation's age is not its current admission-wait age. A
 recent event is not necessarily an admission transition either. The current
 projection supplies neither a canonical wait-start timestamp nor its history, so

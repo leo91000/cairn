@@ -7,7 +7,7 @@ import {
   resolveRelease,
   trustedRun,
   verifiedImage,
-} from '../resolve-release.mjs'
+} from '../release/resolve-release.mjs'
 
 const repository = 'leo91000/cairn'
 const tree = 'e'.repeat(40)

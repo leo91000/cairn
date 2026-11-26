@@ -7,11 +7,11 @@ import {
   it,
   vi,
 } from 'vitest'
-import { validationFailures } from '../pr-validation-required.mjs'
-import { validationScope } from '../pr-validation-scope.mjs'
-import { runPlan, validationPlan } from '../validate-pr.mjs'
+import { validationFailures } from '../ci/pr-validation-required.mjs'
+import { validationScope } from '../ci/pr-validation-scope.mjs'
+import { runPlan, validationPlan } from '../ci/validate-pr.mjs'
 
-const requiredValidationCli = fileURLToPath(new URL('../pr-validation-required.mjs', import.meta.url))
+const requiredValidationCli = fileURLToPath(new URL('../ci/pr-validation-required.mjs', import.meta.url))
 
 function runRequiredValidationCli(results) {
   return spawnSync(process.execPath, [requiredValidationCli], {
@@ -22,7 +22,7 @@ function runRequiredValidationCli(results) {
 
 describe('pR validation', () => {
   it('includes platform and contract checks for indirect shared inputs', () => {
-    for (const file of ['crates/contracts/src/lib.rs', 'packages/contracts/generated/models.json', 'scripts/generate-contracts.mjs', 'tests/fixtures/resume-contracts.json', 'pnpm-lock.yaml', '.github/workflows/pr.yaml', 'scripts/pr-validation-scope.mjs'])
+    for (const file of ['crates/contracts/src/lib.rs', 'packages/contracts/generated/models.json', 'scripts/dev/generate-contracts.mjs', 'tests/fixtures/resume-contracts.json', 'pnpm-lock.yaml', '.github/workflows/pr.yaml', 'scripts/ci/pr-validation-scope.mjs'])
       expect(validationScope([file])).toEqual({ android: true, contracts: true, browser: true })
     expect(validationScope(['apps/web/src/main.ts'])).toEqual({ android: false, contracts: false, browser: true })
     expect(validationScope(['apps/android/app/src/main/java/build/cairn/contracts/ResumeRunClient.kt'])).toEqual({ android: true, contracts: true, browser: false })
@@ -30,7 +30,7 @@ describe('pR validation', () => {
     expect(validationScope(['apps/android/app/build.gradle.kts'])).toEqual({ android: true, contracts: false, browser: false })
     expect(validationScope(['crates/installation/src/lib.rs'])).toEqual({ android: false, contracts: true, browser: true })
     expect(validationScope(['rust-toolchain.toml'])).toEqual({ android: false, contracts: true, browser: true })
-    expect(validationScope(['scripts/generate-contracts.mjs'])).toEqual({ android: true, contracts: true, browser: true })
+    expect(validationScope(['scripts/dev/generate-contracts.mjs'])).toEqual({ android: true, contracts: true, browser: true })
     expect(validationScope(['tests/e2e/chats.spec.ts'])).toEqual({ android: false, contracts: false, browser: true })
     expect(validationScope(['docs/README.md'])).toEqual({ android: false, contracts: false, browser: false })
   })

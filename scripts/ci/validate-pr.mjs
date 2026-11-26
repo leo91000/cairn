@@ -1,9 +1,9 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { isolateTestCredentials } from './test-environment.mjs'
+import { isolateTestCredentials } from '../dev/test-environment.mjs'
 
-const root = fileURLToPath(new URL('..', import.meta.url))
+const root = fileURLToPath(new URL('../..', import.meta.url))
 
 export const suites = {
   quality: [['pnpm', 'check']],

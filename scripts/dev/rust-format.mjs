@@ -5,14 +5,14 @@ import { fileURLToPath } from 'node:url'
 const check = process.argv[2] === '--check'
 
 if (process.argv.length > 3 || (process.argv[2] && !check)) {
-  console.error('Usage: node scripts/rust-format.mjs [--check]')
+  console.error('Usage: node scripts/dev/rust-format.mjs [--check]')
   process.exit(1)
 }
 
-const cwd = fileURLToPath(new URL('..', import.meta.url))
+const cwd = fileURLToPath(new URL('../..', import.meta.url))
 const commands = [
   ['cargo', ['fmt', '--all', ...(check ? ['--check'] : [])]],
-  [process.execPath, ['scripts/rust-spacing.mjs', ...(check ? ['--check'] : [])]],
+  [process.execPath, ['scripts/dev/rust-spacing.mjs', ...(check ? ['--check'] : [])]],
 ]
 
 for (const [command, args] of commands) {

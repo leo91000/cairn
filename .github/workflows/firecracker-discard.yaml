@@ -4,14 +4,14 @@ on:
     paths:
       - Dockerfile
       - deploy/microvm/firecracker-*.patch
-      - scripts/test-firecracker-discard.sh
+      - scripts/ci/test-firecracker-discard.sh
       - .github/workflows/firecracker-discard.yaml
   push:
     branches: [main]
     paths:
       - Dockerfile
       - deploy/microvm/firecracker-*.patch
-      - scripts/test-firecracker-discard.sh
+      - scripts/ci/test-firecracker-discard.sh
       - .github/workflows/firecracker-discard.yaml
   workflow_dispatch:
 permissions:
@@ -40,4 +40,4 @@ jobs:
           key: firecracker-discard-${{ runner.os }}-ubuntu24-1.97.0-${{ hashFiles('deploy/microvm/firecracker-*.patch') }}
           restore-keys: firecracker-discard-${{ runner.os }}-ubuntu24-1.97.0-
       - name: Verify discard ordering, completions, feature negotiation
-        run: scripts/test-firecracker-discard.sh
+        run: scripts/ci/test-firecracker-discard.sh

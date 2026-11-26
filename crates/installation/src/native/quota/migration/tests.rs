@@ -478,7 +478,7 @@ async fn exercise(state: &Path) {
 }
 
 #[tokio::test]
-#[ignore = "requires the disposable pool migration fixture; scripts/qualify-native-quota.mjs"]
+#[ignore = "requires the disposable pool migration fixture; scripts/ci/qualify-native-quota.mjs"]
 async fn kernel_pool_migration_qualification() {
     let state = fixture_state();
     match std::env::var("CAIRN_NATIVE_MIGRATION_PHASE")

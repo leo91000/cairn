@@ -844,7 +844,7 @@ mod compatibility_tests {
             )
             .unwrap();
         let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/run-progress.mjs")
+            .join("../../scripts/dev/run-progress.mjs")
             .canonicalize()
             .unwrap();
         let script = format!(

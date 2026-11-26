@@ -91,7 +91,7 @@ export function checkApk(apk) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [file] = process.argv.slice(2)
   if (!file)
-    throw new Error('Usage: node scripts/check-android-dex-size.mjs <apk-or-dex>')
+    throw new Error('Usage: node scripts/android/check-android-dex-size.mjs <apk-or-dex>')
   const report = file.endsWith('.dex') ? inspectDex(readFileSync(file)) : checkApk(file)
   console.log(JSON.stringify(report))
 }

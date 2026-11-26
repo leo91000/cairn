@@ -13,10 +13,10 @@ import {
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { isolateTestCredentials } from './test-environment.mjs'
+import { isolateTestCredentials } from '../dev/test-environment.mjs'
 
 export const AVATAR_FILTER = 'test(agent_avatars::tests::) | test(authorization::tests::) | test(authorization::jobs::tests::)'
-export const AVATAR_ARGS = ['scripts/test-backend.mjs', '--nextest', '-p', 'cairn-installation', '--lib', '--test-threads', '8', '--no-fail-fast', '--color', 'never', '--status-level', 'all', '-E', AVATAR_FILTER]
+export const AVATAR_ARGS = ['scripts/dev/test-backend.mjs', '--nextest', '-p', 'cairn-installation', '--lib', '--test-threads', '8', '--no-fail-fast', '--color', 'never', '--status-level', 'all', '-E', AVATAR_FILTER]
 export const WORKER_BUILD_ARGS = ['build', '--locked', '-p', 'cairn-installation', '--bin', 'cairn']
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 
@@ -54,7 +54,7 @@ export function sourceIdentity(source, candidate) {
     throw new Error('Avatar diagnostic source mismatch')
   // Existing diagnostic setup inserts only the phase observer in this launcher.
   const changed = git(['diff', '--name-only', 'HEAD']).split('\n').filter(Boolean)
-  if (changed.some(file => file !== 'scripts/test-backend.mjs'))
+  if (changed.some(file => file !== 'scripts/dev/test-backend.mjs'))
     throw new Error('Avatar diagnostic source has tracked changes')
   return { commit, tree: git(['rev-parse', 'HEAD^{tree}']) }
 }
@@ -102,7 +102,7 @@ export function runAvatarDiagnostic({
     selector: 'avatar-authority',
     source: revision,
     worker: { path: 'target/debug/cairn', ...worker },
-    launcherSHA256: digest(readFileSync(path.join(source, 'scripts/test-backend.mjs'))),
+    launcherSHA256: digest(readFileSync(path.join(source, 'scripts/dev/test-backend.mjs'))),
     fixtureSHA256: digest(readFileSync(path.join(source, 'crates/installation/tests/fixtures/plugin_grants.rs'))),
     avatarTestSHA256: digest(readFileSync(path.join(source, 'crates/installation/src/agent_avatars/tests.rs'))),
     cargoLockSHA256: digest(readFileSync(path.join(source, 'Cargo.lock'))),

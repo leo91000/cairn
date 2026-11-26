@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
-import { isolateTestCredentials } from './test-environment.mjs'
+import { isolateTestCredentials } from '../dev/test-environment.mjs'
 
 if (process.env.CAIRN_NATIVE_DISPOSABLE_HOST !== '1')
   throw new Error('Native quota qualification requires an explicitly designated disposable host.')

@@ -62,7 +62,7 @@ affected code and the full qualification workflows for specialist coverage:
   against an offline loopback master and observes its heartbeat; the immutable
   reference keeps its original controller entry point. This exercises pre-runtime
   legacy IO initialization during conversion without a production connection.
-- Firecracker changes require `scripts/test-firecracker-discard.sh` where
+- Firecracker changes require `scripts/ci/test-firecracker-discard.sh` where
   relevant. Container/release changes require the corresponding image smoke
   tests. Use disposable infrastructure with the required KVM/ublk capabilities.
 
@@ -127,7 +127,7 @@ Image publication requires both jobs to succeed. When physical migration is
 selected for a full run, it waits for both jobs; a backend-only migration run
 continues to require only the backend suite.
 
-The backend installs nextest with `scripts/install-nextest-ci.mjs`. Its official
+The backend installs nextest with `scripts/ci/install-nextest-ci.mjs`. Its official
 GitHub release asset ID, size and SHA256 are pinned; acquisition uses the release
 asset API because the public download URL has returned persistent 504s. The
 digest also matches the immutable install-action manifest cited in the helper.
@@ -182,7 +182,7 @@ publish, promotion and deployment jobs are skipped.
 
 The five native test-dependency callers (`rust-check`, `backend`,
 `cli-qualification`, `backend-migration-qualification` and `node-checks`) use
-`scripts/install-native-ci-dependencies.mjs`. Its closed native profile preserves
+`scripts/ci/install-native-ci-dependencies.mjs`. Its closed native profile preserves
 `libclang-dev age e2fsprogs fakeroot`; update/install have 120/360-second work
 budgets, noninteractive sudo and bounded acquisition/lock waits. Phase markers
 contain fixed status fields, and owned process groups are cleaned before returning
@@ -239,7 +239,7 @@ The fixed wrapper runs `cargo build --locked -p cairn-installation --bin cairn`
 from the immutable candidate, then exactly once:
 
 ```sh
-node scripts/test-backend.mjs --nextest -p cairn-installation --lib --test-threads 8 --no-fail-fast --color never --status-level all -E 'test(agent_avatars::tests::) | test(authorization::tests::) | test(authorization::jobs::tests::)'
+node scripts/dev/test-backend.mjs --nextest -p cairn-installation --lib --test-threads 8 --no-fail-fast --color never --status-level all -E 'test(agent_avatars::tests::) | test(authorization::tests::) | test(authorization::jobs::tests::)'
 ```
 
 Both commands stay inside the existing owned-command supervisor and actual

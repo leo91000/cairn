@@ -46,7 +46,7 @@ See [microVM requirements and architecture](docs/MICROVMS.md).
 ```sh
 cp .env.example .env
 # Configure CAIRN_BEACON_ORIGIN for Beacon.
-versions=$(node scripts/cli-updates.mjs build-versions) \
+versions=$(node scripts/release/cli-updates.mjs build-versions) \
   && node -e 'for (const [tool, version] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${tool.toUpperCase()}_VERSION=${version}`)' "$versions" \
   | xargs docker compose build \
   && docker compose up -d

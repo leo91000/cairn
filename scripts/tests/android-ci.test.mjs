@@ -13,10 +13,10 @@ import {
   expect,
   it,
 } from 'vitest'
-import { artifactName, recordBuild, verifyBuild } from '../android-build.mjs'
-import { smokeProbe } from '../android-release-smoke.mjs'
-import { androidVersion } from '../android-release.mjs'
-import { AndroidValidationPendingError, resolveAndroidRelease, trustedAndroidRun } from '../resolve-android-release.mjs'
+import { artifactName, recordBuild, verifyBuild } from '../android/android-build.mjs'
+import { smokeProbe } from '../android/android-release-smoke.mjs'
+import { androidVersion } from '../android/android-release.mjs'
+import { AndroidValidationPendingError, resolveAndroidRelease, trustedAndroidRun } from '../android/resolve-android-release.mjs'
 
 const config = {
   repository: 'leo91000/cairn',

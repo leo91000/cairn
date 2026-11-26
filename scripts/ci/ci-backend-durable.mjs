@@ -24,13 +24,13 @@ import { observeCommand } from './ci-deadline.mjs'
 
 export const UPLOADER_SHA = '043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' // upload-artifact v7.0.1
 export const BACKEND_COMMAND = 'node' // Preserve setup-pnpm's PATH-selected runtime.
-export const BACKEND_ARGS = ['scripts/test-backend.mjs', '--nextest', '--test-threads', '8', '--no-fail-fast', '--color', 'never', '--status-level', 'all']
+export const BACKEND_ARGS = ['scripts/dev/test-backend.mjs', '--nextest', '--test-threads', '8', '--no-fail-fast', '--color', 'never', '--status-level', 'all']
 // Selection is available only inside main's validated diagnostic startup path.
 export function backendDiagnosticCommand(selector = 'full', workspace) {
   if (selector === 'full')
     return { command: BACKEND_COMMAND, args: BACKEND_ARGS }
   if (selector === 'avatar-authority' && path.isAbsolute(workspace))
-    return { command: BACKEND_COMMAND, args: [path.join(workspace, 'scripts/ci-avatar-authority-diagnostic.mjs')] }
+    return { command: BACKEND_COMMAND, args: [path.join(workspace, 'scripts/ci/ci-avatar-authority-diagnostic.mjs')] }
   throw new Error('Unknown backend diagnostic selector')
 }
 
@@ -507,19 +507,19 @@ export async function main() {
       attempt: env.GITHUB_RUN_ATTEMPT,
       repository: env.GITHUB_REPOSITORY,
       uploader: UPLOADER_SHA,
-      supervisorSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci-deadline.mjs'), 65536)),
-      publisherSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci-backend-durable.mjs'), 65536)),
-      traceObserverSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci-backend-trace.mjs'), 65536)),
+      supervisorSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci/ci-deadline.mjs'), 65536)),
+      publisherSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci/ci-backend-durable.mjs'), 65536)),
+      traceObserverSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci/ci-backend-trace.mjs'), 65536)),
       dependenciesSHA256: sha256(readBounded(dependenciesFile, 65536)),
       sourceManifestSHA256: sha256(readBounded(path.join(output, 'source.json'), 65536)),
-      launcherSHA256: sha256(readBounded(path.join(source, 'scripts/test-backend.mjs'), 65536)),
+      launcherSHA256: sha256(readBounded(path.join(source, 'scripts/dev/test-backend.mjs'), 65536)),
       acquisition: 'unknown',
     }
     const selector = env.BACKEND_DIAGNOSTIC_SELECTOR || 'full'
     const selected = backendDiagnosticCommand(selector, workspace)
     receipt.selector = selector
     if (selector === 'avatar-authority')
-      receipt.avatarObserverSHA256 = sha256(readBounded(path.join(workspace, 'scripts/ci-avatar-authority-diagnostic.mjs'), 65536))
+      receipt.avatarObserverSHA256 = sha256(readBounded(path.join(workspace, 'scripts/ci/ci-avatar-authority-diagnostic.mjs'), 65536))
     const directory = mkdtempSync(path.join(env.RUNNER_TEMP, 'cairn-backend-publication-'))
     mkdirSync(output, { recursive: true, mode: 0o700 })
     const publishArtifact = artifactPublisher({ uploader: path.join(uploaderRoot, 'dist/upload/index.js'), directory, env })

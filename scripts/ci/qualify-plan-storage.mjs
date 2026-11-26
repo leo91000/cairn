@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { isolateTestCredentials } from './test-environment.mjs'
+import { isolateTestCredentials } from '../dev/test-environment.mjs'
 
 if (process.env.GITHUB_ACTIONS !== 'true')
   throw new Error('This two-source qualification runs only on an ephemeral CI runner.')

@@ -1719,7 +1719,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires scripts/qualify-native-quota.mjs on its dedicated disposable filesystem"]
+    #[ignore = "requires scripts/ci/qualify-native-quota.mjs on its dedicated disposable filesystem"]
     async fn kernel_migration_copy_headroom() {
         assert_eq!(
             std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),
@@ -1864,7 +1864,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires scripts/qualify-native-quota.mjs on its dedicated disposable filesystem"]
+    #[ignore = "requires scripts/ci/qualify-native-quota.mjs on its dedicated disposable filesystem"]
     async fn kernel_missing_conversion_replacement_preserves_original_journal() {
         assert_eq!(
             std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),

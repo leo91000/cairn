@@ -13,7 +13,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const launcher = fileURLToPath(new URL('../test-native-namespace.mjs', import.meta.url))
+const launcher = fileURLToPath(new URL('../ci/test-native-namespace.mjs', import.meta.url))
 const testName = 'storage::ublk::namespace::tests::isolated_namespace_qualification'
 const namespaceTests = [testName, 'storage::ublk::namespace::tests::recovery_template_drops_only_attested_private_copies', 'native::block::holders::tests::retained_namespace_without_procfs_still_reports_the_device', 'native::block::holders::tests::private_mount_outside_a_chroot_is_not_lost', 'native::block::holders::tests::covered_namespace_root_requires_independent_superblock_inventory', 'native::block::holders::tests::covered_network_namespace_does_not_block_filesystem_inventory', 'native::systemd::directory_consumers::tests::persistent_mount_namespace_keeps_directory_ownership_without_tasks']
 const privilegedTests = ['native::block::holders::tests::raw_block_device_descriptor_is_a_holder', 'native::block::holders::tests::mapped_raw_block_node_is_a_holder_after_its_descriptor_closes', 'storage::ublk::observation::tests::encoded_absence_is_not_replaced_by_a_legacy_opcode_error']

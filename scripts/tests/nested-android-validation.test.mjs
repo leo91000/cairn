@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { evidenceStatus, waitForValidation } from '../nested-android-validation.mjs'
+import { evidenceStatus, waitForValidation } from '../android/nested-android-validation.mjs'
 
 const config = {
   repository: 'leo91000/cairn',

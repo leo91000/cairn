@@ -2,7 +2,7 @@
 # Run native: container build sandboxes may deny io_uring_setup. No tests skip
 # unsupported io_uring; discard qualification must actually exercise the engine.
 set -euo pipefail
-repository=$(cd -- "$(dirname -- "$0")/.." && pwd)
+repository=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 source_commit=95f868c8e345b1cc8faccd1a3c910b4989dc3f58
 source_sha256=27280787407229c412901dfcf74cd378f1336010e71050aba43ace51cd4a0f4f
 grep -Fq -- "$source_commit" "$repository/Dockerfile"

@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import process from 'node:process'
-import { isolateTestCredentials } from './test-environment.mjs'
+import { isolateTestCredentials } from '../dev/test-environment.mjs'
 
 isolateTestCredentials()
 const built = spawnSync('cargo', ['test', '--locked', '--workspace', '--lib', '--no-run', '--message-format=json'], {

@@ -129,7 +129,7 @@ that were resolved with its version (`ANTIGRAVITY_URL`, `ANTIGRAVITY_SHA512`). T
 built for linux/amd64 only:
 
 ```sh
-versions=$(node scripts/cli-updates.mjs build-versions) \
+versions=$(node scripts/release/cli-updates.mjs build-versions) \
   && node -e 'for (const [key, value] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${key.includes("-") ? key.replace("-", "_").toUpperCase() : `${key.toUpperCase()}_VERSION`}=${value}`)' "$versions" \
   | xargs docker compose build \
   && docker compose up -d
@@ -428,7 +428,7 @@ Publish the JSON, logs and screenshots to durable private artifact storage. Then
 from the trusted operator environment (not the Intel host), record the result:
 
 ```sh
-node scripts/nested-android-validation.mjs record /path/to/intel.json https://<durable-report-url>
+node scripts/android/nested-android-validation.mjs record /path/to/intel.json https://<durable-report-url>
 ```
 
 The recorded commit status documents the result; CI does not wait for it.

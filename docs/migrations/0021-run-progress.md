@@ -84,7 +84,7 @@ recovery; the conservative compatibility path remains available for legacy runs.
 
 ## Reproducible local SQL measurements
 
-Run `node scripts/measure-run-progress.mjs`. This creates and removes its own
+Run `node scripts/dev/measure-run-progress.mjs`. This creates and removes its own
 SQLite fixture, with the source schemas, 100,000 diagnostics, 128 item digests, a
 256 KiB prepared workspace, 1,000 reads and 60 separately committed writes. It
 prints encoded bytes, query plans, wall time, CPU and WAL bytes. Local Linux, Node

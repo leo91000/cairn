@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-SPEC = importlib.util.spec_from_file_location('native_reference', Path(__file__).resolve().parents[1] / 'native_reference.py')
+SPEC = importlib.util.spec_from_file_location('native_reference', Path(__file__).resolve().parents[1] / 'ci' / 'native_reference.py')
 reference = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(reference)
 

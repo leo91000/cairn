@@ -199,7 +199,7 @@ val checkDebugAndroidTestDexSize by
         dependsOn("packageDebugAndroidTest")
         commandLine(
             "node",
-            rootProject.file("../../scripts/check-android-dex-size.mjs"),
+            rootProject.file("../../scripts/android/check-android-dex-size.mjs"),
             layout.buildDirectory
                 .file("outputs/apk/androidTest/debug/app-debug-androidTest.apk")
                 .get()

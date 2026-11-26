@@ -1,0 +1,29 @@
+name: Set up Android SDK and Java
+description: Configure Temurin Java 21, Android SDK tools, optional Gradle cache, and required SDK packages.
+inputs:
+  gradle:
+    description: Configure Gradle caching via gradle/actions/setup-gradle.
+    default: 'true'
+  packages:
+    description: Space-separated sdkmanager package list to install.
+    default: platforms;android-37.0 build-tools;36.0.0
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: '21'
+    - uses: android-actions/setup-android@v3
+      with:
+        packages: platform-tools
+    - uses: gradle/actions/setup-gradle@v5
+      if: inputs.gradle == 'true'
+    - name: Install Android SDK packages
+      if: inputs.packages != ''
+      shell: bash
+      env:
+        SDK_PACKAGES: ${{ inputs.packages }}
+      run: |
+        read -r -a packages <<< "$SDK_PACKAGES"
+        sdkmanager "${packages[@]}"

@@ -258,7 +258,7 @@ An explicit local metadata-write benchmark exercises the real `Store` on synthet
 
 ```sh
 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
-  node scripts/test-backend.mjs -p cairn-installation --test run_write_performance \
+  node scripts/dev/test-backend.mjs -p cairn-installation --test run_write_performance \
   -- --ignored --nocapture --test-threads=1
 ```
 
@@ -466,7 +466,7 @@ state, and it does not remove the frozen run snapshot from live responses.
 The ignored unit benchmark exercises real Store fixtures and the live read path:
 
 ```sh
-node scripts/test-backend.mjs -p cairn-installation --lib \
+node scripts/dev/test-backend.mjs -p cairn-installation --lib \
   measure_conversation_reads_by_count_and_snapshot_size -- \
   --ignored --nocapture --test-threads=1
 ```

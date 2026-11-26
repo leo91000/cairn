@@ -15,9 +15,9 @@ import path from 'node:path'
 import process from 'node:process'
 import { it } from 'vitest'
 import { parse } from 'yaml'
-import { instrumentBackend } from '../backend-ci-phase-overlay.mjs'
-import { observeCommand } from '../ci-deadline.mjs'
-import { selectJobClock } from '../ci-diagnostic-source.mjs'
+import { instrumentBackend } from '../ci/backend-ci-phase-overlay.mjs'
+import { observeCommand } from '../ci/ci-deadline.mjs'
+import { selectJobClock } from '../ci/ci-diagnostic-source.mjs'
 
 function temporary(t, parent = os.tmpdir()) {
   const directory = mkdtempSync(path.join(parent, 'cairn-ci-deadline-'))
@@ -141,7 +141,7 @@ it('does not start work after the evidence reserve has begun', async (t) => {
 })
 
 it('backend overlay keeps the exact original launcher and refuses ambiguous sources', () => {
-  const source = readFileSync(new URL('../test-backend.mjs', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../dev/test-backend.mjs', import.meta.url), 'utf8')
   const observed = instrumentBackend(source)
   assert.ok(observed.includes('recordCIPhase(\'worker-fixture-build\')'))
   assert.ok(observed.includes('recordCIPhase(\'code-worker-build\')'))
@@ -323,14 +323,14 @@ it.each(['backend', 'native'])('accepts workflow diagnostic prerequisites withou
     GITHUB_REPOSITORY: 'invalid',
   }
   delete environment.BACKEND_QUALIFICATION
-  const result = spawnSync(process.execPath, [new URL('../ci-diagnostic-source.mjs', import.meta.url).pathname, role], { encoding: 'utf8', env: environment })
+  const result = spawnSync(process.execPath, [new URL('../ci/ci-diagnostic-source.mjs', import.meta.url).pathname, role], { encoding: 'utf8', env: environment })
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /Invalid CI clock identity/)
   assert.doesNotMatch(result.stderr, /Diagnostics require/)
 })
 
 it('rejects an independent Plan storage request before reading CI metadata or fetching sources', () => {
-  const file = new URL('../ci-diagnostic-source.mjs', import.meta.url)
+  const file = new URL('../ci/ci-diagnostic-source.mjs', import.meta.url)
   const result = spawnSync(process.execPath, [file.pathname, 'backend'], {
     encoding: 'utf8',
     env: {

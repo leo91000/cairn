@@ -9,7 +9,7 @@ on:
       - package.json
       - pnpm-lock.yaml
       - playwright.config.ts
-      - scripts/qualify-beacon-sql-fixture.ts
+      - scripts/ci/qualify-beacon-sql-fixture.ts
       - scripts/tests/ci-coverage.test.mjs
       - tests/e2e/live.spec.ts
   workflow_dispatch:
@@ -57,15 +57,7 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
-      - name: Check browser image version
-        run: |
-          node --input-type=module <<'JS'
-          import { readFileSync } from 'node:fs'
-          const installed = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
-          const preinstalled = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
-          if (installed !== preinstalled)
-            throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
-          JS
+      - uses: ./.github/actions/check-playwright-image
       - name: Install the pinned Rust toolchain and test dependencies
         run: |
           apt-get update -qq
@@ -78,7 +70,7 @@ jobs:
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture
           pnpm exec vite build --config apps/web/vite.config.ts
       - name: Qualify the isolated Postgres fixture
-        run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
+        run: pnpm exec tsx scripts/ci/qualify-beacon-sql-fixture.ts
       - name: Run the affected WebKit live test
         timeout-minutes: 10
         env:

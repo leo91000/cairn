@@ -615,7 +615,7 @@ def android(network, directory, args, report):
     private = directory / "direct-fixture.json"
     fixture_log = directory / "fixture.log"
     with fixture_log.open("w") as output:
-        fixture = subprocess.Popen(["node", "--import", "tsx", "scripts/android-direct-fixture.mjs", str(private)],
+        fixture = subprocess.Popen(["node", "--import", "tsx", "scripts/android/android-direct-fixture.mjs", str(private)],
                                    env=env, stdout=output, stderr=output, start_new_session=True)
     network.children.append(fixture)
     network.groups.append(fixture.pid)

@@ -16,8 +16,8 @@ import process from 'node:process'
 import { test as nodeTest } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
-import { closeNetworkFixture, networkPhaseDiagnostics } from '../scripts/network-phase-diagnostics.mjs'
-import { isolateTestCredentials } from '../scripts/test-environment.mjs'
+import { closeNetworkFixture, networkPhaseDiagnostics } from '../scripts/ci/network-phase-diagnostics.mjs'
+import { isolateTestCredentials } from '../scripts/dev/test-environment.mjs'
 
 isolateTestCredentials()
 
@@ -25,8 +25,8 @@ nodeTest('phase evidence survives a real Playwright timeout that removes every P
   const directory = mkdtempSync(join(tmpdir(), 'cairn-network-timeout-'))
   try {
     const playwright = new URL('../node_modules/@playwright/test/index.mjs', import.meta.url).href
-    const diagnostics = new URL('../scripts/network-phase-diagnostics.mjs', import.meta.url).href
-    const isolation = new URL('../scripts/test-environment.mjs', import.meta.url).href
+    const diagnostics = new URL('../scripts/ci/network-phase-diagnostics.mjs', import.meta.url).href
+    const isolation = new URL('../scripts/dev/test-environment.mjs', import.meta.url).href
     const output = join(directory, 'scenario.json')
     const state = join(directory, 'cleanup.json')
     const config = join(directory, 'playwright.config.mjs')

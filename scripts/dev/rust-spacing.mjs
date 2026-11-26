@@ -79,7 +79,7 @@ if (import.meta.main) {
   const check = process.argv[2] === '--check'
 
   if (process.argv.length > 3 || (process.argv[2] && !check)) {
-    console.error('Usage: node scripts/rust-spacing.mjs [--check]')
+    console.error('Usage: node scripts/dev/rust-spacing.mjs [--check]')
     process.exit(1)
   }
 

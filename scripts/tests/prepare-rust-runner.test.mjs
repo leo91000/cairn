@@ -9,7 +9,7 @@ import {
   vi,
 } from 'vitest'
 import { parse } from 'yaml'
-import { prepareRustRunner, REQUIRED_FREE_BYTES, UNUSED_SDK_DIRECTORIES } from '../prepare-rust-runner.mjs'
+import { prepareRustRunner, REQUIRED_FREE_BYTES, UNUSED_SDK_DIRECTORIES } from '../ci/prepare-rust-runner.mjs'
 
 const environment = {
   GITHUB_ACTIONS: 'true',
@@ -378,7 +378,7 @@ describe('disposable Rust test runner disk preparation', () => {
   })
 
   it('the real CLI refuses non-Actions execution, including inherited host metadata', () => {
-    const result = spawnSync(process.execPath, [fileURLToPath(new URL('../prepare-rust-runner.mjs', import.meta.url))], {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('../ci/prepare-rust-runner.mjs', import.meta.url))], {
       env: { ...process.env, GITHUB_ACTIONS: 'false' },
       encoding: 'utf8',
     })

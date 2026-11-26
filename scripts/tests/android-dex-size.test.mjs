@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer'
 import { describe, expect, it } from 'vitest'
-import { inspectDex } from '../check-android-dex-size.mjs'
+import { inspectDex } from '../android/check-android-dex-size.mjs'
 
 function fixture(size, { virtual = false, abstract = false } = {}) {
   const bytes = Buffer.alloc(176 + size * 2)

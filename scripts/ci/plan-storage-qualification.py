@@ -44,7 +44,7 @@ def main():
     reference = sys.argv[1]
     if not re.fullmatch('[0-9a-f]{40}', reference):
         raise ValueError('Full reference SHA required')
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     candidate = git('rev-parse', 'HEAD', cwd=repo)
     run(['git', 'merge-base', '--is-ancestor', reference, candidate], cwd=repo)
     if git('diff', '--name-only', reference, candidate, '--', 'Cargo.lock', 'vendor', cwd=repo):

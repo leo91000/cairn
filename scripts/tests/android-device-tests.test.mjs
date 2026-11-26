@@ -5,7 +5,7 @@ import {
   parseInstrumentation,
   planShards,
   waitForArtifact,
-} from '../android-device-tests.mjs'
+} from '../android/android-device-tests.mjs'
 
 function output(text, step = 1000) {
   return text.trim().split('\n').map((line, index) => ({ text: line, time: index * step }))

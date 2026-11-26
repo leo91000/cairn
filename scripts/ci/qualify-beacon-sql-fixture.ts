@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
 import process from 'node:process'
-import { executeBeaconSql } from '../tests/e2e/beacon-relay-fixture'
+import { executeBeaconSql } from '../../tests/e2e/beacon-relay-fixture'
 
 // Run only against CI's disposable Postgres service, using the real TS consumer
 // and the example from the same browser-backend artifact as the journeys.
