@@ -21,7 +21,7 @@ import {
   TriangleAlert,
 } from '../icons'
 
-const props = defineProps<{ email?: string }>()
+const props = defineProps<{ email?: string, embedded?: boolean }>()
 
 const parameters = Object.fromEntries(new URLSearchParams(location.search))
 const details = ref<{
@@ -143,7 +143,12 @@ function handleConfirmed() {
 </script>
 
 <template>
-  <AuthStage max-width="md" label="Connect an assistant" :busy="busy || loading">
+  <AuthStage
+    max-width="md"
+    label="Connect an assistant"
+    :busy="busy || loading"
+    :embedded="props.embedded"
+  >
     <template #header>
       <BrandWordmark class="origin-left scale-[0.88]" />
       <span

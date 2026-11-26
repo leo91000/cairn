@@ -32,7 +32,7 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
     var removing by remember { mutableStateOf<Mcp?>(null) }
     var disconnecting by remember { mutableStateOf(false) }
     var oauth by rememberSaveable { mutableStateOf<String?>(null) }
-    var oauthNotice by remember { mutableStateOf("") }
+    var oauthNotice by remember { mutableStateOf<Pair<String, NoticeTone>?>(null) }
     val context = LocalContext.current
     LaunchedEffect(state.mcps) { items = state.mcps }
     Poll("mcps", 3000) {
@@ -43,9 +43,11 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
                     oauth = null
                     oauthNotice =
                         when (result.result) {
-                            "connected" -> "Connexion OAuth terminée."
-                            "denied" -> "Autorisation annulée."
-                            else -> "Autorisation expirée ou échouée. Réessayez la connexion."
+                            "connected" -> "Connexion OAuth terminée." to NoticeTone.INFO
+                            "denied" -> "Autorisation annulée." to NoticeTone.WARNING
+                            else ->
+                                "Autorisation expirée ou échouée. Réessayez la connexion." to
+                                    NoticeTone.ERROR
                         }
                 }
             }
@@ -65,9 +67,9 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
             Text("Ajouter un MCP")
         }
         SearchField("Rechercher", query, { query = it })
-        if (oauthNotice.isNotBlank()) {
-            Notice(oauthNotice, tone = NoticeTone.INFO) {
-                IconButton(onClick = { oauthNotice = "" }) {
+        oauthNotice?.let { (message, tone) ->
+            Notice(message, tone = tone) {
+                IconButton(onClick = { oauthNotice = null }) {
                     Icon(
                         CairnIcons.Close,
                         "Fermer",
@@ -174,7 +176,7 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
                                             BeginMcpInput(id = mcp.id, native = true)
                                         )
                                     oauth = mcp.id
-                                    oauthNotice = ""
+                                    oauthNotice = null
                                     browse(context, result.url)
                                 }
                             },

@@ -51,7 +51,7 @@ export function workspaceRouter(base = '/') {
       { path: '/nodes', component: () => import('./views/Nodes.vue') },
       { path: '/settings/:section(account|installation|sensitive)?', component: () => import('./views/Settings.vue') },
       { path: '/settings/coding-agents/:provider(codex|claude|opencode|antigravity)', component: () => import('./views/CodingAgentConfiguration.vue') },
-      { path: '/authorize', component: () => import('./views/Authorize.vue') },
+      { path: '/authorize', component: () => import('./views/Authorize.vue'), props: { embedded: true } },
       { path: '/:pathMatch(.*)*', redirect: '/' },
     ],
   })
