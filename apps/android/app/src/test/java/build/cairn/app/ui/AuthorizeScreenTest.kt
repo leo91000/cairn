@@ -272,6 +272,10 @@ class AuthorizeScreenTest {
                     .onNodeWithText("Recevoir un code par e-mail")
                     .performScrollTo()
                     .performClick()
+                // The code field appears once Beacon answers the code request.
+                compose.waitUntil(10_000) {
+                    compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().size == 1
+                }
                 val codeInput = compose.onNode(hasSetTextAction())
                 codeInput.performTextInput("12")
                 compose.onNodeWithText("Valider la confirmation").assertIsNotEnabled()
