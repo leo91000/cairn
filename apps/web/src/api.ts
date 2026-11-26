@@ -22,7 +22,7 @@ import {
   documentSignal,
   resumeDocument,
 } from './document-lifetime'
-import { clearHistoryCache } from './history-cache'
+import { clearEarlierHistory, clearHistoryCache } from './history-cache'
 import { InstallationTransport } from './installation-transport'
 import { observeTransport } from './transport-observation'
 
@@ -60,8 +60,10 @@ watch(connectionScope, () => {
   state.protocolError = ''
 }, { flush: 'sync' })
 watch(() => state.signingOut || (state.ready && !state.authenticated), (clear) => {
-  if (clear)
-    void clearHistoryCache()
+  if (!clear)
+    return
+  void clearHistoryCache()
+  clearEarlierHistory()
 }, { flush: 'sync' })
 export const installationTransport = new InstallationTransport(state)
 watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.redirecting, state.installationOnline, documentLifetime.value.signal.aborted], () => {

@@ -59,7 +59,8 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     status(failures ? 'reconnecting' : 'connecting', true)
     const windowed = path !== '/chats/stream'
     const recent = windowed && cursor !== '0' && followsLatest?.()
-    const route = `${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${windowed ? '&window=1' : ''}${recent ? '&recent=1' : ''}${query}`
+    // Compact: the list once, then only the conversations that changed (see `nextLiveState`).
+    const route = `${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${windowed ? '&window=1' : ''}${recent ? '&recent=1' : ''}&compact=1${query}`
     let current: EventSource
     try {
       current = installationTransport.source(route, apiUrl(route))

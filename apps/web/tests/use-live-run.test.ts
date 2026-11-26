@@ -142,7 +142,9 @@ it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history whe
   const firstScope = effectScope()
   scopes.push(firstScope)
   const first = firstScope.run(() => useLiveRun(() => path.value, { current: () => false }))!
-  expect(first.snapshot.value).toBeUndefined()
+  // An outdated copy shows at once and says it is updating.
+  expect(first.events.value).toMatchObject([{ id: 20 }])
+  expect(first.connectionNotice.value).toBe('Updating…')
 
   if (reason === 'navigation') {
     path.value = '/chats/b/stream'
@@ -180,4 +182,144 @@ it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history whe
   await reopened.loadOlder()
   expect(api).toHaveBeenCalledWith('/chats/a/history?before=20&history=v2%3Ar%3A1')
   expect(reopened.hasOlder.value).toBe(false)
+})
+
+it('keeps the list of a compact stream and applies its changes', async () => {
+  const scope = effectScope()
+  scopes.push(scope)
+  const live = scope.run(() => useLiveRun(() => '/chats/a/stream', { list: true }))!
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
+  const run = { id: 'r', status: 'succeeded' }
+  await accept({
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v2:r:1',
+    state: {
+      run,
+      chat: { id: 'a', messages: [] },
+      chats: [{ id: 'a' }, { id: 'b' }],
+      artifacts: [],
+    },
+  } as never, 1)
+  expect(live.snapshot.value?.chat?.run).toEqual(run)
+  expect(live.carriesList.value).toBe(true)
+
+  await accept({
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v2:r:1',
+    chatChanges: { upserts: [{ id: 'b', title: 'Moved' }], removed: ['a'], order: ['b'] },
+  } as never, 1)
+  expect(live.snapshot.value?.chats).toEqual([{ id: 'b', title: 'Moved' }])
+  expect(live.snapshot.value?.chat?.id).toBe('a')
+})
+
+it('treats a saved copy completed over several batches as the server list', async () => {
+  const scope = await cacheScope('test-session')
+  const stream = '/chats/a/stream'
+  await writeHistory(scope, stream, {
+    version: 2,
+    cursor: 5,
+    history: 'v2:r:1',
+    state: { run: null, chat: { id: 'a', messages: [] } as never, artifacts: [] },
+    entries: [],
+    events: [],
+    savedAt: Date.now(),
+  })
+  const effect = effectScope()
+  scopes.push(effect)
+  const live = effect.run(() => useLiveRun(() => stream, { list: true, current: () => false }))!
+  expect(live.restored.value).toBe(true)
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
+  // The catch-up's first batch carries the state; the completing one has nothing new.
+  await accept({
+    events: [],
+    reset: false,
+    more: true,
+    history: 'v2:r:1',
+    state: {
+      run: null,
+      chat: { id: 'a', messages: [] },
+      chats: [{ id: 'a' }],
+      artifacts: [],
+    },
+  } as never, 6)
+  expect(live.restored.value).toBe(true)
+  await accept({
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v2:r:1',
+  } as never, 7)
+  expect(live.restored.value).toBe(false)
+  expect(live.connectionNotice.value).toBe('')
+})
+
+it('saves nothing for a stream whose state is saved elsewhere', async () => {
+  const scope = await cacheScope('test-session')
+  const effect = effectScope()
+  scopes.push(effect)
+  effect.run(() => useLiveRun(() => '/chats/stream', { save: false }))
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
+  await accept({
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v2::0',
+    state: {
+      run: null,
+      chat: null,
+      chats: [{ id: 'a' }],
+      artifacts: [],
+    },
+  } as never, 0)
+  effect.stop()
+  expect(peekHistory(scope, '/chats/stream')).toBeUndefined()
+})
+
+it('adopts a first history revision without clearing, and clears on a later change', async () => {
+  const stored = new Map<string, string>()
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => stored.set(key, value),
+  })
+  const scope = await cacheScope('test-session')
+  const other = '/chats/other/stream'
+  await writeHistory(scope, other, {
+    version: 2,
+    cursor: 0,
+    history: 'v2:r:1',
+    state: { run: null, chat: null, artifacts: [] },
+    entries: [],
+    events: [],
+    savedAt: Date.now(),
+  })
+  const effect = effectScope()
+  scopes.push(effect)
+  effect.run(() => useLiveRun(() => '/chats/a/stream'))
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
+  const batch = (historyRevision: string) => ({
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v2:r:1',
+    state: {
+      run: null,
+      chat: null,
+      artifacts: [],
+      cacheRevision: 'trash revision',
+      historyRevision,
+    },
+  }) as never
+  await accept(batch('initial'), 1)
+  expect(stored.get('conversation-history-revision')).toBe('initial')
+  expect(peekHistory(scope, other)).toBeDefined()
+  await accept(batch('changed'), 1)
+  expect(peekHistory(scope, other)).toBeUndefined()
 })
