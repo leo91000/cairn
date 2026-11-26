@@ -460,7 +460,7 @@ test('identical queued-message edits keep retry identity scoped to the edited me
   expect(attempts[2].id).not.toBe(attempts[0].id)
 })
 
-test('a transient agent error shows a retry countdown and resumes without user input', async ({ page, workspace }) => {
+isolatedWorkspaceTest('a transient agent error shows a retry countdown and resumes without user input', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
     id: randomUUID(),

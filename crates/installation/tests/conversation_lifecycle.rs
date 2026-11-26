@@ -2272,11 +2272,12 @@ async fn implementation_approval_is_atomic_with_concurrent_requests_and_retries(
     let chat = app.create_chat().await;
     let chat_id = text(&chat, "id").to_owned();
     let run = id();
-    app.add_finished_run(
+    app.add_finished_run_with_request(
         &run,
         RunStatus::Succeeded,
         json!({ "snapshot": { "agent": { "provider": "codex" } } }),
         "Plan request",
+        Some("request-a"),
     )
     .await;
     let c = chat_id.clone();
@@ -2293,7 +2294,10 @@ async fn implementation_approval_is_atomic_with_concurrent_requests_and_retries(
                 "Reviewed plan",
                 Some(&json!({
                     "type": "item.completed",
-                    "item": { "id": "proposal", "type": "proposed_plan", "text": "Reviewed plan" },
+                    "item": {
+                        "id": "proposal", "type": "proposed_plan",
+                        "text": "Reviewed plan", "request_id": "request-a",
+                    },
                 })),
             )?;
             Ok(())
@@ -2529,13 +2533,14 @@ async fn implementation_rejects_newer_unfinished_root_lifecycles() {
                 let chat = app.create_chat().await;
                 let chat_id = text(&chat, "id").to_owned();
                 let run = id();
-                app.add_finished_run(
+                app.add_finished_run_with_request(
                     &run,
                     status,
                     json!({
                         "snapshot": { "agent": { "provider": "codex" } }
                     }),
                     "Plan request",
+                    Some("request-a"),
                 )
                 .await;
                 let (c, r) = (chat_id.clone(), run.clone());
@@ -2544,11 +2549,14 @@ async fn implementation_rejects_newer_unfinished_root_lifecycles() {
                     chat["runId"] = r.clone().into();
                     db.save_conversation_boundary(&chat)?;
                     db.event(&r, &EventKind::ItemCompleted, "Reviewed plan", Some(&json!({
-                        "item": { "id": "proposal", "type": "proposed_plan", "text": "Reviewed plan" }
+                        "item": {
+                            "id": "proposal", "type": "proposed_plan",
+                            "text": "Reviewed plan", "request_id": "request-a",
+                        }
                     })))?;
                     let old: i64 = db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [&r], |row| row.get(0))?;
                     db.event(&r, &phase, "", Some(&json!({
-                        "item": { "id": proposal, "type": "proposed_plan", "text": "" }
+                        "item": { "id": proposal, "type": "proposed_plan", "text": "", "request_id": "request-a" }
                     })))?;
                     Ok(old)
                 }).await.unwrap();

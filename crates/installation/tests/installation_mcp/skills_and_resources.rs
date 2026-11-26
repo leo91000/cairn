@@ -520,8 +520,12 @@ async fn both_mcp_endpoints_bind_approval_to_the_latest_root_lifecycle() {
                     let mut chat = db.conversation_boundary(&c)?.unwrap();
                     chat["runId"] = r.clone().into();
                     db.save_conversation_boundary(&chat)?;
+                    db.event(&r, &EventKind::ChatUser, "Plan request", Some(&json!({ "messageId": "request-a" })))?;
                     db.event(&r, &EventKind::ItemCompleted, "Reviewed plan", Some(&json!({
-                        "item": { "id": "original", "type": "proposed_plan", "text": "Reviewed plan" }
+                        "item": {
+                            "id": "original", "type": "proposed_plan",
+                            "text": "Reviewed plan", "request_id": "request-a",
+                        }
                     })))?;
                     let original: i64 = db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [&r], |row| row.get(0))?;
                     db.event(&r, &EventKind::ChatUser, "Clarification", Some(&json!({ "messageId": "request-b" })))?;

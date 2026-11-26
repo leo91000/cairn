@@ -94,7 +94,11 @@ remain necessary; historical production shapes also need this private check.
 1. Retain an untouched, private source backup. Use SQLite's backup API or a
    coordinated stopped-manager backup that preserves the database and its WAL.
    Copying only a live `manager.db` file is not a consistent backup. Record its
-   schema version and checksum; keep directories owner-only and files private.
+   schema version and checksum. Keep directories owner-only and files private.
+   For schema 37, verify `backend-migration-staging` on the stopped manager's
+   data volume before rehearsing the database copy. Record its aggregate state
+   as absent or as a real, empty directory. An occupied directory, symlink or
+   unreadable path blocks the upgrade until the prior manager can finish cleanup.
 2. Make a separate writable rehearsal copy containing `manager.db`. Never pass
    the live installation directory or the untouched source backup to the helper.
    Keep all database copies on the installation host; do not upload them to CI,

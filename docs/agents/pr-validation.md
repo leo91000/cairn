@@ -120,6 +120,8 @@ namespace test compilation keep `--workspace --lib`, retaining the dependency
 features used by the workspace suite. The preflight keeps its installation package
 filter and native service/files test filters, so it executes the same cases before
 building every test binary.
+See the [close drain](../NATIVE-CLOSE-DRAIN-MEASUREMENTS.md) and
+[terminal metadata](../NATIVE-TERMINAL-REASONS.md) measurement procedures.
 Package-only selection changes Cargo's unified dependency graph and rebuilds the
 installation test library. Exact case filters and the namespace executable check
 still select the intended installation tests.

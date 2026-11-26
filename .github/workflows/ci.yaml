@@ -508,7 +508,7 @@ jobs:
       - name: Qualify confirmed backend changes from this commit
         run: |
           set -o pipefail
-          pnpm test:backend -p cairn-installation --test native_nodes both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion -- --exact 2>&1 | tee backend-migration-tests.log
+          pnpm test:backend -p cairn-installation --test native_nodes transitions_and_resume::both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion -- --exact 2>&1 | tee backend-migration-tests.log
           python3 - <<'PYTHON'
           import pathlib, re
           result = pathlib.Path('backend-migration-tests.log').read_text()

@@ -211,7 +211,7 @@ describe('parallel CI coverage', () => {
     expect(step).toBeDefined()
     expect(step.run).toContain('set -o pipefail')
     expect(step.run).not.toContain('moto[server]')
-    expect(step.run).toContain('pnpm test:backend -p cairn-installation --test native_nodes both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion -- --exact')
+    expect(step.run).toContain('pnpm test:backend -p cairn-installation --test native_nodes transitions_and_resume::both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion -- --exact')
     expect(step.run).toContain('1 passed; 0 failed; 0 ignored;')
     expect(step.run).not.toContain('${{')
     expect(step.run).not.toContain('CAIRN_TEST_REUSED_BUILD')
