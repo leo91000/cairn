@@ -44,7 +44,7 @@ revision in the PR description. Run the harness alone in each worktree:
 ```sh
 TMPDIR=/var/tmp CAIRN_REOPEN_BENCH_GIB=16 CARGO_BUILD_JOBS=8 \
   CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
-  node scripts/dev/test-backend.mjs --workspace --lib \
+  pnpm test:backend --workspace --lib \
   journal_reopen_measurement -- --ignored --nocapture --test-threads=1
 ```
 

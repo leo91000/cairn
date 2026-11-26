@@ -11,7 +11,7 @@ the full workspace suite. Its isolated nextest process prints one
 `NATIVE_CLOSE_GATE_MEASUREMENT` JSON record. To select only that measurement:
 
 ```sh
-node scripts/dev/test-backend.mjs --nextest --workspace --lib \
+pnpm test:backend --nextest --workspace --lib \
   -E 'package(=cairn-installation) & test(scoped_close_contention_measurement)' --no-capture
 ```
 

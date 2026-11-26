@@ -63,7 +63,7 @@ The backend job runs this measurement alone with the credential-isolating
 launcher. The same command can be used to reproduce it on an exact candidate:
 
 ```sh
-node scripts/dev/test-backend.mjs --workspace --lib \
+pnpm test:backend --workspace --lib \
   native::service::terminal_tests::terminal_reason_metadata_measurement \
   -- --exact --ignored --nocapture
 ```

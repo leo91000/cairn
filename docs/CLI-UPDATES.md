@@ -161,7 +161,8 @@ channel between qualifications:
   `get_usage`, token rotation against the endpoint, and subscription inference.
 - The native turn runs with YOLO access and calls no tool. Apart from plan turns,
   how a release applies the sandbox settings of restricted agents (`settings` in
-  `claude_process.rs`), the `--permission-prompt-tool` approval flow, and MCP tool
+  `crates/installation/src/coding_agent/claude_process/protocol.rs`), the
+  `--permission-prompt-tool` approval flow, and MCP tool
   calls under `--strict-mcp-config` has no per-release native check. Production
   runner isolation still applies.
 

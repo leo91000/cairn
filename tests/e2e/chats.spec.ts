@@ -9,8 +9,7 @@ import {
   expectChatReady,
   expectSingleScroll,
   initializeRepository,
-  isolatedWorkspaceTest,
-  test,
+  isolatedWorkspaceTest as test,
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
@@ -460,7 +459,7 @@ test('identical queued-message edits keep retry identity scoped to the edited me
   expect(attempts[2].id).not.toBe(attempts[0].id)
 })
 
-isolatedWorkspaceTest('a transient agent error shows a retry countdown and resumes without user input', async ({ page, workspace }) => {
+test('a transient agent error shows a retry countdown and resumes without user input', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
     id: randomUUID(),
@@ -505,7 +504,7 @@ isolatedWorkspaceTest('a transient agent error shows a retry countdown and resum
   await expect(failure).toHaveCount(1)
 })
 
-isolatedWorkspaceTest('cancelling automatic recovery pauses the conversation and preserves its work', async ({ page, workspace }) => {
+test('cancelling automatic recovery pauses the conversation and preserves its work', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
     id: randomUUID(),
@@ -1098,7 +1097,7 @@ test('same-provider quota resume submits the changed model default and unchanged
 })
 
 // Each Chromium and WebKit journey starts with its own account read budget.
-isolatedWorkspaceTest('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {
+test('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {
   initializeRepository(workspace.projectPath)
   await page.goto(workspacePath('/tasks'))
   await authenticateWorkspace(page)

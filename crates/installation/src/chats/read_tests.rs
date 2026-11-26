@@ -345,6 +345,11 @@ CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,
 #[tokio::test]
 async fn answers_preserve_shapes_order_and_saved_privacy() {
     use serde_json::json;
+
+    const MESSAGE_IDS: [&str; 2] = [
+        "00000000-0000-4000-8000-0000000000m2",
+        "00000000-0000-4000-8000-0000000000m1",
+    ];
     for private in [true, false] {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
@@ -398,29 +403,29 @@ async fn answers_preserve_shapes_order_and_saved_privacy() {
                     "agentId": crate::config::MAIN_AGENT_ID,
                 }))?;
                 db.save_question(&question)?;
-                let message: Message = serde_json::from_value(json!({
-                    "id": "00000000-0000-4000-8000-0000000000m1",
-                    "chatId": chat_seed,
-                    "text": delivery,
-                    "status": "queued",
-                    "createdAt": 2,
-                    "questionId": question.id,
-                    "answers": answers_seed,
-                }))?;
-                db.save_message(&message)?;
+                for id in MESSAGE_IDS {
+                    let message: Message = serde_json::from_value(json!({
+                        "id": id,
+                        "chatId": chat_seed,
+                        "text": delivery,
+                        "status": "queued",
+                        "createdAt": 2,
+                        "questionId": question.id,
+                        "answers": answers_seed,
+                    }))?;
+                    db.save_message(&message)?;
+                }
                 Ok(())
             })
             .await
             .unwrap();
         drop(store);
 
-        let expected_ids = vec!["00000000-0000-4000-8000-0000000000m1".to_owned()];
         for _ in 0..2 {
             let store = crate::store::Store::open(root.path()).unwrap();
             let chat = chat.clone();
             let run = run.clone();
             let expected = answers.clone();
-            let expected_ids = expected_ids.clone();
             let replacement = replacement.clone();
             store
                 .transaction(move |db| {
@@ -428,19 +433,25 @@ async fn answers_preserve_shapes_order_and_saved_privacy() {
                     assert_eq!(
                         messages
                             .iter()
-                            .map(|message| &message.id)
+                            .map(|message| message.id.as_str())
                             .collect::<Vec<_>>(),
-                        expected_ids.iter().collect::<Vec<_>>()
+                        MESSAGE_IDS
                     );
                     for message in messages {
                         assert_eq!(serde_json::to_value(&message.answers)?, expected);
                         assert_eq!(message.text, delivery);
                         db.save_message(&message)?;
+                        let stored_text: String = db.0.query_row(
+                            "SELECT text FROM chat_messages WHERE id=?",
+                            [&message.id],
+                            |row| row.get(0),
+                        )?;
+                        assert_eq!(stored_text, "Questionnaire response");
                     }
                     let assert_projection = |detail: serde_json::Value| {
                         assert_eq!(
                             detail["messages"].as_array().unwrap().len(),
-                            expected_ids.len()
+                            MESSAGE_IDS.len()
                         );
                         for message in detail["messages"].as_array().unwrap() {
                             assert_eq!(
@@ -472,7 +483,9 @@ async fn answers_preserve_shapes_order_and_saved_privacy() {
                             )?;
                             let expected_text = if private { PRIVATE_ANSWER_TEXT } else { delivery };
                             assert_eq!(event_text, expected_text);
-                            assert_eq!(serde_json::from_str::<Value>(&payload)?["text"], expected_text);
+                            let payload: Value = serde_json::from_str(&payload)?;
+                            assert_eq!(payload["text"], expected_text);
+                            assert_eq!(payload["messageId"], message.id);
                         }
                     }
                     Ok(())
