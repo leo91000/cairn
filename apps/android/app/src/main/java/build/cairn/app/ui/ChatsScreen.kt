@@ -355,11 +355,13 @@ internal fun ConversationList(
 
 /**
  * A saved conversation is current when the Fil shows nothing new since it was saved: the same
- * finished turn, no work in progress and no later change, as on the web.
+ * finished turn, no work in progress and no later change, as on the web. One the Fil does not list
+ * may have been deleted meanwhile: it says it is updating until its stream answers.
  */
 internal fun savedIsCurrent(saved: CachedHistory, chats: List<Chat>?): Boolean {
     val chat = saved.state.chat ?: return true
-    val known = chats?.find { it.id == chat.id } ?: return true
+    if (chats.isNullOrEmpty()) return true
+    val known = chats.find { it.id == chat.id } ?: return false
     val run = saved.state.run
     return known.runId == run?.id &&
         known.status == (run?.status ?: "idle") &&

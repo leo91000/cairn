@@ -26,6 +26,8 @@ const MAX_TOTAL = 20 * 1024 * 1024
 // Saved conversations hold their own history only: the list is saved once, apart.
 const MAX_COUNT = 60
 const TTL = 7 * 24 * 60 * 60 * 1000
+// Saved conversations are keyed by stream path, which always starts with a slash.
+const LIST = 'list'
 let epoch = 0
 let serial = Promise.resolve()
 
@@ -95,7 +97,8 @@ function enqueue(work: () => Promise<void>) {
   return serial
 }
 
-// Newest first: deletes entries beyond the count, the total size or their age.
+// Newest first: deletes entries beyond the count, the total size or their age. The saved list
+// is not one of the counted conversations: it tells which saved ones were deleted meanwhile.
 function evict(store: IDBObjectStore) {
   let count = 0
   let total = 0
@@ -105,7 +108,8 @@ function evict(store: IDBObjectStore) {
     if (!cursor)
       return
     const [savedAt, size] = cursor.key as [number, number]
-    count++
+    if (!String(cursor.primaryKey).endsWith(`:${LIST}`))
+      count++
     total += size
     if (count > MAX_COUNT || total > MAX_TOTAL || Date.now() - savedAt >= TTL)
       store.delete(cursor.primaryKey)
@@ -213,8 +217,6 @@ export function writeHistory(scope: string, path: string, value: CachedHistory) 
 }
 
 export interface SavedChatList { chats: ChatView[], planTurnsEnabled: boolean, savedAt: number }
-// Saved conversations are keyed by stream path, which always starts with a slash.
-const LIST = 'list'
 
 /** The conversation list last received, shown until the server's list arrives. */
 export async function readChatList(scope: string): Promise<SavedChatList | undefined> {

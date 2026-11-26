@@ -234,12 +234,15 @@ const listed = computed(() => chats.value.find(chat => chat.id === selectedChatI
 const heading = computed(() => detail.value ?? listed.value)
 
 // A saved conversation is current when the Fil shows nothing new since it was saved:
-// the same finished turn, no work in progress and no later change.
+// the same finished turn, no work in progress and no later change. One the Fil does not list
+// may have been deleted meanwhile: it says it is updating until its stream answers.
 function savedIsCurrent(saved: CachedHistory) {
   const chat = saved.state.chat
-  const known = chat && chats.value.find(item => item.id === chat.id)
-  if (!chat || !known)
+  if (!chat || !chats.value.length)
     return true
+  const known = chats.value.find(item => item.id === chat.id)
+  if (!known)
+    return false
   const run = saved.state.run
   return known.runId === (run?.id ?? null)
     && known.status === (run?.status ?? 'idle')

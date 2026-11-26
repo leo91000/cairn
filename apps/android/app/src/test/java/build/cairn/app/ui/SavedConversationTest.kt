@@ -31,10 +31,15 @@ class SavedConversationTest {
     }
 
     @Test
-    fun `without the Fil or the conversation in it, the copy shows`() {
+    fun `without the Fil, the copy is current`() {
         assertTrue(savedIsCurrent(saved(), null))
         assertTrue(savedIsCurrent(saved(), emptyList()))
         assertTrue(savedIsCurrent(saved(chat = null), listed()))
+    }
+
+    @Test
+    fun `a conversation the Fil no longer lists may be deleted and is outdated`() {
+        assertFalse(savedIsCurrent(saved(), listOf(chat.copy(id = "other"))))
     }
 
     @Test
