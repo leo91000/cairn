@@ -268,6 +268,11 @@ struct Access {
     authorize: Authorization,
 }
 
+struct CacheLookup {
+    identity: Identity,
+    cached: Option<(Arc<Vec<Value>>, bool)>,
+}
+
 impl Access {
     async fn for_grant(s: &Arc<Service>, id: &str, bearer: &str) -> Result<Self> {
         let (server, scope, authority) = s.mcps.grant_authorized(s, id, bearer).await?;
@@ -280,18 +285,29 @@ impl Access {
         })
     }
 
-    async fn identity(&self, s: &Service) -> Result<Identity> {
+    async fn lookup(&self, s: &Service) -> Result<CacheLookup> {
         self.authorize.recheck().await?;
+        self.lookup_local(s).await
+    }
+
+    async fn lookup_local(&self, s: &Service) -> Result<CacheLookup> {
         let id = self.server.id.clone();
         let revision = self.server.revision;
         let authorize = self.authorize.clone();
+        let mcps = Arc::clone(&s.mcps);
+        // Clone the entry at the same local ordering point as checking the
+        // credential and grant. Rendering and refresh never run on this actor.
         s.store
-            .read(move |db| {
+            .write(move |db| {
                 authorize.authorize(db)?;
                 let credentials = db.mcp_credentials(&id)?.map(|bytes| blake3::hash(&bytes));
-                Ok(Identity {
+                let identity = Identity {
                     revision,
                     credentials,
+                };
+                Ok(CacheLookup {
+                    identity,
+                    cached: mcps.gateway_catalogs.get(&id, identity),
                 })
             })
             .await
@@ -308,12 +324,12 @@ impl Access {
 
 pub(super) async fn list(s: &Arc<Service>, id: &str, bearer: &str) -> Result<Value> {
     let access = Access::for_grant(s, id, bearer).await?;
-    let identity = access.identity(s).await?;
-    if let Some((tools, refresh)) = s.mcps.gateway_catalogs.get(id, identity) {
+    let lookup = access.lookup(s).await?;
+    if let Some((tools, refresh)) = lookup.cached {
         tracing::info!(target: "cairn_performance", operation = "mcp_gateway_catalog", connection_id = id, event = "hit", refresh);
         let result = access.listing(&tools);
         if refresh {
-            refresh_in_background(s.clone(), access, identity, tools, REFRESH_TIMEOUT);
+            refresh_in_background(s.clone(), access, lookup.identity, tools, REFRESH_TIMEOUT);
         }
         return Ok(result);
     }
@@ -322,11 +338,11 @@ pub(super) async fn list(s: &Arc<Service>, id: &str, bearer: &str) -> Result<Val
     // authorized caller populated the catalogue while this one was queued.
     let _guard = s.mcps.lock(id).await;
     let access = Access::for_grant(s, id, bearer).await?;
-    let identity = access.identity(s).await?;
-    if let Some((tools, refresh)) = s.mcps.gateway_catalogs.get(id, identity) {
+    let lookup = access.lookup(s).await?;
+    if let Some((tools, refresh)) = lookup.cached {
         let result = access.listing(&tools);
         if refresh {
-            refresh_in_background(s.clone(), access, identity, tools, REFRESH_TIMEOUT);
+            refresh_in_background(s.clone(), access, lookup.identity, tools, REFRESH_TIMEOUT);
         }
         return Ok(result);
     }
@@ -953,7 +969,7 @@ mod tests {
         wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
 
         let access = Access::for_grant(&s, id, bearer).await.unwrap();
-        let identity = access.identity(&s).await.unwrap();
+        let identity = access.lookup(&s).await.unwrap().identity;
         let (previous, _) = s.mcps.gateway_catalogs.get(id, identity).unwrap();
         refresh_in_background(
             s.clone(),
@@ -977,7 +993,7 @@ mod tests {
         wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
 
         let access = Access::for_grant(&s, id, bearer).await.unwrap();
-        let identity = access.identity(&s).await.unwrap();
+        let identity = access.lookup(&s).await.unwrap().identity;
         let (previous, _) = s.mcps.gateway_catalogs.get(id, identity).unwrap();
         refresh_in_background(
             s.clone(),
@@ -1087,6 +1103,7 @@ mod tests {
         access.authorize.recheck().await.unwrap();
         let (previous, _) = s.mcps.gateway_catalogs.get(id, identity).unwrap();
         s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
+        assert!(access.lookup_local(&s).await.is_err());
         let publication = publish_refresh(
             &s,
             id.to_owned(),
