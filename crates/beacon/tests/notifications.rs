@@ -1589,26 +1589,31 @@ async fn removing_a_member_waits_for_an_admitted_send_and_prevents_the_next_send
 
     let installation = relay.session["installations"][0]["id"].as_str().unwrap();
     let member = member_session["account"]["id"].as_str().unwrap();
-    let removal = request(
+    // The suspended provider call keeps its notification device row locked.
+    let (push_pid,): (i32,) = sqlx_core::query_as::query_as(
+        "SELECT pid FROM pg_locks
+         WHERE locktype = 'relation' AND relation = 'notification_devices'::regclass
+           AND mode = 'RowShareLock' AND granted",
+    )
+    .fetch_one(&relay.app.pool)
+    .await
+    .unwrap();
+    let request = request(
         &relay.app,
         &relay.cookie,
         &relay.session,
         Method::DELETE,
         &format!("/api/installations/{installation}/sharing/members/{member}"),
-    )
-    .send();
-    tokio::pin!(removal);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), &mut removal)
-            .await
-            .is_err(),
-        "revocation must serialize with the already admitted send"
     );
-    question(&relay, &run, &"e".repeat(64)).await;
+    let removal = tokio::spawn(async move { request.send().await });
+    relay.app.wait_for_blocked_request(push_pid).await;
 
+    // Queue the next event once revocation is waiting on the admitted send.
+    question(&relay, &run, &"e".repeat(64)).await;
     push.release.add_permits(1);
-    let response = tokio::time::timeout(std::time::Duration::from_secs(5), &mut removal)
+    let response = tokio::time::timeout(Duration::from_secs(35), removal)
         .await
+        .expect("member removal must finish after the admitted send")
         .unwrap()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
