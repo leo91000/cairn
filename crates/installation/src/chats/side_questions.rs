@@ -331,7 +331,7 @@ pub(crate) fn reason(unavailable: SideQuestionUnavailable) -> &'static str {
             "Codex cannot answer side questions in Cairn: its side conversations can still use tools. Ask in the conversation instead."
         }
         SideQuestionUnavailable::CodexRelease => {
-            "This Codex release cannot answer side questions in Cairn: they need version 0.172.0 or later. Ask in the conversation instead."
+            "This Codex release cannot answer side questions in Cairn: they need a stable release, 0.172.0 or later. Ask in the conversation instead."
         }
         SideQuestionUnavailable::Opencode => {
             "OpenCode cannot answer side questions in Cairn yet. Ask in the conversation instead."
@@ -1171,6 +1171,36 @@ mod tests {
                 assert_eq!(held[0]["sideQuestionId"], "withdrawn");
                 run["sideQuestionsCompacting"] = json!(false);
                 assert_eq!(deliveries(db, "c", &run)?.len(), 2);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_engines_that_announced_side_questions_receive_them() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                open_question(db, &question(""), "turn", "")?;
+                let run = |provider: &str, announced: bool| {
+                    json!({
+                        "id": "r",
+                        "status": "running",
+                        "chatExecution": { "messageId": "turn" },
+                        "snapshot": { "agent": { "provider": provider } },
+                        "sideQuestions": announced,
+                    })
+                };
+                for provider in ["claude", "codex", "antigravity"] {
+                    let delivered = deliveries(db, "c", &run(provider, true))?;
+                    assert_eq!(delivered.len(), 1, "{provider}");
+                    assert_eq!(delivered[0]["sideQuestion"]["id"], "a", "{provider}");
+                    assert!(deliveries(db, "c", &run(provider, false))?.is_empty());
+                }
+                // OpenCode has no side mechanism, whatever its adapter says.
+                assert!(deliveries(db, "c", &run("opencode", true))?.is_empty());
                 Ok(())
             })
             .await

@@ -32,6 +32,8 @@ const TEXT_IDLE_FLUSH: Duration = Duration::from_millis(250);
 const SIDE_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long a finished turn collects the side answers Codex already sent before it ended.
 const SIDE_DRAIN: Duration = Duration::from_millis(100);
+/// How long a finished turn waits for Codex to acknowledge the withdrawal of the rest.
+const SIDE_WITHDRAWAL: Duration = Duration::from_secs(2);
 /// Precedes each side question, which Codex samples as the next user message of a copy of
 /// the running turn. It cannot run a tool there, so it is asked not to try.
 const SIDE_PROMPT: &str = "The user asks you a side question while you work. Answer it in this one reply from what you already know of the conversation and your work: tools are unavailable here, and this exchange neither changes nor continues your task.";
@@ -1215,17 +1217,9 @@ impl Chat<'_> {
     }
 
     async fn cancel_sample(&mut self, request: u64) -> Result<()> {
-        let params = json!({ "requestId": request });
-        // Once the turn completed, stopping the reply must not make it fail: the
-        // withdrawal no longer waits on the stop signal.
-        let cancelled = if self.closing_sides {
-            self.session
-                .rpc
-                .request("thread/sample/cancel", params)
-                .await
-        } else {
-            self.request("thread/sample/cancel", params).await
-        };
+        let cancelled = self
+            .request("thread/sample/cancel", json!({ "requestId": request }))
+            .await;
         // A sample that already finished has nothing left to cancel.
         match cancelled {
             Err(error) if error.status == 409 => Err(error),
@@ -1244,7 +1238,9 @@ impl Chat<'_> {
             Ok(response) => response,
             // Codex would otherwise keep sampling a question nobody waits for.
             Err(error) if error.status == 504 => {
-                self.cancel_sample(request).await?;
+                if !self.closing_sides {
+                    self.cancel_sample(request).await?;
+                }
                 return self
                     .side_failed(
                         &question,
@@ -1317,9 +1313,17 @@ impl Chat<'_> {
             self.side_settled(question, result).await?;
         }
         self.emit(json!({ "type": "chat.side.closed" })).await?;
-        for (question, request) in std::mem::take(&mut self.sides) {
-            self.cancel_sample(request).await?;
-            self.side_failed(&question, crate::chats::side_questions::EXPIRED)
+        // Codex would finish them otherwise. Withdrawals go out together and never fail
+        // or long delay the completed turn, even if the reply stops meanwhile.
+        let open = std::mem::take(&mut self.sides);
+        let rpc = self.session.rpc.clone();
+        let withdrawals = open
+            .values()
+            .map(|request| rpc.request("thread/sample/cancel", json!({ "requestId": request })));
+        let _ = tokio::time::timeout(SIDE_WITHDRAWAL, futures_util::future::join_all(withdrawals))
+            .await;
+        for question in open.keys() {
+            self.side_failed(question, crate::chats::side_questions::EXPIRED)
                 .await?;
         }
         self.samples.clear();

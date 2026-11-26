@@ -23,7 +23,8 @@ history. What changes is how Cairn meets it:
   sample taken earlier copies a thread without the request the agent is working on.
   As for Claude Code, new side questions wait while Codex compacts the turn's context,
   and a sample that times out is cancelled. Answers Codex sent before the turn ended are
-  recorded before admission closes.
+  recorded before admission closes; the remaining samples are then withdrawn together,
+  waiting at most two seconds for Codex's acknowledgement.
   Codex's `/side` command, a `thread/fork` that keeps its tools, stays unused.
 - **Gate on a minimum release, qualified in CI.** Adapters announce side questions
   from the first release probed (Claude Code 2.1.308, Codex 0.172.0) onwards, for plain
@@ -32,8 +33,10 @@ history. What changes is how Cairn meets it:
   job runs `tests/native_side_questions.rs` against every Claude Code and Codex release a
   build ships: through Cairn's adapters and a local model, a side question gets its
   answer while the turn runs, one whose answer calls a shell tool settles without the
-  tool running, a withdrawn one settles silently, the turn completes, and no side
-  question reaches the saved session or the next turn's context. A release that breaks
+  tool running while the main turn's identical call runs, a withdrawn one settles
+  silently, the turn completes, and no side question reaches the conversation's events,
+  the reply or the saved session (Claude Code's transcript, Codex's rollout), nor the
+  next turn's context, which the Codex test also checks. A release that breaks
   this fails the build rather than Cairn's users. A release no build shipped, such as
   one an operator installs by hand, is trusted from the same minimum: the qualification
   covers what Cairn ships.

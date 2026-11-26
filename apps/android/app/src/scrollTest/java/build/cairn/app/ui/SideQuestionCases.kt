@@ -308,7 +308,7 @@ abstract class SideQuestionCases {
                 unavailable = "codex-release"
                 compose
                     .onNodeWithText(
-                        "Cette version de Codex ne peut pas répondre aux questions à côté dans Cairn : il faut la version 0.172.0 ou une plus récente. Posez-la dans la conversation."
+                        "Cette version de Codex ne peut pas répondre aux questions à côté dans Cairn : il faut une version stable, 0.172.0 ou plus récente. Posez-la dans la conversation."
                     )
                     .assertExists()
                 // So does a Claude Code release.

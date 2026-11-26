@@ -113,7 +113,7 @@ production, the CLIs may still contact their vendors' public endpoints:
 - Claude Code and Codex each answer side questions through their adapter while a turn
   runs (`tests/native_side_questions.rs`): a side answer that calls a tool must not
   run it, a withdrawn question settles silently, and no side question reaches the
-  saved session or the next turn. Adapters offer side questions from a minimum
+  conversation, the reply or the saved session (nor, for Codex, the next turn). Adapters offer side questions from a minimum
   release onwards, so this check, not a version pin, keeps a release that breaks them
   from being served ([ADR-0093](adr/0093-engine-side-questions.md)).
 - The short PR validation runs none of these checks, nor does a `backend-only`

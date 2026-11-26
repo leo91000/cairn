@@ -386,7 +386,7 @@ internal fun ColumnScope.SideQuestionPanel(
                     "codex" ->
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
                     "codex-release" ->
-                        "Cette version de Codex ne peut pas répondre aux questions à côté dans Cairn : il faut la version 0.172.0 ou une plus récente. Posez-la dans la conversation."
+                        "Cette version de Codex ne peut pas répondre aux questions à côté dans Cairn : il faut une version stable, 0.172.0 ou plus récente. Posez-la dans la conversation."
                     "opencode" ->
                         "OpenCode ne peut pas encore répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
                     "unknown-agent" ->
