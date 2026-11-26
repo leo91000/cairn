@@ -113,9 +113,10 @@ test('asks side questions about a running reply without steering, queuing or rec
   await page.screenshot({ path: test.info().outputPath('side-question-answer-desktop-dark.png'), animations: 'disabled' })
   await page.emulateMedia({ colorScheme: 'light' })
 
-  // Following the answer back to its reply closes the panel; the reply counts it.
+  // Following the answer back to its reply closes the panel and focuses the reply.
   await panel.getByRole('button', { name: 'Show reply' }).click()
   await expect(panel).not.toBeVisible()
+  await expect(message).toBeFocused()
   await expect(message.getByRole('button', { name: 'Show 1 side question about this reply' })).toBeVisible()
 
   // A passage selected in the reply can be asked about too.
@@ -355,6 +356,7 @@ test('retained questions without a reply stay accessible after reopening', async
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
   await page.getByRole('menuitem', { name: 'Open activity fullscreen', exact: true }).click()
   const fullscreen = page.getByRole('dialog', { name: 'Fullscreen activity' })
+  await expect(fullscreen.getByRole('status').and(page.getByTestId('side-question-status'))).toHaveCount(1)
   const fullscreenButton = fullscreen.getByTestId('side-question-button')
   await fullscreenButton.click()
   await expect(panel.getByText('General question', { exact: true })).toBeVisible()

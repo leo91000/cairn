@@ -1996,6 +1996,11 @@ function key(event: KeyboardEvent) {
             @implement="implementPlan"
             @pause-wait="busy || action('pause', { paused: true })"
           >
+            <template #announcements>
+              <p class="sr-only" role="status" data-testid="side-question-status">
+                {{ sideQuestionIndicator && sideQuestionIndicator.kind !== 'idle' && sideQuestionIndicator.kind !== 'saved' ? sideQuestionIndicator.label : '' }}
+              </p>
+            </template>
             <template v-if="sideQuestionIndicator" #working-action>
               <SideQuestionButton
                 ref="workingSideQuestionButton"

@@ -484,7 +484,11 @@ function reveal(reference: { itemId: string, replyEventId: number | null }) {
   if (!reply)
     return false
   follow.value = false
-  reply.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  // The closing drawer restores its opener first. Focus the linked reply afterwards.
+  void nextTick(() => {
+    reply.focus({ preventScroll: true })
+    reply.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  })
   reply.classList.add('side-question-target')
   setTimeout(() => reply.classList.remove('side-question-target'), 1600)
   return true
@@ -518,6 +522,7 @@ defineExpose({
     </Teleport>
     <Teleport :to="fullscreenHost || 'body'" :disabled="!fullscreen">
       <section class="activity-feed flex flex-1 min-h-0 min-w-0 flex-col overflow-hidden bg-transparent" :class="{ 'is-fullscreen': fullscreen }" aria-label="Run conversation">
+        <slot name="announcements" />
         <header v-if="!compactToolbar || fullscreen" :class="chat ? ['py-0! phone:py-0!', { 'phone:hidden!': !fullscreen }] : ''" class="activity-toolbar flex justify-between items-center gap-4.5 bg-transparent shrink-0 phone:gap-2.5 phone:flex-wrap px-6 py-[17px] phone:px-[15px] phone:py-[13px]">
           <div v-if="!chat" class="activity-toolbar-title flex items-center gap-[11px] font-semibold text-sm min-w-0 phone:[flex:1_1_160px]">
             <span class="activity-presence w-[7px] h-[7px] rounded-full bg-[light-dark(#8e8baa,_var(--dark-accent-surface))] shrink-0" :class="{ live: active && !suspended }" /><span>{{ active && suspended ? exclusiveSuspensionLabel : fullscreen ? task : chat ? (active ? 'Working' : 'Conversation') : 'Agent activity' }}</span>
@@ -596,6 +601,7 @@ defineExpose({
                   v-else-if="entry.kind === 'message'"
                   class="activity-message chat-message my-3 py-2 rounded-lg transition-colors duration-500"
                   :class="visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : ''"
+                  :tabindex="chat && entry.itemId ? -1 : undefined"
                   :data-item-id="chat ? entry.itemId : undefined"
                   :data-reply-event-id="entry.replyEventIds?.[0]"
                   :data-reply-events="entry.replyEventIds?.join(' ')"

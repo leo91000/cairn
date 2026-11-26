@@ -247,9 +247,6 @@ defineExpose({
 </script>
 
 <template>
-  <p class="sr-only" role="status">
-    {{ indicator && indicator.kind !== 'idle' && indicator.kind !== 'saved' ? indicator.label : '' }}
-  </p>
   <Modal
     v-if="open"
     title="Side questions"
