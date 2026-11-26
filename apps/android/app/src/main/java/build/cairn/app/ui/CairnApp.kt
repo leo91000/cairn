@@ -187,10 +187,14 @@ private fun CairnAppContent(
     var authorizationUrl by rememberSaveable(state.session.account?.id) { mutableStateOf("") }
     var shareRevision by rememberSaveable(state.session.account?.id) { mutableIntStateOf(0) }
     val sharedConsent: McpConsentState = viewModel(key = "shared-mcp-consent")
-    // A share waits for an in-flight decision and for its summary, which holds the client's
-    // single-use return link, so a new request never discards an approval.
-    LaunchedEffect(sharedUrl, state.busy, sharedConsent.completed) {
-        if (sharedUrl.isNotBlank() && !state.busy && sharedConsent.completed == null) {
+    // A share waits for an in-flight decision and for this account's open summary, which holds
+    // the client's single-use return link, so a new request never discards an approval. A summary
+    // whose dialog was dropped (sign-out, account switch) no longer holds anything.
+    val showingSummary =
+        authorizationUrl.isNotBlank() &&
+            sharedConsent.completed?.let { it.accountId == state.session.account?.id } == true
+    LaunchedEffect(sharedUrl, state.busy, showingSummary) {
+        if (sharedUrl.isNotBlank() && !state.busy && !showingSummary) {
             sharedConsent.completed = null
             authorizationUrl = sharedUrl
             shareRevision++

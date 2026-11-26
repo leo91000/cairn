@@ -43,7 +43,7 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
                     oauth = null
                     oauthNotice =
                         when (result.result) {
-                            "connected" -> "Connexion OAuth terminée." to NoticeTone.INFO
+                            "connected" -> "Connexion OAuth terminée." to NoticeTone.SUCCESS
                             "denied" -> "Autorisation annulée." to NoticeTone.WARNING
                             else ->
                                 "Autorisation expirée ou échouée. Réessayez la connexion." to

@@ -436,6 +436,24 @@ class AuthorizeScreenTest {
                 assertEquals("", incomingUrl)
                 assertEquals(1, consents.size)
                 assertTrue(consents.first().contains("client-1"))
+
+                // A summary dropped with its dialog, as on sign-out, must not hold later shares.
+                compose.onNodeWithText("Autoriser").performScrollTo().performClick()
+                compose.waitUntil(10_000) {
+                    compose.onAllNodesWithText("Accès autorisé").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.runOnIdle { mounted = false }
+                compose.waitForIdle()
+                compose.runOnIdle { mounted = true }
+                compose.waitForIdle()
+                compose.runOnIdle { incomingUrl = firstUrl }
+                compose.waitUntil(10_000) {
+                    compose
+                        .onAllNodesWithText("Autoriser « Claude » ?")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertEquals("", incomingUrl)
             } finally {
                 release.countDown()
                 try {
