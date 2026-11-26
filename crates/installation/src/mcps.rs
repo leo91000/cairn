@@ -635,23 +635,33 @@ impl Mcps {
                 None
             }
         };
-        let cache = s
-            .store
+        let id = server.id.clone();
+        let candidate = publication.map(|publication| {
+            let tools = crate::mcp_server::gateway_catalog::management_candidate(&server.tools);
+            (publication, tools)
+        });
+        let publish_authority = authorize.clone();
+        s.store
             .transaction(move |db| {
                 authorize.authorize(db)?;
-                db.save_mcp_server(&server)?;
-                let Some(publication) = publication else {
-                    return Ok(None);
-                };
-                let credentials = db.mcp_credentials(&server.id)?;
-                Ok(publication
-                    .matches_credentials(credentials.as_deref().map(blake3::hash))
-                    .then_some((server, publication)))
+                db.save_mcp_server(&server)
             })
             .await?;
-        if let Some((server, publication)) = cache {
-            self.gateway_catalogs
-                .remember_management_discovery(server, publication);
+        if let Some((publication, tools)) = candidate {
+            // The durable management result is already committed. Its optional
+            // gateway cache still has to pass the current local authority check.
+            let mcps = Arc::clone(&s.mcps);
+            let _ = s
+                .store
+                .write(move |db| {
+                    publish_authority.check_local(db)?;
+                    let credentials = db.mcp_credentials(&id)?;
+                    if publication.matches_credentials(credentials.as_deref().map(blake3::hash)) {
+                        mcps.gateway_catalogs.insert(publication, tools);
+                    }
+                    Ok(())
+                })
+                .await;
         }
         if let Some(id) = revoked {
             self.gateway_catalogs.invalidate(&id);

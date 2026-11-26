@@ -135,23 +135,22 @@ impl Catalogs {
         Some((entry.tools.clone(), refresh))
     }
 
-    fn insert(&self, publication: CataloguePublication, tools: Arc<Vec<Value>>) {
+    pub(crate) fn insert(&self, publication: CataloguePublication, tools: Option<Arc<Vec<Value>>>) {
         let CataloguePublication {
             id,
             identity,
             expires_at,
             denied,
         } = publication;
-        let cacheable = encoded_size(tools.as_ref()).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES);
         let now = Instant::now();
         let mut entries = self.entries.lock().unwrap();
         if denied.load(Ordering::Relaxed) {
             return;
         }
-        if !cacheable {
+        let Some(tools) = tools else {
             entries.remove(&id);
             return;
-        }
+        };
         if entries.len() >= MAX_CONNECTIONS
             && !entries.contains_key(&id)
             && let Some(oldest) = entries
@@ -214,9 +213,8 @@ impl Catalogs {
         id: &str,
         expected: Identity,
         previous: &Arc<Vec<Value>>,
-        tools: Vec<Value>,
+        tools: Option<Arc<Vec<Value>>>,
     ) {
-        let cacheable = encoded_size(&tools).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES);
         let mut entries = self.entries.lock().unwrap();
         let Some(current) = entries.get_mut(id) else {
             return;
@@ -225,9 +223,9 @@ impl Catalogs {
             return;
         }
 
-        if cacheable {
+        if let Some(tools) = tools {
             let now = Instant::now();
-            current.tools = Arc::new(tools);
+            current.tools = tools;
             current.discovered_at = now;
             current.refresh_at = now + REFRESH_AFTER;
         } else {
@@ -243,18 +241,17 @@ impl Catalogs {
             entry.refresh_at = Instant::now() + REFRESH_AFTER;
         }
     }
+}
 
-    pub(crate) fn remember_management_discovery(
-        &self,
-        server: McpServer,
-        publication: CataloguePublication,
-    ) {
-        if validate(&server.tools).is_ok() {
-            self.insert(publication, Arc::new(server.tools));
-        } else {
-            self.invalidate(&server.id);
-        }
-    }
+fn cache_candidate(tools: Arc<Vec<Value>>) -> Option<Arc<Vec<Value>>> {
+    encoded_size(tools.as_ref())
+        .is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES)
+        .then_some(tools)
+}
+
+pub(crate) fn management_candidate(tools: &[Value]) -> Option<Arc<Vec<Value>>> {
+    validate(tools).ok()?;
+    cache_candidate(Arc::new(tools.to_vec()))
 }
 
 fn validate(tools: &[Value]) -> Result<()> {
@@ -412,9 +409,20 @@ fn refresh_in_background(
                     .await
                     .is_ok_and(|result| result.is_ok())
             {
-                s.mcps
-                    .gateway_catalogs
-                    .apply_refresh(id, expected, &previous, tools);
+                let tools = cache_candidate(Arc::new(tools));
+                let _ = timeout_at(
+                    deadline,
+                    publish_refresh(
+                        &s,
+                        id.to_owned(),
+                        expected,
+                        previous.clone(),
+                        tools,
+                        authorize,
+                        deadline,
+                    ),
+                )
+                .await;
             }
             timing.next("close");
             if let Some(client) = client {
@@ -432,6 +440,34 @@ fn refresh_in_background(
             .gateway_catalogs
             .defer_refresh_retry(id, expected, &previous);
     });
+}
+
+async fn publish_refresh(
+    s: &Service,
+    id: String,
+    expected: Identity,
+    previous: Arc<Vec<Value>>,
+    tools: Option<Arc<Vec<Value>>>,
+    authorize: Authorization,
+    deadline: Instant,
+) -> Result<()> {
+    let mcps = Arc::clone(&s.mcps);
+    // A reader connection can overlap a committed revocation. Serialize the
+    // final grant check with revocation and credential changes on the writer.
+    s.store
+        .write(move |db| {
+            // The actor still runs accepted jobs when their caller times out.
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+            authorize.authorize(db)?;
+            if Instant::now() < deadline {
+                mcps.gateway_catalogs
+                    .apply_refresh(&id, expected, &previous, tools);
+            }
+            Ok(())
+        })
+        .await
 }
 
 async fn read_tools(
@@ -462,14 +498,26 @@ async fn discover(s: &Arc<Service>, access: &Access) -> Result<Arc<Vec<Value>>> 
     }
     .await;
     timing.next("recheck");
-    let current = access.identity(s).await?;
+    access.authorize.recheck().await?;
     match result {
         Ok((tools, publication)) => {
             let tools = Arc::new(tools);
-            if let Some(publication) = publication
-                && publication.matches_credentials(current.credentials)
-            {
-                s.mcps.gateway_catalogs.insert(publication, tools.clone());
+            if let Some(publication) = publication {
+                let candidate = cache_candidate(tools.clone());
+                let authorize = access.authorize.clone();
+                let id = access.server.id.clone();
+                let mcps = Arc::clone(&s.mcps);
+                s.store
+                    .write(move |db| {
+                        authorize.authorize(db)?;
+                        let credentials = db.mcp_credentials(&id)?;
+                        if publication.matches_credentials(credentials.as_deref().map(blake3::hash))
+                        {
+                            mcps.gateway_catalogs.insert(publication, candidate);
+                        }
+                        Ok(())
+                    })
+                    .await?;
             }
             timing.finish();
             Ok(tools)
@@ -623,7 +671,7 @@ mod tests {
                 expires_at: None,
             },
         );
-        catalogs.insert(publication, tools.clone());
+        catalogs.insert(publication, Some(tools.clone()));
 
         let (cached, refresh) = catalogs.get("fixture", identity).unwrap();
         assert!(Arc::ptr_eq(&cached, &tools));
@@ -687,7 +735,7 @@ mod tests {
                 expires_at: Some(crate::config::now()),
             },
         );
-        catalogs.insert(publication, tools);
+        catalogs.insert(publication, Some(tools));
         assert!(catalogs.get("fixture", identity).is_none());
     }
 
@@ -707,11 +755,14 @@ mod tests {
         catalogs.invalidate_matching("fixture", identity.revision, identity.credentials);
 
         let tools = Arc::new(vec![json!({ "name": "read" })]);
-        catalogs.insert(delayed_test, tools.clone());
+        catalogs.insert(delayed_test, Some(tools.clone()));
         assert!(catalogs.get("fixture", identity).is_none());
         let fresh = catalogs.register("fixture", identity.revision, credential);
-        catalogs.insert(fresh, tools);
-        catalogs.insert(delayed_cold, Arc::new(vec![json!({ "name": "older" })]));
+        catalogs.insert(fresh, Some(tools));
+        catalogs.insert(
+            delayed_cold,
+            Some(Arc::new(vec![json!({ "name": "older" })])),
+        );
         assert_eq!(
             catalogs.get("fixture", identity).unwrap().0[0]["name"],
             "read"
@@ -1031,6 +1082,26 @@ mod tests {
         );
         wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
         assert!(s.mcps.gateway_catalogs.get(id, identity).is_none());
+        list(&s, id, bearer).await.unwrap();
+        let access = Access::for_grant(&s, id, bearer).await.unwrap();
+        access.authorize.recheck().await.unwrap();
+        let (previous, _) = s.mcps.gateway_catalogs.get(id, identity).unwrap();
+        s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
+        let publication = publish_refresh(
+            &s,
+            id.to_owned(),
+            identity,
+            previous.clone(),
+            Some(Arc::new(vec![json!({ "name": "late_refresh" })])),
+            access.authorize,
+            Instant::now() + Duration::from_secs(3),
+        )
+        .await;
+        assert!(publication.is_err());
+        assert!(Arc::ptr_eq(
+            &s.mcps.gateway_catalogs.get(id, identity).unwrap().0,
+            &previous
+        ));
         upstream.abort();
     }
 }
