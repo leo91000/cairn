@@ -164,6 +164,85 @@ function chooseTrigger(key: string) {
 let timer: ReturnType<typeof setTimeout> | undefined
 let generation = 0
 
+// A check that answers during a press waits for the click that ends it: its status and messages
+// change the layout, which would move the pressed control from under the pointer and lose the
+// press. A press released elsewhere or cancelled lets the check through, and none is held longer
+// than this after it answers or, without an answer yet, after the release.
+const PRESS_HOLD = 2000
+// Controls a press ends with a click on, which a tap delivers last. Dragging a slider has no click
+// to protect.
+const CLICKABLE = 'button, a[href], summary, label, input, select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"]'
+const SLIDER = 'input[type="range"]'
+let pressedPointerId: number | undefined
+let pressedElement: Element | undefined
+let held: (() => void) | undefined
+let heldTimer: ReturnType<typeof setTimeout> | undefined
+
+function afterPress(apply: () => void) {
+  if (pressedPointerId === undefined) {
+    apply()
+    return
+  }
+
+  held = apply
+  clearTimeout(heldTimer)
+  heldTimer = setTimeout(releasePress, PRESS_HOLD)
+}
+
+function releasePress() {
+  pressedPointerId = undefined
+  pressedElement = undefined
+  clearTimeout(heldTimer)
+  const apply = held
+  held = undefined
+  apply?.()
+}
+
+function startPress(event: PointerEvent) {
+  if (!event.isPrimary)
+    return
+  const target = event.target instanceof Element ? event.target : null
+  const control = target?.closest(SLIDER) ? null : target?.closest(CLICKABLE)
+  // A held check waits for this press's click; any other press ends an earlier one that had none.
+  if (event.button !== 0 || !control || control.matches(':disabled')) {
+    releasePress()
+    return
+  }
+
+  // An earlier press that had no click no longer bounds this one.
+  if (!held)
+    clearTimeout(heldTimer)
+  pressedPointerId = event.pointerId
+  pressedElement = control
+}
+
+function finishPress(event: PointerEvent) {
+  if (event.pointerId !== pressedPointerId)
+    return
+  const released = document.elementFromPoint(event.clientX, event.clientY)
+  // Touch compatibility clicks may arrive after pointerup's next timer task, so a release on the
+  // pressed control waits for its click. A release away from it has no click to protect.
+  if (!released || !pressedElement?.contains(released)) {
+    releasePress()
+    return
+  }
+
+  if (!held) {
+    clearTimeout(heldTimer)
+    heldTimer = setTimeout(releasePress, PRESS_HOLD)
+  }
+}
+
+// In the capture phase, a click is seen once its target is fixed and before its control handles it.
+const pressEvents = [
+  ['pointerdown', startPress],
+  ['pointerup', finishPress],
+  ['click', releasePress],
+  ['pointercancel', releasePress],
+  ['contextmenu', releasePress],
+  ['dragstart', releasePress],
+] as const
+
 function scheduleValidation(value: HookRuleDefinition | null, delay = 350) {
   if (!value)
     return
@@ -173,12 +252,13 @@ function scheduleValidation(value: HookRuleDefinition | null, delay = 350) {
   validationError.value = ''
   checking.value = true
   timer = setTimeout(async () => {
+    let apply: () => void
     try {
       const local = ruleJsonDraftProblems(value)
       const output = local.length
         ? { valid: false, problems: local, warnings: [] }
         : await validateHookRule(api, { definition: value, ruleId: rule.value?.id ?? id.value })
-      if (!disposed && current === generation) {
+      apply = () => {
         validated.value = true
         validationError.value = ''
         problems.value = output.problems
@@ -186,12 +266,16 @@ function scheduleValidation(value: HookRuleDefinition | null, delay = 350) {
       }
     }
     catch (e) {
-      if (!disposed && current === generation)
-        validationError.value = (e as Error).message
+      apply = () => validationError.value = (e as Error).message
     }
-    finally {
-      if (!disposed && current === generation)
+
+    if (!disposed && current === generation) {
+      afterPress(() => {
+        if (disposed || current !== generation)
+          return
+        apply()
         checking.value = false
+      })
     }
   }, delay)
 }
@@ -335,6 +419,9 @@ async function saveDraftOverLatest() {
 }
 
 onMounted(() => {
+  for (const [type, listener] of pressEvents)
+    window.addEventListener(type, listener as EventListener, true)
+  window.addEventListener('blur', releasePress)
   wideQuery.addEventListener('change', onWide)
   window.addEventListener('beforeunload', beforeUnload)
   void load()
@@ -363,6 +450,10 @@ onBeforeUnmount(() => {
   disposed = true
   generation++
   clearTimeout(timer)
+  clearTimeout(heldTimer)
+  for (const [type, listener] of pressEvents)
+    window.removeEventListener(type, listener as EventListener, true)
+  window.removeEventListener('blur', releasePress)
   wideQuery.removeEventListener('change', onWide)
   window.removeEventListener('beforeunload', beforeUnload)
 })
