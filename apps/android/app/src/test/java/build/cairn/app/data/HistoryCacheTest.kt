@@ -36,6 +36,89 @@ class HistoryCacheTest {
         )
 
     @Test
+    fun `run logs of the session go while conversations, the list and other sessions stay`() =
+        runBlocking {
+            val run = Run(id = "r", status = "succeeded", taskId = "")
+            val cache = cache()
+            val conversation = cache.key("origin", "session", "/chats/c/stream")
+            val list = cache.key("origin", "session", "/chats/stream")
+            val log = cache.key("origin", "session", "/runs/r/stream")
+            val retained = cache.key("origin", "session", "/runs/s/stream")
+            val other = cache.key("origin", "other", "/runs/r/stream")
+            cache.save(
+                conversation,
+                record().copy(state = LiveState(run = run, chat = Chat(id = "c"))),
+                true,
+            )
+            cache.save(list, record().copy(state = LiveState(chats = listOf(Chat(id = "c")))), true)
+            cache.save(log, record().copy(state = LiveState(run = run)), true)
+            cache.save(other, record().copy(state = LiveState(run = run)), true)
+            cache.save(retained, record().copy(state = LiveState(run = run)), false)
+            cache.removeRunLogs("origin", "session")
+            assertNull(cache.read(retained))
+            val reopened = cache()
+            assertNull(reopened.read(log))
+            assertNotNull(reopened.read(conversation))
+            assertNotNull(reopened.read(list))
+            assertNotNull(reopened.read(other))
+        }
+
+    @Test
+    fun `run logs saved before they were named apart go once`() = runBlocking {
+        val run = Run(id = "r", status = "succeeded", taskId = "")
+        val cache = cache()
+        // Saved under a bare digest, as before run logs were named apart.
+        cache.save("legacy", record().copy(state = LiveState(run = run)), true)
+        cache.save(
+            "conversation",
+            record().copy(state = LiveState(run = run, chat = Chat(id = "c"))),
+            true,
+        )
+        cache().removeRunLogs("origin", "session")
+        val reopened = cache()
+        assertNull(reopened.read("legacy"))
+        assertNotNull(reopened.read("conversation"))
+        // Later removals only drop files by name.
+        reopened.save("legacy", record().copy(state = LiveState(run = run)), true)
+        reopened.removeRunLogs("origin", "session")
+        assertNotNull(cache().read("legacy"))
+    }
+
+    @Test
+    fun `a cleared cache never reads its files again to find older run logs`() = runBlocking {
+        val run = Run(id = "r", status = "succeeded", taskId = "")
+        val cache = cache()
+        cache.clear()
+        // Only a file from before the clear could be an unnamed run log; this one is not read.
+        cache.save("unnamed", record().copy(state = LiveState(run = run)), true)
+        cache.removeRunLogs("origin", "session")
+        assertNotNull(cache().read("unnamed"))
+    }
+
+    @Test
+    fun `a forgotten conversation is never saved again until the cache is cleared`() = runBlocking {
+        val cache = cache()
+        cache.save("gone", record(), true)
+        cache.forget("gone")
+        cache.save("gone", record(), true)
+        assertNull(cache.read("gone"))
+        assertNull(cache().read("gone"))
+        cache.clear()
+        cache.save("gone", record(), true)
+        assertNotNull(cache.read("gone"))
+    }
+
+    @Test
+    fun `a saved conversation stores its chat run once and reads it back`() = runBlocking {
+        val run = Run(id = "r", status = "succeeded", taskId = "")
+        val saved = record().copy(state = LiveState(run = run, chat = Chat(id = "c", run = run)))
+        cache().save("run", saved, true)
+        val file = directory.root.listFiles()!!.single { it.name == "run" }
+        assertEquals(1, Regex("\"id\":\"r\"").findAll(file.readText()).count())
+        assertEquals(run, cache().read("run")!!.state.chat?.run)
+    }
+
+    @Test
     fun `warm reads and neighboring saves reuse retained payload sizes`() = runBlocking {
         val traversals = AtomicInteger()
         val contents = mapOf<String, JsonElement>("output" to JsonPrimitive("retained output"))
@@ -276,9 +359,9 @@ class HistoryCacheTest {
         assertNotNull(cache.read("huge"))
         assertTrue(cache.read("huge")!!.hasOlder)
         assertEquals(3L, cache.read("huge")!!.oldest)
-        for (i in 0..14) cache.save("key$i", record(), true)
-        assertTrue(directory.root.listFiles()!!.size <= 12)
+        for (i in 0..61) cache.save("key$i", record(), true)
+        assertTrue(directory.root.listFiles()!!.size <= 60)
         assertNull(cache.read("key0"))
-        assertNotNull(cache.read("key14"))
+        assertNotNull(cache.read("key61"))
     }
 }

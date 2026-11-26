@@ -58,7 +58,64 @@ data class LiveState(
     val chats: List<Chat>? = null,
     val artifacts: List<Deliverable> = emptyList(),
     val cacheRevision: String? = null,
+    /** Compact streams only: the saved-history revision, which trashing leaves unchanged. */
+    val historyRevision: String? = null,
 )
+
+/** The conversation's run is the state's own `run`: compact streams and saved copies omit it. */
+fun LiveState.withChatRun(): LiveState =
+    if (chat == null || chat.run != null || run == null) this else copy(chat = chat.copy(run = run))
+
+/** List changes on a compact stream (`compact=1`), applied to the list it sent first. */
+@Serializable
+data class ChatChanges(
+    /** New conversations and conversations whose summary changed, in full. */
+    val upserts: List<Chat> = emptyList(),
+    /** Conversations that left the list. */
+    val removed: List<String> = emptyList(),
+    /** Every listed id in order, when the order changed beyond the removals. */
+    val order: List<String>? = null,
+)
+
+fun List<Chat>.applyChanges(changes: ChatChanges): List<Chat> {
+    val removed = changes.removed.toSet()
+    val upserts = changes.upserts.associateBy { it.id }
+    val kept = filter { it.id !in removed }
+    val known = kept.associateBy { it.id }
+    val order =
+        changes.order
+            ?: (changes.upserts.map { it.id }.filter { it !in known } + kept.map { it.id })
+    return order.mapNotNull { upserts[it] ?: known[it] }
+}
+
+/**
+ * The state after one stream batch. A compact batch sends its state without an unchanged list, and
+ * list changes on their own; both apply to the list received before.
+ */
+fun nextLiveState(previous: LiveState?, state: LiveState?, changes: ChatChanges?): LiveState? {
+    var next = state?.withChatRun() ?: previous
+    if (next != null && state != null && state.chats == null && previous?.chats != null)
+        next = next.copy(chats = previous.chats)
+    val chats = next?.chats
+    if (next != null && chats != null && changes != null)
+        next = next.copy(chats = chats.applyChanges(changes))
+    return next
+}
+
+/**
+ * The saved stream paths of conversations that left the list: deleted, or no longer shared. Their
+ * saved copies go, as on the web, with every saved run log (`HistoryCache.removeRunLogs`).
+ */
+fun leftChatPaths(previous: List<Chat>?, chats: List<Chat>?): List<String> {
+    if (previous == null || chats == null) return emptyList()
+    val listed = chats.mapTo(HashSet()) { it.id }
+    // Both lists come from this device's own list stream, which only moves forward: unlike a list
+    // another web tab saved, a conversation missing from the newer one is gone.
+    return previous.filter { it.id !in listed }.map { savedChatPath(it.id) }
+}
+
+/** Where a conversation opened by its identifier is saved. */
+fun savedChatPath(id: String) = "/chats/${segment(id)}/stream"
 
 @Serializable
 data class LiveBatch(
@@ -72,6 +129,8 @@ data class LiveBatch(
     /** Timeline cards: the window's snapshot, or the cards these events changed. */
     val entries: List<TimelineChange> = emptyList(),
     val largeEntries: List<build.cairn.contracts.LargeTimelineReference> = emptyList(),
+    /** On a compact stream: the list changes since the previous batch. */
+    val chatChanges: ChatChanges? = null,
 )
 
 typealias HistoryPage = build.cairn.contracts.HistoryPage
