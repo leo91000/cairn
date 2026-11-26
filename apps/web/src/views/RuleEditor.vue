@@ -167,10 +167,11 @@ let generation = 0
 // A check that answers during a press waits for the click that ends it: its status and messages
 // change the layout, which would move the pressed control from under the pointer and lose the
 // press. A press that ends without a click on that control lets the check through, and none is
-// held longer than this.
+// held longer than this after it answers or, without an answer yet, after the release.
 const PRESS_HOLD = 2000
 // Controls a click activates; other presses, such as dragging a slider, have no click to protect.
 const CLICKABLE = 'button, a[href], summary, label, input[type="checkbox"], input[type="radio"], [role="button"], [role="menuitem"], [role="option"], [role="tab"]'
+const FIELD = 'input:not([type="checkbox"], [type="radio"]), select, textarea'
 let pressedPointerId: number | undefined
 let pressedElement: Element | undefined
 let held: (() => void) | undefined
@@ -197,7 +198,8 @@ function releasePress() {
 }
 
 function startPress(event: PointerEvent) {
-  const control = event.target instanceof Element ? event.target.closest(CLICKABLE) : null
+  const target = event.target instanceof Element ? event.target : null
+  const control = target?.closest(FIELD) ? null : target?.closest(CLICKABLE)
   if (event.button !== 0 || !event.isPrimary || !control || control.matches(':disabled'))
     return
   pressedPointerId = event.pointerId
@@ -215,13 +217,10 @@ function finishPress(event: PointerEvent) {
     return
   }
 
-  clearTimeout(heldTimer)
-  heldTimer = setTimeout(releasePress, PRESS_HOLD)
-}
-
-function releaseOnWindowBlur(event: FocusEvent) {
-  if (event.target === window)
-    releasePress()
+  if (!held) {
+    clearTimeout(heldTimer)
+    heldTimer = setTimeout(releasePress, PRESS_HOLD)
+  }
 }
 
 // In the capture phase, a click is seen once its target is fixed and before its control handles it.
@@ -412,7 +411,7 @@ async function saveDraftOverLatest() {
 onMounted(() => {
   for (const [type, listener] of pressEvents)
     window.addEventListener(type, listener as EventListener, true)
-  window.addEventListener('blur', releaseOnWindowBlur)
+  window.addEventListener('blur', releasePress)
   wideQuery.addEventListener('change', onWide)
   window.addEventListener('beforeunload', beforeUnload)
   void load()
@@ -444,7 +443,7 @@ onBeforeUnmount(() => {
   clearTimeout(heldTimer)
   for (const [type, listener] of pressEvents)
     window.removeEventListener(type, listener as EventListener, true)
-  window.removeEventListener('blur', releaseOnWindowBlur)
+  window.removeEventListener('blur', releasePress)
   wideQuery.removeEventListener('change', onWide)
   window.removeEventListener('beforeunload', beforeUnload)
 })

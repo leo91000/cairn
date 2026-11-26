@@ -547,6 +547,37 @@ test('loop insertion stays reachable when validation finishes during a press', a
   }
 })
 
+test('a check answering while a slider is pressed is applied at once', async ({ page, workspace }) => {
+  const rule = await emptyLoopRule(workspace)
+  const validation = { current: Promise.withResolvers<void>() }
+  await useRelayForHttpMocks(page)
+  await page.route('**/api/hook-rules/validate', async (route) => {
+    await validation.current.promise
+    await route.continue()
+  })
+
+  try {
+    await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+    await signIn(page)
+    const status = page.getByRole('status').filter({ hasText: /Checking|Ready/ })
+    await expect(status).toHaveText('Checking…')
+    // A drag ends without a click, so there is no press to protect; a synthetic press leaves the value as it is.
+    await page.getByRole('slider', { name: /Triggerings that act/ })
+      .dispatchEvent('pointerdown', {
+        pointerId: 7,
+        pointerType: 'touch',
+        isPrimary: true,
+        button: 0,
+      })
+    await answerCheck(page, validation)
+    // Well before a held check would be let through.
+    await expect(status).toHaveText('Ready', { timeout: 1000 })
+  }
+  finally {
+    validation.current.resolve()
+  }
+})
+
 async function openConditionStep(page: Page, workspace: Workspace) {
   const fixture = await rulesFixture(workspace)
   const validation = { current: Promise.withResolvers<void>() }
@@ -587,7 +618,7 @@ async function answerCheck(page: Page, validation: { current: PromiseWithResolve
   await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 300)))
 }
 
-test('a check answering during a press waits for its release on a phone', async ({ page, workspace }) => {
+test('a check answering during a press waits for its click on a phone', async ({ page, workspace }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   const { add, status, validation } = await openConditionStep(page, workspace)
 
