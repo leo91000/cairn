@@ -1,3 +1,4 @@
+import type { Page } from '@playwright/test'
 import type { Workspace } from './fixtures'
 import {
   expect,
@@ -547,47 +548,55 @@ test('loop insertion stays reachable when validation finishes during a press', a
   }
 })
 
-test('a check answering during a press waits for its release on a phone', async ({ page, workspace }) => {
-  await page.setViewportSize({ width: 390, height: 844 })
-
+async function openConditionStep(page: Page, workspace: Workspace) {
   const fixture = await rulesFixture(workspace)
-  let validation = Promise.withResolvers<void>()
-  validation.resolve()
+  const validation = { current: Promise.withResolvers<void>() }
+  validation.current.resolve()
   await useRelayForHttpMocks(page)
   await page.route('**/api/hook-rules/validate', async (route) => {
-    await validation.promise
+    await validation.current.promise
     await route.continue()
   })
 
-  try {
-    await page.goto(workspacePath(`/rules/new?agent=${fixture.agent.id}&instance=${fixture.instanceId}`))
-    await signIn(page)
-    const status = page.locator('[role="status"]', { hasText: /Checking|to fix|Ready/ })
-    await expect(status).toHaveText(/to fix|Ready/)
+  await page.goto(workspacePath(`/rules/new?agent=${fixture.agent.id}&instance=${fixture.instanceId}`))
+  await signIn(page)
+  const status = page.locator('[role="status"]', { hasText: /Checking|to fix|Ready/ })
+  await expect(status).toHaveText(/to fix|Ready/)
 
-    // The new step is checked while Add a condition is pressed. Its messages grow the step
-    // sheet, so they wait for the release instead of moving the button under the pointer.
-    validation = Promise.withResolvers<void>()
-    await page.getByRole('button', { name: 'Add the first step', exact: true }).click()
-    await page.getByRole('menuitem', { name: /If \/ otherwise/ }).click()
-    await expect(status).toHaveText('Checking…')
-    const add = page.getByRole('button', { name: 'Add a condition', exact: true })
-    // The sheet slides in first: press once it rests.
-    let previous: number | undefined
-    await expect.poll(async () => {
-      const y = (await add.boundingBox())?.y
-      const resting = y !== undefined && y === previous
-      previous = y
-      return resting
-    }).toBe(true)
+  // The new step's check is held, and its messages will grow the step sheet.
+  validation.current = Promise.withResolvers<void>()
+  await page.getByRole('button', { name: 'Add the first step', exact: true }).click()
+  await page.getByRole('menuitem', { name: /If \/ otherwise/ }).click()
+  await expect(status).toHaveText('Checking…')
+  const add = page.getByRole('button', { name: 'Add a condition', exact: true })
+  // The sheet slides in first: press once it rests.
+  let previous: number | undefined
+  await expect.poll(async () => {
+    const y = (await add.boundingBox())?.y
+    const resting = y !== undefined && y === previous
+    previous = y
+    return resting
+  }).toBe(true)
+  return { add, status, validation }
+}
+
+// Answers the held check and gives the page time to apply it: a held answer moves nothing.
+async function answerCheck(page: Page, validation: { current: PromiseWithResolvers<void> }) {
+  const answered = page.waitForResponse('**/api/hook-rules/validate')
+  validation.current.resolve()
+  await (await answered).finished()
+  await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 300)))
+}
+
+test('a check answering during a press waits for its release on a phone', async ({ page, workspace }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const { add, status, validation } = await openConditionStep(page, workspace)
+
+  try {
     const before = (await add.boundingBox())!
     await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
     await page.mouse.down()
-    const answered = page.waitForResponse('**/api/hook-rules/validate')
-    validation.resolve()
-    await answered
-    // Give the answer time to reach the page: it is held, so nothing moves.
-    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 300)))
+    await answerCheck(page, validation)
     await expect(status).toHaveText('Checking…')
     expect((await add.boundingBox())!.y).toBe(before.y)
     await page.mouse.up()
@@ -595,7 +604,31 @@ test('a check answering during a press waits for its release on a phone', async 
     await expect(status).toHaveText(/to fix/)
   }
   finally {
-    validation.resolve()
+    validation.current.resolve()
+  }
+})
+
+test('a check answering during a tap waits for its click', async ({ page, workspace, hasTouch }) => {
+  test.skip(!hasTouch, 'Taps need a touch screen.')
+  const { add, status, validation } = await openConditionStep(page, workspace)
+
+  try {
+    // A touch press is reported before its tap: its pointer events come first, its click last.
+    const before = (await add.boundingBox())!
+    await add.dispatchEvent('pointerdown', {
+      pointerId: 7,
+      pointerType: 'touch',
+      isPrimary: true,
+      button: 0,
+    })
+    await answerCheck(page, validation)
+    await expect(status).toHaveText('Checking…')
+    await page.touchscreen.tap(before.x + before.width / 2, before.y + before.height / 2)
+    await expect(page.getByRole('menuitem', { name: /The author is one/ })).toBeVisible()
+    await expect(status).toHaveText(/to fix/)
+  }
+  finally {
+    validation.current.resolve()
   }
 })
 

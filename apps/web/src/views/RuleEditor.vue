@@ -164,40 +164,67 @@ function chooseTrigger(key: string) {
 let timer: ReturnType<typeof setTimeout> | undefined
 let generation = 0
 
-// A check that answers during a press waits for its release: its status and messages change the
-// layout, which would move the pressed control from under the pointer and lose the press. A press
-// that never reports its end holds a check at most this long.
+// A check that answers during a press waits for the click that ends it: its status and messages
+// change the layout, which would move the pressed control from under the pointer and lose the
+// press. A press that ends without a click on that control lets the check through, and none is
+// held longer than this.
 const PRESS_HOLD = 2000
-let pressing = false
+let pressedPointerId: number | undefined
+let pressedElement: Element | undefined
 let held: (() => void) | undefined
 let heldTimer: ReturnType<typeof setTimeout> | undefined
 
 function afterPress(apply: () => void) {
-  if (!pressing) {
+  if (pressedPointerId === undefined) {
     apply()
     return
   }
 
   held = apply
   clearTimeout(heldTimer)
-  heldTimer = setTimeout(releaseHeld, PRESS_HOLD)
+  heldTimer = setTimeout(releasePress, PRESS_HOLD)
 }
 
-function releaseHeld() {
+function releasePress() {
+  pressedPointerId = undefined
+  pressedElement = undefined
   clearTimeout(heldTimer)
   const apply = held
   held = undefined
   apply?.()
 }
 
-const pressStarted = () => pressing = true
-
-// In a later task, so the click that ends the press reaches its control first.
-function pressEnded() {
-  pressing = false
-  if (held)
-    setTimeout(releaseHeld)
+function startPress(event: PointerEvent) {
+  if (event.button !== 0 || !event.isPrimary || !(event.target instanceof Element))
+    return
+  pressedPointerId = event.pointerId
+  pressedElement = event.target
 }
+
+function finishPress(event: PointerEvent) {
+  if (event.pointerId !== pressedPointerId)
+    return
+  const released = document.elementFromPoint(event.clientX, event.clientY)
+  // Touch compatibility clicks may arrive after pointerup's next timer task, so a release on the
+  // pressed control waits for its click. A release away from it has no click to protect.
+  if (!released || !pressedElement?.contains(released))
+    releasePress()
+}
+
+function releaseOnWindowBlur(event: FocusEvent) {
+  if (event.target === window)
+    releasePress()
+}
+
+// In the capture phase, a click is seen once its target is fixed and before its control handles it.
+const pressEvents = [
+  ['pointerdown', startPress],
+  ['pointerup', finishPress],
+  ['click', releasePress],
+  ['pointercancel', releasePress],
+  ['contextmenu', releasePress],
+  ['dragstart', releasePress],
+] as const
 
 function scheduleValidation(value: HookRuleDefinition | null, delay = 350) {
   if (!value)
@@ -375,9 +402,9 @@ async function saveDraftOverLatest() {
 }
 
 onMounted(() => {
-  window.addEventListener('pointerdown', pressStarted, true)
-  window.addEventListener('pointerup', pressEnded, true)
-  window.addEventListener('pointercancel', pressEnded, true)
+  for (const [type, listener] of pressEvents)
+    window.addEventListener(type, listener as EventListener, true)
+  window.addEventListener('blur', releaseOnWindowBlur)
   wideQuery.addEventListener('change', onWide)
   window.addEventListener('beforeunload', beforeUnload)
   void load()
@@ -407,9 +434,9 @@ onBeforeUnmount(() => {
   generation++
   clearTimeout(timer)
   clearTimeout(heldTimer)
-  window.removeEventListener('pointerdown', pressStarted, true)
-  window.removeEventListener('pointerup', pressEnded, true)
-  window.removeEventListener('pointercancel', pressEnded, true)
+  for (const [type, listener] of pressEvents)
+    window.removeEventListener(type, listener as EventListener, true)
+  window.removeEventListener('blur', releaseOnWindowBlur)
   wideQuery.removeEventListener('change', onWide)
   window.removeEventListener('beforeunload', beforeUnload)
 })
