@@ -102,6 +102,10 @@ impl AuthorityProof {
             .filter(|age| *age >= 0)
     }
 
+    pub(crate) fn was_replaced(&self, db: &Db<'_>) -> Result<bool> {
+        Ok(self.0 != Self::load(db)?.0)
+    }
+
     fn current_account(&self, account: &str) -> bool {
         self.age_at(crate::config::now())
             .is_some_and(|age| age <= AUTHORITY_TTL_MS)

@@ -1499,7 +1499,20 @@ fn renew_leases(
         if lease_ms == 0 {
             continue;
         }
-        attempt.lease_expires_at = Some(lease_started_at + lease_ms as i64);
+        let expires_at = lease_started_at + lease_ms as i64;
+        // An overlapping heartbeat can publish a longer lease using a replacement
+        // proof. Leave that grant in place. A reservation with no granted
+        // lease duration does not count as an earlier renewal.
+        if let Some(proof) = proof
+            && attempt.lease_duration_ms.is_some()
+            && attempt
+                .lease_expires_at
+                .is_some_and(|until| until > expires_at)
+            && proof.was_replaced(db)?
+        {
+            continue;
+        }
+        attempt.lease_expires_at = Some(expires_at);
         attempt.lease_duration_ms = Some(attempt.lease_duration_ms.unwrap_or(0).max(lease_ms));
         db.save_attempt(&attempt)?;
         leases.push(Lease {
