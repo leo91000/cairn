@@ -54,7 +54,6 @@ fun rememberLive(
     current: (CachedHistory) -> Boolean = { true },
 ): LiveSnapshot {
     val owner = LocalLifecycleOwner.current
-    val isCurrent by rememberUpdatedState(current)
     val enabled = workspace.session.authenticated && !workspace.signingOut
     val api = if (enabled) vm.api else null
     var value by remember(path, api) { mutableStateOf(LiveSnapshot()) }
