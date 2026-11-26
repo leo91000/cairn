@@ -107,8 +107,8 @@ credentials or running images.
 
 Full qualifications run the resolved OpenCode, Claude Code and Antigravity native
 adapters (Antigravity's release is downloaded from Google's manifest and checked
-against its SHA-512), plus the Plan boundary checks for the resolved Claude Code
-and Codex releases,
+against its SHA-512), plus the Plan boundary and side-question checks for the
+resolved Claude Code and Codex releases,
 in one separate 30-minute `cli-qualification` job after the normal backend suite.
 It checks out the same commit, builds its test binaries on its own runner and
 preserves the native adapter, supported-release resume and rollback checks.

@@ -144,17 +144,17 @@ mod side_question_tests {
     }
 
     #[test]
-    fn only_the_qualified_release_answers_side_questions() {
-        assert!(answers_side_questions("2.1.308"));
+    fn qualified_releases_answer_side_questions() {
+        for release in ["2.1.308", "2.1.311", "2.2.0"] {
+            assert!(answers_side_questions(release), "{release}");
+        }
         for release in [
             "2.1.280",
             "2.1.307",
             "2.1.307-rc",
             "2.1.308-rc.1",
             "2.1.308+build",
-            "2.1.310",
             "2.1.310-beta.1",
-            "2.2.0",
             "3.0.0+build",
             "2.1",
             "",

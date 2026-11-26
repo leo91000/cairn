@@ -7,11 +7,14 @@ use crate::{
     skills::atomic_write,
     validation::text,
 };
+use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     path::Path,
+    pin::Pin,
     time::Duration,
 };
 use tokio::{sync::mpsc, time::Instant};
@@ -25,6 +28,16 @@ use streamed_text::StreamedText;
 const STOPPED: &str = "Conversation stopped.";
 const MAX_MESSAGE: usize = 5_000_000;
 const TEXT_IDLE_FLUSH: Duration = Duration::from_millis(250);
+/// How long Codex may take to answer one side question.
+const SIDE_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long a finished turn collects the side answers Codex already sent before it ended.
+const SIDE_DRAIN: Duration = Duration::from_millis(100);
+/// How long a finished turn waits for Codex to acknowledge the withdrawal of the rest.
+const SIDE_WITHDRAWAL: Duration = Duration::from_secs(2);
+/// Precedes each side question, which Codex samples as the next user message of a copy of
+/// the running turn. It cannot run a tool there, so it is asked not to try.
+const SIDE_PROMPT: &str = "The user asks you a side question while you work. Answer it in this one reply from what you already know of the conversation and your work: tools are unavailable here, and this exchange neither changes nor continues your task.";
+const SIDE_EMPTY: &str = "Codex gave no answer: it tried to use a tool, which side questions do not allow, or replied without text. Ask in the conversation instead.";
 
 /// A Codex thread item as a chat item: snake_case names, as the conversation events use.
 /// `planning` is a Cairn plan turn, whose boundary Cairn enforces.
@@ -221,6 +234,9 @@ impl Cursors {
 // operational identity across turns without changing provider message UUIDs.
 const OPERATIONAL_ID: &str = "cairn-runtime-disk:";
 
+/// A side question and Codex's reply to its `thread/sample` request.
+type Sample = Pin<Box<dyn Future<Output = (String, Result<Value>)> + Send + Sync>>;
+
 /// Item notifications may precede the initial turn/start response. Keep them
 /// bounded and unacknowledged until the native process accepts that request.
 #[derive(Default)]
@@ -258,6 +274,20 @@ struct Chat<'a> {
     /// Human request preceding the current native proposal, retained through history replay.
     proposal_request: Option<String>,
     starting_items: Option<StartingItems>,
+    /// This Codex release announced side questions for the running turn.
+    side_available: bool,
+    /// Codex recorded the turn's request in the thread, so a sample of the thread sees it.
+    turn_recorded: bool,
+    /// Codex is compacting the running turn's context: new side questions wait.
+    side_compacting: bool,
+    /// The turn completed: Cairn withdraws the samples still running, which Codex would
+    /// otherwise finish, and a sample failing now was cut short by that end.
+    closing_sides: bool,
+    /// Side questions Codex is answering, with the ID of their `thread/sample` request.
+    sides: HashMap<String, u64>,
+    /// The `thread/sample` requests in progress. The adapter polls them itself, so a reply
+    /// Codex sent before the turn ended is still read when it ends.
+    samples: FuturesUnordered<Sample>,
 }
 
 impl Chat<'_> {
@@ -720,6 +750,13 @@ impl Chat<'_> {
                 self.emit(json!({ "type": "turn.started" })).await?;
             }
             "item/started" | "item/completed" => {
+                if incoming.method == "item/completed" && params["item"]["type"] == "userMessage" {
+                    self.turn_recorded |= self.turn_submitted;
+                }
+                if params["item"]["type"] == "contextCompaction" {
+                    self.side_compaction(incoming.method == "item/started")
+                        .await?;
+                }
                 let kind = incoming.method.replace('/', ".");
                 self.item(params["item"].clone(), &kind).await?;
             }
@@ -1094,6 +1131,9 @@ impl Chat<'_> {
             service_tier: Some(service_tier.as_str()).filter(|tier| !tier.is_empty()),
         };
         let params = serde_json::to_value(params)?;
+        // Before the turn's own items, which Codex may send before accepting it. Side
+        // questions are read from the inbox only once it is accepted.
+        self.offer_side_questions().await?;
         self.turn_submitted = true;
         self.starting_items = self.planning.then(StartingItems::default);
         let started = self.request("turn/start", params).await?;
@@ -1112,6 +1152,181 @@ impl Chat<'_> {
         if let Some(notice) = speed_notice {
             self.emit(notice).await?;
         }
+        Ok(())
+    }
+
+    /// Codex answers side questions with `thread/sample`: one response sampled from a copy of
+    /// the running turn's context. A tool call it attempts there never runs, and the copy
+    /// never joins the thread's history (ADR-0093).
+    async fn offer_side_questions(&mut self) -> Result<()> {
+        let release = self.session.release.clone();
+        self.side_available = crate::chats::side_questions::qualified(
+            &release,
+            crate::chats::side_questions::CODEX_MINIMUM,
+        );
+        if self.side_available {
+            self.emit(json!({ "type": "chat.side.available" })).await
+        } else {
+            // Says why, instead of leaving the reply "still starting".
+            self.emit(json!({ "type": "chat.side.unavailable", "release": release }))
+                .await
+        }
+    }
+
+    /// Like Claude Code's, side questions wait while Codex compacts the turn's context, whose
+    /// copy a sample would take; withdrawals still apply.
+    async fn side_compaction(&mut self, compacting: bool) -> Result<()> {
+        if !self.side_available || self.side_compacting == compacting {
+            return Ok(());
+        }
+        self.side_compacting = compacting;
+        self.emit(json!({ "type": "chat.side.compacting", "compacting": compacting }))
+            .await
+    }
+
+    async fn ask_side(&mut self, side: &Value) -> Result<()> {
+        let question = text(side, "id").to_owned();
+        let rpc = self.session.rpc.clone();
+        let request = rpc.next_id();
+        let params = json!({
+            "threadId": self.thread,
+            "expectedTurnId": self.turn,
+            "allowInProgressTurn": true,
+            "prompt": format!("{SIDE_PROMPT}\n\n{}", text(side, "text")),
+        });
+        self.sides.insert(question.clone(), request);
+        self.samples.push(Box::pin(async move {
+            let result = rpc
+                .request_as(request, "thread/sample", params, SIDE_TIMEOUT)
+                .await;
+            (question, result)
+        }));
+        // Send the request now, so that a withdrawal or the turn's end normally follows it.
+        while let Some(Some((question, result))) = self.samples.next().now_or_never() {
+            self.side_settled(question, result).await?;
+        }
+        Ok(())
+    }
+
+    /// Withdraws a side question silently. Its sample settles as cancelled.
+    async fn withdraw_side(&mut self, question: &str) -> Result<()> {
+        if let Some(request) = self.sides.remove(question) {
+            self.cancel_sample(request).await?;
+        }
+        Ok(())
+    }
+
+    async fn cancel_sample(&mut self, request: u64) -> Result<()> {
+        let cancelled = self
+            .request("thread/sample/cancel", json!({ "requestId": request }))
+            .await;
+        // A sample that already finished has nothing left to cancel.
+        match cancelled {
+            Err(error) if error.status == 409 => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Codex's reply to a side question. It reports no text when the model attempted a
+    /// tool, which never ran.
+    async fn side_settled(&mut self, question: String, result: Result<Value>) -> Result<()> {
+        // A withdrawn or expired question already settled.
+        let Some(request) = self.sides.remove(&question) else {
+            return Ok(());
+        };
+        let response = match result {
+            Ok(response) => response,
+            // Codex would otherwise keep sampling a question nobody waits for.
+            Err(error) if error.status == 504 => {
+                if !self.closing_sides {
+                    self.cancel_sample(request).await?;
+                }
+                return self
+                    .side_failed(
+                        &question,
+                        "Codex did not answer this side question in time.",
+                    )
+                    .await;
+            }
+            // Cut short by the turn's end, or by its withdrawal then.
+            Err(_) if self.closing_sides => {
+                return self
+                    .side_failed(&question, crate::chats::side_questions::EXPIRED)
+                    .await;
+            }
+            Err(_) => {
+                return self
+                    .side_failed(&question, "Codex could not answer this side question.")
+                    .await;
+            }
+        };
+        let answer = text(&response, "text");
+        if answer.trim().is_empty() {
+            return self.side_failed(&question, SIDE_EMPTY).await;
+        }
+        if !crate::chats::side_questions::answer_fits(answer) {
+            return self
+                .side_failed(&question, "The side answer exceeded the size limit.")
+                .await;
+        }
+        self.emit(json!({
+            "type": "chat.side.answered",
+            "sideQuestionId": question,
+            "text": answer,
+        }))
+        .await
+    }
+
+    async fn side_failed(&mut self, question: &str, error: &str) -> Result<()> {
+        let error = if crate::chats::side_questions::error_fits(error) {
+            error
+        } else {
+            "The side question error exceeded the size limit."
+        };
+        self.emit(json!({
+            "type": "chat.side.failed",
+            "sideQuestionId": question,
+            "error": error,
+        }))
+        .await
+    }
+
+    /// Stops taking side questions once the turn ends, after recording answers that
+    /// already arrived, and withdraws the rest: they never delay the reply, and can be
+    /// asked again during the next one.
+    async fn close_sides(&mut self) -> Result<()> {
+        if !self.side_available {
+            return Ok(());
+        }
+        self.side_available = false;
+        self.closing_sides = true;
+        // Codex's replies precede the turn's completion on its output, so one that arrived
+        // first settles while the reply still takes answers. Reading it can still wait on
+        // the transport's lock, so the remaining samples get a short grace period.
+        let deadline = Instant::now() + SIDE_DRAIN;
+        while !self.samples.is_empty() {
+            let Ok(Some((question, result))) =
+                tokio::time::timeout_at(deadline, self.samples.next()).await
+            else {
+                break;
+            };
+            self.side_settled(question, result).await?;
+        }
+        self.emit(json!({ "type": "chat.side.closed" })).await?;
+        // Codex would finish them otherwise. Withdrawals go out together and never fail
+        // or long delay the completed turn, even if the reply stops meanwhile.
+        let open = std::mem::take(&mut self.sides);
+        let rpc = self.session.rpc.clone();
+        let withdrawals = open
+            .values()
+            .map(|request| rpc.request("thread/sample/cancel", json!({ "requestId": request })));
+        let _ = tokio::time::timeout(SIDE_WITHDRAWAL, futures_util::future::join_all(withdrawals))
+            .await;
+        for question in open.keys() {
+            self.side_failed(question, crate::chats::side_questions::EXPIRED)
+                .await?;
+        }
+        self.samples.clear();
         Ok(())
     }
 
@@ -1208,9 +1423,13 @@ impl Chat<'_> {
                     };
                     self.incoming(incoming).await?;
                 }
+                Some((question, result)) = self.samples.next(), if !self.samples.is_empty() => {
+                    self.side_settled(question, result).await?;
+                }
                 _ = interval.tick() => self.steer(plan).await?,
             }
         }
+        self.close_sides().await?;
         let turn = self.completed.take().unwrap();
         if turn["status"] != "completed" {
             // Keep the provider's error codes: they decide retries and account switches.
@@ -1250,6 +1469,26 @@ impl Chat<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
+            if message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true {
+                // A release that did not announce side questions leaves them unread, and
+                // never mistakes one for steering. Until Codex records the turn's request,
+                // a sample would not see it: they wait in the inbox, as during compaction.
+                let asking = message["sideQuestion"].is_object();
+                if self.completed.is_some()
+                    || !self.side_available
+                    || !self.turn_recorded
+                    || (asking && self.side_compacting)
+                    || !self.attempted.insert(id.to_owned())
+                {
+                    continue;
+                }
+                if asking {
+                    self.ask_side(&message["sideQuestion"]).await?;
+                } else {
+                    self.withdraw_side(text(&message, "sideQuestionId")).await?;
+                }
+                continue;
+            }
             let client_id = if message["operationalNotice"] == true {
                 format!("{OPERATIONAL_ID}{id}")
             } else {
@@ -1263,11 +1502,6 @@ impl Chat<'_> {
                 continue;
             }
             if message["questionCancelled"] == true {
-                continue;
-            }
-            // Codex never announces side questions, so none should arrive. Never
-            // mistake one for steering if the inbox carries it anyway.
-            if message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true {
                 continue;
             }
             let input = crate::attachments::input(
@@ -1396,6 +1630,12 @@ async fn run_session(
         planning: false,
         proposal_request: None,
         starting_items: None,
+        side_available: false,
+        turn_recorded: false,
+        side_compacting: false,
+        closing_sides: false,
+        sides: HashMap::new(),
+        samples: FuturesUnordered::new(),
     };
     let mut result = chat.execute(&plan).await;
     // EOF, cancellation and transport errors can end without another provider

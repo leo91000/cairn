@@ -1,5 +1,9 @@
 # Side questions use Claude Code's native side mechanism; Codex stays unavailable
 
+The exact Claude Code release gate and the Codex exclusion below are superseded by
+[ADR-0093](0093-engine-side-questions.md). The inbox delivery, announcement, withdrawal,
+expiry and storage contracts remain in force.
+
 Users want to ask "why did you do that?" while an agent works, without steering it,
 queuing a turn or polluting the conversation. The answer must come from the engine's
 own context. Claude denies requested tools, with the managed-hook limitation below. Three designs were measured against the engines

@@ -147,7 +147,7 @@ contract and examples](USER-QUESTIONS.md) and [ADR-0074](adr/0074-common-agent-q
 
 ## Side questions
 
-While Claude Code works on a reply, you can ask a quick explanatory question
+While Claude Code, Codex or Antigravity works on a reply, you can ask a quick explanatory question
 without steering it. On the web, use the quote icon in an agent reply's header
 (**Ask about this reply**) or select a passage in the reply and choose **Ask about
 selection**. On Android, use the **Poser une question à côté** icon or **Demander à côté**
@@ -167,12 +167,14 @@ withdrawn; cancellation is best effort and cannot undo effects already performed
 | Coding agent | Side questions |
 | --- | --- |
 | Claude Code | The streaming CLI's `side_question` control request (the same one as `/btw`), with best-effort withdrawal using `control_cancel_request`. Claude Code denies every tool before it could run, answers in one response from the live conversation (an unfinished tool call is marked as still in progress) and skips its transcript. It still runs `PreToolUse` hooks before that denial; Cairn configures none and ignores user and project settings, so only an operator's managed-policy hooks could run. |
-| Codex | Unavailable. Its side conversations (`thread/fork`) keep tools Cairn cannot remove before the model runs, such as code-mode shell commands and subagents, and stopping a fork once a tool starts does not undo its effect ([ADR-0081](adr/0081-native-side-questions.md)). |
+| Codex | The app-server's `thread/sample` (Codex 0.172.0 or later): one response sampled from a copy of the running turn once Codex has recorded its request, withdrawn with `thread/sample/cancel`. A tool call the model attempts there never runs: the question fails instead. A web search enabled for the agent can still run, read-only, on OpenAI's servers within that response. The sample is not written to the thread. Its `/side` conversations (`thread/fork`) keep their tools and stay unused ([ADR-0093](adr/0093-engine-side-questions.md)). |
+| Antigravity | A private copy of the saved conversation resumed with every tool refused, then deleted. It answers from the conversation recorded up to the last finished step. |
 | OpenCode | Unavailable: it has no side mechanism. |
 
-Codex and OpenCode conversations never offer the action, nor does a Claude reply
-that is starting, stopping or compacting, one run by a Claude Code release other than
-2.1.308, or a conversation between replies. The
+OpenCode conversations never offer the action, nor does a reply that is starting,
+stopping or compacting, one run by a Claude Code release before 2.1.308 or a Codex
+release before 0.172.0, or a conversation between replies. CI qualifies the Claude Code
+and Codex releases each build ships ([ADR-0093](adr/0093-engine-side-questions.md)). The
 side-question panel, when its earlier questions open it, and the API and tools
 (`sideQuestionReason`) say why. No second coding agent with write access is started,
 and the conversation's own transcript never contains the side question.

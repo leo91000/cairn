@@ -4,4 +4,4 @@
  * Why the conversation's reply cannot take a side question now, for clients that word
  * it themselves.
  */
-export type SideQuestionUnavailable = 'between-replies' | 'codex' | 'opencode' | 'unknown-agent' | 'stopping' | 'compacting' | 'claude-release' | 'not-offered'
+export type SideQuestionUnavailable = 'between-replies' | 'codex' | 'opencode' | 'unknown-agent' | 'stopping' | 'compacting' | 'claude-release' | 'codex-release' | 'not-offered'

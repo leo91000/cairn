@@ -169,6 +169,7 @@ describe('parallel CI coverage', () => {
     expect(backend.steps.some(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')).toBe(false)
     expect(backend.steps.some(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')).toBe(false)
     expect(backend.steps.some(step => step.run?.includes('--test native_plan_turns'))).toBe(false)
+    expect(backend.steps.some(step => step.run?.includes('--test native_side_questions'))).toBe(false)
     expect(backend.steps.some(step => step.name === 'Check all Rust targets for a backend-only qualification')).toBe(false)
     expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')).toBe(true)
     expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'after-build')).toBe(true)
@@ -272,6 +273,7 @@ describe('parallel CI coverage', () => {
       'Qualify the resolved Claude Code release against its native adapter',
       'Qualify the resolved Antigravity release against its native adapter',
       'Qualify plan turns of the resolved Claude Code and Codex releases',
+      'Qualify side questions of the resolved Claude Code and Codex releases',
     ])
     for (const step of qualifications) {
       expect(step.if).toBe('inputs.backend-only != true')
@@ -294,12 +296,16 @@ describe('parallel CI coverage', () => {
       ANTIGRAVITY_URL: '${{ needs.resolve.outputs.antigravity-url }}',
       ANTIGRAVITY_SHA512: '${{ needs.resolve.outputs.antigravity-sha512 }}',
     })
-    expect(qualifications[3].env).toEqual({
-      CLAUDE_VERSION: '${{ needs.resolve.outputs.claude }}',
-      CODEX_VERSION: '${{ needs.resolve.outputs.codex }}',
-    })
+    for (const step of qualifications.slice(3)) {
+      expect(step.env).toEqual({
+        CLAUDE_VERSION: '${{ needs.resolve.outputs.claude }}',
+        CODEX_VERSION: '${{ needs.resolve.outputs.codex }}',
+      })
+    }
+
     /* eslint-enable no-template-curly-in-string */
     expect(qualifications[3].run).toContain('--test native_plan_turns -- --ignored --test-threads 1')
+    expect(qualifications[4].run).toContain('--test native_side_questions -- --ignored --test-threads 1')
     expect(quality.jobs.backend.steps.find(step => step.run?.includes('--nextest --test-threads')).run).toContain('--nextest --test-threads 8 --no-fail-fast --color never --status-level all')
   })
 

@@ -1,9 +1,9 @@
 use super::*;
 
-/// Only the release tested against the native side-question protocol is enabled.
-/// Other releases must be qualified before extending this gate (ADR-0078).
+/// Releases from the first one tested against the native side-question protocol. CI
+/// qualifies every release Cairn ships before it does (ADR-0093).
 pub(super) fn answers_side_questions(version: &str) -> bool {
-    version == "2.1.308"
+    crate::chats::side_questions::qualified(version, crate::chats::side_questions::CLAUDE_MINIMUM)
 }
 
 /// Prefix of the context usage requests this adapter sends Claude Code.

@@ -484,6 +484,21 @@ jobs:
           test "$("$codex" --version)" = "codex-cli $CODEX_VERSION"
           CLAUDE_NATIVE_BIN="$claude" CODEX_NATIVE_BIN="$codex" \
             node scripts/dev/test-backend.mjs -p cairn-installation --test native_plan_turns -- --ignored --test-threads 1
+      - name: Qualify side questions of the resolved Claude Code and Codex releases
+        if: inputs.backend-only != true
+        env:
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
+        run: |
+          # Adapters offer side questions from a minimum release onwards, so each release this
+          # build ships must answer them without running a tool or touching the history.
+          # See docs/adr/0093-engine-side-questions.md.
+          claude="$RUNNER_TEMP/claude-$CLAUDE_VERSION/bin/claude"
+          codex="$RUNNER_TEMP/codex-$CODEX_VERSION/bin/codex"
+          test "$("$claude" --version)" = "$CLAUDE_VERSION (Claude Code)"
+          test "$("$codex" --version)" = "codex-cli $CODEX_VERSION"
+          CLAUDE_NATIVE_BIN="$claude" CODEX_NATIVE_BIN="$codex" \
+            node scripts/dev/test-backend.mjs -p cairn-installation --test native_side_questions -- --ignored --test-threads 1
       - uses: ./.github/actions/observe-rust-build
         if: always()
         with:
