@@ -166,8 +166,8 @@ let generation = 0
 
 // A check that answers during a press waits for the click that ends it: its status and messages
 // change the layout, which would move the pressed control from under the pointer and lose the
-// press. A press that ends without a click on that control lets the check through, and none is
-// held longer than this after it answers or, without an answer yet, after the release.
+// press. A press released elsewhere or cancelled lets the check through, and none is held longer
+// than this after it answers or, without an answer yet, after the release.
 const PRESS_HOLD = 2000
 // Controls a press ends with a click on, which a tap delivers last. Dragging a slider has no click
 // to protect.
@@ -209,6 +209,9 @@ function startPress(event: PointerEvent) {
     return
   }
 
+  // An earlier press that had no click no longer bounds this one.
+  if (!held)
+    clearTimeout(heldTimer)
   pressedPointerId = event.pointerId
   pressedElement = control
 }

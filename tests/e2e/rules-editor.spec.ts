@@ -643,14 +643,19 @@ test('a check answering during a press is applied when the press is released els
   const { add, status, validation } = await openConditionStep(page, workspace)
 
   try {
+    // A synthetic press, as a touch dragged off its control: it ends without any click.
     const before = (await add.boundingBox())!
-    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
-    await page.mouse.down()
+    const pointer = {
+      pointerId: 7,
+      pointerType: 'touch',
+      isPrimary: true,
+      button: 0,
+    }
+    await add.dispatchEvent('pointerdown', pointer)
     await answerCheck(page, validation)
     await expect(status).toHaveText('Checking…')
     // Released over the sheet above the button: there is no click on it to protect.
-    await page.mouse.move(before.x + before.width / 2, before.y - 40)
-    await page.mouse.up()
+    await add.dispatchEvent('pointerup', { ...pointer, clientX: before.x + before.width / 2, clientY: before.y - 40 })
     // Well before a held check would be let through.
     await expect(status).toHaveText(/to fix/, { timeout: 1000 })
     await expect(page.getByRole('menuitem', { name: /The author is one/ })).toHaveCount(0)
