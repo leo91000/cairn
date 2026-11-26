@@ -125,7 +125,8 @@ function openDefault() {
 
 function ask(about: { itemId: string, replyEventId: number | null, quote: string }) {
   draftRevision++
-  openedFromDefault.value = false
+  if (!open.value)
+    openedFromDefault.value = false
   itemId.value = about.itemId
   replyEventId.value = about.replyEventId
   quote.value = about.quote
@@ -139,7 +140,8 @@ function ask(about: { itemId: string, replyEventId: number | null, quote: string
 /** Opens the panel, on the side questions about one reply when `item` is given. */
 function show(reply?: { itemId: string, replyEventId: number | null, replyEventIds: number[] }) {
   draftRevision++
-  openedFromDefault.value = false
+  if (!open.value)
+    openedFromDefault.value = false
   const item = reply?.itemId ?? ''
   // Questions asked from a reply's panel are about that reply.
   if (item && (item !== itemId.value || reply?.replyEventId !== replyEventId.value)) {

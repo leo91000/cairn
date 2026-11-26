@@ -675,7 +675,7 @@ internal fun ChatPage(
                 } ?: workingStep(live.events, chat?.agentName.orEmpty(), chat?.run?.startedAt)
         }
     val sideChat = chat?.let { if (readOnly) it.copy(canAskSideQuestion = false) else it }
-    val hasSideAction = hasSideQuestionAction(sideChat)
+    val sideStatus = sideChat?.takeIf(::hasSideQuestionAction)?.let { SideQuestionStatus(it, side) }
     val showWorkingIndicator =
         chat?.exclusiveSuspended != true &&
             working != null &&
@@ -1206,8 +1206,8 @@ internal fun ChatPage(
                             choosing = true
                         },
                     ) {
-                        if (sideChat != null && hasSideAction && !showWorkingIndicator)
-                            SideQuestionButton(sideChat, side, size = 40.dp)
+                        if (sideChat != null && sideStatus != null && !showWorkingIndicator)
+                            SideQuestionButton(sideChat, side, size = 40.dp, status = sideStatus)
                         val files = live.state?.artifacts?.size ?: 0
                         if (id != null) {
                             Box {
@@ -1429,8 +1429,8 @@ internal fun ChatPage(
                             Modifier.weight(1f).padding(start = 16.dp),
                             style = MaterialTheme.typography.titleSmall,
                         )
-                        if (sideChat != null && hasSideAction && !showWorkingIndicator)
-                            SideQuestionButton(sideChat, side, size = 40.dp)
+                        if (sideChat != null && sideStatus != null && !showWorkingIndicator)
+                            SideQuestionButton(sideChat, side, size = 40.dp, status = sideStatus)
                         ActionIcon("Quitter le plein écran", Icons.Default.Close) {
                             fullscreen = false
                         }
@@ -1980,18 +1980,19 @@ internal fun ChatPage(
                                             WorkingIndicator(
                                                 working,
                                                 action =
-                                                    if (sideChat != null && hasSideAction) {
+                                                    if (sideChat != null && sideStatus != null) {
                                                         {
                                                             SideQuestionButton(
                                                                 sideChat,
                                                                 side,
-                                                                size = 36.dp,
+                                                                status = sideStatus,
                                                             )
                                                         }
                                                     } else null,
                                             )
                                         }
                                 }
+                                if (selected) SideQuestionAnnouncement(sideStatus)
                                 HistoryStatus(
                                     live,
                                     listState,

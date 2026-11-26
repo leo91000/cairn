@@ -1,12 +1,15 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.dp
@@ -398,19 +401,32 @@ abstract class SideQuestionCases {
             )
         val side = SideQuestionState().apply { observe(emptyList()) }
         var questions by mutableStateOf(listOf(failed))
+        var rowVisible by mutableStateOf(true)
         compose.setContent {
             CairnTheme {
-                SideQuestionButton(
-                    chat(canAsk = true).copy(status = "idle", sideQuestions = questions),
-                    side,
-                )
+                val chat = chat(canAsk = true).copy(status = "idle", sideQuestions = questions)
+                val status = SideQuestionStatus(chat, side)
+                Box {
+                    SideQuestionAnnouncement(status)
+                    if (rowVisible) SideQuestionButton(chat, side, status = status)
+                }
             }
         }
-        compose.onNodeWithContentDescription("Question à côté · Sans réponse (1)").assertExists()
+        val button = compose.onNodeWithTag("side-question-button")
+        val liveRegion = compose.onNodeWithTag("side-question-status")
+        val failure = "Question à côté · Sans réponse (1)"
+        button.assertContentDescriptionEquals(failure)
+        liveRegion.assertContentDescriptionEquals(failure)
+        rowVisible = false
         questions = listOf(failed, answered)
-        compose
-            .onNodeWithContentDescription("Question à côté · Réponse prête (1) · Sans réponse (1)")
-            .assertExists()
+        button.assertDoesNotExist()
+        assertEquals(
+            LiveRegionMode.Polite,
+            liveRegion.fetchSemanticsNode().config[SemanticsProperties.LiveRegion],
+        )
+        liveRegion.assertContentDescriptionEquals(
+            "Question à côté · Réponse prête (1) · Sans réponse (1)"
+        )
     }
 
     @Test
@@ -433,10 +449,13 @@ abstract class SideQuestionCases {
             }
         }
         val workingRow = compose.onNodeWithTag("working-row")
-        val height = workingRow.getBoundsInRoot().height
+        val before = workingRow.getBoundsInRoot()
         showAction = true
-        assertEquals(height, workingRow.getBoundsInRoot().height)
-        compose.onNodeWithContentDescription("Poser une question à côté").performClick()
+        val after = workingRow.getBoundsInRoot()
+        assertEquals(before.bottom - before.top, after.bottom - after.top)
+        compose.onNodeWithContentDescription("Poser une question à côté").performTouchInput {
+            click()
+        }
         assertTrue(side.open)
         assertEquals("", side.itemId)
     }

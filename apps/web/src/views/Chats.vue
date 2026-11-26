@@ -331,6 +331,14 @@ const sideQuestionTrigger = computed(() =>
   ?? headerSideQuestionButton.value?.button,
 )
 const sideQuestionIndicator = computed(() => sideQuestions.value?.indicator ?? null)
+
+async function moveSideQuestionFocus() {
+  const conversation = detail.value?.id
+  await nextTick()
+  if (detail.value?.id === conversation && document.activeElement === document.body)
+    sideQuestionTrigger.value?.focus()
+}
+
 // How many side questions each reply has, for its badge in the conversation.
 const sideQuestionCounts = computed(() => {
   const counts: Record<string, number> = {}
@@ -1718,6 +1726,7 @@ function key(event: KeyboardEvent) {
             :indicator="sideQuestionIndicator"
             header
             @click="sideQuestions?.openDefault()"
+            @move-focus="moveSideQuestionFocus"
           />
           <button
             v-if="detail?.run && fileCount"
@@ -1992,6 +2001,7 @@ function key(event: KeyboardEvent) {
                 ref="workingSideQuestionButton"
                 :indicator="sideQuestionIndicator"
                 @click="sideQuestions?.openDefault()"
+                @move-focus="moveSideQuestionFocus"
               />
             </template>
             <template v-if="sideQuestionIndicator" #fullscreen-action>
@@ -2000,6 +2010,7 @@ function key(event: KeyboardEvent) {
                 :indicator="sideQuestionIndicator"
                 header
                 @click="sideQuestions?.openDefault()"
+                @move-focus="moveSideQuestionFocus"
               />
             </template>
           </ActivityFeed>

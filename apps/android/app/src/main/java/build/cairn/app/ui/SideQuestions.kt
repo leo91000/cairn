@@ -227,6 +227,33 @@ private fun engine(provider: String?) =
 internal fun hasSideQuestionAction(chat: Chat?): Boolean =
     chat != null && (chat.canAskSideQuestion || chat.sideQuestions.isNotEmpty())
 
+internal class SideQuestionStatus(chat: Chat, side: SideQuestionState) {
+    val pending = chat.sideQuestions.any { it.status == "pending" }
+    private val unread = side.unread(chat.sideQuestions)
+    val answers = unread.count { it.status == "answered" }
+    val failures = unread.count { it.status == "failed" }
+    val announcement =
+        listOfNotNull(
+                if (pending) "${engine(chat.provider)} répond" else null,
+                if (answers > 0) "Réponse prête ($answers)" else null,
+                if (failures > 0) "Sans réponse ($failures)" else null,
+            )
+            .joinToString(" · ")
+            .takeIf { it.isNotEmpty() }
+            ?.let { "Question à côté · $it" }
+}
+
+/** Keep announcements available while the working row is scrolled out of the history. */
+@Composable
+internal fun SideQuestionAnnouncement(status: SideQuestionStatus?) {
+    Box(
+        Modifier.size(1.dp).testTag("side-question-status").semantics {
+            contentDescription = status?.announcement.orEmpty()
+            liveRegion = LiveRegionMode.Polite
+        }
+    )
+}
+
 /**
  * Compact icon-only trigger for side questions: lives on the working row while the agent works and
  * moves to the header when saved or unread answers remain after the turn.
@@ -237,30 +264,19 @@ internal fun SideQuestionButton(
     side: SideQuestionState,
     modifier: Modifier = Modifier,
     size: Dp = 36.dp,
+    status: SideQuestionStatus = SideQuestionStatus(chat, side),
 ) {
-    val pending = chat.sideQuestions.filter { it.status == "pending" }
-    val unread = side.unread(chat.sideQuestions)
     val hasQuestions = chat.sideQuestions.isNotEmpty()
     if (!hasQuestions && !chat.canAskSideQuestion) return
 
-    val isPending = pending.isNotEmpty()
-    val answers = unread.count { it.status == "answered" }
-    val failures = unread.count { it.status == "failed" }
+    val isPending = status.pending
+    val answers = status.answers
     val hasUnreadAnswer = answers > 0
-    val hasUnreadFailure = !hasUnreadAnswer && failures > 0
-    val status =
-        listOfNotNull(
-                if (isPending) "${engine(chat.provider)} répond" else null,
-                if (hasUnreadAnswer) "Réponse prête ($answers)" else null,
-                if (failures > 0) "Sans réponse ($failures)" else null,
-            )
-            .joinToString(" · ")
+    val hasUnreadFailure = !hasUnreadAnswer && status.failures > 0
     val label =
-        when {
-            !hasQuestions -> "Poser une question à côté"
-            status.isNotEmpty() -> "Question à côté · $status"
-            else -> "Questions à côté · Enregistrées (${chat.sideQuestions.size})"
-        }
+        status.announcement
+            ?: if (hasQuestions) "Questions à côté · Enregistrées (${chat.sideQuestions.size})"
+            else "Poser une question à côté"
 
     val colors = MaterialTheme.colorScheme
     val container =
@@ -313,10 +329,7 @@ internal fun SideQuestionButton(
             modifier
                 .size(maxOf(size, 48.dp))
                 .testTag("side-question-button")
-                .semantics {
-                    contentDescription = label
-                    liveRegion = LiveRegionMode.Polite
-                }
+                .semantics { contentDescription = label }
                 .clickable(role = Role.Button) {
                     if (!hasQuestions) side.ask("", "") else side.show()
                 },

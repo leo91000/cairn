@@ -314,14 +314,25 @@ test('links reused native item IDs to the selected reply', async ({ page, worksp
 
 test('retained questions without a reply stay accessible after reopening', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
-  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
+  const messageId = randomUUID()
+  const text = 'Review. fixture:chat-hang'
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: messageId, text, provider: 'claude' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).canAskSideQuestion).toBe(true)
   await workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', { id: randomUUID(), text: 'General question' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[0]?.status).toBe('answered')
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
+  const headerButton = page.locator('.chat-header').getByTestId('side-question-button')
+  await expect(headerButton).toHaveAccessibleName('Side question · Saved (1)')
+  await headerButton.focus()
+
+  // The hanging CLI fixture omits the user-message echo. Record the acknowledgement
+  // explicitly so the working row can replace the header button.
+  const { run } = await workspace.api(`/api/chats/${chat.id}`)
+  workspace.service.store.event(run.id, 'chat.user', text, { messageId, text })
   const workingButton = page.locator('.activity-working').getByTestId('side-question-button')
   await expect(workingButton).toHaveAccessibleName('Side question · Saved (1)')
+  await expect(workingButton).toBeFocused()
   await page.screenshot({ path: test.info().outputPath('side-question-working-row.png'), animations: 'disabled' })
   await workingButton.press('Enter')
   const panel = page.getByRole('dialog', { name: 'Side questions' })
@@ -330,7 +341,6 @@ test('retained questions without a reply stay accessible after reopening', async
   // When the turn stops with the drawer open, the trigger moves to the header.
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
   await expect(workingButton).toHaveCount(0)
-  const headerButton = page.locator('.chat-header').getByTestId('side-question-button')
   await expect(headerButton).toHaveCount(1)
   await page.keyboard.press('Escape')
   await expect(panel).toBeHidden()

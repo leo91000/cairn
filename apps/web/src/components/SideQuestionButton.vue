@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { SideQuestionIndicator } from '../side-questions'
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { MessageSquareQuote } from '../icons'
 import Icon from './Icon.vue'
 
@@ -9,9 +9,14 @@ const props = defineProps<{
   /** Shown in the conversation header when the working row is absent. */
   header?: boolean
 }>()
-const emit = defineEmits<{ click: [] }>()
+const emit = defineEmits<{ click: [], moveFocus: [] }>()
 const button = ref<HTMLButtonElement>()
 defineExpose({ button })
+
+onBeforeUnmount(() => {
+  if (button.value && button.value === document.activeElement)
+    emit('moveFocus')
+})
 
 const surfaceClass = computed(() => {
   switch (props.indicator.kind) {
