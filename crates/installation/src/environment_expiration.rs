@@ -984,8 +984,14 @@ impl Service {
             *retirement = self
                 .store
                 .transaction(move |db| {
+                    // Match the per-run backup index's partial predicate.
                     db.0.execute(
-                        "DELETE FROM records WHERE kind IN ('node-backups','node-disk-grants')
+                        "DELETE FROM records WHERE kind='node-backups'
+                         AND json_extract(data,'$.runId')=?",
+                        [&run],
+                    )?;
+                    db.0.execute(
+                        "DELETE FROM records WHERE kind='node-disk-grants'
                          AND json_extract(data,'$.runId')=?",
                         [&run],
                     )?;
