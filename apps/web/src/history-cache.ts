@@ -1,5 +1,7 @@
+import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import type { LiveState, TimelineEntry } from '../../../packages/contracts/live'
+import { withChatRun } from './live-state'
 
 export interface ReadingPosition { top: number, follow: boolean }
 export interface CachedHistory {
@@ -21,7 +23,8 @@ const scopes = new Map<string, string>()
 const MAX_ENTRY = 4 * 1024 * 1024
 const MAX_HISTORY = 3 * 1024 * 1024
 const MAX_TOTAL = 20 * 1024 * 1024
-const MAX_COUNT = 12
+// Saved conversations hold their own history only: the list is saved once, apart.
+const MAX_COUNT = 60
 const TTL = 7 * 24 * 60 * 60 * 1000
 let epoch = 0
 let serial = Promise.resolve()
@@ -123,7 +126,19 @@ function parse(text: string | undefined) {
   if (!text || text.length * 2 > MAX_ENTRY)
     return undefined
   const value = JSON.parse(text) as CachedHistory
-  return valid(value) ? value : undefined
+  return valid(value) ? { ...value, state: withChatRun(value.state) } : undefined
+}
+
+/**
+ * A conversation is saved without the list its stream may carry, which is saved once by
+ * `writeChatList`, and without its chat's run, which is the state's own `run`.
+ */
+function saved(value: CachedHistory): CachedHistory {
+  const { chats: _chats, ...state } = value.state
+  return {
+    ...value,
+    state: { ...state, chat: state.chat && { ...state.chat, run: undefined as never } },
+  }
 }
 
 /** A conversation read in this page, available without waiting for storage. */
@@ -167,12 +182,65 @@ export function writeHistory(scope: string, path: string, value: CachedHistory) 
   const current = epoch
   if (!valid(value))
     return removeHistory(scope, path)
+  value = saved(value)
   let text = JSON.stringify(value)
   // Most conversations fit: only a long one pays for measuring each event.
   if (text.length * 2 + 4096 > MAX_HISTORY)
     text = JSON.stringify(recentHistory(value))
   if (text.length * 2 > MAX_ENTRY)
     return removeHistory(scope, path)
+  remember(key, text)
+  return enqueue(async () => {
+    if (current !== epoch)
+      return
+    await transaction<void>('readwrite', (store) => {
+      store.put({
+        key,
+        text,
+        savedAt: value.savedAt,
+        size: text.length * 2,
+      })
+      evict(store)
+    })
+  })
+}
+
+export interface SavedChatList { chats: ChatView[], planTurnsEnabled: boolean, savedAt: number }
+// Saved conversations are keyed by stream path, which always starts with a slash.
+const LIST = 'list'
+
+/** The conversation list last received, shown until the server's list arrives. */
+export async function readChatList(scope: string): Promise<SavedChatList | undefined> {
+  const key = `${scope}:${LIST}`
+  const current = epoch
+  let text = memory.get(key)?.text
+  if (text === undefined) {
+    try {
+      text = await transaction<string | undefined>('readonly', (store, done) => {
+        const r = store.get(key)
+        r.onsuccess = () => done(r.result?.text)
+      })
+    }
+    catch { /* Cache miss: the stream remains authoritative. */ }
+  }
+
+  try {
+    const value = text === undefined ? undefined : JSON.parse(text) as SavedChatList
+    if (current !== epoch || !value || !Array.isArray(value.chats) || !Number.isFinite(value.savedAt) || Date.now() - value.savedAt >= TTL)
+      return undefined
+    return value
+  }
+  catch {
+    return undefined
+  }
+}
+
+export function writeChatList(scope: string, value: SavedChatList) {
+  const key = `${scope}:${LIST}`
+  const current = epoch
+  const text = JSON.stringify(value)
+  if (text.length * 2 > MAX_ENTRY)
+    return Promise.resolve()
   remember(key, text)
   return enqueue(async () => {
     if (current !== epoch)

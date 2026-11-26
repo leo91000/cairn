@@ -54,6 +54,7 @@ import {
   shortAge,
   tomorrowMorning,
 } from '../signal'
+import { warmHistory } from '../use-live-run'
 import AgentAvatar from './AgentAvatar.vue'
 import HarnessMark from './HarnessMark.vue'
 import Icon from './Icon.vue'
@@ -253,6 +254,12 @@ function label(item: FilItem) {
   if (item.kind === 'review')
     return 'Blocked'
   return item.subtitle
+}
+
+// A conversation about to open is read from storage first, so it shows with the click.
+function warm(item: FilItem) {
+  if (item.chatId && item.to.startsWith('/chats/'))
+    void warmHistory(`${decodeURIComponent(item.to)}/stream`).catch(() => {})
 }
 
 function open(item: FilItem) {
@@ -524,7 +531,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
             @click="open(item)"
             @mouseenter="peek(item, $event)"
             @mouseleave="leavePeek"
-            @focus="peek(item, $event)"
+            @pointerenter="warm(item)"
+            @pointerdown="warm(item)"
+            @focus="peek(item, $event); warm(item)"
             @blur="leavePeek"
           >
             <span class="mt-[11px] w-1.5 shrink-0"><span

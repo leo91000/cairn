@@ -142,7 +142,9 @@ it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history whe
   const firstScope = effectScope()
   scopes.push(firstScope)
   const first = firstScope.run(() => useLiveRun(() => path.value, { current: () => false }))!
-  expect(first.snapshot.value).toBeUndefined()
+  // An outdated copy shows at once and says it is updating.
+  expect(first.events.value).toMatchObject([{ id: 20 }])
+  expect(first.connectionNotice.value).toBe('Updating…')
 
   if (reason === 'navigation') {
     path.value = '/chats/b/stream'
@@ -180,4 +182,37 @@ it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history whe
   await reopened.loadOlder()
   expect(api).toHaveBeenCalledWith('/chats/a/history?before=20&history=v2%3Ar%3A1')
   expect(reopened.hasOlder.value).toBe(false)
+})
+
+it('keeps the list of a compact stream and applies its changes', async () => {
+  const scope = effectScope()
+  scopes.push(scope)
+  const live = scope.run(() => useLiveRun(() => '/chats/a/stream', { list: true }))!
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
+  const run = { id: 'r', status: 'succeeded' }
+  await accept({
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v2:r:1',
+    state: {
+      run,
+      chat: { id: 'a', messages: [] },
+      chats: [{ id: 'a' }, { id: 'b' }],
+      artifacts: [],
+    },
+  } as never, 1)
+  expect(live.snapshot.value?.chat?.run).toEqual(run)
+  expect(live.carriesList.value).toBe(true)
+
+  await accept({
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v2:r:1',
+    chatChanges: { upserts: [{ id: 'b', title: 'Moved' }], removed: ['a'], order: ['b'] },
+  } as never, 1)
+  expect(live.snapshot.value?.chats).toEqual([{ id: 'b', title: 'Moved' }])
+  expect(live.snapshot.value?.chat?.id).toBe('a')
 })

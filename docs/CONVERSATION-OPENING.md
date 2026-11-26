@@ -1,7 +1,8 @@
 # Conversation opening
 
-Opening from the Fil shows only the selected conversation. A current saved copy
-opens immediately; otherwise the reader waits for the stream’s first snapshot.
+Opening from the Fil shows only the selected conversation. A saved copy opens
+immediately, saying it is updating when the Fil shows it is outdated; a conversation
+never saved opens on an outline until the stream's first snapshot.
 
 ## Reader and stream behavior
 
@@ -15,6 +16,15 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
   store revision: a read at a revision sees at least that commit). Deleted conversations are
   skipped before their view is built. The 15-second idle recovery check invalidates the
   account's list cache so external maintenance writes that bypass the store still appear.
+- Streams accept `compact=1`, which both apps send. A compact stream sends the list whole
+  in its connection's first page only. Afterwards `chatChanges` carries the conversations
+  whose summary changed (`upserts`), those that left the list (`removed`) and, when the
+  order changed beyond removals, every listed id (`order`); a batch's `state` omits the
+  unchanged list. The conversation's `chat` omits `run`, which is the state's own `run`.
+  Without `compact=1` streams keep their previous payloads.
+- Trashing a conversation no longer changes `cacheRevision`, so it no longer invalidates
+  every saved conversation. A saved trashed or deleted conversation is corrected when it
+  opens (its lifecycle, or a 404 that removes it); Android removes the deleted one's copy.
 - The opening page is sent without the 25 ms coalescing delay meant for live updates.
 - A resume past more than one page of events first reads the newest window. When it
   reaches back to the saved cursor, which a backlog of replaced text snapshots usually does,
@@ -37,8 +47,12 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
   8 MB decoded-response bound as their wire bodies. Older browsers without
   DecompressionStream request identity. Direct streaming paths, including shared
   artifact files, request identity as well, so file contents and JSON error
-  responses remain readable through streaming frames. Live SSE
-  streams remain uncompressed.
+  responses remain readable through streaming frames. A direct client that can decode
+  gzip asks for compressed event streams with `x-cairn-stream-encoding: gzip`; the
+  installation then compresses the whole SSE response in one gzip stream and flushes
+  every chunk, so each event decodes on arrival while repeated summaries share the
+  compression history. Files, errors and streams without that header stay identity.
+  Relay SSE streams remain uncompressed.
 - Reads share one queue across four SQLite connections instead of alternating between two,
   so a slow page no longer delays the next read queued behind it.
 - New image attachments record their displayed size (the camera orientation applied),
@@ -46,12 +60,13 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
 
 ### Web
 
-- Switching shows the selected conversation only. A saved copy that the Fil shows as
-  current (same finished turn, no work in progress, no later change) opens in the same task
-  as the click; otherwise a centred loader, revealed after 200 ms, stands in until the
-  stream's first snapshot. The saved copy then only resumes the stream from its cursor, and
-  still shows when there is no connection. The header names the conversation from the Fil.
-- « Updating… » appears only when revalidating a saved copy takes more than a second.
+- Switching shows the selected conversation only. A saved copy opens in the same task as
+  the click when it was read in this page; hovering, focusing or pressing a Fil row reads
+  it from storage first. A copy the Fil shows as outdated (another turn, work in progress
+  or a later change) shows « Updating… » at once until the stream completes it; a current
+  one shows it only when revalidating takes more than a second. A conversation never saved
+  opens on an outline of a conversation, revealed after 200 ms, under the header the Fil
+  names. The saved copy resumes the stream from its cursor and still shows offline.
 - The reader uses browser scroll anchoring and pins the end while following. Only a
   reader scrolling up pauses following; positions the feed sets and anchoring adjustments do
   not. Before prepending history it records a visible row's pixel offset, then corrects
@@ -80,14 +95,16 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
 
 ### Android
 
-The selected conversation waits for its stream when its saved copy is outdated, with the
-same rule as the web; pager previews keep showing their saved copies and recheck their
-freshness whenever selected, including pages retained after a previous visit. « Actualisation… »
-appears only after a second. See [web parity](../apps/android/docs/WEB-PARITY.md).
+The selected conversation shows its saved copy at once, with the same rule as the web: an
+outdated copy says « Actualisation… » at once, a current one only after a second. Pager
+previews recheck their freshness whenever selected, including pages retained after a
+previous visit. A conversation never saved opens on the same outline as the web.
+See [web parity](../apps/android/docs/WEB-PARITY.md).
 
 ## Current client contract
 
-Streams accept `list=1` to include the conversation list. The web and Android apps
+Streams accept `list=1` to include the conversation list and `compact=1` for list
+changes and a chat without its duplicated run. The web and Android apps
 use the current stream protocol and installation API; old bundle polling and finite
 relay reads are no longer supported. The browser stores saved conversations in
 `cairn-history-v2`, with no migration or cleanup of earlier cache databases. Images
@@ -97,18 +114,20 @@ may carry dimensions; an image without dimensions sizes itself when loaded.
 
 Web (IndexedDB) and Android (encrypted atomic files) retain loaded history pages
 within the existing byte budget instead of discarding everything except the last
-200 events. Reopening displays saved output immediately when it is current or
-the connection is unavailable; otherwise the reader waits for the first stream
-snapshot under the freshness rule above. Resumption uses the validated cursor. The web client skips its initial full HTTP history read
+200 events. Reopening displays saved output immediately; an outdated copy says it
+is updating under the freshness rule above. Resumption uses the validated cursor. The web client skips its initial full HTTP history read
 when a saved snapshot exists. Revalidation preserves the earliest loaded page;
 a history reset replaces that boundary.
 
 The cache remains session-scoped, expires after seven days, and holds at most
-12 conversations / 20 MiB. The history suffix has a 3 MiB budget including state
+60 conversations / 20 MiB. A saved conversation holds its own history only: neither
+the conversation list nor the chat's duplicated run. The web saves the list once,
+apart (at most every 2 seconds and when the page is hidden), and shows it until a
+stream delivers the server's list; Android's list stream keeps its own saved copy. The history suffix has a 3 MiB budget including state
 and headroom; web accounts conservatively in UTF-16 bytes, Android in UTF-8 bytes.
 An evicted prefix remains available from server pagination. Evicting a prefix also
-invalidates its reading position. Logout and existing revision/deletion handling
-still invalidate saved conversations.
+invalidates its reading position. Logout and a changed cache revision still invalidate
+every saved conversation; permanent deletion on Android removes only that copy.
 
 Activity groups contain at most 30 visible folded calls. Global event-ID gaps and
 hidden events do not count toward that limit. Existing full groups keep their

@@ -47,9 +47,8 @@ fun rememberLive(
     path: String,
     streaming: Boolean = true,
     /**
-     * Whether a saved conversation still matches what the server holds. An outdated one only
-     * resumes the stream from its cursor: the reader waits for the update instead of seeing older
-     * output that is about to change, as on the web. Previews always show their copy.
+     * Whether a saved conversation still matches what the server holds. Every saved copy shows at
+     * once; an outdated one says it is updating until the stream completes it, as on the web.
      */
     current: (CachedHistory) -> Boolean = { true },
 ): LiveSnapshot {
@@ -61,8 +60,8 @@ fun rememberLive(
     var reconnectGeneration by remember(path, api) { mutableIntStateOf(0) }
     val session = remember(path, api) { LiveSession() }
     // Retained pager pages become previews and then selected again without being restored.
-    // Recheck their latest snapshot at selection, before a frame of old content can show.
-    var waiting by
+    // Recheck their latest snapshot at selection, so an outdated one says it is updating.
+    var stale by
         remember(path, api, streaming) {
             val previous = session.snapshot
             val detail = previous.state
@@ -108,8 +107,8 @@ fun rememberLive(
             if (session.path != path)
                 vm.historyCache.read(key)?.let {
                     session.restore(it, path, api.streamGeneration.get())
-                    waiting = streaming && !isCurrent(it)
-                    if (!waiting) value = session.snapshot
+                    stale = streaming && !isCurrent(it)
+                    value = session.snapshot
                 }
             val replay = session.snapshot
             try {
@@ -125,16 +124,14 @@ fun rememberLive(
                                 streaming || (it.catchingUp && it.httpStatus == null)
                             }
                             .collect {
-                                // The stream's own state replaces an outdated copy; without a
-                                // connection, the copy is still better than nothing.
-                                if (waiting && it === replay) return@collect
+                                // The saved copy shows until the stream's own state replaces it.
                                 vm.acceptCacheRevision(it.state?.cacheRevision)
                                 cacheGeneration = vm.historyCache.generation
                                 if (!it.catchingUp || it.httpStatus != null) {
                                     if (it.history != value.history || it.epoch != value.epoch)
                                         olderError = null
                                     value = pages.display(it)
-                                    waiting = false
+                                    if (it !== replay) stale = false
                                 }
                                 if (it.httpStatus in listOf(401, 403, 404, 409)) {
                                     vm.historyCache.remove(key)
@@ -177,7 +174,7 @@ fun rememberLive(
             }
         }
     }
-    val visible = if (waiting) LiveSnapshot() else value
+    val visible = if (stale) value.copy(stale = true) else value
     return visible.copy(
         loadingOlder = loadingOlder,
         olderError = olderError,
@@ -336,9 +333,12 @@ internal fun BoxScope.HistoryStatus(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         // A revalidation that takes a moment says so; a quick one stays silent, as on the web.
-        var notice by remember { mutableStateOf(connection.takeIf { it != UPDATING_STATUS }) }
-        LaunchedEffect(connection) {
-            if (connection == UPDATING_STATUS) delay(SLOW_UPDATE_MILLIS)
+        // An outdated saved copy says so at once.
+        var notice by remember {
+            mutableStateOf(connection.takeIf { it != UPDATING_STATUS || live.stale })
+        }
+        LaunchedEffect(connection, live.stale) {
+            if (connection == UPDATING_STATUS && !live.stale) delay(SLOW_UPDATE_MILLIS)
             notice = connection
         }
         // Keep the last text while fading out, so the pill does not empty before it disappears.

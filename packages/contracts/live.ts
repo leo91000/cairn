@@ -12,6 +12,15 @@ export interface LiveState {
   chats?: ChatView[]
   artifacts: Deliverable[]
 }
+/** List changes on a compact stream (`compact=1`), applied to the list it sent first. */
+export interface ChatChanges {
+  /** New conversations and conversations whose summary changed, in full. */
+  upserts: ChatView[]
+  /** Conversations that left the list. */
+  removed: string[]
+  /** Every listed id in order, when the order changed beyond the removals. */
+  order?: string[]
+}
 export interface LiveBatch {
   oldest?: number
   hasOlder?: boolean
@@ -21,7 +30,12 @@ export interface LiveBatch {
   /** Timeline cards: the window's snapshot, or the cards these events changed. */
   entries?: TimelineChange[]
   largeEntries?: LargeTimelineReference[]
+  /**
+   * On a compact stream the state omits an unchanged list, which these changes update,
+   * and its chat omits `run`, which is the state's own `run`.
+   */
   state?: LiveState
+  chatChanges?: ChatChanges
   /** Replaces the loaded history: an invalid cursor, another run, or a `recent=1` resume past a long backlog. */
   reset: boolean
   more: boolean

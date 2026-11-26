@@ -21,6 +21,7 @@ import {
 } from './history-cache'
 import { readLargeEvents, readLargeTimeline } from './large-timeline'
 import { liveConnection } from './live-connection'
+import { nextLiveState } from './live-state'
 import { LiveTimeline } from './live-timeline'
 
 /** A revalidation that takes longer than this says so; a quick one stays silent. */
@@ -28,11 +29,25 @@ const SLOW_UPDATE = 1000
 /** Saving serializes the whole conversation: streaming output saves at most this often. */
 const SAVE_DELAY = 2000
 
+/** Saved conversations belong to the signed-in session of an installation. */
+export function cacheSession() {
+  return state.installationId ? `${state.installationId}:${state.csrf}` : state.csrf
+}
+
+/** Reads a saved conversation into memory, so opening it shows it before the next paint. */
+export async function warmHistory(path: string) {
+  if (!state.authenticated || state.signingOut || !state.csrf)
+    return
+  const session = cacheSession()
+  const scope = knownScope(session) ?? await cacheScope(session).catch(() => undefined)
+  if (scope && !peekHistory(scope, path))
+    await readHistory(scope, path)
+}
+
 export interface LiveRunOptions {
   /**
-   * Whether a saved conversation still matches what the server holds. A current one
-   * shows at once; an outdated one only seeds the stream's cursor, and the view waits
-   * for the result instead of showing older output that is about to change.
+   * Whether a saved conversation still matches what the server holds. Every saved copy
+   * shows at once; an outdated one says it is updating until the stream completes it.
    */
   current?: (saved: CachedHistory) => boolean
   /** The stream also carries the conversation list, so the tab needs no second stream. */
@@ -50,6 +65,8 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
   const timeline = ref<TimelineEntry[]>([])
   const status = ref<LiveStatus>('connecting')
   const slow = ref(false)
+  // The saved copy shown is known to be older than the server's conversation.
+  const stale = ref(false)
   const catchingUp = ref(true)
   const synced = ref(false)
   // The snapshot shown comes from the saved conversation, not yet from the server.
@@ -134,9 +151,10 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       catchingUp.value = false
     }
 
-    let waiting = !!cached && options.current?.(cached) === false
-    if (cached && !waiting)
+    if (cached) {
+      stale.value = options.current?.(cached) === false
       showSaved(cached)
+    }
 
     // A copy opened under another path is also saved where other openings look for it.
     const saved = () => [...new Set([value, (detail && options.savedAs?.(detail)) || value])]
@@ -232,8 +250,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         const candidate = accumulator.copy()
         candidate.apply(events, [...(batch.entries ?? []), ...large.map(entry => ({ kind: 'upsert' as const, entry }))], accepted)
         accumulator = candidate
-        if (batch.state)
-          detail = batch.state
+        detail = nextLiveState(detail, batch.state, batch.chatChanges)
         carriesList.value = !!options.list && !!detail?.chats
 
         cursor = accepted
@@ -247,7 +264,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
 
         complete = !batch.more
         if (complete) {
-          waiting = false
+          stale.value = false
           hasOlder.value = older
           synced.value = true
           if (batch.state)
@@ -275,12 +292,6 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       setStatus(connectionStatus)
       if (connectionStatus === 'live')
         return
-      // Without a connection, an outdated saved conversation is still better than nothing.
-      if (waiting && cached && connectionStatus !== 'connecting') {
-        waiting = false
-        showSaved(cached)
-      }
-
       if (connectionStatus !== 'reconnecting')
         return
       if (checking)
@@ -303,7 +314,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     }, cached ? { cursor: cached.cursor, history: cached.history } : undefined, () => position.value?.follow ?? true, options.list ? '&list=1' : '')
   }
 
-  watch([path, () => state.authenticated && !state.signingOut, () => state.csrf], ([value, enabled, csrf]) => {
+  watch([path, () => state.authenticated && !state.signingOut, () => state.csrf], ([value, enabled]) => {
     persist?.()
     const current = ++generation
     connection?.close()
@@ -315,6 +326,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     olderError.value = ''
     position.value = undefined
     synced.value = false
+    stale.value = false
     restored.value = false
     hasOlder.value = false
     snapshot.value = undefined
@@ -330,7 +342,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     }
 
     if (value)
-      void open(value, current, state.installationId ? `${state.installationId}:${csrf}` : csrf)
+      void open(value, current, cacheSession())
   }, { immediate: true, flush: 'sync' })
   const leaving = () => persist?.()
   const hidden = () => document.hidden && persist?.()
@@ -361,7 +373,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     error,
     position,
     savePosition,
-    connectionNotice: computed(() => error.value ? '' : status.value === 'offline' ? (snapshot.value ? 'Offline · showing saved conversation' : 'Offline') : status.value === 'reconnecting' ? 'Reconnecting…' : status.value === 'connecting' && snapshot.value && slow.value ? 'Updating…' : ''),
+    connectionNotice: computed(() => error.value ? '' : status.value === 'offline' ? (snapshot.value ? 'Offline · showing saved conversation' : 'Offline') : status.value === 'reconnecting' ? 'Reconnecting…' : snapshot.value && (stale.value || (status.value === 'connecting' && slow.value)) ? 'Updating…' : ''),
     reconnect: () => connection?.reconnect(),
   }
 }

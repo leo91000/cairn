@@ -1800,10 +1800,15 @@ function key(event: KeyboardEvent) {
           <p v-if="connectionNotice" role="status" class="pointer-events-none absolute top-3 left-1/2 z-10 m-0! -translate-x-1/2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-xs whitespace-nowrap text-muted shadow-[0_4px_16px_#0000000f] backdrop-blur-sm">
             {{ connectionNotice }}
           </p>
-          <!-- As on Android, a conversation opens on a centred loader. It appears only when
-               opening takes a moment, so a quick open goes straight to the conversation. -->
-          <div v-if="route.params.id && !detail" role="status" class="opening-loader flex flex-1 flex-col items-center justify-center gap-3 text-sm text-muted">
-            <Icon :name="LoaderCircle" :size="22" class="animate-spin" />Loading conversation…
+          <!-- As on Android, a conversation never read before opens on the outline of a
+               conversation under the header the Fil names. It appears only when opening takes
+               a moment, so a quick open goes straight to the conversation. -->
+          <div v-if="route.params.id && !detail" role="status" class="opening-loader mx-auto flex w-full max-w-3xl flex-1 flex-col justify-end gap-3 px-6 pb-10">
+            <span aria-hidden="true" class="ml-auto h-11 w-2/5 animate-pulse rounded-2xl bg-hover" />
+            <span aria-hidden="true" class="h-3.5 w-1/5 animate-pulse rounded bg-hover" />
+            <span aria-hidden="true" class="h-3.5 w-4/5 animate-pulse rounded bg-hover" />
+            <span aria-hidden="true" class="h-3.5 w-3/5 animate-pulse rounded bg-hover" />
+            <span class="mt-2 text-center text-xs text-muted">Loading conversation…</span>
           </div>
           <div v-else-if="inactive" class="m-auto w-full max-w-xl px-6 py-12 text-center">
             <h2 class="mb-3 text-xl">

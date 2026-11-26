@@ -17,15 +17,18 @@ import okhttp3.mockwebserver.*
 import org.junit.Rule
 import org.junit.Test
 
-/** Retained pager pages must recheck the Fil before showing their saved output on selection. */
+/**
+ * Retained pager pages recheck the Fil on selection: an outdated saved output stays visible and
+ * says it is updating until the stream completes it.
+ */
 abstract class SavedConversationCases {
     @get:Rule val compose = createComposeRule()
 
-    @Test fun selectingAnOutdatedCachedPreviewWaitsForItsStream() = select(fromCache = true)
+    @Test fun selectingAnOutdatedCachedPreviewShowsItWhileUpdating() = select(fromCache = true)
 
-    @Test fun selectingAnOutdatedNetworkPreviewWaitsForItsStream() = select()
+    @Test fun selectingAnOutdatedNetworkPreviewShowsItWhileUpdating() = select()
 
-    @Test fun reselectingAnOutdatedRetainedPageWaitsForItsStream() = select(wasSelected = true)
+    @Test fun reselectingAnOutdatedRetainedPageShowsItWhileUpdating() = select(wasSelected = true)
 
     private fun select(fromCache: Boolean = false, wasSelected: Boolean = false) {
         MockWebServer().use { server ->
@@ -171,6 +174,7 @@ abstract class SavedConversationCases {
                                     current = { savedIsCurrent(it, listOf(known)) },
                                 )
                             Text(live.events.lastOrNull()?.text ?: "Waiting for current output")
+                            if (live.stale) Text("Updating saved output")
                         }
                     }
                 }
@@ -186,14 +190,15 @@ abstract class SavedConversationCases {
                 }
                 compose.waitForIdle()
                 compose.waitUntil(10000) { requested.count == 0L }
-                compose.onNodeWithText("Saved output").assertDoesNotExist()
-                compose.onNodeWithText("Waiting for current output").assertIsDisplayed()
+                compose.onNodeWithText("Saved output").assertIsDisplayed()
+                compose.onNodeWithText("Updating saved output").assertIsDisplayed()
 
                 release.countDown()
                 compose.waitUntil(10000) {
                     compose.onAllNodesWithText("Current output").fetchSemanticsNodes().isNotEmpty()
                 }
                 compose.onNodeWithText("Current output").assertIsDisplayed()
+                compose.onNodeWithText("Updating saved output").assertDoesNotExist()
             } finally {
                 release.countDown()
                 compose.runOnIdle { mounted = false }

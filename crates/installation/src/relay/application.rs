@@ -110,7 +110,13 @@ impl DirectTraffic {
 
                             // Direct clients hand stream chunks to readers verbatim, without an
                             // HTTP decoder. A client predating this route's classification may
-                            // still ask for gzip, so streamed bodies always use identity.
+                            // still ask for gzip, so streamed bodies always use identity. A
+                            // client that decodes gzip event streams asks for them explicitly.
+                            let gzip = stream
+                                && request.headers.iter().any(|(name, value)| {
+                                    name.eq_ignore_ascii_case("x-cairn-stream-encoding")
+                                        && value == "gzip"
+                                });
                             if stream {
                                 request
                                     .headers
@@ -128,6 +134,7 @@ impl DirectTraffic {
                             let streaming = StreamOutput {
                                 frames: output.clone(),
                                 credit: credit.clone(),
+                                gzip,
                             };
                             let router = router.clone();
                             let output = output.clone();

@@ -106,6 +106,8 @@ for (const view of ['conversation', 'fil'] as const) {
       const row = page.locator(`.fil [data-fil-key="chat:${chat.id}"]`)
       await expect(row).toBeVisible()
       await expectSavedStream(page, stream)
+      // The list is saved once, apart from the conversations.
+      await expectSavedStream(page, ':list')
 
       await page.route('**/api/chats**', route => route.abort())
       await page.reload()
@@ -315,7 +317,7 @@ test('a slow conversation opens on a loader, then returns to the previous readin
   await expect(page.getByRole('status').filter({ hasText: 'Loading conversation' })).toHaveCount(0)
 })
 
-test('an outdated saved conversation waits for its update instead of showing older output', async ({ page, workspace }) => {
+test('an outdated saved conversation shows at once and says it is updating', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const first = await workspace.api('/api/chats', 'POST', {})
   const second = await workspace.api('/api/chats', 'POST', {})
@@ -349,14 +351,19 @@ test('an outdated saved conversation waits for its update instead of showing old
   })
   try {
     await row.click()
-    // The Fil already shows the later turn: the saved copy only resumes the stream.
-    await expect(page.getByRole('status').filter({ hasText: 'Loading conversation' })).toBeVisible()
-    await expect(page.locator('.activity-message')).toHaveCount(0)
+    // The Fil already shows the later turn: the saved copy shows at once, says it is
+    // updating and resumes the stream from its cursor.
+    await expect(page.locator('.activity-message').getByText('Outdated conversation question', { exact: true }).first()).toBeVisible()
+    const updating = page.getByRole('status').filter({ hasText: 'Updating…' })
+    await expect(updating).toBeVisible()
+    await expect(page.getByRole('status').filter({ hasText: 'Loading conversation' })).toHaveCount(0)
+    await expect(page.locator('.activity-message').getByText('A later question', { exact: true })).toHaveCount(0)
     await expect.poll(() => streams.length).toBeGreaterThan(0)
     expect(Number(new URL(streams[0]!).searchParams.get('after'))).toBeGreaterThan(0)
+    expect(new URL(streams[0]!).searchParams.get('compact')).toBe('1')
     release()
     await expect(page.locator('.activity-message').getByText('A later question', { exact: true }).first()).toBeVisible()
-    await expect(page.locator('.activity-message').getByText('Outdated conversation question', { exact: true }).first()).toBeAttached()
+    await expect(updating).toHaveCount(0)
   }
   finally {
     release()

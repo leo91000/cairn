@@ -60,6 +60,46 @@ data class LiveState(
     val cacheRevision: String? = null,
 )
 
+/** The conversation's run is the state's own `run`: compact streams and saved copies omit it. */
+fun LiveState.withChatRun(): LiveState =
+    if (chat == null || chat.run != null || run == null) this else copy(chat = chat.copy(run = run))
+
+/** List changes on a compact stream (`compact=1`), applied to the list it sent first. */
+@Serializable
+data class ChatChanges(
+    /** New conversations and conversations whose summary changed, in full. */
+    val upserts: List<Chat> = emptyList(),
+    /** Conversations that left the list. */
+    val removed: List<String> = emptyList(),
+    /** Every listed id in order, when the order changed beyond the removals. */
+    val order: List<String>? = null,
+)
+
+fun List<Chat>.apply(changes: ChatChanges): List<Chat> {
+    val removed = changes.removed.toSet()
+    val upserts = changes.upserts.associateBy { it.id }
+    val kept = filter { it.id !in removed }
+    val known = kept.associateBy { it.id }
+    val order =
+        changes.order
+            ?: (changes.upserts.map { it.id }.filter { it !in known } + kept.map { it.id })
+    return order.mapNotNull { upserts[it] ?: known[it] }
+}
+
+/**
+ * The state after one stream batch. A compact batch sends its state without an unchanged list, and
+ * list changes on their own; both apply to the list received before.
+ */
+fun nextLiveState(previous: LiveState?, state: LiveState?, changes: ChatChanges?): LiveState? {
+    var next = state?.withChatRun() ?: previous
+    if (next != null && state != null && state.chats == null && previous?.chats != null)
+        next = next.copy(chats = previous.chats)
+    val chats = next?.chats
+    if (next != null && chats != null && changes != null)
+        next = next.copy(chats = chats.apply(changes))
+    return next
+}
+
 @Serializable
 data class LiveBatch(
     val events: List<RunEvent>,
@@ -72,6 +112,8 @@ data class LiveBatch(
     /** Timeline cards: the window's snapshot, or the cards these events changed. */
     val entries: List<TimelineChange> = emptyList(),
     val largeEntries: List<build.cairn.contracts.LargeTimelineReference> = emptyList(),
+    /** On a compact stream: the list changes since the previous batch. */
+    val chatChanges: ChatChanges? = null,
 )
 
 typealias HistoryPage = build.cairn.contracts.HistoryPage

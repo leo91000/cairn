@@ -36,6 +36,16 @@ class HistoryCacheTest {
         )
 
     @Test
+    fun `a saved conversation stores its chat run once and reads it back`() = runBlocking {
+        val run = Run(id = "r", status = "succeeded", taskId = "")
+        val saved = record().copy(state = LiveState(run = run, chat = Chat(id = "c", run = run)))
+        cache().save("run", saved, true)
+        val file = directory.root.listFiles()!!.single { it.name == "run" }
+        assertEquals(1, Regex("\"id\":\"r\"").findAll(file.readText()).count())
+        assertEquals(run, cache().read("run")!!.state.chat?.run)
+    }
+
+    @Test
     fun `warm reads and neighboring saves reuse retained payload sizes`() = runBlocking {
         val traversals = AtomicInteger()
         val contents = mapOf<String, JsonElement>("output" to JsonPrimitive("retained output"))
@@ -276,9 +286,9 @@ class HistoryCacheTest {
         assertNotNull(cache.read("huge"))
         assertTrue(cache.read("huge")!!.hasOlder)
         assertEquals(3L, cache.read("huge")!!.oldest)
-        for (i in 0..14) cache.save("key$i", record(), true)
-        assertTrue(directory.root.listFiles()!!.size <= 12)
+        for (i in 0..61) cache.save("key$i", record(), true)
+        assertTrue(directory.root.listFiles()!!.size <= 60)
         assertNull(cache.read("key0"))
-        assertNotNull(cache.read("key14"))
+        assertNotNull(cache.read("key61"))
     }
 }

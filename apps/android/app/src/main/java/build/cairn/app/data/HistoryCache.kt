@@ -98,9 +98,11 @@ class HistoryCache(
                             ?: runCatching {
                                 val file = File(root, key)
                                 require(file.length() in 1..(maxEntry + 64).toLong())
-                                wireJson.decodeFromString<CachedHistory>(
-                                    String(unseal(key, file.readBytes()), Charsets.UTF_8)
-                                )
+                                wireJson
+                                    .decodeFromString<CachedHistory>(
+                                        String(unseal(key, file.readBytes()), Charsets.UTF_8)
+                                    )
+                                    .let { it.copy(state = it.state.withChatRun()) }
                             }
                                 .getOrNull()
                     if (value == null || !valid(value)) {
@@ -269,7 +271,7 @@ class HistoryCache(
             total += entry.bytes
             if (total > maxTotal) evictMemory(key)
         }
-        while (memory.size > 12) evictMemory(memory.keys.first())
+        while (memory.size > MAX_COUNT) evictMemory(memory.keys.first())
     }
 
     private fun evictMemory(key: String) {
@@ -283,7 +285,10 @@ class HistoryCache(
         if (key !in dirty) return
         val value = memory[key]?.value ?: return
         runCatching {
-            val bytes = wireJson.encodeToString(value).toByteArray()
+            // The chat's run is the state's own `run`, restored when the file is read.
+            val stored =
+                value.copy(state = value.state.copy(chat = value.state.chat?.copy(run = null)))
+            val bytes = wireJson.encodeToString(stored).toByteArray()
             if (bytes.size > maxEntry) {
                 removeLocked(key)
                 return
@@ -308,7 +313,7 @@ class HistoryCache(
                 .forEachIndexed { index, file ->
                     total += file.length()
                     if (
-                        index >= 12 ||
+                        index >= MAX_COUNT ||
                             total > maxTotal ||
                             System.currentTimeMillis() - file.lastModified() >= ttl
                     )
@@ -318,6 +323,9 @@ class HistoryCache(
     }
 
     companion object {
+        /** A saved conversation holds its own history only, so many fit the byte budget. */
+        private const val MAX_COUNT = 60
+
         fun encrypted(context: Context): HistoryCache {
             fun key(): SecretKey {
                 val alias = "cairn.history.v1"

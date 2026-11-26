@@ -144,6 +144,8 @@ data class LiveSnapshot(
     val loadOlder: () -> Unit = {},
     /** Changes when the stream replaces its events; pages loaded above them are dropped. */
     val epoch: Int = 0,
+    /** A saved copy older than the server's conversation, shown until the stream completes it. */
+    val stale: Boolean = false,
     /** Tells the stream whether the reader follows the latest output, from the reading position. */
     val followLatest: (Boolean) -> Unit = {},
     /** Reopens this stream to fetch the current conversation after a refused action. */
@@ -166,7 +168,9 @@ private fun CairnApi.frames(
                     "$path?after=$cursor" +
                         (history?.let { "&history=${segment(it)}" } ?: "") +
                         (if (windowed) "&window=1" else "") +
-                        if (windowed && recent) "&recent=1" else ""
+                        (if (windowed && recent) "&recent=1" else "") +
+                        // The list once, then only the conversations that changed.
+                        "&compact=1"
                 )
                 .header("Accept", "text/event-stream")
                 .get()
@@ -453,7 +457,7 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                     }
                     snapshot =
                         LiveSnapshot(
-                            batch.state ?: snapshot.state,
+                            nextLiveState(snapshot.state, batch.state, batch.chatChanges),
                             accumulator.events,
                             accumulator.entries,
                             status = "En direct",

@@ -10,7 +10,9 @@ import {
   clearHistoryCache,
   knownScope,
   peekHistory,
+  readChatList,
   readHistory,
+  writeChatList,
   writeHistory,
 } from '../src/history-cache'
 
@@ -45,6 +47,31 @@ it('isolates sessions and routes, and copies snapshots before retaining them', a
   expect(await readHistory('session', '/runs/a/stream')).toBeUndefined()
   expect(await cacheScope('session')).not.toContain('session')
 })
+it('saves a conversation without the list and the duplicated chat run, and the list apart', async () => {
+  const run = { id: 'r', status: 'succeeded' }
+  const value = {
+    ...record(),
+    state: {
+      run,
+      chat: { id: 'c', messages: [] },
+      chats: [{ id: 'c' }, { id: 'd' }],
+      artifacts: [],
+    },
+  } as unknown as CachedHistory
+  value.state.chat!.run = run as never
+  await writeHistory('session', '/chats/c/stream', value)
+
+  const saved = await readHistory('session', '/chats/c/stream')
+  expect(saved?.state.chats).toBeUndefined()
+  expect(saved?.state.chat?.run).toEqual(run)
+
+  expect(await readChatList('session')).toBeUndefined()
+  await writeChatList('session', { chats: [{ id: 'c' }] as never, planTurnsEnabled: true, savedAt: Date.now() })
+  expect(await readChatList('session')).toMatchObject({ chats: [{ id: 'c' }], planTurnsEnabled: true })
+  expect(await readChatList('other')).toBeUndefined()
+  await writeChatList('session', { chats: [], planTurnsEnabled: false, savedAt: Date.now() - 8 * 24 * 60 * 60 * 1000 })
+  expect(await readChatList('session')).toBeUndefined()
+})
 it('shows a conversation saved in this page without waiting for storage', async () => {
   const scope = await cacheScope('page')
   expect(knownScope('page')).toBe(scope)
@@ -63,12 +90,12 @@ it('expires, bounds and clears caches even when IndexedDB is unavailable', async
   expect(await readHistory('s', 'expired')).toBeUndefined()
   await writeHistory('s', 'huge', { ...record(), events: [{ ...record().events[0], text: 'x'.repeat(4 * 1024 * 1024) }] })
   expect(await readHistory('s', 'huge')).toMatchObject({ events: [], hasOlder: true, oldest: 3 })
-  for (let i = 0; i < 15; i++)
+  for (let i = 0; i < 61; i++)
     await writeHistory('s', String(i), record())
   expect(await readHistory('s', '0')).toBeUndefined()
-  expect(await readHistory('s', '14')).toBeDefined()
+  expect(await readHistory('s', '60')).toBeDefined()
   await clearHistoryCache()
-  expect(await readHistory('s', '14')).toBeUndefined()
+  expect(await readHistory('s', '60')).toBeUndefined()
 })
 it('rejects a cursor inconsistent with its saved events', async () => {
   await writeHistory('s', 'bad', { ...record(), cursor: 1 })
