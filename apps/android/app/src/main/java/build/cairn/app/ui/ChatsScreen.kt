@@ -37,6 +37,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.heading
@@ -689,7 +691,9 @@ internal fun ChatPage(
             fullscreen -> SideQuestionPlacement.FullscreenHeader
             else -> SideQuestionPlacement.Header
         }
-    val sideButtonFocus = key(id) { rememberSideQuestionButtonFocus(sidePlacement) }
+    val sideFocusFallback = remember(id) { FocusRequester() }
+    val sideButtonFocus =
+        key(id) { rememberSideQuestionButtonFocus(sidePlacement, sideFocusFallback) }
     val conversationError = conversationError(chat, readOnly)
     val error = conversationError?.takeUnless {
         quota != null && (isQuotaMessage(it) || it == quota.message)
@@ -1245,7 +1249,7 @@ internal fun ChatPage(
                                     }
                             }
                         }
-                        Box {
+                        Box(Modifier.focusRequester(sideFocusFallback)) {
                             ActionIcon("Options de la conversation", CairnIcons.More) {
                                 menu = true
                             }
@@ -1451,8 +1455,10 @@ internal fun ChatPage(
                                 size = 40.dp,
                                 status = sideStatus,
                             )
-                        ActionIcon("Quitter le plein écran", Icons.Default.Close) {
-                            fullscreen = false
+                        Box(Modifier.focusRequester(sideFocusFallback)) {
+                            ActionIcon("Quitter le plein écran", Icons.Default.Close) {
+                                fullscreen = false
+                            }
                         }
                     }
                 if (choosing) {

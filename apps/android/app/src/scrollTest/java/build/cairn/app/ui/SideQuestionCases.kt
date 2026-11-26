@@ -3,13 +3,20 @@ package build.cairn.app.ui
 import android.app.Application
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.input.InputModeManager
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -466,14 +473,22 @@ abstract class SideQuestionCases {
         val side = SideQuestionState()
         val working = WorkingStep("Omni travaille", "", null)
         var placement by mutableStateOf(SideQuestionPlacement.Working)
+        var workingRowVisible by mutableStateOf(true)
+        val fallback = FocusRequester()
+        lateinit var inputMode: InputModeManager
         compose.setContent {
             CairnTheme {
-                val focus = rememberSideQuestionButtonFocus(placement)
+                inputMode = LocalInputModeManager.current
+                val focus = rememberSideQuestionButtonFocus(placement, fallback)
                 val currentChat = chat(canAsk = true)
                 Column {
+                    Box(Modifier.focusRequester(fallback)) {
+                        ActionIcon("Options de la conversation", CairnIcons.More) {}
+                    }
+                    Spacer(Modifier.height(16.dp))
                     if (placement == SideQuestionPlacement.Header) {
                         SideQuestionButton(currentChat, side, focus, size = 40.dp)
-                    } else {
+                    } else if (workingRowVisible) {
                         WorkingIndicator(
                             working,
                             action = {
@@ -485,12 +500,22 @@ abstract class SideQuestionCases {
             }
         }
         val button = compose.onNodeWithTag("side-question-button")
-        compose.onRoot().performKeyInput { pressKey(Key.Tab) }
+        compose.runOnIdle { assertTrue(inputMode.requestInputMode(InputMode.Keyboard)) }
+        button.performSemanticsAction(SemanticsActions.RequestFocus)
         button.assertIsFocused()
         placement = SideQuestionPlacement.Header
         button.assertIsFocused()
         placement = SideQuestionPlacement.Working
         button.assertIsFocused()
+
+        placement = SideQuestionPlacement.Header
+        button.assertIsFocused()
+        compose.runOnIdle {
+            workingRowVisible = false
+            placement = SideQuestionPlacement.Working
+        }
+        button.assertDoesNotExist()
+        compose.onNodeWithContentDescription("Options de la conversation").assertIsFocused()
     }
 
     @Test

@@ -239,17 +239,24 @@ internal enum class SideQuestionPlacement {
 
 /** Keep keyboard focus when the visible side-question button moves between placements. */
 @Composable
-internal fun rememberSideQuestionButtonFocus(placement: SideQuestionPlacement?): Modifier {
+internal fun rememberSideQuestionButtonFocus(
+    placement: SideQuestionPlacement?,
+    fallback: FocusRequester,
+): Modifier {
     val requester = remember { FocusRequester() }
     var focused by remember { mutableStateOf(false) }
     var placed by remember { mutableStateOf<SideQuestionPlacement?>(null) }
     // Take the snapshot before Compose detaches the outgoing focus target.
     val restoreFocus = focused
     LaunchedEffect(placement) {
-        if (placement != null && restoreFocus) {
+        if (restoreFocus) {
             withFrameNanos {}
-            // The working row may be outside the visible history and have no focus target.
-            if (placed == placement) requester.requestFocus()
+            // Keep the reading position when the new working row is outside the visible history.
+            val restored =
+                placement != null &&
+                    placed == placement &&
+                    runCatching { requester.requestFocus() }.getOrDefault(false)
+            if (!restored) runCatching { fallback.requestFocus() }
         }
     }
     return Modifier.focusRequester(requester)

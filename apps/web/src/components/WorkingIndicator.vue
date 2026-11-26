@@ -20,9 +20,9 @@ const hiddenTasks = computed(() => Math.max(0, (props.step.waiting?.length ?? 0)
 </script>
 
 <template>
-  <div v-if="step.waiting" class="agent-waiting flex min-w-0 items-start gap-3">
+  <div v-if="step.waiting" class="flex min-w-0 items-start gap-3">
     <div
-      class="flex min-w-0 flex-1 items-start gap-3"
+      class="agent-waiting flex min-w-0 flex-1 items-start gap-3"
       role="status"
       aria-live="polite"
       :aria-label="`${step.title}: ${step.detail}. The agent resumes when it finishes.`"
@@ -55,9 +55,9 @@ const hiddenTasks = computed(() => Math.max(0, (props.step.waiting?.length ?? 0)
     </div>
     <slot name="action" />
   </div>
-  <div v-else class="agent-working flex min-w-0 items-center gap-3">
+  <div v-else class="flex min-w-0 items-center gap-3">
     <div
-      class="flex min-w-0 flex-1 items-center gap-3"
+      class="agent-working flex min-w-0 flex-1 items-center gap-3"
       role="status"
       aria-live="polite"
       :aria-label="[step.title, step.detail].filter(Boolean).join(': ')"
