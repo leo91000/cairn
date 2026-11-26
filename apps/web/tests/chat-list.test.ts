@@ -49,9 +49,17 @@ it('forgets the saved copies of conversations that leave the server list', async
   for (const path of ['/chats/gone-slug/stream', '/chats/gone/stream', '/runs/gone-run/stream', '/chats/kept/stream'])
     await writeHistory(scope, path, saved())
 
-  const gone = { id: 'gone', slug: 'gone-slug', runId: 'gone-run' } as ChatView
-  const kept = { id: 'kept', slug: '' } as ChatView
-  publishChats([gone, kept])
+  const gone = {
+    id: 'gone',
+    slug: 'gone-slug',
+    runId: 'gone-run',
+    createdAt: 1,
+  } as ChatView
+  const kept = { id: 'kept', slug: '', createdAt: 1 } as ChatView
+  // Just created: a list read moments earlier may not hold it yet.
+  const fresh = { id: 'fresh', slug: '', createdAt: Date.now() } as ChatView
+  await writeHistory(scope, '/chats/fresh/stream', saved())
+  publishChats([gone, kept, fresh])
   // A saved list never removes anything: only the server's list does.
   publishChats([kept], { saved: true })
   expect(peekHistory(scope, '/chats/gone-slug/stream')).toBeDefined()
@@ -62,6 +70,7 @@ it('forgets the saved copies of conversations that leave the server list', async
   // Run logs do not name their conversation: every saved one goes.
   expect(peekHistory(scope, '/runs/gone-run/stream')).toBeUndefined()
   expect(peekHistory(scope, '/chats/kept/stream')).toBeDefined()
+  expect(peekHistory(scope, '/chats/fresh/stream')).toBeDefined()
 })
 
 it('forgets what left the list since it was saved when the server list arrives first', async () => {
@@ -72,9 +81,9 @@ it('forgets what left the list since it was saved when the server list arrives f
   vi.stubGlobal('document', Object.assign(new EventTarget(), { hidden: false }))
   const scope = await cacheScope('test-session')
   await writeHistory(scope, '/chats/gone/stream', saved())
-  await writeChatList(scope, { chats: [{ id: 'gone', slug: '' }, { id: 'kept', slug: '' }] as ChatView[], planTurnsEnabled: false, savedAt: Date.now() })
+  await writeChatList(scope, { chats: [{ id: 'gone', slug: '', createdAt: 1 }, { id: 'kept', slug: '', createdAt: 1 }] as ChatView[], planTurnsEnabled: false, savedAt: Date.now() })
 
-  publishChats([{ id: 'kept', slug: '' } as ChatView])
+  publishChats([{ id: 'kept', slug: '', createdAt: 1 } as ChatView])
   const effect = effectScope()
   const list = effect.run(() => useChatList())!
   await vi.waitFor(() => expect(peekHistory(scope, '/chats/gone/stream')).toBeUndefined())

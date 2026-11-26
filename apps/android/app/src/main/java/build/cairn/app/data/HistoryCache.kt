@@ -63,6 +63,8 @@ class HistoryCache(
     private val memory = linkedMapOf<String, Entry>()
     private val pendingLock = Any()
     private val pending = mutableMapOf<String, PendingSave>()
+    /** Deleted conversations: a reader still open never saves them again, as on the web. */
+    private val forgotten = mutableSetOf<String>()
     private val positions = mutableMapOf<String, Position>()
     private val written = mutableMapOf<String, Long>()
     private val dirty = mutableSetOf<String>()
@@ -134,7 +136,7 @@ class HistoryCache(
         expectedGeneration: Long,
     ): PendingSave? =
         synchronized(pendingLock) {
-            if (expectedGeneration != generation) return@synchronized null
+            if (expectedGeneration != generation || key in forgotten) return@synchronized null
             if (olderThan(value, pending[key]?.value)) return@synchronized null
             PendingSave(key, value, expectedGeneration).also { pending[key] = it }
         }
@@ -232,6 +234,12 @@ class HistoryCache(
     suspend fun flush(key: String) =
         withContext(Dispatchers.IO) { lock.withLock { writeLocked(key) } }
 
+    /** Removes a deleted conversation's saved copy for good: it is never saved again. */
+    suspend fun forget(key: String) {
+        synchronized(pendingLock) { forgotten.add(key) }
+        remove(key)
+    }
+
     suspend fun remove(key: String) =
         withContext(Dispatchers.IO) {
             lock.withLock {
@@ -268,6 +276,7 @@ class HistoryCache(
                 synchronized(pendingLock) {
                     generation++
                     pending.clear()
+                    forgotten.clear()
                 }
                 positions.clear()
                 memory.clear()

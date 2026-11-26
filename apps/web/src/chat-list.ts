@@ -23,6 +23,8 @@ let served = false
 let unsaved: { session: string, chats: ChatView[], planTurnsEnabled: boolean } | undefined
 let saveTimer: ReturnType<typeof setTimeout> | undefined
 let lastSaved: ChatView[] | undefined
+// The server shares a list for up to a quarter second; this leaves ample margin.
+const RECENT = 10_000
 const SAVE_DELAY = 2000
 
 function saveList() {
@@ -42,7 +44,10 @@ function saveList() {
 // the saved run logs, among which its earlier runs cannot be told apart.
 function forgetRemoved(previous: ChatView[], chats: ChatView[]) {
   const listed = new Set(chats.map(chat => chat.id))
-  const removed = previous.filter(chat => !listed.has(chat.id))
+  // A list read moments earlier, by another tab or stream, may not hold a conversation created
+  // since: only an older conversation missing from the server's list is gone.
+  const settled = Date.now() - RECENT
+  const removed = previous.filter(chat => !listed.has(chat.id) && chat.createdAt < settled)
   if (!removed.length)
     return
   void cacheScope(cacheSession()).then((scope) => {

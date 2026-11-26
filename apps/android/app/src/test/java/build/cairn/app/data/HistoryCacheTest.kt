@@ -64,6 +64,19 @@ class HistoryCacheTest {
         }
 
     @Test
+    fun `a forgotten conversation is never saved again until the cache is cleared`() = runBlocking {
+        val cache = cache()
+        cache.save("gone", record(), true)
+        cache.forget("gone")
+        cache.save("gone", record(), true)
+        assertNull(cache.read("gone"))
+        assertNull(cache().read("gone"))
+        cache.clear()
+        cache.save("gone", record(), true)
+        assertNotNull(cache.read("gone"))
+    }
+
+    @Test
     fun `a saved conversation stores its chat run once and reads it back`() = runBlocking {
         val run = Run(id = "r", status = "succeeded", taskId = "")
         val saved = record().copy(state = LiveState(run = run, chat = Chat(id = "c", run = run)))

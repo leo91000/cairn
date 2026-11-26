@@ -142,7 +142,7 @@ fun rememberLive(
                                     value = pages.display(it)
                                     if (left.isNotEmpty())
                                         vm.viewModelScope.launch {
-                                            for (saved in left) vm.historyCache.remove(
+                                            for (saved in left) vm.historyCache.forget(
                                                 vm.historyCache.key(
                                                     api.cacheScope,
                                                     api.csrf,
