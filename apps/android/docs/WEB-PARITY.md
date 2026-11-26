@@ -49,7 +49,11 @@ invalidate earlier polling responses on both apps.
 The installation validates drafts and reports
 errors at their step. On compact web screens the title has its own row, which
 keeps the header height stable when validation changes from Checking to Ready.
-Android already shows validation below the rule name. Saving creates a version.
+Android already shows validation below the rule name. Below the wide layout, the
+web's step sheet keeps its full height and a group's validation messages follow
+its Add a condition button, so validation answering during a press never moves
+the pressed control; Android's step sheet already has a fixed height with its
+messages below the step. Saving creates a version.
 A state-only revision change is refreshed while preserving the draft. A newer
 saved definition can be reviewed, adopted or explicitly replaced by the draft
 as the next version.

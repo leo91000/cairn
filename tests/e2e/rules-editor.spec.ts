@@ -545,6 +545,55 @@ test('loop insertion stays reachable when validation finishes during a press', a
   }
 })
 
+test('a condition press stays on its button when validation answers during it on a phone', async ({ page, workspace }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+
+  const fixture = await rulesFixture(workspace)
+  let validation = Promise.withResolvers<void>()
+  validation.resolve()
+  await useRelayForHttpMocks(page)
+  await page.route('**/api/hook-rules/validate', async (route) => {
+    await validation.promise
+    await route.continue()
+  })
+
+  try {
+    await page.goto(workspacePath(`/rules/new?agent=${fixture.agent.id}&instance=${fixture.instanceId}`))
+    await signIn(page)
+    const status = page.locator('[role="status"]', { hasText: /Checking|to fix|Ready/ })
+    await expect(status).toHaveText(/to fix|Ready/)
+
+    // The new step is checked while the condition button is pressed; the check then adds
+    // its messages to the step sheet.
+    validation = Promise.withResolvers<void>()
+    await page.getByRole('button', { name: 'Add the first step', exact: true }).click()
+    await page.getByRole('menuitem', { name: /If \/ otherwise/ }).click()
+    await expect(status).toHaveText('Checking…')
+    const add = page.getByRole('button', { name: 'Add a condition', exact: true })
+    await expect(add).toBeVisible()
+    // The sheet slides in first: press once it rests.
+    let previous: number | undefined
+    await expect.poll(async () => {
+      const y = (await add.boundingBox())?.y
+      const resting = y !== undefined && y === previous
+      previous = y
+      return resting
+    }).toBe(true)
+    const before = (await add.boundingBox())!
+    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
+    await page.mouse.down()
+    validation.resolve()
+    await expect(status).toHaveText(/to fix/)
+    await expect(page.getByText(/Review \d+ validation message/)).toBeVisible()
+    expect((await add.boundingBox())!.y).toBe(before.y)
+    await page.mouse.up()
+    await expect(page.getByRole('menuitem', { name: /The author is one/ })).toBeVisible()
+  }
+  finally {
+    validation.resolve()
+  }
+})
+
 test('a committed creation with an unavailable response keeps later edits for a new version', async ({ page, workspace }) => {
   const fixture = await rulesFixture(workspace)
   const before = new Set((await workspace.api('/api/hook-rules')).rules.map((rule: any) => rule.id))

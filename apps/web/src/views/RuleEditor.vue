@@ -630,6 +630,7 @@ onBeforeUnmount(() => {
       v-if="!wide && selectedNode && selected"
       title="Edit step"
       sheet
+      steady
       headless
       @close="selected = null"
     >

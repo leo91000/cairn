@@ -128,13 +128,6 @@ test('the visual editor inserts branches and edits structured conditions without
   await page.getByRole('textbox', { name: 'Rule name' }).fill('A visual support rule')
   const graph = page.locator('.rule-graph')
 
-  // Each edit is validated a moment later, and its messages resize the phone's bottom sheet:
-  // the next click waits for that check so the sheet no longer moves under it. The open sheet
-  // makes the header inert, so its status is found by attribute rather than by role.
-  async function checked() {
-    await expect(page.locator('[role="status"]', { hasText: /\d+ to fix|Ready/ })).toBeAttached()
-  }
-
   async function expectUnscaledMenu() {
     const menu = page.getByRole('menu', { name: 'Add a step', exact: true })
     const popup = menu.locator('..')
@@ -158,16 +151,13 @@ test('the visual editor inserts branches and edits structured conditions without
   await expect.poll(() => page.getByRole('menu').evaluate(element => (element.closest('[popover]') ?? element).getBoundingClientRect().bottom)).toBeLessThanOrEqual((page.viewportSize()?.height ?? 0) + 1)
   await page.getByRole('menuitem', { name: /If \/ otherwise/ }).click()
   await expect(page.getByRole('heading', { name: 'If / otherwise', exact: true })).toBeVisible()
-  await checked()
   await page.getByRole('button', { name: 'Add a condition', exact: true }).click()
   await page.getByRole('menuitem', { name: /The author is one/ }).click()
-  await checked()
   await page.getByRole('button', { name: 'Choose people…', exact: true }).click()
   await page.getByRole('button', { name: 'Alice', exact: true }).click()
   await expect(page.getByText('Alice', { exact: true }).first()).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Rule name' })).toHaveValue('A visual support rule')
   await expect(page.locator('textarea[aria-label*="JSON"]')).toHaveCount(0)
-  await checked()
   await page.getByRole('button', { name: 'Close the step', exact: true }).click()
   for (let index = 0; index < 7; index++)
     await graph.getByRole('button', { name: 'Zoom in', exact: true }).click()
@@ -176,7 +166,6 @@ test('the visual editor inserts branches and edits structured conditions without
   await page.getByRole('menuitem', { name: /Remember a value/ }).click()
   await page.getByRole('textbox', { name: 'Name', exact: true }).fill('lastAuthor')
   await page.getByRole('textbox', { name: 'Value', exact: true }).fill('Saved {{payload.author}}')
-  await checked()
   await page.getByRole('button', { name: 'Close the step', exact: true }).click()
   await page.getByRole('button', { name: 'Create rule', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'A visual support rule', exact: true })).toBeVisible()
