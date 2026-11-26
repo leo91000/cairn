@@ -359,6 +359,49 @@ async fn one_unreadable_warming_group_does_not_block_later_projects() {
     assert!(bases.lookup(&[archive], 128).await.unwrap().is_some());
 }
 
+#[test]
+fn warming_acknowledgement_does_not_wait_for_filesystem_workers() {
+    use std::{sync::Arc, time::Duration};
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (_root, bases, archive, _) = fixture().await;
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let (release, proceed) = std::sync::mpsc::channel();
+            let blocking = tokio::task::spawn_blocking(move || {
+                entered.send(()).unwrap();
+                proceed.recv().unwrap();
+            });
+            entry.await.unwrap();
+
+            let warmer = Arc::new(super::bases_warmer::Warmer::default());
+            let stop = CancellationToken::new();
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                warmer.enqueue(
+                    bases,
+                    json!({ "archives": [archive], "diskMiB": 128, "individual": true }),
+                    Arc::new(tokio::sync::Mutex::new(json!({
+                        "limits": { "diskMiB": 16384 },
+                    }))),
+                    stop.clone(),
+                ),
+            )
+            .await;
+            stop.cancel();
+            release.send(()).unwrap();
+            blocking.await.unwrap();
+            warmer.wait_idle().await;
+            result
+                .expect("queue acknowledgement must not wait for a filesystem probe")
+                .unwrap();
+        });
+}
+
 #[tokio::test]
 #[ignore = "executed by the isolated background preparation wrapper"]
 async fn background_preparation_yields_to_foreground_intent_and_then_finishes_child() {

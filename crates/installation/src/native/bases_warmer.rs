@@ -68,26 +68,11 @@ impl Warmer {
                 continue;
             }
             let key = bases.key(&archives, disk_mib)?;
-            if individual
-                && self
-                    .queue
-                    .lock()
-                    .await
-                    .failures
-                    .get(&key)
-                    .is_some_and(|failure| failure.retry_at > Instant::now())
-            {
-                continue;
-            }
-            match bases.can_warm(&archives, disk_mib).await {
-                Ok(true) => candidates.push(Job {
-                    archives,
-                    disk_mib,
-                    key,
-                }),
-                Ok(false) => {}
-                Err(error) => self.warming_failed(&key, &error).await,
-            }
+            candidates.push(Job {
+                archives,
+                disk_mib,
+                key,
+            });
         }
         if candidates.is_empty() {
             return Ok(());
