@@ -411,14 +411,7 @@ impl Receipt {
             emit(events, delivered(id)).await?;
         }
         atomic_write(Path::new(text(plan, "output")), self.text.as_bytes()).await?;
-        // Old single-request receipts have an unambiguous boundary. With several
-        // delivered requests, an old receipt cannot establish when each plan was authored.
-        let legacy_request = (self.delivered.len() == 1 && self.delivered[0] == self.message_id)
-            .then_some(self.message_id.as_str());
-        for mut item in self.proposals {
-            if item.get("request_id").is_none() {
-                item["request_id"] = json!(legacy_request);
-            }
+        for item in self.proposals {
             emit(events, json!({ "type": "item.completed", "item": item })).await?;
         }
         let item = json!({ "id": self.item_id, "type": "agent_message", "text": self.text });

@@ -1376,8 +1376,8 @@ async fn completed_plan_receipt_replays_the_proposal_without_starting_another_tu
 }
 
 #[tokio::test]
-async fn completed_plan_receipt_preserves_proposal_ids_and_subagent_parentage() {
-    for ambiguous in [false, true] {
+async fn completed_plan_receipt_preserves_unbound_proposals_and_subagent_parentage() {
+    for clarified in [false, true] {
         let root = TempDir::new().unwrap();
         let mut c = setup(&root);
         c.claude_bin = "/nonexistent-claude-for-receipt".into();
@@ -1398,7 +1398,7 @@ async fn completed_plan_receipt_preserves_proposal_ids_and_subagent_parentage() 
         ]);
         let receipt = json!({
             "messageId": "original",
-            "delivered": if ambiguous { json!(["original", "later-clarification"]) } else { json!(["original"]) },
+            "delivered": if clarified { json!(["original", "later-clarification"]) } else { json!(["original"]) },
             "text": "Waiting for approval",
             "itemId": "final-reply",
             "proposals": proposals,
@@ -1417,15 +1417,7 @@ async fn completed_plan_receipt_preserves_proposal_ids_and_subagent_parentage() 
             .filter(|event| event["item"]["type"] == "proposed_plan")
             .map(|event| event["item"].clone())
             .collect();
-        let mut expected = proposals;
-        for item in expected.as_array_mut().unwrap() {
-            item["request_id"] = if ambiguous {
-                Value::Null
-            } else {
-                json!("original")
-            };
-        }
-        assert_eq!(json!(actual), expected);
+        assert_eq!(json!(actual), proposals);
         assert!(!c.home.join(".claude/invocations.jsonl").exists());
         assert_eq!(
             std::fs::read_to_string(root.path().join("result.md")).unwrap(),
