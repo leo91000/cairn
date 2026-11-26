@@ -225,3 +225,50 @@ impl Store {
         self.read(|db| db.attempts()).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_attempt_write_does_not_leave_an_allocation_when_the_caller_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let attempt = Attempt {
+            id: "attempt".into(),
+            role: AttemptRole::Execution,
+            run_id: "run".into(),
+            node_id: super::super::LOCAL_NODE_ID.into(),
+            resources: NodeResources::default(),
+            runtime_id: "runtime".into(),
+            created_at: 1,
+            lease_expires_at: Some(60001),
+            released: false,
+            native_mode: None,
+            additional_disk_mi_b: 0,
+            disk_materialized: true,
+            released_at: None,
+            lease_required: true,
+            lease_duration_ms: Some(u64::MAX),
+        };
+        store
+            .transaction(move |db| {
+                assert!(db.save_attempt(&attempt).is_err());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(store.attempt("attempt").await.unwrap().is_none());
+        store
+            .read(|db| {
+                assert!(
+                    !db.0
+                        .prepare("SELECT 1 FROM placements WHERE id=?")?
+                        .exists(["attempt"])?
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+}

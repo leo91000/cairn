@@ -100,7 +100,7 @@ fn enable_wal(connection: &Connection, timeout: Duration) -> rusqlite::Result<()
     connection.busy_timeout(timeout)
 }
 
-fn upgrade_compact_schema(writer: &mut Connection) -> Result<()> {
+fn upgrade_compact_schema(writer: &mut Connection, directory: &Path) -> Result<()> {
     let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version == DATABASE_VERSION {
@@ -123,6 +123,23 @@ fn upgrade_compact_schema(writer: &mut Connection) -> Result<()> {
         ));
     }
 
+    // The earlier startup marker only covers database detachment. Private
+    // conversion copies may still be waiting for its background cleanup.
+    let staging = directory.join("backend-migration-staging");
+    let staging_occupied = match std::fs::symlink_metadata(&staging) {
+        Ok(metadata) if metadata.is_dir() => {
+            std::fs::read_dir(staging)?.next().transpose()?.is_some()
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if staging_occupied {
+        return Err(Error::bad(
+            "Legacy backend conversion cleanup is pending; complete it with a schema-37 manager before upgrading.",
+        ));
+    }
+
     // Drop the retired dependants before their referenced tables. The earlier
     // manager already detached S3 environments and queued local retirement.
     tx.execute_batch(
@@ -135,6 +152,7 @@ fn upgrade_compact_schema(writer: &mut Connection) -> Result<()> {
          DROP TABLE IF EXISTS shared_objects;
          DROP TABLE IF EXISTS remote_deletions;",
     )?;
+    Db(&tx).remove("manager-staging-retirements", "backend-conversion")?;
     tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -158,7 +176,7 @@ impl Store {
         writer.busy_timeout(Duration::from_secs(30))?;
         writer.execute_batch("PRAGMA foreign_keys=ON;")?;
         if version == PRE_COMPACTION_DATABASE_VERSION {
-            upgrade_compact_schema(&mut writer)?;
+            upgrade_compact_schema(&mut writer, directory)?;
         } else if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
@@ -1422,11 +1440,36 @@ mod schema_tests {
                 None,
             )
             .unwrap();
+        Db(&db)
+            .put(
+                "manager-staging-retirements",
+                &json!({ "id": "backend-conversion" }),
+            )
+            .unwrap();
+
+        let staging = root.path().join("backend-migration-staging");
+        std::fs::create_dir(&staging).unwrap();
+        let image = staging.join("source.ext4");
+        std::fs::write(&image, b"private conversion copy").unwrap();
+        let error = Store::open(root.path()).err().unwrap();
+        assert!(error.message.contains("conversion cleanup is pending"));
+        assert!(image.is_file());
+        assert!(db.table_exists(None, "shared_publications").unwrap());
+        std::fs::remove_file(image).unwrap();
+        drop(db);
 
         let compacted = Store::open(root.path()).unwrap();
         assert_eq!(
             compacted.kv("retained").await.unwrap(),
             Some(json!({ "value": 42 }))
+        );
+        let db = Connection::open(&file).unwrap();
+        assert!(staging.is_dir());
+        assert!(
+            Db(&db)
+                .get("manager-staging-retirements", "backend-conversion")
+                .unwrap()
+                .is_none()
         );
         for table in [
             "shared_objects",

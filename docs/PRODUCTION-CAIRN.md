@@ -61,6 +61,10 @@ work and update separately through their existing host supervisor.
 New installations create schema 38. An existing installation must start from
 schema 37 after a successful start with a manager that completed
 [local-disk retirement](migrations/0033-local-conversation-disks.md).
+Let that manager finish cleaning up abandoned backend conversion copies before
+stopping it. When present, `backend-migration-staging` in the manager data
+directory must be empty. The schema-38 manager refuses an occupied staging
+directory so the old manager can finish the cleanup.
 The schema-38 upgrade drops retired remote-disk coordination tables in one
 transaction. The working files and retirement queue for local disks stay in
 place. Historical database migrations are available in earlier releases.

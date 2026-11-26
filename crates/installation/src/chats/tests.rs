@@ -1,5 +1,40 @@
 use super::*;
 
+#[tokio::test]
+async fn nested_failed_wait_does_not_hide_a_subsequent_committed_notification() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(root.path()).unwrap();
+    let original = store
+        .transaction(|db| {
+            db.save_conversation_boundary(&json!({ "id": "chat" }))?;
+            let mut chat = conversation(db, "chat")?;
+            chat.wakeup = Some(serde_json::from_value(json!({
+                "id": "wait", "messageId": "request", "reason": "Waiting",
+                "seconds": 60, "createdAt": 1, "wakeAt": 60_001,
+            }))?);
+            let saved = db.save_conversation(&chat)?;
+            Ok(saved)
+        })
+        .await
+        .unwrap();
+    let before = store.revision();
+    let mut invalid = original.clone();
+    invalid.wakeup.as_mut().unwrap().seconds = 0;
+    store
+        .transaction(move |db| {
+            assert!(db.save_conversation(&invalid).is_err());
+            db.set("committed", &json!(true), None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(store.revision(), before + 1);
+    assert_eq!(store.kv("committed").await.unwrap(), Some(json!(true)));
+    let persisted = store.read(|db| conversation(db, "chat")).await.unwrap();
+    assert_eq!(json!(persisted.wakeup), json!(original.wakeup));
+}
+
 fn fixture_chat(value: &Value) -> Conversation {
     let mut value = value.clone();
     value

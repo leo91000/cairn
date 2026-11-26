@@ -984,6 +984,11 @@ impl Service {
             *retirement = self
                 .store
                 .transaction(move |db| {
+                    db.0.execute(
+                        "DELETE FROM records WHERE kind IN ('node-backups','node-disk-grants')
+                         AND json_extract(data,'$.runId')=?",
+                        [&run],
+                    )?;
                     db.remove_account_lease(&run)?;
                     db.update_run_boundary(&run, &json!({ "storage":null }))?;
                     detached.local = true;

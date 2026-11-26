@@ -1057,12 +1057,35 @@ async fn interrupted_environment_retirement_accepts_messages_and_retries_after_p
         .save_conversation_boundary(chat.clone())
         .await
         .unwrap();
+    let retiring_run = run.clone();
+    app.service
+        .store
+        .transaction(move |db| {
+            for kind in ["node-backups", "node-disk-grants"] {
+                db.put(
+                    kind,
+                    &json!({ "id": format!("{kind}-old"), "runId": retiring_run }),
+                )?;
+                db.put(
+                    kind,
+                    &json!({ "id": format!("{kind}-kept"), "runId": "different-run" }),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
     app.service.cleanup_conversations().await.unwrap();
     let detail = app.get(&chat_path(&chat)).await.1;
     assert_eq!(detail["environmentState"], "expired");
     assert_eq!(detail["environmentExpirationCause"], "inactivity");
     assert!(detail["environmentError"].is_null());
     app.service.retire_environments().await.unwrap();
+    for kind in ["node-backups", "node-disk-grants"] {
+        let records = app.service.store.list(kind).await.unwrap();
+        assert_eq!(records.len(), 1, "{kind}");
+        assert_eq!(records[0]["id"], format!("{kind}-kept"));
+    }
     let detail = app.get(&chat_path(&chat)).await.1;
     assert!(detail["environmentError"].is_string());
     assert_eq!(
