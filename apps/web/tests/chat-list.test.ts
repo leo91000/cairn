@@ -46,10 +46,10 @@ function saved(): CachedHistory {
 it('forgets the saved copies of conversations that leave the server list', async () => {
   const { publishChats } = await import('../src/chat-list')
   const scope = await cacheScope('test-session')
-  for (const path of ['/chats/gone-slug/stream', '/chats/gone/stream', '/chats/kept/stream'])
+  for (const path of ['/chats/gone-slug/stream', '/chats/gone/stream', '/runs/gone-run/stream', '/chats/kept/stream'])
     await writeHistory(scope, path, saved())
 
-  const gone = { id: 'gone', slug: 'gone-slug' } as ChatView
+  const gone = { id: 'gone', slug: 'gone-slug', runId: 'gone-run' } as ChatView
   const kept = { id: 'kept', slug: '' } as ChatView
   publishChats([gone, kept])
   // A saved list never removes anything: only the server's list does.
@@ -59,6 +59,7 @@ it('forgets the saved copies of conversations that leave the server list', async
   publishChats([kept])
   await vi.waitFor(() => expect(peekHistory(scope, '/chats/gone-slug/stream')).toBeUndefined())
   expect(peekHistory(scope, '/chats/gone/stream')).toBeUndefined()
+  expect(peekHistory(scope, '/runs/gone-run/stream')).toBeUndefined()
   expect(peekHistory(scope, '/chats/kept/stream')).toBeDefined()
 })
 

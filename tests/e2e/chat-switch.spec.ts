@@ -10,7 +10,7 @@ import {
 
 async function expectSavedStream(page: Page, stream: string, savedAfter = 0) {
   await expect.poll(() => page.evaluate(({ stream, savedAfter }) => new Promise<boolean>((resolve) => {
-    const open = indexedDB.open('cairn-history-v2')
+    const open = indexedDB.open('cairn-history-v3')
     open.onsuccess = () => {
       const db = open.result
       const tx = db.transaction('entries')
@@ -98,7 +98,8 @@ for (const view of ['conversation', 'fil'] as const) {
       await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
       const detail = await workspace.api(`/api/chats/${chat.id}`)
       const path = view === 'conversation' ? `/chats/${detail.slug}` : '/'
-      const stream = view === 'conversation' ? `/chats/${detail.slug}/stream` : '/chats/stream'
+      // The Fil saves only its list; a conversation saves its own history.
+      const stream = view === 'conversation' ? `/chats/${detail.slug}/stream` : ':list'
       await page.setViewportSize({ width: 1440, height: 900 })
       await page.goto(workspacePath(path))
       await authenticateWorkspace(page)
@@ -119,7 +120,9 @@ for (const view of ['conversation', 'fil'] as const) {
         window.dispatchEvent(new PageTransitionEvent('pagehide'))
         return now
       })
-      await expectSavedStream(page, stream, savedAfter)
+      // The Fil has nothing new to save offline: its saved list stays as it was.
+      if (view === 'conversation')
+        await expectSavedStream(page, stream, savedAfter)
       await page.reload()
       await page.getByRole('tab', { name: 'Tout', exact: true }).click()
       await expect(row).toBeVisible()

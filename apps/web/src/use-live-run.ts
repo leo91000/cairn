@@ -55,6 +55,8 @@ export interface LiveRunOptions {
   list?: boolean
   /** Where the stream's state is saved, when another path names it better than the one opened. */
   savedAs?: (state: LiveState) => string | undefined
+  /** Whether the stream's state is saved at all; the list stream's list is saved apart. */
+  save?: boolean
 }
 
 // A view shows its own stream only: switching paths clears the previous data at once, so
@@ -160,7 +162,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     // A copy opened under another path is also saved where other openings look for it.
     const saved = () => [...new Set([value, (detail && options.savedAs?.(detail)) || value])]
     persist = () => {
-      if (!scope || !complete || !detail || !history || current !== generation || !state.authenticated || state.signingOut)
+      if (options.save === false || !scope || !complete || !detail || !history || current !== generation || !state.authenticated || state.signingOut)
         return
       storedPosition = position.value
       const record = {

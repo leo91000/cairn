@@ -35,7 +35,8 @@ function saveList() {
 }
 
 // A conversation that leaves the server's list was deleted or is no longer shared with this
-// person: its saved copy goes too, under the slug and the identifier it may be opened by.
+// person: its saved copies go too, under the slug and the identifier it may be opened by, and
+// its run log.
 function forgetRemoved(previous: ChatView[], chats: ChatView[]) {
   const listed = new Set(chats.map(chat => chat.id))
   const removed = previous.filter(chat => !listed.has(chat.id))
@@ -45,6 +46,8 @@ function forgetRemoved(previous: ChatView[], chats: ChatView[]) {
     for (const chat of removed) {
       for (const key of new Set([chat.slug || chat.id, chat.id]))
         void removeHistory(scope, `/chats/${key}/stream`)
+      if (chat.runId)
+        void removeHistory(scope, `/runs/${chat.runId}/stream`)
     }
   }).catch(() => {})
 }
@@ -83,7 +86,8 @@ async function restoreList() {
  * own stream, unless the open conversation's stream carries it.
  */
 export function useChatList() {
-  const live = useLiveRun(() => chatListCarried.value ? undefined : '/chats/stream')
+  // The list is saved apart, so this stream saves nothing of its own.
+  const live = useLiveRun(() => chatListCarried.value ? undefined : '/chats/stream', { save: false })
   watch(live.snapshot, (value) => {
     if (value?.chats)
       publishChats(value.chats, { saved: live.restored.value, planTurnsEnabled: value.planTurnsEnabled })

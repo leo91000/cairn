@@ -56,8 +56,10 @@ function valid(value: CachedHistory): boolean {
     && value.entries.every(card => !!card && typeof card.id === 'string' && Number.isSafeInteger(card.position) && Number.isSafeInteger(card.revision) && typeof card.content?.kind === 'string')
 }
 
-// Saved conversations indexed by age and size for bounded eviction.
-const DATABASE = 'cairn-history-v2'
+// Saved conversations indexed by age and size for bounded eviction. Version 3 holds
+// conversations without the list or the chat's duplicated run, and the list apart: a tab of
+// an older bundle, with its own eviction and invalidation, keeps to version 2.
+const DATABASE = 'cairn-history-v3'
 
 function db() {
   return new Promise<IDBDatabase>((resolve, reject) => {

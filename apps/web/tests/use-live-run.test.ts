@@ -258,3 +258,26 @@ it('treats a saved copy completed over several batches as the server list', asyn
   expect(live.restored.value).toBe(false)
   expect(live.connectionNotice.value).toBe('')
 })
+
+it('saves nothing for a stream whose state is saved elsewhere', async () => {
+  const scope = await cacheScope('test-session')
+  const effect = effectScope()
+  scopes.push(effect)
+  effect.run(() => useLiveRun(() => '/chats/stream', { save: false }))
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
+  await accept({
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v2::0',
+    state: {
+      run: null,
+      chat: null,
+      chats: [{ id: 'a' }],
+      artifacts: [],
+    },
+  } as never, 0)
+  effect.stop()
+  expect(peekHistory(scope, '/chats/stream')).toBeUndefined()
+})

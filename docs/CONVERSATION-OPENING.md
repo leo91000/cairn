@@ -108,7 +108,8 @@ Streams accept `list=1` to include the conversation list and `compact=1` for lis
 changes and a chat without its duplicated run. The web and Android apps
 use the current stream protocol and installation API; old bundle polling and finite
 relay reads are no longer supported. The browser stores saved conversations in
-`cairn-history-v2`, with no migration or cleanup of earlier cache databases. Images
+`cairn-history-v3`, with no migration or cleanup of earlier cache databases; a tab of an
+older bundle keeps `cairn-history-v2`, so neither evicts nor clears the other's copies. Images
 may carry dimensions; an image without dimensions sizes itself when loaded.
 
 ## History cache
