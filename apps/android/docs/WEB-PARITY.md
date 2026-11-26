@@ -1,5 +1,18 @@
 # Android 0.6.0 / web parity
 
+## Shared diagram engine spec and mirrored modules (2026-11-26)
+
+Web and Android continue to parse and lay out Mermaid flowcharts, state
+diagrams, sequence diagrams and pie charts natively with no WebView or
+third-party diagram library. Both engines now read their shared limits and
+layout constants from `packages/contracts/diagram-spec.json` (generated into
+`packages/contracts/generated/diagram-spec.ts` and
+`apps/android/app/src/main/java/build/cairn/contracts/DiagramSpec.kt`), and
+follow the same mirrored module structure (`apps/web/src/diagram/*.ts` and
+`apps/android/app/src/main/java/build/cairn/app/ui/Diagram*.kt`) pinned by
+`tests/fixtures/diagrams.json`. No rendering, contract, MCP or
+`cairn_installation` behavior changes.
+
 ## Installation navigation before draft handoff (2026-11-15)
 
 Web suspends background direct negotiation as soon as installation navigation

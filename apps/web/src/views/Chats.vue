@@ -71,6 +71,11 @@ import {
   publishChats,
 } from '../chat-list'
 import { chatQuota, isQuotaMessage } from '../chat-quota'
+import {
+  reportResumeDiagnostic,
+  resumeDiagnosticProvider,
+  resumeDiagnosticRunStatus,
+} from '../chat-resume-diagnostics'
 import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
@@ -147,70 +152,6 @@ import { delegatedChatsKey, openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
 import { chatPath } from '../workspace-links'
-
-type ResumeDiagnosticStage
-  = | 'handler-entered'
-    | 'guard-no-detail'
-    | 'guard-busy'
-    | 'run-state'
-    | 'selection-start'
-    | 'catalog-state'
-    | 'selection-ready'
-    | 'resume-attempt'
-    | 'resume-returned'
-    | 'pause-attempt'
-    | 'pause-returned'
-    | 'caught'
-
-type ResumeDiagnosticRunStatus = 'missing' | 'other' | 'queued' | 'running' | 'failed' | 'interrupted' | 'cancelled' | 'succeeded' | 'idle'
-
-interface ResumeDiagnosticRecord {
-  stage: ResumeDiagnosticStage
-  runStatus?: ResumeDiagnosticRunStatus
-  resumeAvailable?: boolean
-  provider?: Provider | 'other'
-  catalogPresent?: boolean
-}
-
-type ResumeDiagnosticWindow = Window & {
-  __cairnTestResumeDiagnostic?: (record: ResumeDiagnosticRecord) => void
-}
-
-const resumeDiagnosticEnabled = import.meta.env.VITE_CAIRN_TEST_RESUME_DIAGNOSTICS === 'true'
-let resumeDiagnosticCount = 0
-
-function reportResumeDiagnostic(record: ResumeDiagnosticRecord) {
-  if (!resumeDiagnosticEnabled || resumeDiagnosticCount >= 16)
-    return
-  resumeDiagnosticCount++
-  try {
-    (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnostic?.(record)
-  }
-  catch {
-    // The optional test probe must never affect the resume action.
-  }
-}
-
-function resumeDiagnosticRunStatus(status?: string): ResumeDiagnosticRunStatus {
-  switch (status) {
-    case 'queued':
-    case 'running':
-    case 'failed':
-    case 'interrupted':
-    case 'cancelled':
-    case 'succeeded':
-    case 'idle':
-      return status
-    default:
-      return status ? 'other' : 'missing'
-  }
-}
-
-function resumeDiagnosticProvider(provider: string): Provider | 'other' {
-  if (provider === 'codex' || provider === 'claude' || provider === 'opencode' || provider === 'antigravity')
-    return provider
-  return 'other'
-}
 
 const router = useRouter()
 const route = useRoute()

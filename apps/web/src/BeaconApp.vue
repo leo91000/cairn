@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { SelectOption } from './select'
+import type { AccountSession, BeaconInstallation, DeviceReview } from './beacon-session'
 import {
   computed,
   defineAsyncComponent,
@@ -28,7 +28,14 @@ import {
   sharedPreference,
   workspaceReturn,
 } from './beacon-location'
-import { clientPerformance } from './client-performance'
+import {
+  beaconAccountRequest,
+  beaconInstallationRequest,
+  buildInstallationOptions,
+  formatInstallationCommand,
+  INSTALLATION_INSTRUCTIONS as installationInstructions,
+  installationStatus,
+} from './beacon-session'
 import { startClientPerformance } from './client-performance-runtime'
 import AccountMenu from './components/AccountMenu.vue'
 import AccountMethods from './components/AccountMethods.vue'
@@ -55,20 +62,6 @@ const PerformanceSettings = defineAsyncComponent(() => import('./components/Perf
 const performanceDiagnostics = startClientPerformance(useRouter())
 onScopeDispose(() => performanceDiagnostics.stop())
 
-interface AccountSession {
-  authenticated: boolean
-  account: { id: string, email: string } | null
-  csrf: string | null
-  installations: Array<{
-    id: string
-    slug?: string
-    name: string
-    role: 'owner' | 'member'
-    online: boolean
-    updateRequired: boolean
-  }>
-}
-
 const session = ref<AccountSession | null>(null)
 const options = ref({ google: false, github: false, passkeys: false })
 const showMethods = ref(false)
@@ -86,11 +79,7 @@ const busy = ref(false)
 const methodBusy = ref(false)
 const error = ref('')
 const claimCode = ref('')
-const installationCommand = computed(() => {
-  const quote = (value: string) => `'${value.replaceAll('\'', '\'"\'"\'')}'`
-  return `curl -fsSL ${quote(`${beaconOrigin}/install.sh`)} | sudo bash -s -- --claim-code ${quote(claimCode.value)}`
-})
-const installationInstructions = 'This code expires in 10 minutes. Run this command on your Linux x86-64 machine. No domain, certificate, incoming port or S3 setup is needed.'
+const installationCommand = computed(() => formatInstallationCommand(claimCode.value))
 const showSharing = ref(false)
 const showInvitations = ref(false)
 const confirmLeave = ref(false)
@@ -98,34 +87,13 @@ const invitationsPage = new URLSearchParams(window.location.search).has('invitat
 const editingName = ref(false)
 const installationName = ref('')
 const deviceCode = ref('')
-const deviceReview = ref<{
-  code: string
-  name: string
-  fingerprint: string
-  confirmation: string
-} | null>(null)
+const deviceReview = ref<DeviceReview | null>(null)
 const claimStatus = ref('')
 const confirmDetach = ref(false)
 const confirmForget = ref(false)
-const installation = ref<{
-  id: string
-  slug?: string
-  name: string
-  online: boolean
-  updateRequired: boolean
-  role: 'owner' | 'member'
-} | null>(null)
+const installation = ref<BeaconInstallation | null>(null)
 const router = useRouter()
-const installationOptions = computed<SelectOption[]>(() => (session.value?.installations ?? []).map(item => ({
-  value: item.id,
-  label: item.name,
-  description: item.role === 'owner' ? 'Owner' : 'Member',
-  keywords: [installationStatus(item)],
-  status: {
-    label: installationStatus(item),
-    tone: item.updateRequired ? 'warning' : item.online ? 'success' : 'muted',
-  },
-})))
+const installationOptions = computed(() => buildInstallationOptions(session.value?.installations ?? []))
 const beaconReturnKey = 'cairn-installation-return'
 const authorizePage = window.location.pathname === '/authorize'
 const claimPage = window.location.pathname === '/claim'
@@ -232,36 +200,7 @@ watch(() => state.authenticated, (authenticated) => {
   }
 })
 
-async function accountRequest(route: string, body?: unknown) {
-  const scope = clientPerformance.capture()
-  const finish = clientPerformance.begin(body === undefined ? 'API_READ' : 'API_WRITE', scope)
-  try {
-    const value = await accountRequestOnce(route, body, scope)
-    finish?.('ok')
-    return value
-  }
-  catch (error) {
-    finish?.('error')
-    throw error
-  }
-}
-
-async function accountRequestOnce(route: string, body: unknown, scope: ReturnType<typeof clientPerformance.capture>) {
-  const response = await fetch(`/api/account/${route}`, {
-    method: body === undefined ? 'GET' : 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.value?.csrf || '' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  if (response.status === 204)
-    return
-  const text = await response.text()
-  clientPerformance.probe('API')
-  const value = text ? clientPerformance.measure('JSON_DECODE', () => JSON.parse(text), scope) : undefined
-  if (!response.ok)
-    throw new Error(value?.error || 'Unable to reach Cairn. Please try again.')
-  return value
-}
+const accountRequest = (route: string, body?: unknown) => beaconAccountRequest(route, session.value?.csrf || '', body)
 
 async function loadSession() {
   busy.value = true
@@ -394,20 +333,7 @@ async function passkey() {
   }
 }
 
-async function installationRequest(route: string, body?: unknown, method: 'POST' | 'DELETE' = 'POST') {
-  const response = await fetch(`/api/installations/${route}`, {
-    method,
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.value?.csrf || '' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  if (response.status === 204)
-    return
-  const value = await response.json()
-  if (!response.ok)
-    throw new Error(value.error || 'Unable to update the installation.')
-  return value
-}
+const installationRequest = (route: string, body?: unknown, method: 'POST' | 'DELETE' = 'POST') => beaconInstallationRequest(route, session.value?.csrf || '', body, method)
 
 async function leaveInstallation() {
   if (!installation.value)
@@ -695,12 +621,6 @@ onScopeDispose(() => {
   clearTimeout(availabilityTimer)
   document.removeEventListener('visibilitychange', visibleAvailability)
 })
-
-function installationStatus(value: { online: boolean, updateRequired: boolean }) {
-  if (value.updateRequired)
-    return 'Mise à jour nécessaire'
-  return value.online ? 'Online' : 'Offline'
-}
 
 function selectInstallation(id: string) {
   const selected = session.value?.installations.find(item => item.id === id)

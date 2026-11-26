@@ -6,7 +6,6 @@ import type { ReplaceAgentInput } from '../../../../packages/contracts/generated
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
 import type {
   AgentDraft,
-  ChipTone,
   Context,
   DelegationEffect,
   Preview,
@@ -62,6 +61,13 @@ import {
   skillKey,
   skillLabel,
 } from '../agent-access'
+import {
+  grantChip as chip,
+  formatListNames as names,
+  AGENT_NAV_GROUPS as navGroups,
+  shortCount as short,
+  AGENT_SECTION_TITLES as titles,
+} from '../agent-page-meta'
 import { useAgentPeople } from '../agent-people'
 import { accessSummary } from '../agent-use'
 import {
@@ -117,27 +123,6 @@ const isNew = computed(() => id.value === 'new')
 // A new agent keeps one creation identity, so retrying after a lost response never duplicates it.
 const creation = useResourceSave()
 const isMain = computed(() => id.value === MAIN_AGENT_ID)
-const titles: Record<SectionId, string> = {
-  identity: 'Identity & instructions',
-  model: 'Coding agent & model',
-  people: 'Who can use it',
-  projects: 'Projects',
-  skills: 'Skills',
-  mcps: 'MCP & tools',
-  plugins: 'Secrets & plugins',
-  nodes: 'Nodes',
-  sandbox: 'Execution mode',
-  powers: 'Elevated rights',
-  advanced: 'Limits',
-}
-const navGroups: { title: string, items: SectionId[] }[] = [
-  { title: 'Profile', items: ['identity', 'model'] },
-  { title: 'People', items: ['people'] },
-  { title: 'Resource access', items: ['projects', 'skills', 'mcps', 'plugins'] },
-  { title: 'Execution', items: ['nodes', 'sandbox'] },
-  { title: 'Elevated rights', items: ['powers'] },
-  { title: 'Advanced', items: ['advanced'] },
-]
 const section = computed<SectionId | undefined>(() => {
   const value = String(route.query.section ?? '')
   return value in titles ? value as SectionId : undefined
@@ -233,19 +218,6 @@ const skillItems = computed<SelectionItem[]>(() => {
     }
   })
 })
-
-function names(ids: string[], name: (id: string) => string, limit = 3) {
-  const listed = ids.slice(0, limit).map(name)
-  return ids.length > limit ? `${listed.join(', ')} +${ids.length - limit}` : listed.join(', ')
-}
-
-function short(value: string[] | null, total: number) {
-  return value === null ? 'All' : value.length ? `${value.length}/${Math.max(total, value.length)}` : 'None'
-}
-
-function chip(value: string[] | null): { tone: ChipTone, label: string } {
-  return value === null || value.length ? { tone: 'granted', label: 'Granted' } : { tone: 'none', label: 'None' }
-}
 
 const projectName = (project: string) => state.projects.find(item => item.id === project)?.name ?? 'Removed project'
 
