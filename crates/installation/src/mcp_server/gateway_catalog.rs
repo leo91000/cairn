@@ -156,10 +156,9 @@ impl Catalogs {
         id: &str,
         expected: Identity,
         previous: &Arc<Vec<Value>>,
-        tools: Option<Vec<Value>>,
+        tools: Vec<Value>,
     ) {
-        let tools =
-            tools.filter(|tools| encoded_size(tools).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES));
+        let cacheable = encoded_size(&tools).is_ok_and(|bytes| bytes <= MAX_CATALOG_BYTES);
         let mut entries = self.entries.lock().unwrap();
         let Some(current) = entries.get_mut(id) else {
             return;
@@ -168,7 +167,7 @@ impl Catalogs {
             return;
         }
 
-        if let Some(tools) = tools {
+        if cacheable {
             let now = Instant::now();
             current.tools = Arc::new(tools);
             current.discovered_at = now;
@@ -323,12 +322,14 @@ fn refresh_in_background(
                 crate::performance::Operation::new("mcp_gateway_refresh", id, "connect");
             let mcps = Arc::clone(&s.mcps);
             let denied_id = id.clone();
-            let denied_entry = previous.clone();
             let on_access_denied = Box::new(move || {
                 // A remote denial is about this credential snapshot, even
-                // when the initiating grant expires before the response.
-                mcps.gateway_catalogs
-                    .apply_refresh(&denied_id, expected, &denied_entry, None);
+                // when a new listing replaced the catalogue in the meantime.
+                mcps.gateway_catalogs.invalidate_matching(
+                    &denied_id,
+                    expected.revision,
+                    expected.credentials,
+                );
             });
             let session = Client::begin_catalog_refresh(
                 &s,
@@ -364,7 +365,7 @@ fn refresh_in_background(
             {
                 s.mcps
                     .gateway_catalogs
-                    .apply_refresh(id, expected, &previous, Some(tools));
+                    .apply_refresh(id, expected, &previous, tools);
             }
             timing.next("close");
             if let Some(client) = client {
@@ -916,6 +917,10 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(3), revoked_entered.notified())
             .await
             .unwrap();
+        // Test replaces the descriptor entry under the same credentials while
+        // the background request is still awaiting the upstream response.
+        s.mcps.test(&s, id).await.unwrap();
+        assert!(s.mcps.gateway_catalogs.get(id, identity).is_some());
         s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
         revoked_release.notify_one();
         wait_for_refresh_release(&s.mcps.gateway_catalogs, id).await;
