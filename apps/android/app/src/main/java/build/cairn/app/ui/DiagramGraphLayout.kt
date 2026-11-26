@@ -1004,7 +1004,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
                 size = TITLE_FONT,
                 weight = 600,
                 anchor = TextAnchor.MIDDLE,
-                fill = tone("ink"),
+                fill = diagramTone("ink"),
             )
         )
     }
@@ -1013,12 +1013,13 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         val box = boxes[cluster.id] ?: continue
         val area = finalBox(box)
         val style = cluster.style
-        val fill = style?.fill?.let { DiagramPaint.Literal(it) } ?: tone("cluster")
+        val fill = style?.fill?.let { DiagramPaint.Literal(it) } ?: diagramTone("cluster")
         backgrounds.add(
             PathItem(
                 d = roundedRect(area.x, area.y, area.w, area.h, 14.0),
                 fill = fill,
-                stroke = style?.stroke?.let { DiagramPaint.Literal(it) } ?: tone("cluster-line"),
+                stroke =
+                    style?.stroke?.let { DiagramPaint.Literal(it) } ?: diagramTone("cluster-line"),
                 width = style?.strokeWidth ?: 1.0,
                 dash = if (style?.dashed == true) listOf(5.0, 4.0) else null,
             )
@@ -1065,7 +1066,7 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         }
 
     fun edgePaint(edge: GraphEdge): DiagramPaint =
-        edge.style?.stroke?.let { DiagramPaint.Literal(it) } ?: tone("edge")
+        edge.style?.stroke?.let { DiagramPaint.Literal(it) } ?: diagramTone("edge")
     fun edgeWidth(edge: GraphEdge) =
         edge.style?.strokeWidth ?: (if (edge.line == EdgeLine.THICK) 3.0 else 1.5)
 
@@ -1307,10 +1308,11 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
         val solid = source.shape == NodeShape.START || source.shape == NodeShape.FORK
         val paths = shapePaths(source.shape, center.x, center.y, box.w, box.h)
         val fill: DiagramPaint =
-            style?.fill?.let { DiagramPaint.Literal(it) } ?: if (solid) tone("ink") else tone(kind)
+            style?.fill?.let { DiagramPaint.Literal(it) }
+                ?: if (solid) diagramTone("ink") else diagramTone(kind)
         val stroke: DiagramPaint =
             style?.stroke?.let { DiagramPaint.Literal(it) }
-                ?: if (solid) tone("ink") else tone("$kind-line")
+                ?: if (solid) diagramTone("ink") else diagramTone("$kind-line")
         for (d in paths.outlines) {
             nodeItems.add(
                 PathItem(
@@ -1331,8 +1333,8 @@ internal fun layoutGraph(graph: GraphDiagram, measure: TextMeasure): Scene {
             nodeItems.add(
                 PathItem(
                     d = d,
-                    fill = if (filled) tone("ink") else null,
-                    stroke = if (filled) tone("ink") else stroke,
+                    fill = if (filled) diagramTone("ink") else null,
+                    stroke = if (filled) diagramTone("ink") else stroke,
                     width = 1.25,
                     link = source.link,
                 )
@@ -1414,7 +1416,10 @@ private fun edgeLabel(label: TextBlock, at: Pt): List<SceneItem> {
     val w = label.width + 12
     val h = label.height + 4
     return listOf(
-        PathItem(d = roundedRect(at.x - w / 2, at.y - h / 2, w, h, 6.0), fill = tone("label")),
+        PathItem(
+            d = roundedRect(at.x - w / 2, at.y - h / 2, w, h, 6.0),
+            fill = diagramTone("label"),
+        ),
         TextItem(
             x = at.x,
             y = at.y,
@@ -1422,7 +1427,7 @@ private fun edgeLabel(label: TextBlock, at: Pt): List<SceneItem> {
             size = LABEL_FONT,
             weight = 500,
             anchor = TextAnchor.MIDDLE,
-            fill = tone("muted"),
+            fill = diagramTone("muted"),
         ),
     )
 }

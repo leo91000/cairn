@@ -226,7 +226,7 @@ internal fun textOn(style: DiagramStyle?, fallback: String): DiagramPaint {
         }
     }
 
-    return tone(fallback)
+    return diagramTone(fallback)
 }
 
 internal fun family(shape: NodeShape) =
@@ -505,7 +505,7 @@ internal fun headPaths(
         return listOf(
             PathItem(
                 d = ellipse(tx - ux * 4.5, ty - uy * 4.5, 4.0, 4.0),
-                fill = tone("canvas"),
+                fill = diagramTone("canvas"),
                 stroke = paint,
                 width = 1.5,
             )

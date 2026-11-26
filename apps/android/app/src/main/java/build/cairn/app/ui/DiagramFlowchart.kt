@@ -1,5 +1,7 @@
 package build.cairn.app.ui
 
+import kotlin.math.min
+
 // Opening delimiters, longest first, with their closing delimiter and shape.
 private val SHAPES =
     listOf(

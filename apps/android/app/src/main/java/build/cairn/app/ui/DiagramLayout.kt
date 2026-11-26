@@ -76,7 +76,7 @@ internal fun interface TextMeasure {
 
 internal fun lineHeight(size: Double) = jsRound(size * 1.4)
 
-internal fun tone(name: String) = DiagramPaint.Tone(name)
+internal fun diagramTone(name: String) = DiagramPaint.Tone(name)
 
 internal const val NODE_FONT = DiagramSpec.Layout.NODE_FONT
 internal const val LABEL_FONT = DiagramSpec.Layout.LABEL_FONT

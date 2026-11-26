@@ -236,7 +236,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                 val to = index.getValue(item.to)
                 touch(from, to)
                 val block = text!!
-                val paint = tone("edge")
+                val paint = diagramTone("edge")
                 val dash = if (item.line == EdgeLine.DOTTED) listOf(5.0, 4.0) else null
                 if (from == to) {
                     val labelY = y + block.height / 2
@@ -360,8 +360,8 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                                 Pt(left + width, y + h),
                                 Pt(left, y + h),
                             ),
-                        fill = tone("note"),
-                        stroke = tone("note-line"),
+                        fill = diagramTone("note"),
+                        stroke = diagramTone("note-line"),
                         width = 1.0,
                     )
                 )
@@ -373,7 +373,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                                 PathCommand.Line(left + width - 10, y + 10),
                                 PathCommand.Line(left + width, y + 10),
                             ),
-                        stroke = tone("note-line"),
+                        stroke = diagramTone("note-line"),
                         width = 1.0,
                     )
                 )
@@ -385,7 +385,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                         size = SEQ_FONT,
                         weight = 400,
                         anchor = TextAnchor.MIDDLE,
-                        fill = tone("note-ink"),
+                        fill = diagramTone("note-ink"),
                     )
                 )
                 extend(left, left + width)
@@ -468,7 +468,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                             frame.end - frame.start,
                             8.0,
                         ),
-                    fill = frame.color?.let { DiagramPaint.Literal(it) } ?: tone("cluster"),
+                    fill = frame.color?.let { DiagramPaint.Literal(it) } ?: diagramTone("cluster"),
                     opacity = if (frame.color != null) 0.22 else 1.0,
                 )
             )
@@ -478,7 +478,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
         frames.add(
             PathItem(
                 d = roundedRect(left, frame.start, frameEnd - left, frame.end - frame.start, 8.0),
-                stroke = tone("cluster-line"),
+                stroke = diagramTone("cluster-line"),
                 width = 1.25,
             )
         )
@@ -504,7 +504,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                         ),
                         PathCommand.Close,
                     ),
-                fill = tone("cluster-line"),
+                fill = diagramTone("cluster-line"),
             )
         )
         frames.add(
@@ -515,7 +515,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                 size = LABEL_FONT,
                 weight = 700,
                 anchor = TextAnchor.START,
-                fill = tone("cluster-ink"),
+                fill = diagramTone("cluster-ink"),
             )
         )
         if (frame.label != null) {
@@ -527,7 +527,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                     size = LABEL_FONT,
                     weight = 500,
                     anchor = TextAnchor.START,
-                    fill = tone("muted"),
+                    fill = diagramTone("muted"),
                 )
             )
         }
@@ -540,7 +540,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                             PathCommand.Move(left, branch.y),
                             PathCommand.Line(frameEnd, branch.y),
                         ),
-                    stroke = tone("cluster-line"),
+                    stroke = diagramTone("cluster-line"),
                     width = 1.0,
                     dash = listOf(5.0, 4.0),
                 )
@@ -554,7 +554,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                         size = LABEL_FONT,
                         weight = 500,
                         anchor = TextAnchor.START,
-                        fill = tone("muted"),
+                        fill = diagramTone("muted"),
                     )
                 )
             }
@@ -573,8 +573,8 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                         max(12.0, activation.end - activation.start),
                         3.0,
                     ),
-                fill = tone("data"),
-                stroke = tone("data-line"),
+                fill = diagramTone("data"),
+                stroke = diagramTone("data-line"),
                 width = 1.0,
             )
         )
@@ -587,7 +587,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                     PathCommand.Move(center, top + headHeight),
                     PathCommand.Line(center, bottomTop),
                 ),
-            stroke = tone("cluster-line"),
+            stroke = diagramTone("cluster-line"),
             width = 1.25,
             dash = listOf(3.0, 4.0),
         )
@@ -602,8 +602,8 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                 participants.add(
                     PathItem(
                         d = ellipse(cx, figureTop + 9, 7.0, 7.0),
-                        fill = tone("terminal"),
-                        stroke = tone("terminal-line"),
+                        fill = diagramTone("terminal"),
+                        stroke = diagramTone("terminal-line"),
                         width = 1.5,
                     )
                 )
@@ -622,8 +622,8 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                                 ),
                                 PathCommand.Close,
                             ),
-                        fill = tone("terminal"),
-                        stroke = tone("terminal-line"),
+                        fill = diagramTone("terminal"),
+                        stroke = diagramTone("terminal-line"),
                         width = 1.5,
                     )
                 )
@@ -635,7 +635,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                         size = NODE_FONT,
                         weight = 600,
                         anchor = TextAnchor.MIDDLE,
-                        fill = tone("ink"),
+                        fill = diagramTone("ink"),
                     )
                 )
                 continue
@@ -644,8 +644,8 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
             participants.add(
                 PathItem(
                     d = roundedRect(cx - head.w / 2, edge, head.w, headHeight, 10.0),
-                    fill = tone("terminal"),
-                    stroke = tone("terminal-line"),
+                    fill = diagramTone("terminal"),
+                    stroke = diagramTone("terminal-line"),
                     width = 1.25,
                     shadow = true,
                 )
@@ -658,7 +658,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                     size = NODE_FONT,
                     weight = 600,
                     anchor = TextAnchor.MIDDLE,
-                    fill = tone("terminal-ink"),
+                    fill = diagramTone("terminal-ink"),
                 )
             )
         }
@@ -674,7 +674,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                 size = TITLE_FONT,
                 weight = 600,
                 anchor = TextAnchor.MIDDLE,
-                fill = tone("ink"),
+                fill = diagramTone("ink"),
             )
         )
     }
@@ -714,7 +714,7 @@ private fun messageText(
             size = SEQ_FONT,
             weight = 400,
             anchor = anchor,
-            fill = tone("ink"),
+            fill = diagramTone("ink"),
         )
     )
 }
@@ -726,7 +726,7 @@ private fun badge(value: Double, x: Double, y: Double, measure: TextMeasure): Li
     val text = jsNumberString(value)
     val w = sequenceBadgeWidth(value, measure)
     return listOf(
-        PathItem(d = roundedRect(x - w / 2, y - 9, w, 18.0, 9.0), fill = tone("edge")),
+        PathItem(d = roundedRect(x - w / 2, y - 9, w, 18.0, 9.0), fill = diagramTone("edge")),
         TextItem(
             x = x,
             y = y,
@@ -734,7 +734,7 @@ private fun badge(value: Double, x: Double, y: Double, measure: TextMeasure): Li
             size = 10.0,
             weight = 700,
             anchor = TextAnchor.MIDDLE,
-            fill = tone("canvas"),
+            fill = diagramTone("canvas"),
         ),
     )
 }

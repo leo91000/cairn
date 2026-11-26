@@ -4,6 +4,7 @@ import kotlin.math.PI
 import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sin
 
 internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
@@ -29,7 +30,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
     diagram.slices.forEachIndexed { position, slice ->
         if (slice.value == 0.0) return@forEachIndexed
         val sweep = (slice.value / total) * PI * 2
-        val paint = tone("series-${position % SERIES}")
+        val paint = diagramTone("series-${position % SERIES}")
         // Slices are separated by a hairline gap of equal width on both rims.
         val gap = if (positiveCount == 1) 0.0 else min(0.012, sweep / 4)
         items.add(
@@ -61,7 +62,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
                     size = 11.0,
                     weight = 700,
                     anchor = TextAnchor.MIDDLE,
-                    fill = tone("canvas"),
+                    fill = diagramTone("canvas"),
                 )
             )
         }
@@ -77,7 +78,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
             size = 18.0,
             weight = 700,
             anchor = TextAnchor.MIDDLE,
-            fill = tone("ink"),
+            fill = diagramTone("ink"),
         )
     )
     items.add(
@@ -88,7 +89,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
             size = 11.0,
             weight = 500,
             anchor = TextAnchor.MIDDLE,
-            fill = tone("muted"),
+            fill = diagramTone("muted"),
         )
     )
 
@@ -104,7 +105,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
         items.add(
             PathItem(
                 d = roundedRect(legendX, legendY - 6, 12.0, 12.0, 3.5),
-                fill = tone("series-${position % SERIES}"),
+                fill = diagramTone("series-${position % SERIES}"),
             )
         )
         items.add(
@@ -115,7 +116,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
                 size = 13.0,
                 weight = 500,
                 anchor = TextAnchor.START,
-                fill = tone("ink"),
+                fill = diagramTone("ink"),
             )
         )
         val labelWidth = measure.width(label, 13.0, 500)
@@ -127,7 +128,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
                 size = 12.0,
                 weight = 500,
                 anchor = TextAnchor.START,
-                fill = tone("muted"),
+                fill = diagramTone("muted"),
             )
         )
         legendWidth = max(legendWidth, 20 + labelWidth + 8 + measure.width(detail, 12.0, 500))
@@ -144,7 +145,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
                 size = 12.0,
                 weight = 600,
                 anchor = TextAnchor.START,
-                fill = tone("ink"),
+                fill = diagramTone("ink"),
             )
         )
         legendWidth = max(legendWidth, 20 + measure.width(label, 12.0, 600))
@@ -167,7 +168,7 @@ internal fun layoutPie(diagram: PieDiagram, measure: TextMeasure): Scene {
                 size = TITLE_FONT,
                 weight = 600,
                 anchor = TextAnchor.MIDDLE,
-                fill = tone("ink"),
+                fill = diagramTone("ink"),
             ),
         )
     }

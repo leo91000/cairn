@@ -687,14 +687,6 @@ internal fun PluginReview(
 }
 
 @Composable
-internal fun Note(text: String) =
-    Text(
-        text,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-
-@Composable
 internal fun PluginHeader(
     id: String,
     name: String,
