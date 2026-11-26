@@ -94,10 +94,17 @@ constructor(
     val ruleDrafts by lazy { RuleDraftStore.encrypted(application) }
     private val retentionPreferences = application.getSharedPreferences("conversation-cache", 0)
 
+    /**
+     * Compact streams carry the history revision, kept under its own key: the trash revision that
+     * earlier versions stored never clears this cache after an update, as on the web.
+     */
     suspend fun acceptCacheRevision(revision: String?) {
-        if (revision != null && retentionPreferences.getString(api.cacheScope, null) != revision) {
-            historyCache.clear()
-            retentionPreferences.edit().putString(api.cacheScope, revision).apply()
+        if (revision == null) return
+        val key = "history:${api.cacheScope}"
+        val stored = retentionPreferences.getString(key, null)
+        if (stored != revision) {
+            if (stored != null) historyCache.clear()
+            retentionPreferences.edit().putString(key, revision).apply()
         }
     }
 

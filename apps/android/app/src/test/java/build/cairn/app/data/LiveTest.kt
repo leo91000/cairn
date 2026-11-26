@@ -580,6 +580,102 @@ class LiveTest {
         }
 
     @Test
+    fun `compact streams keep their list and apply only the conversations that changed`() =
+        runBlocking {
+            fun chat(id: String, title: String = id) = Chat(id = id, title = title)
+            val run = Run(id = "r1", status = "succeeded", taskId = "")
+            val first =
+                LiveBatch(
+                    emptyList(),
+                    LiveState(
+                        run = run,
+                        chat = Chat(id = "a"),
+                        chats = listOf(chat("a"), chat("b"), chat("c")),
+                    ),
+                    false,
+                    false,
+                    history = "v2:r1:1",
+                )
+            val paused =
+                LiveBatch(
+                    emptyList(),
+                    LiveState(run = run, chat = Chat(id = "a", paused = true)),
+                    false,
+                    false,
+                    history = "v2:r1:1",
+                )
+            val moved =
+                LiveBatch(
+                    emptyList(),
+                    chatChanges =
+                        ChatChanges(
+                            upserts = listOf(chat("c", "Later")),
+                            removed = listOf("b"),
+                            order = listOf("c", "a"),
+                        ),
+                    reset = false,
+                    more = false,
+                    history = "v2:r1:1",
+                )
+            MockWebServer().use { server ->
+                server.enqueue(
+                    MockResponse()
+                        .setHeader("Content-Type", "text/event-stream")
+                        .setBody(frame(1, first) + frame(1, paused) + frame(1, moved))
+                        .setSocketPolicy(SocketPolicy.KEEP_OPEN)
+                )
+                server.start()
+                val api = CairnApi(server.url("/"), MemoryVault())
+                // Snapshots are conflated: the last one carries every change applied in order.
+                val last =
+                    withTimeout(10000) {
+                        api.live("/chats/a/stream").first {
+                            it.state?.chats?.map { chat -> chat.id } == listOf("c", "a")
+                        }
+                    }
+                assertEquals(
+                    "/api/chats/a/stream?after=0&window=1&compact=1",
+                    server.takeRequest().path,
+                )
+                assertEquals("Later", last.state?.chats?.first()?.title)
+                assertEquals(true, last.state?.chat?.paused)
+                assertEquals(run, last.state?.chat?.run)
+            }
+        }
+
+    @Test
+    fun `conversations that leave the list name the saved copies to forget`() {
+        // One list stream only moves forward: even the newest conversation is gone once unlisted.
+        val list = listOf(Chat(id = "a"), Chat(id = "b c", runId = "r1"), Chat(id = "newest"))
+        assertEquals(
+            listOf("/chats/b%20c/stream", "/chats/newest/stream"),
+            leftChatPaths(list, listOf(Chat(id = "a"))),
+        )
+        assertEquals(emptyList<String>(), leftChatPaths(null, list))
+        assertEquals(emptyList<String>(), leftChatPaths(list, null))
+        assertEquals("/chats/a/stream", savedChatPath("a"))
+    }
+
+    @Test
+    fun `a compact state keeps the previous list and restores the chat run`() {
+        val run = Run(id = "r1", status = "succeeded", taskId = "")
+        val first =
+            nextLiveState(
+                null,
+                LiveState(run = run, chat = Chat(id = "a"), chats = listOf(Chat(id = "a"))),
+                null,
+            )!!
+        assertEquals(run, first.chat?.run)
+        val paused =
+            nextLiveState(first, LiveState(run = run, chat = Chat(id = "a", paused = true)), null)!!
+        assertEquals(listOf("a"), paused.chats?.map { it.id })
+        assertEquals(run, paused.chat?.run)
+        val added = nextLiveState(paused, null, ChatChanges(upserts = listOf(Chat(id = "b"))))!!
+        assertEquals(listOf("b", "a"), added.chats?.map { it.id })
+        assertSame(paused.chat, added.chat)
+    }
+
+    @Test
     fun `SSE reconnect sends accepted cursor and reset discards previous execution`() =
         runBlocking {
             MockWebServer().use { server ->
@@ -631,9 +727,12 @@ class LiveTest {
                             .take(2)
                             .toList()
                     }
-                assertEquals("/api/chats/chat/stream?after=0&window=1", server.takeRequest().path)
                 assertEquals(
-                    "/api/chats/chat/stream?after=1&window=1&recent=1",
+                    "/api/chats/chat/stream?after=0&window=1&compact=1",
+                    server.takeRequest().path,
+                )
+                assertEquals(
+                    "/api/chats/chat/stream?after=1&window=1&recent=1&compact=1",
                     server.takeRequest().path,
                 )
                 assertEquals("r2", snapshots.last().state?.run?.id)
@@ -688,13 +787,22 @@ class LiveTest {
                         api.live("/chats/two/stream", session).first { it.entries.isNotEmpty() }
                     assertEquals("Nouvelle session", fresh.replyText())
                 }
-                assertEquals("/api/chats/one/stream?after=0&window=1", server.takeRequest().path)
                 assertEquals(
-                    "/api/chats/one/stream?after=1&window=1&recent=1",
+                    "/api/chats/one/stream?after=0&window=1&compact=1",
                     server.takeRequest().path,
                 )
-                assertEquals("/api/chats/two/stream?after=0&window=1", server.takeRequest().path)
-                assertEquals("/api/chats/two/stream?after=0&window=1", server.takeRequest().path)
+                assertEquals(
+                    "/api/chats/one/stream?after=1&window=1&recent=1&compact=1",
+                    server.takeRequest().path,
+                )
+                assertEquals(
+                    "/api/chats/two/stream?after=0&window=1&compact=1",
+                    server.takeRequest().path,
+                )
+                assertEquals(
+                    "/api/chats/two/stream?after=0&window=1&compact=1",
+                    server.takeRequest().path,
+                )
             }
         }
 

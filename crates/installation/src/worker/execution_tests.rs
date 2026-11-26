@@ -1,20 +1,8 @@
 use super::*;
 
-#[tokio::test]
-async fn delete_cleanup_evidence_survives_live_checkpoint_persistence() {
-    use axum::{Json, Router, routing::any};
-    let attempt = crate::config::id();
-    let response_attempt = attempt.clone();
-    let app = Router::new().fallback(any(move || {
-        let attempt = response_attempt.clone();
-        async move {
-            Json(json!({
-                "StatusCode": 70, "FinalizationFailed": true,
-                "NativeCleanup": { "attemptId": attempt, "workloadFenced": true,
-                    "message": "Disk held by valkey pid 42" }
-            }))
-        }
-    }));
+async fn fence_service(
+    app: axum::Router,
+) -> (tempfile::TempDir, Arc<Service>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -30,6 +18,25 @@ async fn delete_cleanup_evidence_survives_live_checkpoint_persistence() {
     )
     .await
     .unwrap();
+    (root, service, server)
+}
+
+#[tokio::test]
+async fn delete_cleanup_evidence_survives_live_checkpoint_persistence() {
+    use axum::{Json, Router, routing::any};
+    let attempt = crate::config::id();
+    let response_attempt = attempt.clone();
+    let app = Router::new().fallback(any(move || {
+        let attempt = response_attempt.clone();
+        async move {
+            Json(json!({
+                "StatusCode": 70, "FinalizationFailed": true,
+                "NativeCleanup": { "attemptId": attempt, "workloadFenced": true,
+                    "message": "Disk held by valkey pid 42" }
+            }))
+        }
+    }));
+    let (_root, service, server) = fence_service(app).await;
     let id = crate::config::id();
     let fixture_id = id.clone();
     service
@@ -111,6 +118,112 @@ async fn delete_cleanup_evidence_survives_live_checkpoint_persistence() {
     );
     service.shutdown.cancel();
     server.abort();
+}
+
+#[tokio::test]
+async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
+    use axum::{Json, Router, http::Request, routing::any};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempt = crate::config::id();
+    let receipt = json!({
+        "StatusCode": crate::runner::CONTROLLER_FAILED,
+        "FinalizationFailed": true,
+        "NativeCleanup": {
+            "attemptId": attempt,
+            "workloadFenced": true,
+            "message": "Native disk cleanup is still in progress."
+        }
+    });
+    for (final_stop, cleared) in [
+        (
+            json!({ "NativeCleanupRetired": { "attemptId": attempt } }),
+            true,
+        ),
+        (json!({}), false),
+        (receipt.clone(), false),
+        (
+            json!({ "NativeCleanupRetired": { "attemptId": crate::config::id() } }),
+            false,
+        ),
+    ] {
+        let pending = receipt.clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+        let observations = Arc::new(AtomicUsize::new(0));
+        let route_stops = stops.clone();
+        let route_observations = observations.clone();
+        let url = format!("/runs/{attempt}");
+        let app = Router::new().fallback(any(move |request: Request<axum::body::Body>| {
+            let mut result = pending.clone();
+            match request.method().as_str() {
+                "DELETE" => {
+                    assert_eq!(request.uri().path(), url);
+                    if route_stops.fetch_add(1, Ordering::Relaxed) > 0 {
+                        result = final_stop.clone();
+                    }
+                }
+                "POST" => {
+                    assert_eq!(request.uri().path(), format!("{url}/wait"));
+                    assert_eq!(
+                        request.uri().query(),
+                        Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY)
+                    );
+                    if route_observations.fetch_add(1, Ordering::Relaxed) > 0 {
+                        result["NativeCleanup"]["retired"] = true.into();
+                    }
+                }
+                method => panic!("Unexpected fixture request: {method}"),
+            }
+            async move { Json(result) }
+        }));
+        let (_root, service, server) = fence_service(app).await;
+        let id = crate::config::id();
+        let fixture_id = id.clone();
+        let attempt = attempt.clone();
+        let saved = service
+            .store
+            .transaction(move |db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": fixture_id, "taskId": fixture_id, "trigger": "chat",
+                        "status": "succeeded", "summary": "Completed reply", "isolated": true
+                    }),
+                    None,
+                )?;
+                let mut saved = RunCheckpoint::from_value(json!({
+                    "runnerId": attempt, "prepared": { "backend": "native", "isolated": true },
+                    "remainingMs": null,
+                }))?;
+                let state = db.run_state(&fixture_id)?.unwrap();
+                saved.settled = Some(Some(Settled::from_state(&state)));
+                saved.store_in(db, &fixture_id)?;
+                Ok(saved)
+            })
+            .await
+            .unwrap();
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+        checkpoint
+            .fence(&service, &service.store.run(&id).await.unwrap())
+            .await
+            .unwrap();
+        release(&service, &checkpoint, None, true).await.unwrap();
+        let state = service.store.run_state(&id).await.unwrap();
+        if cleared {
+            assert_eq!(state.status, RunStatus::Succeeded);
+            assert_eq!(state.summary, "Completed reply");
+            assert!(state.error.is_none());
+        } else {
+            assert_eq!(state.status, RunStatus::Failed);
+            assert_eq!(
+                state.error.as_deref(),
+                Some("Native disk cleanup is still in progress.")
+            );
+        }
+        assert_eq!(observations.load(Ordering::Relaxed), 2);
+        assert_eq!(stops.load(Ordering::Relaxed), 2);
+        service.shutdown.cancel();
+        server.abort();
+    }
 }
 
 #[tokio::test]

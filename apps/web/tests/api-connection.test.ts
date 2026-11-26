@@ -14,7 +14,7 @@ vi.mock('../src/installation-transport', () => ({
     request(_path: string, url: string, options: RequestInit) { return fetch(url, options) }
   },
 }))
-vi.mock('../src/history-cache', () => ({ clearHistoryCache: async () => {} }))
+vi.mock('../src/history-cache', () => ({ clearHistoryCache: async () => {}, clearEarlierHistory: () => {} }))
 
 const request = vi.fn()
 let client: typeof import('../src/api')

@@ -95,9 +95,12 @@ internal fun BoxScope.HistoryStatus(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         // A revalidation that takes a moment says so; a quick one stays silent, as on the web.
-        var notice by remember { mutableStateOf(connection.takeIf { it != UPDATING_STATUS }) }
-        LaunchedEffect(connection) {
-            if (connection == UPDATING_STATUS) delay(SLOW_UPDATE_MILLIS)
+        // An outdated saved copy says so at once.
+        var notice by remember {
+            mutableStateOf(connection.takeIf { it != UPDATING_STATUS || live.stale })
+        }
+        LaunchedEffect(connection, live.stale) {
+            if (connection == UPDATING_STATUS && !live.stale) delay(SLOW_UPDATE_MILLIS)
             notice = connection
         }
         // Keep the last text while fading out, so the pill does not empty before it disappears.

@@ -222,6 +222,9 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<(Value, Vec<String>)>
     chat.trashed_at = Some(trashed_at);
     chat.purge_at = Some(trashed_at);
     chat.paused = true;
+    // Clients predating compact streams drop every saved conversation on this change.
+    // Compact clients drop the copies of conversations that leave their list instead,
+    // and follow `historyRevision`, which trashing leaves unchanged (see `live::read_page`).
     db.set(
         "conversation-cache-revision",
         &crate::config::id().into(),

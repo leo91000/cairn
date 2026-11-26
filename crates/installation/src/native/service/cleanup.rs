@@ -162,7 +162,7 @@ impl Controller {
         {
             // A new fence must not report that the verified close is still pending.
             tracing::debug!(attempt = id, "Ignoring superseded native cleanup receipt");
-            return json!({});
+            return json!({ "NativeCleanupRetired": { "attemptId": id } });
         }
         result
     }
@@ -666,7 +666,10 @@ mod tests {
         ));
         assert!(!controller.file(&attempt, "active").exists());
         assert!(controller.file(&attempt, "cleanup-result").exists());
-        assert_eq!(controller.stopped_result(&attempt).await, json!({}));
+        assert_eq!(
+            controller.stopped_result(&attempt).await,
+            json!({ "NativeCleanupRetired": { "attemptId": attempt } })
+        );
         let response = controller.wait(&attempt, true);
         let history = axum::body::to_bytes(response.into_body(), 4096)
             .await
@@ -814,7 +817,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(controller.stopped_result(&attempt).await, json!({}));
+        assert_eq!(
+            controller.stopped_result(&attempt).await,
+            json!({ "NativeCleanupRetired": { "attemptId": attempt } })
+        );
 
         let failure = json!({ "StatusCode": 70, "FinalizationFailed": true });
         tokio::fs::write(controller.file(&attempt, "exit"), failure.to_string())

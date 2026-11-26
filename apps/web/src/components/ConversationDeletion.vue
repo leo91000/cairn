@@ -3,6 +3,8 @@ import type { ChatView } from '../../../../packages/contracts/chats'
 import { ref } from 'vue'
 import { deleteChat } from '../../../../packages/contracts/generated/deleteChat'
 import { api, state } from '../api'
+import { cacheScope, forgetHistory, removeRunLogs } from '../history-cache'
+import { cacheSession } from '../use-live-run'
 import Modal from './Modal.vue'
 import UiButton from './UiButton.vue'
 
@@ -21,6 +23,16 @@ async function remove() {
     const draftScope = state.installationId ? `${state.installationId}:` : ''
     sessionStorage.removeItem(`cairn-chat-draft:${draftScope}${props.chat.id}`)
     sessionStorage.removeItem(`cairn-chat-draft:${draftScope}${props.chat.id}:plan`)
+    // Its saved copy goes at once, as on Android; other devices drop it from list changes.
+    const scope = await cacheScope(cacheSession()).catch(() => undefined)
+    for (const key of new Set([props.chat.slug || props.chat.id, props.chat.id])) {
+      if (scope)
+        void forgetHistory(scope, `/chats/${key}/stream`)
+    }
+
+    if (scope)
+      void removeRunLogs(scope)
+
     emit('deleted', props.chat.id)
   }
   catch (e) {

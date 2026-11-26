@@ -870,6 +870,156 @@ async fn a_conversation_stream_carries_the_conversation_list_only_on_request() {
 }
 
 #[tokio::test]
+async fn compact_streams_send_the_list_once_then_only_changed_conversations() {
+    /// The next list changes. A compact stream never sends the whole list again.
+    async fn changes(stream: &mut Stream) -> Value {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (_, batch) = stream.batch().await;
+                assert!(batch["state"].get("chats").is_none());
+                if let Some(changes) = batch.get("chatChanges") {
+                    return changes.clone();
+                }
+            }
+        })
+        .await
+        .expect("the list changes must arrive without another write")
+    }
+
+    fn ids(chats: &Value) -> Vec<&str> {
+        chats
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chat| text(chat, "id"))
+            .collect()
+    }
+
+    let f = Fixture::new().await;
+    let older = f.service.chat_create(json!({})).await.unwrap();
+    let newer = f.service.chat_create(json!({})).await.unwrap();
+    let (older_id, newer_id) = (text(&older, "id"), text(&newer, "id"));
+
+    let mut conversation = f
+        .open_path(
+            &format!("/api/chats/{older_id}/stream?window=1&list=1&compact=1"),
+            None,
+        )
+        .await;
+    let (_, batch) = conversation.batch().await;
+    assert_eq!(ids(&batch["state"]["chats"]), [newer_id, older_id]);
+    // The chat's run is the stream's own `run`, sent once.
+    assert_eq!(batch["state"]["chat"]["id"], older["id"]);
+    assert!(batch["state"]["chat"].get("run").is_none());
+    assert!(batch["state"].get("run").is_some());
+    let revision = batch["state"]["historyRevision"].clone();
+    assert_eq!(revision, "initial");
+    let mut legacy = f.open_path("/api/chats/stream", None).await;
+    let (_, batch) = legacy.batch().await;
+    let legacy_revision = batch["state"]["cacheRevision"].clone();
+    assert!(batch["state"].get("historyRevision").is_none());
+
+    let mut list = f.open_path("/api/chats/stream?compact=1", None).await;
+    let (_, batch) = list.batch().await;
+    assert_eq!(ids(&batch["state"]["chats"]), [newer_id, older_id]);
+
+    // A conversation that changes in place is sent alone, without the order.
+    f.service.chat_pause(newer_id, true).await.unwrap();
+    for stream in [&mut conversation, &mut list] {
+        let changes = changes(stream).await;
+        assert_eq!(ids(&changes["upserts"]), [newer_id]);
+        assert_eq!(changes["upserts"][0]["paused"], true);
+        assert_eq!(changes["removed"], json!([]));
+        assert!(changes.get("order").is_none());
+    }
+
+    // A conversation that moves also carries the new order.
+    f.service.chat_pause(older_id, true).await.unwrap();
+    for stream in [&mut conversation, &mut list] {
+        let changes = changes(stream).await;
+        assert_eq!(ids(&changes["upserts"]), [older_id]);
+        let order: Vec<&str> = changes["order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap())
+            .collect();
+        assert_eq!(order, [older_id, newer_id]);
+    }
+
+    // A trashed conversation leaves the list; other saved conversations stay valid.
+    f.service.chat_trash(newer_id, true).await.unwrap();
+    for stream in [&mut conversation, &mut list] {
+        let changes = changes(stream).await;
+        assert_eq!(changes["removed"], json!([newer_id]));
+        assert_eq!(changes["upserts"], json!([]));
+        assert!(changes.get("order").is_none());
+    }
+    let mut reopened = f.open_path("/api/chats/stream?compact=1", None).await;
+    let (_, batch) = reopened.batch().await;
+    assert_eq!(ids(&batch["state"]["chats"]), [older_id]);
+    assert_eq!(batch["state"]["historyRevision"], revision);
+    // Clients without list changes still drop every saved conversation.
+    let mut legacy = f.open_path("/api/chats/stream", None).await;
+    let (_, batch) = legacy.batch().await;
+    assert_ne!(batch["state"]["cacheRevision"], legacy_revision);
+}
+
+/// Bytes a list-carrying conversation stream receives while other conversations change:
+/// the full list each time, the compact changes, and the compact changes as one gzip stream.
+/// Run with `CAIRN_PROFILE_OPENING=1 ... -- --nocapture profile_compact_list_updates`.
+#[tokio::test]
+async fn profile_compact_list_updates() {
+    if std::env::var_os("CAIRN_PROFILE_OPENING").is_none() {
+        return;
+    }
+    let f = Fixture::new().await;
+    let mut chats = Vec::new();
+    for _ in 0..300 {
+        chats.push(f.service.chat_create(json!({})).await.unwrap());
+    }
+    let open = text(&chats[0], "id").to_owned();
+    let changing = text(&chats[1], "id").to_owned();
+    let path = format!("/api/chats/{open}/stream?after=0&window=1&list=1");
+    let mut full = f.open_path(&path, None).await;
+    let mut compact = f.open_path(&format!("{path}&compact=1"), None).await;
+    full.batch().await;
+    let (cursor, first) = compact.batch().await;
+    let (full_first, compact_first) = (full.received, compact.received);
+
+    // The relay encodes one gzip stream, flushed after every SSE chunk.
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut encode = |id: i64, batch: &Value| {
+        let frame = format!("event: batch\nid: {id}\ndata: {batch}\n\n");
+        std::io::Write::write_all(&mut encoder, frame.as_bytes()).unwrap();
+        std::io::Write::flush(&mut encoder).unwrap();
+        std::mem::take(encoder.get_mut()).len()
+    };
+    let gzip_first = encode(cursor, &first);
+    let mut gzip_updates = 0;
+    let updates = 20;
+    for n in 0..updates {
+        f.service.chat_pause(&changing, n % 2 == 0).await.unwrap();
+        full.batch().await;
+        let (id, batch) = compact.batch().await;
+        gzip_updates += encode(id, &batch);
+    }
+    println!(
+        "{}",
+        json!({
+            "conversations": chats.len(),
+            "updates": updates,
+            "fullFirstBytes": full_first,
+            "compactFirstBytes": compact_first,
+            "compactGzipFirstBytes": gzip_first,
+            "fullUpdateBytes": full.received - full_first,
+            "compactUpdateBytes": compact.received - compact_first,
+            "compactGzipUpdateBytes": gzip_updates,
+        })
+    );
+}
+
+#[tokio::test]
 async fn multiple_clients_refresh_disconnect_and_catch_up_without_gaps() {
     let f = Fixture::new().await;
     f.append(237).await;

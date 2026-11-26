@@ -46,7 +46,7 @@ it('resumes only accepted batches and ignores callbacks from a replaced connecti
   original.batch('10', 'broken JSON')
   expect(original.closed).toBe(true)
   vi.advanceTimersByTime(500)
-  expect(Source.instances[1].url).toBe('/api/runs/r/stream?after=9&window=1')
+  expect(Source.instances[1].url).toBe('/api/runs/r/stream?after=9&window=1&compact=1')
   original.batch('11')
   expect(accept).toHaveBeenCalledTimes(1)
   Source.instances[1].batch('10')
@@ -139,7 +139,7 @@ it('backs off repeated failures and does not advance after a consumer failure', 
   }, vi.fn())
   Source.instances[0].batch('50')
   vi.advanceTimersByTime(500)
-  expect(Source.instances[1].url).toBe('/api/chats/stream?after=0')
+  expect(Source.instances[1].url).toBe('/api/chats/stream?after=0&compact=1')
   Source.instances[1].onerror?.()
   vi.advanceTimersByTime(999)
   expect(Source.instances).toHaveLength(2)
@@ -151,7 +151,7 @@ it('backs off repeated failures and does not advance after a consumer failure', 
 it('validates cached history and restarts safely when the server no longer supports revisions', () => {
   const accept = vi.fn()
   const connection = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 42, history: 'v1:r:1' })
-  expect(Source.instances[0].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1')
+  expect(Source.instances[0].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1&compact=1')
   Source.instances[0].batch('43', '{"events":[],"reset":false,"more":false,"history":"v1:r:1"}')
   expect(accept).toHaveBeenCalledTimes(1)
   connection.reconnect()
@@ -159,25 +159,25 @@ it('validates cached history and restarts safely when the server no longer suppo
   Source.instances[1].batch('44')
   expect(accept).toHaveBeenCalledTimes(1)
   vi.advanceTimersByTime(500)
-  expect(Source.instances[2].url).toBe('/api/chats/c/stream?after=0&window=1')
+  expect(Source.instances[2].url).toBe('/api/chats/c/stream?after=0&window=1&compact=1')
   connection.close()
 })
 
 it('offers the recent window only when a viewer following the latest output resumes', () => {
   let follows = true
   const connection = liveConnection('/chats/c/stream', vi.fn(), vi.fn(), { cursor: 42, history: 'v1:r:1' }, () => follows)
-  expect(Source.instances[0].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1&recent=1')
+  expect(Source.instances[0].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1&recent=1&compact=1')
   // A reader of older messages keeps the replay that preserves their position.
   follows = false
   connection.reconnect()
-  expect(Source.instances[1].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1')
+  expect(Source.instances[1].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1&compact=1')
   connection.close()
   // A fresh stream already opens on the recent window; the conversation list has none.
   const fresh = liveConnection('/runs/r/stream', vi.fn(), vi.fn(), undefined, () => true)
-  expect(Source.instances[2].url).toBe('/api/runs/r/stream?after=0&window=1')
+  expect(Source.instances[2].url).toBe('/api/runs/r/stream?after=0&window=1&compact=1')
   fresh.close()
   const list = liveConnection('/chats/stream', vi.fn(), vi.fn(), { cursor: 7, history: 'v1:list:1' }, () => true)
-  expect(Source.instances[3].url).toBe('/api/chats/stream?after=7&history=v1%3Alist%3A1')
+  expect(Source.instances[3].url).toBe('/api/chats/stream?after=7&history=v1%3Alist%3A1&compact=1')
   list.close()
 })
 
@@ -188,7 +188,7 @@ it('replays from zero with a reset when a cached consumer baseline is invalid', 
   const connection = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 42, history: 'v1:r:1' })
   Source.instances[0].batch('43', '{"events":[],"reset":false,"more":false,"history":"v1:r:1"}')
   vi.advanceTimersByTime(500)
-  expect(Source.instances[1].url).toBe('/api/chats/c/stream?after=0&window=1')
+  expect(Source.instances[1].url).toBe('/api/chats/c/stream?after=0&window=1&compact=1')
   Source.instances[1].batch('10', '{"events":[],"reset":false,"more":true,"history":"v1:r:1"}')
   expect(accept.mock.calls[1][0].reset).toBe(true)
   connection.close()

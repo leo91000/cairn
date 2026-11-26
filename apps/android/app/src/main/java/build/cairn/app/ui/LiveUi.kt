@@ -13,6 +13,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewModelScope
 import build.cairn.app.data.*
 import build.cairn.contracts.ReadRunHistoryInput
 import build.cairn.contracts.TimelineContent
@@ -38,22 +39,21 @@ fun rememberLive(
     path: String,
     streaming: Boolean = true,
     /**
-     * Whether a saved conversation still matches what the server holds. An outdated one only
-     * resumes the stream from its cursor: the reader waits for the update instead of seeing older
-     * output that is about to change, as on the web. Previews always show their copy.
+     * Whether a saved conversation still matches what the server holds. Every saved copy shows at
+     * once; an outdated one says it is updating until the stream completes it, as on the web.
      */
     current: (CachedHistory) -> Boolean = { true },
 ): LiveSnapshot {
     val owner = LocalLifecycleOwner.current
-    val isCurrent by rememberUpdatedState(current)
     val enabled = workspace.session.authenticated && !workspace.signingOut
     val api = if (enabled) vm.api else null
     var value by remember(path, api) { mutableStateOf(LiveSnapshot()) }
     var reconnectGeneration by remember(path, api) { mutableIntStateOf(0) }
     val session = remember(path, api) { LiveSession() }
-    // Retained pager pages become previews and then selected again without being restored.
-    // Recheck their latest snapshot at selection, before a frame of old content can show.
-    var waiting by
+    // The saved copy shown until the stream completes it. Retained pager pages become previews and
+    // then selected again without being restored: their latest snapshot is the copy. Whether it is
+    // outdated is decided again on every composition, so a Fil read after the copy still flags it.
+    var savedCopy by
         remember(path, api, streaming) {
             val previous = session.snapshot
             val detail = previous.state
@@ -68,7 +68,7 @@ fun rememberLive(
                         previous.entries,
                     )
                 else null
-            mutableStateOf(streaming && saved != null && !current(saved))
+            mutableStateOf(saved?.takeIf { streaming })
         }
     val parentScope = rememberCoroutineScope()
     val scope =
@@ -99,8 +99,8 @@ fun rememberLive(
             if (session.path != path)
                 vm.historyCache.read(key)?.let {
                     session.restore(it, path, api.streamGeneration.get())
-                    waiting = streaming && !isCurrent(it)
-                    if (!waiting) value = session.snapshot
+                    savedCopy = it.takeIf { streaming }
+                    value = session.snapshot
                 }
             val replay = session.snapshot
             try {
@@ -116,16 +116,39 @@ fun rememberLive(
                                 streaming || (it.catchingUp && it.httpStatus == null)
                             }
                             .collect {
-                                // The stream's own state replaces an outdated copy; without a
-                                // connection, the copy is still better than nothing.
-                                if (waiting && it === replay) return@collect
-                                vm.acceptCacheRevision(it.state?.cacheRevision)
+                                // The saved copy shows until the stream's own state replaces it.
+                                // Only a snapshot the stream delivered carries the server's
+                                // revision: a saved copy, or a reconnect that kept its state, may
+                                // carry the trash revision an earlier version followed.
+                                if (it !== replay && it.status == LIVE_STATUS)
+                                    vm.acceptCacheRevision(it.state?.historyRevision)
                                 cacheGeneration = vm.historyCache.generation
                                 if (!it.catchingUp || it.httpStatus != null) {
                                     if (it.history != value.history || it.epoch != value.epoch)
                                         olderError = null
+                                    // A conversation that leaves the list was deleted or is no
+                                    // longer shared: its saved copy goes too, as on the web. The
+                                    // cache lock never delays the list on screen, and leaving the
+                                    // screen does not cancel the removal.
+                                    val left =
+                                        if (path == "/chats/stream")
+                                            leftChatPaths(value.state?.chats, it.state?.chats)
+                                        else emptyList()
                                     value = pages.display(it)
-                                    waiting = false
+                                    if (left.isNotEmpty())
+                                        vm.viewModelScope.launch {
+                                            for (saved in left) vm.historyCache.forget(
+                                                vm.historyCache.key(
+                                                    api.cacheScope,
+                                                    api.csrf,
+                                                    saved,
+                                                )
+                                            )
+                                            vm.historyCache.removeRunLogs(api.cacheScope, api.csrf)
+                                        }
+                                    // Only the server's own complete state replaces the copy, as
+                                    // on the web; a reconnect keeps saying it is updating.
+                                    if (it !== replay && it.status == LIVE_STATUS) savedCopy = null
                                 }
                                 if (it.httpStatus in listOf(401, 403, 404, 409)) {
                                     vm.historyCache.remove(key)
@@ -168,7 +191,14 @@ fun rememberLive(
             }
         }
     }
-    val visible = if (waiting) LiveSnapshot() else value
+    // An outdated copy says it is updating, even when it came from an earlier live snapshot.
+    val stale = savedCopy?.let { !current(it) } == true
+    val visible =
+        when {
+            !stale -> value
+            value.status == LIVE_STATUS -> value.copy(stale = true, status = UPDATING_STATUS)
+            else -> value.copy(stale = true)
+        }
     return visible.copy(
         loadingOlder = loadingOlder,
         olderError = olderError,

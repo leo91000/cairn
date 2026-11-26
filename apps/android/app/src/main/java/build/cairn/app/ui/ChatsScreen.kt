@@ -7,6 +7,11 @@
 package build.cairn.app.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.content.contentReceiver
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -39,6 +44,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import build.cairn.contracts.ChatInput
@@ -88,7 +94,8 @@ fun ChatsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit, cr
 
 internal fun savedIsCurrent(saved: CachedHistory, chats: List<Chat>?): Boolean {
     val chat = saved.state.chat ?: return true
-    val known = chats?.find { it.id == chat.id } ?: return true
+    if (chats.isNullOrEmpty()) return true
+    val known = chats.find { it.id == chat.id } ?: return false
     val run = saved.state.run
     return known.runId == run?.id &&
         known.status == (run?.status ?: "idle") &&
@@ -119,7 +126,7 @@ internal fun ChatPage(
             rememberLive(
                 vm,
                 state,
-                "/chats/${segment(id)}/stream",
+                savedChatPath(id),
                 streaming = selected,
                 current = { savedIsCurrent(it, conversations.state?.chats) },
             )
@@ -344,7 +351,7 @@ internal fun ChatPage(
         rememberHistoryPosition(
             vm,
             state,
-            if (id == null) "/chats/stream" else "/chats/${segment(id)}/stream",
+            if (id == null) "/chats/stream" else savedChatPath(id),
             live,
             listState,
             !gallery,
@@ -1422,19 +1429,7 @@ internal fun ChatPage(
                                 }
                         }
                         if (live.catchingUp && id != null) {
-                            Column(
-                                Modifier.weight(1f).fillMaxWidth(),
-                                verticalArrangement =
-                                    Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                            ) {
-                                CircularProgressIndicator(Modifier.size(28.dp))
-                                Text(
-                                    live.error ?: live.status,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
+                            OpeningOutline(live.error ?: live.status, Modifier.weight(1f))
                         } else {
                             Box(Modifier.weight(1f).fillMaxWidth()) {
                                 LazyColumn(
@@ -2256,5 +2251,43 @@ internal fun ChatPage(
                 }
             }
         }
+    }
+}
+
+/**
+ * A conversation never read before opens on the outline of one, under the header the Fil names, as
+ * on the web, instead of a centred spinner.
+ */
+@Composable
+internal fun OpeningOutline(status: String, modifier: Modifier = Modifier) {
+    val pulse = rememberInfiniteTransition(label = "opening")
+    val alpha by
+        pulse.animateFloat(
+            0.45f,
+            1f,
+            infiniteRepeatable(tween(900), RepeatMode.Reverse),
+            label = "opening-alpha",
+        )
+    val shade = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = alpha)
+    Column(
+        modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
+    ) {
+        Box(
+            Modifier.align(Alignment.End)
+                .fillMaxWidth(0.45f)
+                .height(44.dp)
+                .background(shade, RoundedCornerShape(18.dp))
+        )
+        for (width in listOf(0.2f, 0.8f, 0.6f)) Box(
+            Modifier.fillMaxWidth(width).height(14.dp).background(shade, RoundedCornerShape(4.dp))
+        )
+        Text(
+            status,
+            Modifier.fillMaxWidth().padding(top = 8.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
     }
 }
