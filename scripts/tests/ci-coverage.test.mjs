@@ -695,7 +695,6 @@ describe('parallel CI coverage', () => {
       'backend-only': true,
       'validation-only': true,
       'backend-qualification': 'none',
-      'plan-storage-reference': '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
       'exclusive-android': true,
       'browser-workers': '2',
     }
@@ -704,7 +703,7 @@ describe('parallel CI coverage', () => {
     }
 
     for (const mode of ['', 'none']) {
-      expect(runsWith({ ...legacy, 'ci-diagnostic': mode })).toEqual(['backend', 'plan-storage', 'rust-check'])
+      expect(runsWith({ ...legacy, 'ci-diagnostic': mode })).toEqual(['backend', 'rust-check'])
     }
 
     expect(quality.on.pull_request).toBeUndefined()

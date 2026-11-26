@@ -3,7 +3,7 @@ on:
   workflow_call:
     inputs:
       mode:
-        description: Storage qualification job to run (storage-development, vm-discard-qualification, plan-storage)
+        description: Storage qualification job to run (storage-development, vm-discard-qualification)
         required: true
         type: string
       validation-only:
@@ -16,9 +16,6 @@ on:
         type: string
         default: ''
       diagnostic-reference:
-        type: string
-        default: ''
-      plan-storage-reference:
         type: string
         default: ''
 permissions:
@@ -41,10 +38,9 @@ jobs:
           BACKEND_ONLY: ${{ inputs.backend-only }}
           DIAGNOSTIC_CANDIDATE: ${{ inputs.diagnostic-candidate }}
           DIAGNOSTIC_REFERENCE: ${{ inputs.diagnostic-reference }}
-          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
         run: |
           test "$VALIDATION_ONLY" = true && test "$BACKEND_ONLY" = false
-          test -z "$DIAGNOSTIC_CANDIDATE" && test -z "$DIAGNOSTIC_REFERENCE" && test -z "$PLAN_STORAGE_REFERENCE"
+          test -z "$DIAGNOSTIC_CANDIDATE" && test -z "$DIAGNOSTIC_REFERENCE"
           git rev-parse HEAD
       - uses: ./.github/actions/setup-pnpm
         with:
@@ -72,30 +68,3 @@ jobs:
       - run: rustup toolchain install 1.97.0 --profile minimal
       - name: Exercise the pinned VMM discard and async IO implementation
         run: bash scripts/ci/test-firecracker-discard.sh
-
-  plan-storage:
-    name: Plan storage layout and version fence
-    if: inputs.mode == 'plan-storage'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          install: false
-      - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
-      - name: Install compilation dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
-      - name: Qualify two actual source revisions on synthetic databases
-        env:
-          PLAN_STORAGE_OUTPUT: ${{ runner.temp }}/plan-storage-evidence
-          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
-        run: node scripts/ci/qualify-plan-storage.mjs "$PLAN_STORAGE_REFERENCE"
-      - uses: actions/upload-artifact@v7.0.1
-        if: always()
-        with:
-          name: plan-storage-qualification
-          path: ${{ runner.temp }}/plan-storage-evidence/
-          if-no-files-found: error

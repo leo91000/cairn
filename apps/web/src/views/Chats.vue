@@ -72,7 +72,7 @@ import {
 } from '../chat-list'
 import { chatQuota, isQuotaMessage } from '../chat-quota'
 import {
-  reportResumeDiagnostic,
+  createResumeDiagnosticReporter,
   resumeDiagnosticProvider,
   resumeDiagnosticRunStatus,
 } from '../chat-resume-diagnostics'
@@ -1180,6 +1180,8 @@ async function action(name: 'pause' | 'stop' | 'restore' | 'new-session' | 'comp
   }
   finally { busy.value = false }
 }
+
+const reportResumeDiagnostic = createResumeDiagnosticReporter()
 
 async function resumeQuota() {
   reportResumeDiagnostic({ stage: 'handler-entered' })

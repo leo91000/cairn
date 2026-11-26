@@ -317,7 +317,6 @@ it.each(['backend', 'native'])('accepts workflow diagnostic prerequisites withou
     ...process.env,
     BACKEND_ONLY: 'true',
     VALIDATION_ONLY: 'true',
-    PLAN_STORAGE_REFERENCE: '',
     DIAGNOSTIC_CANDIDATE: '358461be03f947ff168950d0a85999e5ad5f9274',
     DIAGNOSTIC_REFERENCE: '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
     GITHUB_REPOSITORY: 'invalid',
@@ -327,22 +326,6 @@ it.each(['backend', 'native'])('accepts workflow diagnostic prerequisites withou
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /Invalid CI clock identity/)
   assert.doesNotMatch(result.stderr, /Diagnostics require/)
-})
-
-it('rejects an independent Plan storage request before reading CI metadata or fetching sources', () => {
-  const file = new URL('../ci/ci-diagnostic-source.mjs', import.meta.url)
-  const result = spawnSync(process.execPath, [file.pathname, 'backend'], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      BACKEND_ONLY: 'true',
-      VALIDATION_ONLY: 'true',
-      DIAGNOSTIC_CANDIDATE: '358461be03f947ff168950d0a85999e5ad5f9274',
-      PLAN_STORAGE_REFERENCE: '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
-    },
-  })
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /Diagnostics require/)
 })
 
 it('executes the actual reference verification after the pair builder created its evidence directory', (t) => {

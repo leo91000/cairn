@@ -29,17 +29,19 @@ type ResumeDiagnosticWindow = Window & {
 }
 
 const resumeDiagnosticEnabled = import.meta.env.VITE_CAIRN_TEST_RESUME_DIAGNOSTICS === 'true'
-let resumeDiagnosticCount = 0
 
-export function reportResumeDiagnostic(record: ResumeDiagnosticRecord) {
-  if (!resumeDiagnosticEnabled || resumeDiagnosticCount >= 16)
-    return
-  resumeDiagnosticCount++
-  try {
-    (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnostic?.(record)
-  }
-  catch {
-    // The optional test probe must never affect the resume action.
+export function createResumeDiagnosticReporter(enabled = resumeDiagnosticEnabled) {
+  let resumeDiagnosticCount = 0
+  return function reportResumeDiagnostic(record: ResumeDiagnosticRecord) {
+    if (!enabled || resumeDiagnosticCount >= 16)
+      return
+    resumeDiagnosticCount++
+    try {
+      (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnostic?.(record)
+    }
+    catch {
+      // The optional test probe must never affect the resume action.
+    }
   }
 }
 

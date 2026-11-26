@@ -18,33 +18,44 @@ for (const record of records) {
 
 if (built.status !== 0)
   process.exit(built.status ?? 1)
-const binary = records.find(record => record.reason === 'compiler-artifact' && record.target?.name === 'cairn_installation' && record.executable)?.executable
-if (!binary)
-  throw new Error('Cargo did not produce the isolated namespace test executable')
 const privileged = process.argv.includes('--sudo')
-const testNames = [
-  'storage::ublk::namespace::tests::isolated_namespace_qualification',
-  'storage::ublk::namespace::tests::recovery_template_drops_only_attested_private_copies',
-  'native::block::holders::tests::retained_namespace_without_procfs_still_reports_the_device',
-  'native::block::holders::tests::private_mount_outside_a_chroot_is_not_lost',
-  'native::block::holders::tests::covered_namespace_root_requires_independent_superblock_inventory',
-  'native::block::holders::tests::covered_network_namespace_does_not_block_filesystem_inventory',
-  'native::systemd::directory_consumers::tests::persistent_mount_namespace_keeps_directory_ownership_without_tasks',
+const selectedTests = [
+  { target: 'cairn_block_storage', name: 'ublk::namespace::tests::isolated_namespace_qualification' },
+  { target: 'cairn_block_storage', name: 'ublk::namespace::tests::recovery_template_drops_only_attested_private_copies' },
+  { target: 'cairn_installation', name: 'native::block::holders::tests::retained_namespace_without_procfs_still_reports_the_device' },
+  { target: 'cairn_installation', name: 'native::block::holders::tests::private_mount_outside_a_chroot_is_not_lost' },
+  { target: 'cairn_installation', name: 'native::block::holders::tests::covered_namespace_root_requires_independent_superblock_inventory' },
+  { target: 'cairn_installation', name: 'native::block::holders::tests::covered_network_namespace_does_not_block_filesystem_inventory' },
+  { target: 'cairn_installation', name: 'native::systemd::directory_consumers::tests::persistent_mount_namespace_keeps_directory_ownership_without_tasks' },
 ]
 // A user namespace cannot create a block node on the host-backed temp directory.
 if (privileged) {
-  testNames.push('native::block::holders::tests::raw_block_device_descriptor_is_a_holder', 'native::block::holders::tests::mapped_raw_block_node_is_a_holder_after_its_descriptor_closes', 'storage::ublk::observation::tests::encoded_absence_is_not_replaced_by_a_legacy_opcode_error')
+  selectedTests.push(
+    { target: 'cairn_installation', name: 'native::block::holders::tests::raw_block_device_descriptor_is_a_holder' },
+    { target: 'cairn_installation', name: 'native::block::holders::tests::mapped_raw_block_node_is_a_holder_after_its_descriptor_closes' },
+    { target: 'cairn_block_storage', name: 'ublk::observation::tests::encoded_absence_is_not_replaced_by_a_legacy_opcode_error' },
+  )
 }
 
-const listed = spawnSync(binary, ['--list', '--ignored'], { encoding: 'utf8' })
-if (listed.error)
-  throw listed.error
-if (listed.status !== 0 || testNames.some(testName => !listed.stdout.split('\n').includes(`${testName}: test`)))
-  throw new Error('Namespace qualification test is absent from the executable')
+const binaries = {}
+for (const target of new Set(selectedTests.map(test => test.target))) {
+  const binary = records.find(record => record.reason === 'compiler-artifact' && record.target?.name === target && record.executable)?.executable
+  if (!binary)
+    throw new Error(`Cargo did not produce the isolated namespace test executable for ${target}`)
+  const listed = spawnSync(binary, ['--list', '--ignored'], { encoding: 'utf8' })
+  if (listed.error)
+    throw listed.error
+  const available = listed.stdout.split('\n')
+  const expected = selectedTests.filter(test => test.target === target).map(test => test.name)
+  if (listed.status !== 0 || expected.some(testName => !available.includes(`${testName}: test`)))
+    throw new Error('Namespace qualification test is absent from the executable')
+  binaries[target] = binary
+}
+
 const command = privileged ? 'sudo' : 'unshare'
 const args = privileged ? ['-n', 'unshare', '--mount', '--propagation', 'private'] : ['--user', '--map-root-user', '--mount', '--propagation', 'private']
-for (const testName of testNames) {
-  const tested = spawnSync(command, [...args, binary, '--exact', testName, '--ignored', '--nocapture'], { stdio: 'inherit' })
+for (const { target, name } of selectedTests) {
+  const tested = spawnSync(command, [...args, binaries[target], '--exact', name, '--ignored', '--nocapture'], { stdio: 'inherit' })
   if (tested.error)
     throw tested.error
   if (tested.status !== 0)
