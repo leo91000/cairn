@@ -281,3 +281,44 @@ it('saves nothing for a stream whose state is saved elsewhere', async () => {
   effect.stop()
   expect(peekHistory(scope, '/chats/stream')).toBeUndefined()
 })
+
+it('adopts a first history revision without clearing, and clears on a later change', async () => {
+  const stored = new Map<string, string>()
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => stored.set(key, value),
+  })
+  const scope = await cacheScope('test-session')
+  const other = '/chats/other/stream'
+  await writeHistory(scope, other, {
+    version: 2,
+    cursor: 0,
+    history: 'v2:r:1',
+    state: { run: null, chat: null, artifacts: [] },
+    entries: [],
+    events: [],
+    savedAt: Date.now(),
+  })
+  const effect = effectScope()
+  scopes.push(effect)
+  effect.run(() => useLiveRun(() => '/chats/a/stream'))
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
+  const batch = (cacheRevision: string) => ({
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v2:r:1',
+    state: {
+      run: null,
+      chat: null,
+      artifacts: [],
+      cacheRevision,
+    },
+  }) as never
+  await accept(batch('initial'), 1)
+  expect(stored.get('conversation-history-revision')).toBe('initial')
+  expect(peekHistory(scope, other)).toBeDefined()
+  await accept(batch('changed'), 1)
+  expect(peekHistory(scope, other)).toBeUndefined()
+})

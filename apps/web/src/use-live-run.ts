@@ -234,8 +234,12 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
           // follows the trash revision under the previous key, never clears this one's cache.
           const revisionKey = state.installationId ? `conversation-history-revision:${state.installationId}` : 'conversation-history-revision'
           try {
-            if (localStorage.getItem(revisionKey) !== batch.state.cacheRevision) {
-              void clearHistoryCache()
+            // A revision seen for the first time invalidates nothing, as on Android: other
+            // installations keep their saved conversations.
+            const known = localStorage.getItem(revisionKey)
+            if (known !== batch.state.cacheRevision) {
+              if (known !== null)
+                void clearHistoryCache()
               localStorage.setItem(revisionKey, batch.state.cacheRevision)
             }
           }
