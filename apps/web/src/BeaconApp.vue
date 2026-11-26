@@ -83,27 +83,30 @@ const code = ref('')
 const challenge = ref('')
 const resendCooldown = ref(0)
 let resendTimer: ReturnType<typeof setTimeout> | undefined
+let resendAvailableAt = 0
 
 function stopResendTimer() {
   clearTimeout(resendTimer)
   resendTimer = undefined
+  resendAvailableAt = 0
   resendCooldown.value = 0
 }
 
 function tickResendCooldown() {
-  if (resendCooldown.value <= 1) {
+  const remaining = resendAvailableAt - Date.now()
+  if (remaining <= 0) {
     stopResendTimer()
     return
   }
 
-  resendCooldown.value--
-  resendTimer = setTimeout(tickResendCooldown, 1000)
+  resendCooldown.value = Math.ceil(remaining / 1000)
+  resendTimer = setTimeout(tickResendCooldown, Math.min(remaining, 1000))
 }
 
 function startResendCooldown() {
   stopResendTimer()
-  resendCooldown.value = 30
-  resendTimer = setTimeout(tickResendCooldown, 1000)
+  resendAvailableAt = Date.now() + 30_000
+  tickResendCooldown()
 }
 
 onScopeDispose(stopResendTimer)

@@ -90,6 +90,12 @@ internal class McpConsentState : ViewModel() {
     var completed by mutableStateOf<CompletedMcpConsent?>(null)
 }
 
+private data class ReviewedMcpConsent(
+    val url: String,
+    val parameters: Map<String, String>,
+    val preview: ConsentPreview,
+)
+
 @Composable
 internal fun AuthorizeScreen(
     vm: CairnViewModel,
@@ -101,9 +107,7 @@ internal fun AuthorizeScreen(
     val credentials = accountCredentials()
     val context = LocalContext.current
     var url by rememberSaveable(sharedUrl) { mutableStateOf(sharedUrl) }
-    var preview by remember { mutableStateOf<ConsentPreview?>(null) }
-    var previewUrl by remember { mutableStateOf("") }
-    var parameters by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var review by remember { mutableStateOf<ReviewedMcpConsent?>(null) }
     var selectedInstallationId by rememberSaveable {
         mutableStateOf(state.installation?.id.orEmpty())
     }
@@ -119,9 +123,8 @@ internal fun AuthorizeScreen(
     fun loadPreview(targetUrl: String) {
         vm.perform {
             val (parsed, loaded) = previewMcpConsent(targetUrl)
-            parameters = parsed
-            preview = loaded
-            previewUrl = targetUrl
+            review = ReviewedMcpConsent(targetUrl, parsed, loaded)
+            url = targetUrl
             editingUrl = false
             consentState.completed = null
             confirmationRequired = loaded.confirmationRequired
@@ -144,14 +147,14 @@ internal fun AuthorizeScreen(
     }
 
     fun decide(approved: Boolean, installationId: String) {
-        val details = preview ?: return
+        val reviewed = review ?: return
         vm.perform {
-            val result = recordMcpConsent(parameters, approved, installationId)
+            val result = recordMcpConsent(reviewed.parameters, approved, installationId)
             consentState.completed =
                 CompletedMcpConsent(
-                    previewUrl,
+                    reviewed.url,
                     state.session.account?.id,
-                    details,
+                    reviewed.preview,
                     installationId,
                     approved,
                     result.redirect,
@@ -200,7 +203,7 @@ internal fun AuthorizeScreen(
                 if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 state.error?.let { ErrorNotice(it, vm::clearMessage) }
 
-                val details = completed?.preview ?: preview
+                val details = completed?.preview ?: review?.preview
                 if (details == null || editingUrl) {
                     AuthCard {
                         Heading(
@@ -216,6 +219,7 @@ internal fun AuthorizeScreen(
                             "Lien d’autorisation",
                             url,
                             { url = it },
+                            enabled = !state.busy,
                             keyboardOptions = InputKeyboards.Uri,
                         )
                         Row(
@@ -225,9 +229,10 @@ internal fun AuthorizeScreen(
                             if (details != null) {
                                 OutlinedButton(
                                     onClick = {
-                                        url = previewUrl
+                                        url = checkNotNull(review).url
                                         editingUrl = false
                                     },
+                                    enabled = !state.busy,
                                     shape = RoundedCornerShape(12.dp),
                                     modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                                 ) {
@@ -312,7 +317,14 @@ internal fun AuthorizeScreen(
                                 )
                             }
                             Button(
-                                onClick = { browse(context, completed.redirect) },
+                                onClick = {
+                                    runCatching { browse(context, completed.redirect) }
+                                        .onFailure {
+                                            vm.notify(
+                                                "Impossible d’ouvrir le navigateur. Vérifiez qu’un navigateur est activé, puis réessayez."
+                                            )
+                                        }
+                                },
                                 shape = RoundedCornerShape(12.dp),
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                             ) {
@@ -544,6 +556,12 @@ internal fun AuthorizeScreen(
                                     }
                                 }
                             }
+                        } else {
+                            Text(
+                                "Ajoutez une installation dont vous êtes propriétaire pour accorder un accès.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
 
                         // Tiered scope cards

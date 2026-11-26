@@ -175,6 +175,7 @@ class AuthorizeScreenTest {
                 "${origin.trimEnd('/')}/authorize?client_id=client-1&redirect_uri=https%3A%2F%2Fclaude.ai%2Fcb&response_type=code&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256&scope=read+manage+run"
             val models = ViewModelStore().apply { put("authorize", vm) }
             var mounted by mutableStateOf(true)
+            var incomingUrl by mutableStateOf(sharedUrl)
             try {
                 var consumed = false
                 val restoration = StateRestorationTester(compose)
@@ -182,8 +183,11 @@ class AuthorizeScreenTest {
                     if (mounted)
                         CairnTheme {
                             CairnApp(
-                                sharedUrl = sharedUrl,
-                                consumedShare = { consumed = true },
+                                sharedUrl = incomingUrl,
+                                consumedShare = {
+                                    incomingUrl = ""
+                                    consumed = true
+                                },
                                 vm = vm,
                                 credentials = credentials,
                             )
@@ -197,6 +201,24 @@ class AuthorizeScreenTest {
                         .isNotEmpty()
                 }
                 assertTrue(consumed)
+
+                compose.runOnIdle { incomingUrl = "https://elsewhere.example.test/authorize" }
+                compose.waitUntil(10_000) {
+                    compose
+                        .onAllNodesWithText("Le lien doit appartenir au serveur", substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Autoriser « Claude » ?").assertDoesNotExist()
+                compose.onNodeWithText("Autoriser").assertDoesNotExist()
+
+                compose.runOnIdle { incomingUrl = sharedUrl }
+                compose.waitUntil(10_000) {
+                    compose
+                        .onAllNodesWithText("Autoriser « Claude » ?")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
                 compose.onNodeWithText("Compte Cairn · owner@example.test").assertIsDisplayed()
                 compose.onNodeWithText("Client non vérifié").assertIsDisplayed()
                 compose.onNodeWithText("https://claude.ai/cb").assertIsDisplayed()
