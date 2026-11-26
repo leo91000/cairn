@@ -4,14 +4,16 @@
 
 Web and Android share the Signal Pur presentation for account sign-in and MCP OAuth
 authorization: a calm beacon backdrop, unified provider order (passkey first, then
-Google and GitHub with brand marks, then email code), an 8-character segmented code
+Google and GitHub with brand marks, then email code), an 8-digit segmented code
 input with inline resend cooldown, and styled Beacon HTML pages for native GitHub
 handover confirmation and completion.
 
 MCP OAuth consent (`Authorize.vue` on web and `AuthorizeScreen.kt` on Android)
 reaches parity: both display the client-to-Cairn bridge, the amber unverified-client
 trust card with redirect destination (`HTTPS` vs local app), an installation selector
-across owned installations, tiered scope cards highlighting elevated `run` access,
+across owned installations (web defaults to the account's last-used installation and
+opens consent on Beacon's `/authorize` page even from a workspace link; Android defaults
+to its current installation), tiered scope cards highlighting elevated `run` access,
 and inline identity confirmation status driven by `/mcp/oauth/preview`'s
 `confirmationRequired` field. Android auto-previews shared authorization links and
 renders a dedicated post-decision summary card; web also wraps `McpCallback` and

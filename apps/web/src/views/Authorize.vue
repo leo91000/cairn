@@ -25,7 +25,7 @@ import {
   TriangleAlert,
 } from '../icons'
 
-const props = defineProps<{ email?: string, embedded?: boolean, currentInstallationId?: string }>()
+const props = defineProps<{ email?: string, currentInstallationId?: string }>()
 const email = computed(() => props.email || '')
 
 const parameters = Object.fromEntries(new URLSearchParams(location.search))
@@ -159,7 +159,6 @@ function handleConfirmed() {
     max-width="md"
     label="Connect an assistant"
     :busy="busy || loading"
-    :embedded="props.embedded"
   >
     <template #header>
       <BrandWordmark class="origin-left scale-[0.88]" />

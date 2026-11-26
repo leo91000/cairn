@@ -7,6 +7,7 @@ import {
 } from './api'
 import {
   accountSettingsUrl,
+  beaconOrigin,
   centralAccount,
   installationSubdomains,
   installationUrl,
@@ -51,7 +52,20 @@ export function workspaceRouter(base = '/') {
       { path: '/nodes', component: () => import('./views/Nodes.vue') },
       { path: '/settings/:section(account|installation|sensitive)?', component: () => import('./views/Settings.vue') },
       { path: '/settings/coding-agents/:provider(codex|claude|opencode|antigravity)', component: () => import('./views/CodingAgentConfiguration.vue') },
-      { path: '/authorize', component: () => import('./views/Authorize.vue'), props: { embedded: true } },
+      // Consent belongs to the account, not an installation: Beacon's page shows the signed-in
+      // account and the installation it last used.
+      {
+        path: '/authorize',
+        component: { render: () => null },
+        beforeEnter: (to) => {
+          const target = new URL(to.fullPath, beaconOrigin)
+          // Beacon's own page renders consent itself; only leave an installation's copy.
+          if (target.origin === window.location.origin && target.pathname === window.location.pathname)
+            return true
+          redirect(target.href)
+          return false
+        },
+      },
       { path: '/:pathMatch(.*)*', redirect: '/' },
     ],
   })

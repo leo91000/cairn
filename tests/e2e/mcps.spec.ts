@@ -87,7 +87,9 @@ test('workspace consent shows the signed-in account and defaults to the current 
       confirmationRequired: false,
     },
   }))
-  await page.goto(workspacePath('/authorize?client_id=client&redirect_uri=https%3A%2F%2Fdesk.example%2Fcb&response_type=code'))
+  const query = '?client_id=client&redirect_uri=https%3A%2F%2Fdesk.example%2Fcb&response_type=code'
+  await page.goto(`/installations/${workspace.installationSlug}/authorize${query}`)
+  await expect(page).toHaveURL(`${workspace.url}/authorize${query}`)
   await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
   await expect(page.getByTitle(`Signed in as ${workspace.emailProof().email}`)).toBeVisible()
   await expect(page.getByRole('combobox', { name: 'Installation', exact: true })).toHaveValue('Current installation')
