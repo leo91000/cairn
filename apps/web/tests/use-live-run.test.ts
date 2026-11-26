@@ -216,3 +216,45 @@ it('keeps the list of a compact stream and applies its changes', async () => {
   expect(live.snapshot.value?.chats).toEqual([{ id: 'b', title: 'Moved' }])
   expect(live.snapshot.value?.chat?.id).toBe('a')
 })
+
+it('treats a saved copy completed over several batches as the server list', async () => {
+  const scope = await cacheScope('test-session')
+  const stream = '/chats/a/stream'
+  await writeHistory(scope, stream, {
+    version: 2,
+    cursor: 5,
+    history: 'v2:r:1',
+    state: { run: null, chat: { id: 'a', messages: [] } as never, artifacts: [] },
+    entries: [],
+    events: [],
+    savedAt: Date.now(),
+  })
+  const effect = effectScope()
+  scopes.push(effect)
+  const live = effect.run(() => useLiveRun(() => stream, { list: true, current: () => false }))!
+  expect(live.restored.value).toBe(true)
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
+  // The catch-up's first batch carries the state; the completing one has nothing new.
+  await accept({
+    events: [],
+    reset: false,
+    more: true,
+    history: 'v2:r:1',
+    state: {
+      run: null,
+      chat: { id: 'a', messages: [] },
+      chats: [{ id: 'a' }],
+      artifacts: [],
+    },
+  } as never, 6)
+  expect(live.restored.value).toBe(true)
+  await accept({
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v2:r:1',
+  } as never, 7)
+  expect(live.restored.value).toBe(false)
+  expect(live.connectionNotice.value).toBe('')
+})

@@ -40,6 +40,22 @@ import kotlinx.serialization.json.*
 /** How long a revalidation of a saved conversation may take before the reader is told. */
 private const val SLOW_UPDATE_MILLIS = 1000L
 
+private suspend fun forgetRemoved(
+    vm: CairnViewModel,
+    api: CairnApi,
+    previous: List<Chat>?,
+    chats: List<Chat>?,
+) {
+    if (previous == null || chats == null) return
+    val listed = chats.mapTo(HashSet()) { it.id }
+    for (chat in previous) {
+        if (chat.id !in listed)
+            vm.historyCache.remove(
+                vm.historyCache.key(api.cacheScope, api.csrf, "/chats/${segment(chat.id)}/stream")
+            )
+    }
+}
+
 @Composable
 fun rememberLive(
     vm: CairnViewModel,
@@ -130,8 +146,14 @@ fun rememberLive(
                                 if (!it.catchingUp || it.httpStatus != null) {
                                     if (it.history != value.history || it.epoch != value.epoch)
                                         olderError = null
+                                    // A conversation that leaves the list was deleted or is no
+                                    // longer shared: its saved copy goes too, as on the web.
+                                    if (path == "/chats/stream")
+                                        forgetRemoved(vm, api, value.state?.chats, it.state?.chats)
                                     value = pages.display(it)
-                                    if (it !== replay) stale = false
+                                    // Only the server's own complete state replaces the copy, as
+                                    // on the web; a reconnect keeps saying it is updating.
+                                    if (it !== replay && it.status == LIVE_STATUS) stale = false
                                 }
                                 if (it.httpStatus in listOf(401, 403, 404, 409)) {
                                     vm.historyCache.remove(key)

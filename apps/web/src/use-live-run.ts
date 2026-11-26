@@ -216,6 +216,8 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       }
     }
 
+    // The connection delivered server state: a complete snapshot is no longer the saved one.
+    let served = false
     let checking = false
     connection = liveConnection(value, (batch, accepted, signal) => {
       const apply = (large: TimelineEntry[], events = batch.events) => {
@@ -251,6 +253,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         candidate.apply(events, [...(batch.entries ?? []), ...large.map(entry => ({ kind: 'upsert' as const, entry }))], accepted)
         accumulator = candidate
         detail = nextLiveState(detail, batch.state, batch.chatChanges)
+        served ||= !!batch.state || !!batch.chatChanges
         carriesList.value = !!options.list && !!detail?.chats
 
         cursor = accepted
@@ -267,7 +270,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
           stale.value = false
           hasOlder.value = older
           synced.value = true
-          if (batch.state)
+          if (served)
             restored.value = false
           snapshot.value = detail
           show()

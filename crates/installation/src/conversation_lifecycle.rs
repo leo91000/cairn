@@ -222,7 +222,7 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<(Value, Vec<String>)>
     chat.trashed_at = Some(trashed_at);
     chat.purge_at = Some(trashed_at);
     chat.paused = true;
-    // Clients drop saved copies of conversations that leave their list, so trashing
+    // The conversation leaves every list, whose clients drop its saved copy: trashing
     // one no longer invalidates every saved conversation.
     db.audit("chat.trashed", &json!({ "id": id }))?;
     Ok((

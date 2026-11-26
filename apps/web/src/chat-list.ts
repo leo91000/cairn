@@ -1,7 +1,12 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import { onScopeDispose, ref, watch } from 'vue'
 import { state } from './api'
-import { cacheScope, readChatList, writeChatList } from './history-cache'
+import {
+  cacheScope,
+  readChatList,
+  removeHistory,
+  writeChatList,
+} from './history-cache'
 import { cacheSession, useLiveRun } from './use-live-run'
 
 // Active conversations known to the shell: the Fil, search and badges.
@@ -27,10 +32,27 @@ function saveList() {
     .catch(() => {})
 }
 
+// A conversation that leaves the server's list was deleted or is no longer shared with this
+// person: its saved copy goes too, under the slug and the identifier it may be opened by.
+function forgetRemoved(previous: ChatView[], chats: ChatView[]) {
+  const listed = new Set(chats.map(chat => chat.id))
+  const removed = previous.filter(chat => !listed.has(chat.id))
+  if (!removed.length)
+    return
+  void cacheScope(cacheSession()).then((scope) => {
+    for (const chat of removed) {
+      for (const key of new Set([chat.slug || chat.id, chat.id]))
+        void removeHistory(scope, `/chats/${key}/stream`)
+    }
+  }).catch(() => {})
+}
+
 /** Shows a list from a stream; a saved one only until the server's list arrives. */
 export function publishChats(chats: ChatView[], options: { saved?: boolean, planTurnsEnabled?: boolean } = {}) {
   if (options.saved && known)
     return
+  if (!options.saved && known)
+    forgetRemoved(chatList.value, chats)
   chatList.value = chats
   chatPlanEnabled.value = options.planTurnsEnabled === true
   known = true
@@ -79,8 +101,14 @@ export function useChatList() {
     saveList()
   }
 
+  const hidden = () => document.hidden && leaving()
+
   window.addEventListener('pagehide', leaving)
-  onScopeDispose(() => window.removeEventListener('pagehide', leaving))
+  document.addEventListener('visibilitychange', hidden)
+  onScopeDispose(() => {
+    window.removeEventListener('pagehide', leaving)
+    document.removeEventListener('visibilitychange', hidden)
+  })
   watch(() => state.installationId, () => {
     chatPlanEnabled.value = false
   }, { immediate: true, flush: 'sync' })

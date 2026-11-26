@@ -124,6 +124,9 @@ data class StreamFrame(val cursor: Long, val batch: LiveBatch)
 /** A saved conversation is shown while its stream revalidates it. */
 const val UPDATING_STATUS = "Actualisation…"
 
+/** The status of a snapshot the stream delivered. */
+const val LIVE_STATUS = "En direct"
+
 data class LiveSnapshot(
     val state: LiveState? = null,
     val events: List<RunEvent> = emptyList(),
@@ -460,7 +463,7 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                             nextLiveState(snapshot.state, batch.state, batch.chatChanges),
                             accumulator.events,
                             accumulator.entries,
-                            status = "En direct",
+                            status = LIVE_STATUS,
                             catchingUp = batch.more,
                             synced = !batch.more,
                             history = batch.history,

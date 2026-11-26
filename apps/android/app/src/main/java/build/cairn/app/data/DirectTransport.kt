@@ -729,12 +729,14 @@ class DirectChannel(
  * building the response never waits for the stream's first event.
  */
 private class LazyGzip(private val encoded: InputStream) : InputStream() {
-    private val decoded by lazy { GZIPInputStream(encoded, 8192) }
+    private val lazyDecoded = lazy { GZIPInputStream(encoded, 8192) }
+    private val decoded by lazyDecoded
 
     override fun read(): Int = decoded.read()
 
     override fun read(target: ByteArray, start: Int, length: Int): Int =
         decoded.read(target, start, length)
 
-    override fun close() = encoded.close()
+    // Closing the decoder releases its native inflater and closes the encoded stream.
+    override fun close() = if (lazyDecoded.isInitialized()) decoded.close() else encoded.close()
 }

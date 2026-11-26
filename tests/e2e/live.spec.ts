@@ -589,7 +589,8 @@ test('a cached run restores the reading offset while its stream is still connect
       read.onsuccess = () => {
         for (const entry of read.result) {
           const value = JSON.parse(entry.text)
-          if (value.state.run)
+          // The saved conversation list is not a conversation.
+          if (value.state?.run)
             value.state.run.status = 'running'
           store.put({ ...entry, text: JSON.stringify(value) })
         }
@@ -677,7 +678,7 @@ test('following the latest output resumes a long backlog on the recent window, w
       const tx = db.transaction('entries')
       const request = tx.objectStore('entries').getAll()
       request.onsuccess = () => {
-        const value = request.result.map(entry => JSON.parse(entry.text)).find(entry => entry.state.run?.id === runId)
+        const value = request.result.map(entry => JSON.parse(entry.text)).find(entry => entry.state?.run?.id === runId)
         resolve(value ? { cursor: value.cursor, top: value.position?.top, follow: value.position?.follow } : null)
       }
 
@@ -820,7 +821,7 @@ test('recent history loads older pages without moving the reader and survives a 
         const request = tx.objectStore('entries').getAll()
         request.onsuccess = () => resolve(request.result.some((entry) => {
           const saved = JSON.parse(entry.text)
-          return saved.state.run?.id === runId && saved.entries.length >= 350 && saved.hasOlder === false
+          return saved.state?.run?.id === runId && saved.entries.length >= 350 && saved.hasOlder === false
         }))
         tx.oncomplete = () => db.close()
       }
@@ -835,7 +836,7 @@ test('recent history loads older pages without moving the reader and survives a 
       const db = open.result
       const tx = db.transaction('entries')
       const request = tx.objectStore('entries').getAll()
-      request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).entries.length)))
+      request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).entries?.length ?? 0)))
       tx.oncomplete = () => db.close()
     }
   }))).toBeGreaterThanOrEqual(350)
