@@ -70,10 +70,19 @@ class HistoryCache(
     private val maxTotal = 20L * 1024 * 1024
     private val ttl = 7L * 24 * 60 * 60 * 1000
 
-    fun key(origin: String, session: String, path: String): String =
-        MessageDigest.getInstance("SHA-256")
-            .digest("$origin\n$session\n$path".toByteArray())
-            .joinToString("") { "%02x".format(it) }
+    fun key(origin: String, session: String, path: String): String {
+        val digest = digest("$origin\n$session\n$path")
+        // Run logs are named apart, so they can be dropped without reading them.
+        return if (path.startsWith("/runs/")) runLogPrefix(origin, session) + digest else digest
+    }
+
+    private fun runLogPrefix(origin: String, session: String) =
+        "run-" + digest("$origin\n$session").take(16) + "-"
+
+    private fun digest(value: String) =
+        MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).joinToString("") {
+            "%02x".format(it)
+        }
 
     private fun valid(value: CachedHistory) =
         value.version == 2 &&
@@ -232,38 +241,21 @@ class HistoryCache(
         }
 
     /**
-     * Drops every saved run log. A run does not name its conversation, so a deleted conversation's
-     * earlier runs cannot be told apart; a run log opens from its stream again, as on the web.
+     * Drops every saved run log of a session, by name. A run does not name its conversation, so a
+     * deleted conversation's earlier runs cannot be told apart; a run log opens from its stream
+     * again, as on the web.
      */
-    suspend fun removeRunLogs() =
+    suspend fun removeRunLogs(origin: String, session: String) =
         withContext(Dispatchers.IO) {
+            val prefix = runLogPrefix(origin, session)
             lock.withLock {
-                fun runLog(value: CachedHistory?) =
-                    value != null && value.state.chat == null && value.state.run != null
                 val keys =
-                    memory.filterValues { runLog(it.value) }.keys +
+                    memory.keys.filter { it.startsWith(prefix) } +
                         synchronized(pendingLock) {
-                            pending.filterValues { runLog(it.value) }.keys
+                            pending.keys.filter { it.startsWith(prefix) }
                         } +
-                        root
-                            .listFiles()
-                            .orEmpty()
-                            .filter { it.isFile && '.' !in it.name && it.name !in memory }
-                            .filter { file ->
-                                runLog(
-                                    runCatching {
-                                        wireJson.decodeFromString<CachedHistory>(
-                                            String(
-                                                unseal(file.name, file.readBytes()),
-                                                Charsets.UTF_8,
-                                            )
-                                        )
-                                    }
-                                        .getOrNull()
-                                )
-                            }
-                            .map { it.name }
-                for (key in keys) {
+                        root.list().orEmpty().filter { it.startsWith(prefix) }
+                for (key in keys.toSet()) {
                     synchronized(pendingLock) { pending.remove(key) }
                     removeLocked(key)
                 }

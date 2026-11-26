@@ -36,25 +36,32 @@ class HistoryCacheTest {
         )
 
     @Test
-    fun `run logs go while conversations and the list stay`() = runBlocking {
-        val run = Run(id = "r", status = "succeeded", taskId = "")
-        cache()
-            .save(
-                "conversation",
+    fun `run logs of the session go while conversations, the list and other sessions stay`() =
+        runBlocking {
+            val run = Run(id = "r", status = "succeeded", taskId = "")
+            val cache = cache()
+            val conversation = cache.key("origin", "session", "/chats/c/stream")
+            val list = cache.key("origin", "session", "/chats/stream")
+            val log = cache.key("origin", "session", "/runs/r/stream")
+            val retained = cache.key("origin", "session", "/runs/s/stream")
+            val other = cache.key("origin", "other", "/runs/r/stream")
+            cache.save(
+                conversation,
                 record().copy(state = LiveState(run = run, chat = Chat(id = "c"))),
                 true,
             )
-        cache().save("list", record().copy(state = LiveState(chats = listOf(Chat(id = "c")))), true)
-        cache().save("run log", record().copy(state = LiveState(run = run)), true)
-        val retained = cache()
-        retained.save("retained run log", record().copy(state = LiveState(run = run)), false)
-        retained.removeRunLogs()
-        assertNull(retained.read("retained run log"))
-        val reopened = cache()
-        assertNull(reopened.read("run log"))
-        assertNotNull(reopened.read("conversation"))
-        assertNotNull(reopened.read("list"))
-    }
+            cache.save(list, record().copy(state = LiveState(chats = listOf(Chat(id = "c")))), true)
+            cache.save(log, record().copy(state = LiveState(run = run)), true)
+            cache.save(other, record().copy(state = LiveState(run = run)), true)
+            cache.save(retained, record().copy(state = LiveState(run = run)), false)
+            cache.removeRunLogs("origin", "session")
+            assertNull(cache.read(retained))
+            val reopened = cache()
+            assertNull(reopened.read(log))
+            assertNotNull(reopened.read(conversation))
+            assertNotNull(reopened.read(list))
+            assertNotNull(reopened.read(other))
+        }
 
     @Test
     fun `a saved conversation stores its chat run once and reads it back`() = runBlocking {

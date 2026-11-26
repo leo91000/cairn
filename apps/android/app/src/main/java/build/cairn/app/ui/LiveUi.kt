@@ -147,7 +147,7 @@ fun rememberLive(
                                                     saved,
                                                 )
                                             )
-                                            vm.historyCache.removeRunLogs()
+                                            vm.historyCache.removeRunLogs(api.cacheScope, api.csrf)
                                         }
                                     // Only the server's own complete state replaces the copy, as
                                     // on the web; a reconnect keeps saying it is updating.
