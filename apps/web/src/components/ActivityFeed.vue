@@ -494,11 +494,14 @@ function reveal(reference: { itemId: string, replyEventId: number | null }) {
   return true
 }
 
-function isInViewport(element: HTMLElement) {
-  const viewport = scroller.value?.getBoundingClientRect()
-  if (!viewport || !element.isConnected)
+function canFocusWorkingAction(element: HTMLElement) {
+  const scrollerElement = scroller.value
+  if (!scrollerElement || !element.isConnected)
     return false
 
+  // The new row can extend the following feed before its resize observer runs.
+  stick()
+  const viewport = scrollerElement.getBoundingClientRect()
   const bounds = element.getBoundingClientRect()
   return bounds.height > 0 && bounds.top >= viewport.top && bounds.bottom <= viewport.bottom
 }
@@ -512,7 +515,7 @@ defineExpose({
   showsWorkingIndicator,
   fullscreen,
   fullscreenButton,
-  isInViewport,
+  canFocusWorkingAction,
   openFiles: () => { artifactViewer.value = '' },
   enterFullscreen,
   followLatest,

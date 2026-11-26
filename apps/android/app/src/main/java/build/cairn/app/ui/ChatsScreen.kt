@@ -39,7 +39,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.role
@@ -611,6 +613,7 @@ internal fun ChatPage(
             )
         }
     val sideScope = rememberCoroutineScope()
+    val inputMode = LocalInputModeManager.current
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
     val listState = rememberLazyListState()
@@ -2472,6 +2475,11 @@ internal fun ChatPage(
                         followGesture.syncFollow(false)
                         follow = false
                         sideScope.launch {
+                            if (inputMode.inputMode == InputMode.Keyboard) {
+                                // The working-row opener can scroll out of view with the reply.
+                                withFrameNanos {}
+                                runCatching { sideFocusFallback.requestFocus() }
+                            }
                             listState.animateScrollToItem(index + if (id == null) 1 else 0)
                         }
                     } else side.unreachable(itemId, replyEventId)

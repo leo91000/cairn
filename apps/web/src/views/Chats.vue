@@ -329,7 +329,7 @@ const sideQuestionIndicator = computed(() => sideQuestions.value?.indicator ?? n
 
 function sideQuestionFocusTarget() {
   const workingButton = workingSideQuestionButton.value?.button
-  if (workingButton && activity.value?.isInViewport(workingButton))
+  if (workingButton && activity.value?.canFocusWorkingAction(workingButton))
     return workingButton
 
   if (activity.value?.fullscreen)
