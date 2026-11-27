@@ -1278,10 +1278,11 @@ const OAUTH_PROVIDER: &str = r"
 import { mcpProvider } from './tests/fixtures/mcp-provider.ts';
 import { createInterface } from 'node:readline';
 const mode = process.argv[1];
+const challengedDiscovery = mode.startsWith('401-');
 const provider = await mcpProvider(mode === 'per-server' ? {} : {
-    perToolAuthorization: true,
+    perToolAuthorization: !challengedDiscovery,
     dynamicRegistration: false,
-    resourceMetadata: mode === 'per-tool' ? undefined : mode,
+    resourceMetadata: challengedDiscovery ? mode.slice(4) : mode === 'per-tool' ? undefined : mode,
 });
 console.log(provider.origin);
 for await (const line of createInterface({ input: process.stdin })) {
@@ -1412,7 +1413,7 @@ async fn oauth_connects_when_discovery_is_public_and_tools_require_authorization
 }
 
 #[tokio::test]
-async fn oauth_public_discovery_validates_advertised_and_well_known_resources() {
+async fn oauth_validates_advertised_and_well_known_resources() {
     for (mode, endpoint_path, expected_resource) in [
         ("advertised", "/mcp", Some("/mcp")),
         ("query", "/mcp?tenant=fixture", Some("/mcp?tenant=fixture")),
@@ -1420,6 +1421,17 @@ async fn oauth_public_discovery_validates_advertised_and_well_known_resources() 
         ("root-query", "?tenant=fixture", Some("?tenant=fixture")),
         ("wrong-resource", "/mcp", None),
         ("different-spelling", "/mcp", None),
+        (
+            "401-query",
+            "/mcp?tenant=fixture",
+            Some("/mcp?tenant=fixture"),
+        ),
+        ("401-query", "/mcp?tenant=other", None),
+        (
+            "401-unadvertised-query",
+            "/mcp?tenant=fixture",
+            Some("/mcp?tenant=fixture"),
+        ),
     ] {
         let (mut provider, _stdin, mut output) = oauth_provider(mode);
         let origin = output.next_line().await.unwrap().unwrap();

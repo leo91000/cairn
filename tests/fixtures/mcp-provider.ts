@@ -10,7 +10,7 @@ export async function mcpProvider(options: {
   beforeAuthorize?: () => Promise<void>
   perToolAuthorization?: boolean
   dynamicRegistration?: boolean
-  resourceMetadata?: 'advertised' | 'query' | 'root' | 'root-query' | 'wrong-resource' | 'different-spelling'
+  resourceMetadata?: 'advertised' | 'query' | 'unadvertised-query' | 'root' | 'root-query' | 'wrong-resource' | 'different-spelling'
 } = {}) {
   // The manager outlives this fixture and can retain HTTP/SSE connections.
   // Closing the provider must also close those sockets, without waiting for the client.
@@ -29,7 +29,7 @@ export async function mcpProvider(options: {
   const resourcePath = usesRootMetadata || options.resourceMetadata === 'wrong-resource'
     ? ''
     : options.resourceMetadata === 'different-spelling' ? '/tenant/../mcp' : '/mcp'
-  const resourceQuery = options.resourceMetadata === 'query' || options.resourceMetadata === 'root-query' ? '?tenant=fixture' : ''
+  const resourceQuery = options.resourceMetadata === 'query' || options.resourceMetadata === 'unadvertised-query' || options.resourceMetadata === 'root-query' ? '?tenant=fixture' : ''
   const metadata = () => ({ resource: `${origin}${resourcePath}${resourceQuery}`, authorization_servers: [origin], scopes_supported: ['tools:read'] })
   app.get(metadataPath, (request, reply) => {
     if (request.url !== `${metadataPath}${resourceQuery}`)
@@ -95,7 +95,9 @@ export async function mcpProvider(options: {
   app.all(options.resourceMetadata === 'root-query' ? '/' : '/mcp', async (request, reply) => {
     const rpc = request.body as { method?: string, params?: { name?: string } } | null
     const protectedTool = rpc?.method === 'tools/call' && rpc.params?.name === 'admin_reset'
-    const challenge = `Bearer resource_metadata="${origin}${metadataPath}${resourceQuery}"`
+    const challenge = options.resourceMetadata === 'unadvertised-query'
+      ? 'Bearer'
+      : `Bearer resource_metadata="${origin}${metadataPath}${resourceQuery}"`
     if ((!options.perToolAuthorization || protectedTool) && request.headers.authorization !== `Bearer ${accessToken}`)
       return reply.code(401).header('WWW-Authenticate', challenge).send({ error: 'unauthorized' })
     if (options.resourceMetadata === 'advertised' && rpc?.method === 'server/discover') {
