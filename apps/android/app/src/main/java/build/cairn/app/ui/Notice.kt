@@ -23,9 +23,13 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
-/** What a notice tells: a state to know about, something that may need a look, or a failure. */
+/**
+ * What a notice tells: a state to know about, a completed step, something that may need a look, or
+ * a failure.
+ */
 internal enum class NoticeTone {
     INFO,
+    SUCCESS,
     WARNING,
     ERROR,
 }
@@ -43,6 +47,7 @@ internal fun Notice(
     icon: ImageVector =
         when (tone) {
             NoticeTone.INFO -> CairnIcons.Clock
+            NoticeTone.SUCCESS -> CairnIcons.Check
             NoticeTone.WARNING,
             NoticeTone.ERROR -> CairnIcons.Alert
         },
@@ -54,6 +59,7 @@ internal fun Notice(
             NoticeTone.INFO ->
                 MaterialTheme.colorScheme.primaryContainer to
                     MaterialTheme.colorScheme.onPrimaryContainer
+            NoticeTone.SUCCESS -> signal.success.copy(alpha = 0.14f) to signal.success
             NoticeTone.WARNING -> signal.warningSoft to signal.warning
             NoticeTone.ERROR ->
                 MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.error

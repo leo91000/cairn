@@ -71,6 +71,45 @@ test('failed saves keep feedback visible above a scrolled MCP form', async ({ pa
   expect(saves).toBe(1)
 })
 
+test('workspace consent shows the signed-in account and defaults to the current installation', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath('/mcps'))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+  await page.route(/\/mcp\/oauth\/preview$/, route => route.fulfill({
+    json: {
+      client: { client_id: 'client', client_name: 'Desk assistant', redirect_uri: 'https://desk.example/cb' },
+      scopes: ['read'],
+      installations: [
+        { id: 'another-installation', name: 'Another installation', online: true },
+        { id: workspace.installationId, name: 'Current installation', online: true },
+      ],
+      confirmationRequired: false,
+    },
+  }))
+  const query = '?client_id=client&redirect_uri=https%3A%2F%2Fdesk.example%2Fcb&response_type=code'
+  await page.goto(`/installations/${workspace.installationSlug}/authorize${query}`)
+  await expect(page).toHaveURL(`${workspace.url}/authorize${query}`)
+  await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
+  await expect(page.getByTitle(`Signed in as ${workspace.emailProof().email}`)).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'Installation', exact: true })).toHaveValue('Current installation')
+  await expect(page.getByRole('main')).toHaveCount(1)
+})
+
+test('a failed MCP OAuth callback explains the failure and returns to MCPs', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath('/mcps'))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+  await page.route(/\/mcps\/oauth\/callback$/, route => route.fulfill({ status: 400, json: { error: 'Authorization expired' } }))
+  await page.goto(workspacePath('/mcps/callback?code=stale&state=stale'))
+  await expect(page.getByText('Connection failed', { exact: true })).toBeVisible()
+  await expect(page.getByText('Authorization expired')).toBeVisible()
+  await expect(page.getByRole('main')).toHaveCount(1)
+  await page.getByRole('button', { name: 'Back to MCPs', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+})
+
 for (const pending of ['authorization', 'offer'] as const) {
   test(`OAuth navigation does not leave background polls running in the departing page (${pending} pending)`, async ({ page, workspace, browserName }) => {
     const name = `Slow OAuth (${pending})`

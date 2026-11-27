@@ -48,6 +48,7 @@ export const Hammer = 'i-lucide-hammer' as const
 export const ListFilter = 'i-lucide-list-filter' as const
 export const ListTodo = 'i-lucide-list-todo' as const
 export const Lock = 'i-lucide-lock' as const
+export const Mail = 'i-lucide-mail' as const
 export const LoaderCircle = 'i-lucide-loader-circle' as const
 export const LogOut = 'i-lucide-log-out' as const
 export const Maximize2 = 'i-lucide-maximize-2' as const

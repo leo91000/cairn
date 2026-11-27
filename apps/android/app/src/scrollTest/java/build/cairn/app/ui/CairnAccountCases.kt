@@ -510,7 +510,7 @@ abstract class CairnAccountCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            compose.onNodeWithText("Code reçu par e-mail").performTextInput("000000")
+            compose.onNodeWithText("Code reçu par e-mail").performTextInput("00000000")
             compose.onNodeWithText("Se connecter").performClick()
             compose.waitUntil(30000) {
                 compose

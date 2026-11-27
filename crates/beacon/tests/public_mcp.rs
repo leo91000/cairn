@@ -315,6 +315,25 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         preview["installations"][0]["id"],
         relay.session["installations"][0]["id"]
     );
+    assert_eq!(preview["confirmationRequired"], false);
+    sqlx_core::query::query(
+        "UPDATE web_sessions SET last_proof_at = clock_timestamp() - interval '6 minutes'",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    let stale: Value = owner_post(&relay, "/api/mcp/oauth/preview", &parameters)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stale["confirmationRequired"], true);
+    sqlx_core::query::query("UPDATE web_sessions SET last_proof_at = clock_timestamp()")
+        .execute(&app.pool)
+        .await
+        .unwrap();
 
     let consent: Value = owner_post(
         &relay,

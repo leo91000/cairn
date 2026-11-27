@@ -1,11 +1,19 @@
 package build.cairn.app.ui
 
 import android.os.Build
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import build.cairn.contracts.AccountSignInMethod
 import kotlinx.coroutines.CancellationException
@@ -19,7 +27,12 @@ fun accountCredentials(): CairnCredentials {
 }
 
 @Composable
-fun ProviderButtons(vm: CairnViewModel, state: Workspace, linking: Boolean = false) {
+fun ProviderButtons(
+    vm: CairnViewModel,
+    state: Workspace,
+    linking: Boolean = false,
+    onAvailabilityChanged: (Boolean) -> Unit = {},
+) {
     val credentials = accountCredentials()
     var options by remember(state.origin) { mutableStateOf(AccountOptions()) }
     LaunchedEffect(state.origin) {
@@ -32,26 +45,61 @@ fun ProviderButtons(vm: CairnViewModel, state: Workspace, linking: Boolean = fal
                 /* Email sign-in remains available when provider discovery fails. */
             }
     }
-    listOf(
-            AccountProvider.Google to options.google,
-            AccountProvider.GitHub to options.github,
-            AccountProvider.Passkey to
-                (options.passkeys && Build.VERSION.SDK_INT >= 28 && !linking),
-        )
-        .forEach { (provider, available) ->
-            if (available)
-                OutlinedButton(
-                    onClick = { vm.perform { signIn(provider, credentials) } },
+    val passkeyAvailable = options.passkeys && Build.VERSION.SDK_INT >= 28 && !linking
+    val hasAny = passkeyAvailable || options.google || options.github
+    LaunchedEffect(hasAny) { onAvailabilityChanged(hasAny) }
+
+    if (hasAny || state.signingIn) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (passkeyAvailable) {
+                FilledTonalButton(
+                    onClick = { vm.perform { signIn(AccountProvider.Passkey, credentials) } },
                     enabled = !state.busy,
+                    shape = RoundedCornerShape(12.dp),
+                    colors =
+                        ButtonDefaults.filledTonalButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        ),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) {
+                    SocialProviderIcon(AccountProvider.Passkey)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Continuer avec ${AccountProvider.Passkey.label}")
+                }
+            }
+            listOf(
+                    AccountProvider.Google to options.google,
+                    AccountProvider.GitHub to options.github,
+                )
+                .forEach { (provider, available) ->
+                    if (available) {
+                        OutlinedButton(
+                            onClick = { vm.perform { signIn(provider, credentials) } },
+                            enabled = !state.busy,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) {
+                            SocialProviderIcon(provider)
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                if (linking) "Associer ${provider.label}"
+                                else "Continuer avec ${provider.label}"
+                            )
+                        }
+                    }
+                }
+            if (state.signingIn) {
+                TextButton(
+                    onClick = vm::cancelSignIn,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(
-                        if (linking) "Associer ${provider.label}"
-                        else "Continuer avec ${provider.label}"
-                    )
+                    Text("Annuler la connexion")
                 }
+            }
         }
-    if (state.signingIn) TextButton(onClick = vm::cancelSignIn) { Text("Annuler la connexion") }
+    }
 }
 
 @Composable
