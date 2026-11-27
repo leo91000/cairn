@@ -26,8 +26,13 @@ use std::{collections::HashMap, sync::LazyLock};
 const PENDING_TTL_MS: i64 = 600_000;
 const EXPIRED: &str = "Authorization session expired. Start again from MCPs.";
 
-static RESOURCE_METADATA: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r#"resource_metadata="([^"]+)""#).unwrap());
+static RESOURCE_METADATA: LazyLock<regex::Regex> = LazyLock::new(|| {
+    // Consume other quoted strings whole so their descriptions cannot look like parameters.
+    regex::Regex::new(
+        r#""(?:[^"\\]|\\.)*"|(?:^|[ \t,])(?i:resource_metadata)[ \t]*=[ \t]*(?:"((?:[^"\\]|\\.)*)"|([^ \t,]*))"#,
+    )
+    .unwrap()
+});
 
 fn pending_key(state: &str) -> String {
     hex_digest(state)
@@ -76,12 +81,35 @@ fn valid_url(server: &McpServer, value: &str) -> Result<url::Url> {
     Ok(url)
 }
 
+fn advertised_metadata(headers: &HeaderMap) -> Option<String> {
+    let parameter = headers
+        .get_all("www-authenticate")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| RESOURCE_METADATA.captures_iter(value))
+        .find(|capture| capture.get(1).is_some() || capture.get(2).is_some())?;
+    let Some(quoted) = parameter.get(1) else {
+        return parameter.get(2).map(|value| value.as_str().to_owned());
+    };
+
+    let mut characters = quoted.as_str().chars();
+    let mut url = String::new();
+    while let Some(character) = characters.next() {
+        url.push(if character == '\\' {
+            characters.next()?
+        } else {
+            character
+        });
+    }
+    Some(url)
+}
+
 /// Probes without credentials for a resource metadata challenge.
 async fn probe(
     server: &McpServer,
     endpoint: &url::Url,
     authorize: Authorization,
-) -> Result<(bool, String)> {
+) -> Result<(bool, Option<String>)> {
     authorize.recheck().await?;
     let probe = Frame::strict(Message::Request {
         id: 1,
@@ -105,14 +133,7 @@ async fn probe(
             "The server did not request OAuth. Use Test connection or choose no authentication.",
         ));
     }
-    let challenge = response
-        .headers
-        .get_all("www-authenticate")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Ok((public_discovery, challenge))
+    Ok((public_discovery, advertised_metadata(&response.headers)))
 }
 
 /// Protected resource metadata and the URL it was read from. Without an explicit
@@ -121,16 +142,13 @@ async fn protected_resource(
     s: &Service,
     server: &McpServer,
     endpoint: &url::Url,
-    challenge: &str,
+    advertised: Option<String>,
     public_discovery: bool,
     authorize: Authorization,
 ) -> Result<(String, Value)> {
     let origin = endpoint.origin().ascii_serialization();
     let root = format!("{origin}/.well-known/oauth-protected-resource");
-    let advertised = RESOURCE_METADATA
-        .captures(challenge)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_owned());
+    let has_advertised_url = advertised.is_some();
     let metadata_url = advertised.unwrap_or_else(|| {
         if !public_discovery {
             return format!("{root}{}", endpoint.path().trim_end_matches('/'));
@@ -146,7 +164,7 @@ async fn protected_resource(
     let mut expected = endpoint.clone();
     let (metadata_url, resource) = match get(s, server, &metadata_url, authorize.clone()).await {
         Ok(resource) => (metadata_url, resource),
-        Err(error) if challenge.contains("resource_metadata=") => return Err(error),
+        Err(error) if has_advertised_url => return Err(error),
         Err(_) => {
             let resource = get(s, server, &root, authorize.clone())
                 .await
@@ -159,10 +177,11 @@ async fn protected_resource(
         }
     };
 
-    let resource_url = valid_url(server, text(&resource, "resource"))?;
+    let resource_id = text(&resource, "resource");
+    let resource_url = valid_url(server, resource_id)?;
     // Bind public discovery to the resource used to locate this document (RFC 9728 §3.3).
     let matches_resource = if public_discovery {
-        resource_url == expected
+        same_resource_identifier(resource_id, &expected)
     } else {
         resource_covers(&resource_url, endpoint)
     };
@@ -172,6 +191,19 @@ async fn protected_resource(
         ));
     }
     Ok((metadata_url, resource))
+}
+
+fn same_resource_identifier(resource: &str, expected: &url::Url) -> bool {
+    let origin = &expected[..url::Position::BeforePath];
+    let path_and_query = &expected[url::Position::BeforePath..];
+    let Some((resource_origin, resource_path_and_query)) = resource.split_at_checked(origin.len())
+    else {
+        return false;
+    };
+    // MCP permits case differences in the scheme and host, and a bare origin.
+    resource_origin.eq_ignore_ascii_case(origin)
+        && (resource_path_and_query == path_and_query
+            || (path_and_query == "/" && resource_path_and_query.is_empty()))
 }
 
 /// Whether the advertised resource is the endpoint or one of its path ancestors.
@@ -190,12 +222,12 @@ async fn discover(
     authorize: Authorization,
 ) -> Result<OAuthDiscovery> {
     let endpoint = valid_url(server, &server.url)?;
-    let (public_discovery, challenge) = probe(server, &endpoint, authorize.clone()).await?;
+    let (public_discovery, advertised) = probe(server, &endpoint, authorize.clone()).await?;
     let (resource_metadata_url, resource) = protected_resource(
         s,
         server,
         &endpoint,
-        &challenge,
+        advertised,
         public_discovery,
         authorize.clone(),
     )

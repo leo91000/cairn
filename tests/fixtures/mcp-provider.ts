@@ -10,7 +10,7 @@ export async function mcpProvider(options: {
   beforeAuthorize?: () => Promise<void>
   perToolAuthorization?: boolean
   dynamicRegistration?: boolean
-  resourceMetadata?: 'advertised' | 'query' | 'root' | 'wrong-resource'
+  resourceMetadata?: 'advertised' | 'query' | 'root' | 'wrong-resource' | 'different-spelling'
 } = {}) {
   // The manager outlives this fixture and can retain HTTP/SSE connections.
   // Closing the provider must also close those sockets, without waiting for the client.
@@ -25,7 +25,9 @@ export async function mcpProvider(options: {
   const metadataPath = options.resourceMetadata === 'advertised'
     ? '/resource-metadata'
     : options.resourceMetadata === 'root' ? metadataRoot : `${metadataRoot}/mcp`
-  const resourcePath = options.resourceMetadata === 'root' || options.resourceMetadata === 'wrong-resource' ? '' : '/mcp'
+  const resourcePath = options.resourceMetadata === 'root' || options.resourceMetadata === 'wrong-resource'
+    ? ''
+    : options.resourceMetadata === 'different-spelling' ? '/tenant/../mcp' : '/mcp'
   const resourceQuery = options.resourceMetadata === 'query' ? '?tenant=fixture' : ''
   const metadata = () => ({ resource: `${origin}${resourcePath}${resourceQuery}`, authorization_servers: [origin], scopes_supported: ['tools:read'] })
   app.get(metadataPath, (request, reply) => {
@@ -95,8 +97,13 @@ export async function mcpProvider(options: {
     const challenge = `Bearer resource_metadata="${origin}${metadataPath}${resourceQuery}"`
     if ((!options.perToolAuthorization || protectedTool) && request.headers.authorization !== `Bearer ${accessToken}`)
       return reply.code(401).header('WWW-Authenticate', challenge).send({ error: 'unauthorized' })
-    if (options.resourceMetadata === 'advertised' && rpc?.method === 'server/discover')
-      reply.raw.setHeader('WWW-Authenticate', ['Basic realm="fixture"', challenge])
+    if (options.resourceMetadata === 'advertised' && rpc?.method === 'server/discover') {
+      reply.raw.setHeader('WWW-Authenticate', [
+        String.raw`Basic realm="description with resource_metadata=\"https://other.invalid/\""`,
+        `Bearer RESOURCE_METADATA = "${origin}${metadataPath}"`,
+      ])
+    }
+
     reply.hijack()
     await toNodeHandler(handler)(request.raw, reply.raw, request.body)
   })

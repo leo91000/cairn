@@ -1335,6 +1335,13 @@ async fn oauth_connects_when_discovery_is_public_and_tools_require_authorization
         tested.server.state,
         cairn_contracts::ConnectionState::Connected
     );
+    assert!(
+        tested
+            .server
+            .tools
+            .iter()
+            .any(|tool| tool["name"] == "echo")
+    );
     let mut client = Client::connect_server(&s, &tested.server).await.unwrap();
     let echo = client
         .request(
@@ -1411,6 +1418,7 @@ async fn oauth_public_discovery_validates_advertised_and_well_known_resources() 
         ("query", "/mcp?tenant=fixture", Some("/mcp?tenant=fixture")),
         ("root", "/mcp", Some("")),
         ("wrong-resource", "/mcp", None),
+        ("different-spelling", "/mcp", None),
     ] {
         let (mut provider, _stdin, mut output) = oauth_provider(mode);
         let origin = output.next_line().await.unwrap().unwrap();
