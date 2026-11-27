@@ -10,7 +10,7 @@ export async function mcpProvider(options: {
   beforeAuthorize?: () => Promise<void>
   perToolAuthorization?: boolean
   dynamicRegistration?: boolean
-  resourceMetadata?: 'advertised' | 'query' | 'unadvertised-query' | 'root' | 'root-query' | 'wrong-resource' | 'different-spelling'
+  resourceMetadata?: 'advertised' | 'query' | 'unadvertised-query' | 'root' | 'root-query' | 'wrong-resource' | 'different-spelling' | 'different-authority'
 } = {}) {
   // The manager outlives this fixture and can retain HTTP/SSE connections.
   // Closing the provider must also close those sockets, without waiting for the client.
@@ -30,7 +30,11 @@ export async function mcpProvider(options: {
     ? ''
     : options.resourceMetadata === 'different-spelling' ? '/tenant/../mcp' : '/mcp'
   const resourceQuery = options.resourceMetadata === 'query' || options.resourceMetadata === 'unadvertised-query' || options.resourceMetadata === 'root-query' ? '?tenant=fixture' : ''
-  const metadata = () => ({ resource: `${origin}${resourcePath}${resourceQuery}`, authorization_servers: [origin], scopes_supported: ['tools:read'] })
+  const metadata = () => {
+    const resourceOrigin = options.resourceMetadata === 'different-authority' ? origin.replace('127.0.0.1', '127.1') : origin
+    return { resource: `${resourceOrigin}${resourcePath}${resourceQuery}`, authorization_servers: [origin], scopes_supported: ['tools:read'] }
+  }
+
   app.get(metadataPath, (request, reply) => {
     if (request.url !== `${metadataPath}${resourceQuery}`)
       return reply.code(404).send()

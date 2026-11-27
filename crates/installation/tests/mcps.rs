@@ -1279,10 +1279,11 @@ import { mcpProvider } from './tests/fixtures/mcp-provider.ts';
 import { createInterface } from 'node:readline';
 const mode = process.argv[1];
 const challengedDiscovery = mode.startsWith('401-');
+const defaultMetadata = mode === 'per-tool' || mode.endsWith('canonical-authority');
 const provider = await mcpProvider(mode === 'per-server' ? {} : {
     perToolAuthorization: !challengedDiscovery,
     dynamicRegistration: false,
-    resourceMetadata: challengedDiscovery ? mode.slice(4) : mode === 'per-tool' ? undefined : mode,
+    resourceMetadata: defaultMetadata ? undefined : challengedDiscovery ? mode.slice(4) : mode,
 });
 console.log(provider.origin);
 for await (const line of createInterface({ input: process.stdin })) {
@@ -1421,6 +1422,9 @@ async fn oauth_validates_advertised_and_well_known_resources() {
         ("root-query", "?tenant=fixture", Some("?tenant=fixture")),
         ("wrong-resource", "/mcp", None),
         ("different-spelling", "/mcp", None),
+        ("different-authority", "/mcp", None),
+        ("canonical-authority", "/mcp", Some("/mcp")),
+        ("401-canonical-authority", "/mcp", Some("/mcp")),
         (
             "401-query",
             "/mcp?tenant=fixture",
@@ -1435,6 +1439,11 @@ async fn oauth_validates_advertised_and_well_known_resources() {
     ] {
         let (mut provider, _stdin, mut output) = oauth_provider(mode);
         let origin = output.next_line().await.unwrap().unwrap();
+        let configured_origin = if mode.ends_with("canonical-authority") {
+            origin.replace("127.0.0.1", "127.1")
+        } else {
+            origin.clone()
+        };
         let root = TempDir::new().unwrap();
         let s = Service::new(config(&root)).await.unwrap();
         common::relay_fixture::claimed(&s).await.unwrap();
@@ -1442,7 +1451,7 @@ async fn oauth_validates_advertised_and_well_known_resources() {
             .mcp_fixture(
                 json!({
                     "name": "OAuth metadata fixture",
-                    "url": format!("{origin}{endpoint_path}"),
+                    "url": format!("{configured_origin}{endpoint_path}"),
                     "auth": "oauth",
                     "clientId": "pre-registered-client",
                     "allowPrivateNetwork": true,
