@@ -110,7 +110,7 @@ fn advertised_metadata(headers: &HeaderMap) -> Result<Option<String>> {
 /// Probes without credentials for a resource metadata challenge.
 async fn probe(
     server: &McpServer,
-    endpoint: &url::Url,
+    endpoint: &str,
     authorize: Authorization,
 ) -> Result<Option<String>> {
     authorize.recheck().await?;
@@ -122,7 +122,7 @@ async fn probe(
     let mut headers = crate::mcp_client::headers("", MODERN, None)?;
     headers.insert("mcp-method", HeaderValue::from_static("server/discover"));
     let response = network::fetch(
-        endpoint.as_str(),
+        endpoint,
         Method::POST,
         headers,
         Some(serde_json::to_vec(&probe)?),
@@ -144,27 +144,16 @@ async fn protected_resource(
     s: &Service,
     server: &McpServer,
     endpoint: &url::Url,
+    resource_suffix: &str,
     advertised: Option<String>,
     authorize: Authorization,
 ) -> Result<(String, Value)> {
     let origin = &endpoint[..url::Position::BeforePath];
-    let path_and_query = &endpoint[url::Position::BeforePath..];
     let root = format!("{origin}/.well-known/oauth-protected-resource");
     let has_advertised_url = advertised.is_some();
-    let configured_path = server.url.split('?').next().unwrap_or(&server.url);
-    let configured_has_path = configured_path
-        .split_once("://")
-        .is_some_and(|(_, authority_and_path)| authority_and_path.contains('/'));
-    // A URL parser inserts a slash on an authority-only endpoint. Keep an
-    // explicitly configured slash for well-known identity validation.
-    let implicit_root_slash = endpoint.path() == "/" && !configured_has_path;
-    let resource_suffix = if !has_advertised_url && implicit_root_slash {
-        &path_and_query[1..]
-    } else {
-        path_and_query
-    };
     let metadata_url = advertised.unwrap_or_else(|| {
-        let metadata_path = endpoint.path().trim_end_matches('/');
+        let path = endpoint.path();
+        let metadata_path = path.strip_suffix('/').unwrap_or(path);
         let query = &endpoint[url::Position::AfterPath..];
         format!("{root}{metadata_path}{query}")
     });
@@ -199,9 +188,30 @@ async fn discover(
     authorize: Authorization,
 ) -> Result<OAuthDiscovery> {
     let endpoint = valid_url(server, &server.url)?;
-    let advertised = probe(server, &endpoint, authorize.clone()).await?;
-    let (resource_metadata_url, resource) =
-        protected_resource(s, server, &endpoint, advertised, authorize.clone()).await?;
+    let configured_without_query = server.url.split('?').next().unwrap_or(&server.url);
+    let configured_has_path = configured_without_query
+        .split_once("://")
+        .is_some_and(|(_, authority_and_path)| authority_and_path.contains('/'));
+    let origin = &endpoint[..url::Position::BeforePath];
+    let path_and_query = &endpoint[url::Position::BeforePath..];
+    // Preserve a bare origin as the resource identifier, with the canonical
+    // authority. HTTP uses `/` as the request target for an empty path.
+    let resource_suffix = if endpoint.path() == "/" && !configured_has_path {
+        &path_and_query[1..]
+    } else {
+        path_and_query
+    };
+    let probe_url = format!("{origin}{resource_suffix}");
+    let advertised = probe(server, &probe_url, authorize.clone()).await?;
+    let (resource_metadata_url, resource) = protected_resource(
+        s,
+        server,
+        &endpoint,
+        resource_suffix,
+        advertised,
+        authorize.clone(),
+    )
+    .await?;
     let authorization_server = resource["authorization_servers"]
         .as_array()
         .and_then(|servers| servers.first())

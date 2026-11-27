@@ -10,7 +10,20 @@ export async function mcpProvider(options: {
   beforeAuthorize?: () => Promise<void>
   perToolAuthorization?: boolean
   dynamicRegistration?: boolean
-  resourceMetadata?: 'advertised' | 'query' | 'unadvertised-query' | 'root' | 'root-query' | 'unadvertised-root-slash' | 'unadvertised-path-slash' | 'wrong-resource' | 'different-spelling' | 'different-authority'
+  resourceMetadata?:
+    | 'advertised'
+    | 'advertised-bare-origin'
+    | 'advertised-root-slash'
+    | 'query'
+    | 'unadvertised-query'
+    | 'root'
+    | 'root-query'
+    | 'unadvertised-root-slash'
+    | 'unadvertised-path-slash'
+    | 'double-path-slash'
+    | 'wrong-resource'
+    | 'different-spelling'
+    | 'different-authority'
 } = {}) {
   // The manager outlives this fixture and can retain HTTP/SSE connections.
   // Closing the provider must also close those sockets, without waiting for the client.
@@ -22,17 +35,21 @@ export async function mcpProvider(options: {
   let refreshes = 0
   let exchanges = 0
   const metadataRoot = '/.well-known/oauth-protected-resource'
-  const rootSlash = options.resourceMetadata === 'unadvertised-root-slash'
+  const rootSlash = options.resourceMetadata?.endsWith('root-slash')
+  const advertisedRoot = options.resourceMetadata === 'advertised-bare-origin' || options.resourceMetadata === 'advertised-root-slash'
   const pathSlash = options.resourceMetadata === 'unadvertised-path-slash'
-  const usesRootMetadata = options.resourceMetadata === 'root' || options.resourceMetadata === 'root-query' || rootSlash
-  const metadataPath = options.resourceMetadata === 'advertised'
+  const doublePathSlash = options.resourceMetadata === 'double-path-slash'
+  const usesRootMetadata = options.resourceMetadata === 'root' || options.resourceMetadata === 'root-query' || rootSlash || advertisedRoot
+  const metadataPath = options.resourceMetadata === 'advertised' || advertisedRoot
     ? '/resource-metadata'
-    : usesRootMetadata ? metadataRoot : `${metadataRoot}/mcp`
+    : usesRootMetadata ? metadataRoot : `${metadataRoot}/mcp${doublePathSlash ? '/' : ''}`
   let mcpPath = '/mcp'
-  if (options.resourceMetadata === 'root-query' || rootSlash)
+  if (options.resourceMetadata === 'root-query' || rootSlash || advertisedRoot)
     mcpPath = '/'
   if (pathSlash)
     mcpPath = '/mcp/'
+  if (doublePathSlash)
+    mcpPath = '/mcp//'
   const resourcePath = (usesRootMetadata && !rootSlash) || options.resourceMetadata === 'wrong-resource'
     ? ''
     : options.resourceMetadata === 'different-spelling' ? '/tenant/../mcp' : mcpPath

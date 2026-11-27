@@ -1431,8 +1431,11 @@ async fn oauth_validates_advertised_and_well_known_resources() {
             Some("/mcp?tenant=fixture"),
         ),
         ("401-query", "/mcp?tenant=other", None),
+        ("401-advertised-bare-origin", "", Some("")),
+        ("401-advertised-root-slash", "/", Some("/")),
         ("401-unadvertised-root-slash", "/", Some("/")),
         ("401-unadvertised-path-slash", "/mcp/", Some("/mcp/")),
+        ("double-path-slash", "/mcp//", Some("/mcp//")),
         (
             "401-unadvertised-query",
             "/mcp?tenant=fixture",
