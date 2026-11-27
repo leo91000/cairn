@@ -21,6 +21,7 @@ export async function mcpProvider(options: {
     | 'root-fallback'
     | 'unadvertised-root-fallback'
     | 'unadvertised-root-slash'
+    | 'unadvertised-root-bare'
     | 'unadvertised-path-slash'
     | 'double-path-slash'
     | 'wrong-resource'
@@ -38,16 +39,17 @@ export async function mcpProvider(options: {
   let exchanges = 0
   const metadataRoot = '/.well-known/oauth-protected-resource'
   const rootSlash = options.resourceMetadata?.endsWith('root-slash')
+  const rootBare = options.resourceMetadata === 'unadvertised-root-bare'
   const rootFallback = options.resourceMetadata?.endsWith('root-fallback')
   const advertisedRoot = options.resourceMetadata === 'advertised-bare-origin' || options.resourceMetadata === 'advertised-root-slash'
   const pathSlash = options.resourceMetadata === 'unadvertised-path-slash'
   const doublePathSlash = options.resourceMetadata === 'double-path-slash'
-  const usesRootMetadata = options.resourceMetadata === 'root' || options.resourceMetadata === 'root-query' || rootSlash || advertisedRoot
+  const usesRootMetadata = options.resourceMetadata === 'root' || options.resourceMetadata === 'root-query' || rootSlash || rootBare || advertisedRoot
   const metadataPath = options.resourceMetadata === 'advertised' || advertisedRoot
     ? '/resource-metadata'
     : usesRootMetadata ? metadataRoot : `${metadataRoot}/mcp${doublePathSlash ? '/' : ''}`
   let mcpPath = '/mcp'
-  if (options.resourceMetadata === 'root-query' || rootSlash || advertisedRoot)
+  if (options.resourceMetadata === 'root-query' || rootSlash || rootBare || advertisedRoot)
     mcpPath = '/'
   if (pathSlash)
     mcpPath = '/mcp/'

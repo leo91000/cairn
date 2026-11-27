@@ -1435,6 +1435,8 @@ async fn oauth_validates_advertised_and_well_known_resources() {
         ("401-advertised-bare-origin", "", Some("")),
         ("401-advertised-root-slash", "/", Some("/")),
         ("401-unadvertised-root-slash", "/", Some("/")),
+        ("unadvertised-root-bare", "/", Some("")),
+        ("401-unadvertised-root-bare", "/", Some("")),
         ("401-unadvertised-root-fallback", "/mcp", Some("")),
         ("401-root-fallback", "/mcp", None),
         ("401-unadvertised-path-slash", "/mcp/", Some("/mcp/")),

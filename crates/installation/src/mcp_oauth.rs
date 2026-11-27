@@ -194,7 +194,8 @@ async fn protected_resource(
     let query = &endpoint[url::Position::AfterPath..];
     let metadata_url = format!("{root}{metadata_path}{query}");
     let candidate = resource_document(s, server, &metadata_url, probe_url, authorize.clone()).await;
-    if candidate.is_ok() || metadata_url == root {
+    let same_root_lookup = metadata_url == root && probe_url == origin;
+    if candidate.is_ok() || same_root_lookup {
         return candidate;
     }
     resource_document(s, server, &root, origin, authorize)
