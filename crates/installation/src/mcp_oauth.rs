@@ -110,7 +110,7 @@ fn advertised_metadata(headers: &HeaderMap) -> Result<Option<String>> {
 /// Probes without credentials for a resource metadata challenge.
 async fn probe(
     server: &McpServer,
-    endpoint: &url::Url,
+    endpoint: &str,
     authorize: Authorization,
 ) -> Result<Option<String>> {
     authorize.recheck().await?;
@@ -122,7 +122,7 @@ async fn probe(
     let mut headers = crate::mcp_client::headers("", MODERN, None)?;
     headers.insert("mcp-method", HeaderValue::from_static("server/discover"));
     let response = network::fetch(
-        endpoint.as_str(),
+        endpoint,
         Method::POST,
         headers,
         Some(serde_json::to_vec(&probe)?),
@@ -143,44 +143,35 @@ async fn probe(
 async fn protected_resource(
     s: &Service,
     server: &McpServer,
-    endpoint: &url::Url,
+    origin: &str,
+    path_and_query: &str,
     advertised: Option<String>,
     authorize: Authorization,
 ) -> Result<(String, Value)> {
-    let configured_origin = resource_origin(server.url.trim());
-    let canonical_origin = &endpoint[..url::Position::BeforePath];
-    let origin = configured_origin.unwrap_or(canonical_origin);
     let root = format!("{origin}/.well-known/oauth-protected-resource");
     let has_advertised_url = advertised.is_some();
     let metadata_url = advertised.unwrap_or_else(|| {
-        let path = if endpoint.path() == "/" {
-            ""
-        } else {
-            endpoint.path()
-        };
-        let query = &endpoint[url::Position::AfterPath..];
-        format!("{root}{path}{query}")
+        let metadata_suffix = without_implicit_root_slash(path_and_query);
+        format!("{root}{metadata_suffix}")
     });
-    let mut expected = endpoint.clone();
-    let (metadata_url, resource) = match get(s, server, &metadata_url, authorize.clone()).await {
-        Ok(resource) => (metadata_url, resource),
-        Err(error) if has_advertised_url => return Err(error),
-        Err(_) => {
-            let resource = get(s, server, &root, authorize.clone())
-                .await
-                .map_err(|_| {
-                    Error::bad_gateway("OAuth protected resource metadata is unavailable.")
-                })?;
-            expected.set_path("/");
-            expected.set_query(None);
-            (root, resource)
-        }
-    };
+    let (metadata_url, resource, expected_path_and_query) =
+        match get(s, server, &metadata_url, authorize.clone()).await {
+            Ok(resource) => (metadata_url, resource, path_and_query),
+            Err(error) if has_advertised_url => return Err(error),
+            Err(_) => {
+                let resource = get(s, server, &root, authorize.clone())
+                    .await
+                    .map_err(|_| {
+                        Error::bad_gateway("OAuth protected resource metadata is unavailable.")
+                    })?;
+                (root, resource, "/")
+            }
+        };
 
     let resource_id = text(&resource, "resource");
     valid_url(server, resource_id)?;
     // Bind metadata to the resource used to locate this document (RFC 9728 §3.3).
-    if !same_resource_identifier(resource_id, &expected, configured_origin) {
+    if !same_resource_identifier(resource_id, origin, expected_path_and_query) {
         return Err(Error::bad(
             "OAuth resource does not match the configured MCP server.",
         ));
@@ -198,24 +189,23 @@ fn resource_origin(value: &str) -> Option<&str> {
     Some(&value[..scheme.len() + 3 + authority.len()])
 }
 
-fn same_resource_identifier(
-    resource: &str,
-    expected: &url::Url,
-    configured_origin: Option<&str>,
-) -> bool {
+/// An authority-only URI can omit the slash inserted by URL parsing.
+fn without_implicit_root_slash(path_and_query: &str) -> &str {
+    if path_and_query == "/" || path_and_query.starts_with("/?") {
+        &path_and_query[1..]
+    } else {
+        path_and_query
+    }
+}
+
+fn same_resource_identifier(resource: &str, origin: &str, path_and_query: &str) -> bool {
     let Some(resource_origin) = resource_origin(resource) else {
         return false;
     };
-    let canonical_origin = &expected[..url::Position::BeforePath];
-    let matches_origin = resource_origin.eq_ignore_ascii_case(canonical_origin)
-        || configured_origin.is_some_and(|origin| resource_origin.eq_ignore_ascii_case(origin));
     let resource_path_and_query = &resource[resource_origin.len()..];
-    let path_and_query = &expected[url::Position::BeforePath..];
-    // MCP permits case differences in the scheme and host. A bare origin can
-    // omit the slash that URL parsing inserts before the query or end of input.
-    matches_origin
+    resource_origin.eq_ignore_ascii_case(origin)
         && (resource_path_and_query == path_and_query
-            || (expected.path() == "/" && resource_path_and_query == &path_and_query[1..]))
+            || resource_path_and_query == without_implicit_root_slash(path_and_query))
 }
 
 async fn discover(
@@ -224,9 +214,20 @@ async fn discover(
     authorize: Authorization,
 ) -> Result<OAuthDiscovery> {
     let endpoint = valid_url(server, &server.url)?;
-    let advertised = probe(server, &endpoint, authorize.clone()).await?;
-    let (resource_metadata_url, resource) =
-        protected_resource(s, server, &endpoint, advertised, authorize.clone()).await?;
+    let origin =
+        resource_origin(server.url.trim()).unwrap_or(&endpoint[..url::Position::BeforePath]);
+    let path_and_query = &endpoint[url::Position::BeforePath..];
+    let resource = format!("{origin}{path_and_query}");
+    let advertised = probe(server, &resource, authorize.clone()).await?;
+    let (resource_metadata_url, resource) = protected_resource(
+        s,
+        server,
+        origin,
+        path_and_query,
+        advertised,
+        authorize.clone(),
+    )
+    .await?;
     let authorization_server = resource["authorization_servers"]
         .as_array()
         .and_then(|servers| servers.first())
@@ -826,20 +827,15 @@ mod tests {
         let configured = "https://mcp.example.test:443/mcp?tenant=a";
         let endpoint = url::Url::parse(configured).unwrap();
         assert_eq!(endpoint.as_str(), canonical);
-        assert!(same_resource_identifier(
-            configured,
-            &endpoint,
-            resource_origin(configured)
-        ));
-        assert!(!same_resource_identifier(
-            configured,
-            &endpoint,
-            resource_origin(canonical)
-        ));
+        let origin = resource_origin(configured).unwrap();
+        let path_and_query = &endpoint[url::Position::BeforePath..];
+        assert_eq!(format!("{origin}{path_and_query}"), configured);
+        assert!(same_resource_identifier(configured, origin, path_and_query));
+        assert!(!same_resource_identifier(canonical, origin, path_and_query));
         assert!(!same_resource_identifier(
             "https://mcp.example.test:443/mcp?tenant=b",
-            &endpoint,
-            resource_origin(configured)
+            origin,
+            path_and_query
         ));
     }
 }
