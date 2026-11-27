@@ -485,7 +485,8 @@ async fn revoked_native_permissions_still_allow_disabling_but_never_reenabling_a
         .put_node_fixture(f.node.clone())
         .await
         .unwrap();
-    // Even an unavailable authority must not block an execution-reducing edit.
+    // Disabling a task must succeed while Beacon authority is unavailable.
+    common::relay_fixture::native_authority_unavailable(&f.service).await;
     f.service
         .store
         .set(
