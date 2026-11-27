@@ -18,11 +18,14 @@ export async function mcpProvider(options: {
     | 'unadvertised-query'
     | 'root'
     | 'root-query'
+    | 'unadvertised-root-query'
     | 'root-fallback'
+    | 'root-fallback-slash'
     | 'unadvertised-root-fallback'
     | 'unadvertised-root-slash'
     | 'unadvertised-root-bare'
     | 'unadvertised-path-slash'
+    | 'unadvertised-path-alias'
     | 'double-path-slash'
     | 'wrong-resource'
     | 'different-spelling'
@@ -40,25 +43,32 @@ export async function mcpProvider(options: {
   const metadataRoot = '/.well-known/oauth-protected-resource'
   const rootSlash = options.resourceMetadata?.endsWith('root-slash')
   const rootBare = options.resourceMetadata === 'unadvertised-root-bare'
-  const rootFallback = options.resourceMetadata?.endsWith('root-fallback')
+  const fallbackWithSlash = options.resourceMetadata === 'root-fallback-slash'
+  const rootFallback = options.resourceMetadata?.endsWith('root-fallback') || fallbackWithSlash
+  const rootQuery = options.resourceMetadata === 'root-query' || options.resourceMetadata === 'unadvertised-root-query'
   const advertisedRoot = options.resourceMetadata === 'advertised-bare-origin' || options.resourceMetadata === 'advertised-root-slash'
-  const pathSlash = options.resourceMetadata === 'unadvertised-path-slash'
+  const pathAlias = options.resourceMetadata === 'unadvertised-path-alias'
+  const pathSlash = options.resourceMetadata === 'unadvertised-path-slash' || pathAlias
   const doublePathSlash = options.resourceMetadata === 'double-path-slash'
-  const usesRootMetadata = options.resourceMetadata === 'root' || options.resourceMetadata === 'root-query' || rootSlash || rootBare || advertisedRoot
+  const usesRootMetadata = options.resourceMetadata === 'root' || rootQuery || rootSlash || rootBare || advertisedRoot
   const metadataPath = options.resourceMetadata === 'advertised' || advertisedRoot
     ? '/resource-metadata'
     : usesRootMetadata ? metadataRoot : `${metadataRoot}/mcp${doublePathSlash ? '/' : ''}`
   let mcpPath = '/mcp'
-  if (options.resourceMetadata === 'root-query' || rootSlash || rootBare || advertisedRoot)
+  if (rootQuery || rootSlash || rootBare || advertisedRoot)
     mcpPath = '/'
   if (pathSlash)
     mcpPath = '/mcp/'
   if (doublePathSlash)
     mcpPath = '/mcp//'
-  const resourcePath = (usesRootMetadata && !rootSlash) || rootFallback || options.resourceMetadata === 'wrong-resource'
+  let resourcePath = (usesRootMetadata && !rootSlash) || rootFallback || options.resourceMetadata === 'wrong-resource'
     ? ''
     : options.resourceMetadata === 'different-spelling' ? '/tenant/../mcp' : mcpPath
-  const resourceQuery = options.resourceMetadata === 'query' || options.resourceMetadata === 'unadvertised-query' || options.resourceMetadata === 'root-query' ? '?tenant=fixture' : ''
+  if (fallbackWithSlash)
+    resourcePath = '/'
+  if (pathAlias)
+    resourcePath = '/mcp'
+  const resourceQuery = options.resourceMetadata === 'query' || options.resourceMetadata === 'unadvertised-query' || rootQuery ? '?tenant=fixture' : ''
   const metadata = () => {
     const resourceOrigin = options.resourceMetadata === 'different-authority' ? origin.replace('127.0.0.1', '127.1') : origin
     return { resource: `${resourceOrigin}${resourcePath}${resourceQuery}`, authorization_servers: [origin], scopes_supported: ['tools:read'] }

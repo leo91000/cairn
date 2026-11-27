@@ -149,12 +149,13 @@ async fn resource_document(
     server: &McpServer,
     url: &str,
     expected_resource: &str,
+    equivalent_root: Option<&str>,
     authorize: Authorization,
 ) -> Result<ProtectedResourceMetadata> {
     let document = get(s, server, url, authorize).await?;
     let resource = text(&document, "resource");
     valid_url(server, resource)?;
-    if resource != expected_resource {
+    if resource != expected_resource && equivalent_root != Some(resource) {
         return Err(Error::bad(
             "OAuth resource does not match the configured MCP server.",
         ));
@@ -184,7 +185,7 @@ async fn protected_resource(
     authorize: Authorization,
 ) -> Result<ProtectedResourceMetadata> {
     if let Some(url) = advertised {
-        return resource_document(s, server, &url, probe_url, authorize).await;
+        return resource_document(s, server, &url, probe_url, None, authorize).await;
     }
 
     let origin = &endpoint[..url::Position::BeforePath];
@@ -193,12 +194,30 @@ async fn protected_resource(
     let metadata_path = path.strip_suffix('/').unwrap_or(path);
     let query = &endpoint[url::Position::AfterPath..];
     let metadata_url = format!("{root}{metadata_path}{query}");
-    let candidate = resource_document(s, server, &metadata_url, probe_url, authorize.clone()).await;
-    let same_root_lookup = metadata_url == root && probe_url == origin;
-    if candidate.is_ok() || same_root_lookup {
+    // HTTP treats an empty path and `/` as equivalent at the origin. Both exact
+    // identifiers derive the same well-known URL and keep the same query.
+    let bare_root = format!("{origin}{query}");
+    let equivalent_root = (path == "/").then(|| {
+        if probe_url == bare_root {
+            endpoint.as_str()
+        } else {
+            bare_root.as_str()
+        }
+    });
+    let candidate = resource_document(
+        s,
+        server,
+        &metadata_url,
+        probe_url,
+        equivalent_root,
+        authorize.clone(),
+    )
+    .await;
+    if candidate.is_ok() || metadata_url == root {
         return candidate;
     }
-    resource_document(s, server, &root, origin, authorize)
+    let root_with_slash = format!("{origin}/");
+    resource_document(s, server, &root, origin, Some(&root_with_slash), authorize)
         .await
         .or(candidate)
 }
