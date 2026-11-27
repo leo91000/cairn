@@ -147,7 +147,9 @@ async fn protected_resource(
     advertised: Option<String>,
     authorize: Authorization,
 ) -> Result<(String, Value)> {
-    let origin = endpoint.origin().ascii_serialization();
+    let configured_origin = resource_origin(server.url.trim());
+    let canonical_origin = &endpoint[..url::Position::BeforePath];
+    let origin = configured_origin.unwrap_or(canonical_origin);
     let root = format!("{origin}/.well-known/oauth-protected-resource");
     let has_advertised_url = advertised.is_some();
     let metadata_url = advertised.unwrap_or_else(|| {
@@ -178,7 +180,7 @@ async fn protected_resource(
     let resource_id = text(&resource, "resource");
     valid_url(server, resource_id)?;
     // Bind metadata to the resource used to locate this document (RFC 9728 §3.3).
-    if !same_resource_identifier(resource_id, &expected) {
+    if !same_resource_identifier(resource_id, &expected, configured_origin) {
         return Err(Error::bad(
             "OAuth resource does not match the configured MCP server.",
         ));
@@ -186,16 +188,32 @@ async fn protected_resource(
     Ok((metadata_url, resource))
 }
 
-fn same_resource_identifier(resource: &str, expected: &url::Url) -> bool {
-    let origin = &expected[..url::Position::BeforePath];
-    let path_and_query = &expected[url::Position::BeforePath..];
-    let Some((resource_origin, resource_path_and_query)) = resource.split_at_checked(origin.len())
-    else {
+/// Keeps the configured scheme and authority before URL parsing removes default ports.
+fn resource_origin(value: &str) -> Option<&str> {
+    let (scheme, rest) = value.split_once("://")?;
+    let authority = rest.split(['/', '?']).next()?;
+    if authority.is_empty() || authority.contains('\\') {
+        return None;
+    }
+    Some(&value[..scheme.len() + 3 + authority.len()])
+}
+
+fn same_resource_identifier(
+    resource: &str,
+    expected: &url::Url,
+    configured_origin: Option<&str>,
+) -> bool {
+    let Some(resource_origin) = resource_origin(resource) else {
         return false;
     };
+    let canonical_origin = &expected[..url::Position::BeforePath];
+    let matches_origin = resource_origin.eq_ignore_ascii_case(canonical_origin)
+        || configured_origin.is_some_and(|origin| resource_origin.eq_ignore_ascii_case(origin));
+    let resource_path_and_query = &resource[resource_origin.len()..];
+    let path_and_query = &expected[url::Position::BeforePath..];
     // MCP permits case differences in the scheme and host. A bare origin can
     // omit the slash that URL parsing inserts before the query or end of input.
-    resource_origin.eq_ignore_ascii_case(origin)
+    matches_origin
         && (resource_path_and_query == path_and_query
             || (expected.path() == "/" && resource_path_and_query == &path_and_query[1..]))
 }
@@ -795,5 +813,33 @@ impl Mcps {
         self.update_secrets(s, &server.id, |secrets| secrets.verifier = None)
             .await?;
         Client::list_tools(s, server).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resource_origin, same_resource_identifier};
+
+    #[test]
+    fn resource_keeps_an_explicitly_configured_default_port() {
+        let canonical = "https://mcp.example.test/mcp?tenant=a";
+        let configured = "https://mcp.example.test:443/mcp?tenant=a";
+        let endpoint = url::Url::parse(configured).unwrap();
+        assert_eq!(endpoint.as_str(), canonical);
+        assert!(same_resource_identifier(
+            configured,
+            &endpoint,
+            resource_origin(configured)
+        ));
+        assert!(!same_resource_identifier(
+            configured,
+            &endpoint,
+            resource_origin(canonical)
+        ));
+        assert!(!same_resource_identifier(
+            "https://mcp.example.test:443/mcp?tenant=b",
+            &endpoint,
+            resource_origin(configured)
+        ));
     }
 }
