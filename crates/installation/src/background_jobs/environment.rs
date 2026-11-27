@@ -45,12 +45,12 @@ struct TurnCredentials(Option<(std::fs::File, PathBuf)>);
 
 impl TurnCredentials {
     fn capture(plan: &Value, launch: &Launch) -> Result<Self> {
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         if plan["chat"]["claudeManagedAuth"] != true {
             return Ok(Self(None));
         }
-        let path = plan["chat"]["claudeCredentialsDirectory"]
-            .as_str()
+        let dedicated = plan["chat"]["claudeCredentialsDirectory"].as_str();
+        let path = dedicated
             .or_else(|| {
                 launch
                     .environment
@@ -58,10 +58,27 @@ impl TurnCredentials {
                     .map(String::as_str)
             })
             .ok_or_else(|| Error::bad("Missing managed credential directory."))?;
-        let directory = std::fs::OpenOptions::new()
+        let mut options = std::fs::OpenOptions::new();
+        options
             .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)?;
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let directory = match options.open(path) {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && dedicated.is_none()
+                    && plan["backend"] == "firecracker" =>
+            {
+                // A retained disk may be switching to Claude for the first
+                // time. Create its private home without importing over saved state.
+                match std::fs::DirBuilder::new().mode(0o700).create(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error.into()),
+                }
+                options.open(path)?
+            }
+            result => result?,
+        };
         Ok(Self(Some((directory, path.into()))))
     }
 
@@ -486,6 +503,40 @@ async fn forward(
 #[cfg(test)]
 mod credential_tests {
     use super::*;
+
+    #[test]
+    fn manages_claude_credentials_after_switching_a_retained_firecracker_home() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let codex = root.path().join(".codex");
+        std::fs::create_dir(&codex).unwrap();
+        std::fs::write(codex.join("session"), b"saved").unwrap();
+        let claude = root.path().join(".claude");
+        let launch = Launch {
+            program: String::new(),
+            args: vec![],
+            cwd: root.path().into(),
+            environment: [("CLAUDE_CONFIG_DIR".into(), claude.to_str().unwrap().into())].into(),
+            prompt: String::new(),
+        };
+        let plan = serde_json::json!({
+            "backend": "firecracker",
+            "chat": {"provider": "claude", "claudeManagedAuth": true}
+        });
+
+        let guard = TurnCredentials::capture(&plan, &launch).unwrap();
+        assert_eq!(
+            std::fs::metadata(&claude).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::write(claude.join(".credentials.json"), b"managed").unwrap();
+        std::fs::write(claude.join("session"), b"continued").unwrap();
+        guard.clear().unwrap();
+        assert!(!claude.join(".credentials.json").exists());
+        assert_eq!(std::fs::read(claude.join("session")).unwrap(), b"continued");
+        assert_eq!(std::fs::read(codex.join("session")).unwrap(), b"saved");
+    }
 
     #[test]
     fn managed_credentials_clear_the_pinned_directory_and_preserve_unmanaged_files() {
