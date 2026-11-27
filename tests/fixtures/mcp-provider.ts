@@ -5,7 +5,12 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import Fastify from 'fastify'
 import { z } from 'zod'
 
-export async function mcpProvider(options: { clientSecret?: string, beforeAuthorize?: () => Promise<void> } = {}) {
+export async function mcpProvider(options: {
+  clientSecret?: string
+  beforeAuthorize?: () => Promise<void>
+  perToolAuthorization?: boolean
+  preRegisteredClientId?: string
+} = {}) {
   // The manager outlives this fixture and can retain HTTP/SSE connections.
   // Closing the provider must also close those sockets, without waiting for the client.
   const app = Fastify({ forceCloseConnections: true })
@@ -22,14 +27,15 @@ export async function mcpProvider(options: { clientSecret?: string, beforeAuthor
     issuer: origin,
     authorization_endpoint: `${origin}/authorize`,
     token_endpoint: `${origin}/token`,
-    registration_endpoint: `${origin}/register`,
+    registration_endpoint: options.preRegisteredClientId ? undefined : `${origin}/register`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
     code_challenge_methods_supported: ['S256'],
     authorization_response_iss_parameter_supported: true,
   }))
-  app.post('/register', request => ({ ...(request.body as object), client_id: 'fixture-client' }))
+  if (!options.preRegisteredClientId)
+    app.post('/register', request => ({ ...(request.body as object), client_id: 'fixture-client' }))
   app.get('/authorize', async (request, reply) => {
     await options.beforeAuthorize?.()
     const query = request.query as Record<string, string>
@@ -72,7 +78,9 @@ export async function mcpProvider(options: { clientSecret?: string, beforeAuthor
     return server
   })
   app.all('/mcp', async (request, reply) => {
-    if (request.headers.authorization !== `Bearer ${accessToken}`)
+    const rpc = request.body as { method?: string, params?: { name?: string } } | null
+    const protectedTool = rpc?.method === 'tools/call' && rpc.params?.name === 'admin_reset'
+    if ((!options.perToolAuthorization || protectedTool) && request.headers.authorization !== `Bearer ${accessToken}`)
       return reply.code(401).header('WWW-Authenticate', `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`).send({ error: 'unauthorized' })
     reply.hijack()
     await toNodeHandler(handler)(request.raw, reply.raw, request.body)

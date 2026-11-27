@@ -76,7 +76,7 @@ fn valid_url(server: &McpServer, value: &str) -> Result<url::Url> {
     Ok(url)
 }
 
-/// Sends an unauthenticated probe and returns the server's `WWW-Authenticate` challenge.
+/// Probes without credentials for a challenge before trying well-known metadata.
 async fn challenge(
     _s: &Service,
     server: &McpServer,
@@ -99,6 +99,10 @@ async fn challenge(
         server.allow_private_network,
     )
     .await?;
+    // Discovery can be public even when individual tools require OAuth.
+    if (200..300).contains(&response.status) {
+        return Ok(String::new());
+    }
     if response.status != 401 {
         return Err(Error::bad(
             "The server did not request OAuth. Use Test connection or choose no authentication.",
